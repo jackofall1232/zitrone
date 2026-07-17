@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Sublemonable — Copyright (C) 2026 Sublemonable contributors
+  Licensed under the GNU Affero General Public License v3.0 or later.
+  See the LICENSE file in the repository root for full license text.
+  SPDX-License-Identifier: AGPL-3.0-only
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- The ONLY permissions this app requests. No contacts, no storage,
+         no location. CAMERA is used solely to scan a contact's QR code (their
+         public routing ID + key); the app never records or stores images. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- A camera is optional — devices without one still install and work
+         (QR scanning is simply unavailable); paste/link add still functions. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
+    <!-- Required on Android 11+ to detect whether Orbot (Tor) is installed. -->
+    <queries>
+        <package android:name="org.torproject.android" />
+    </queries>
+
+    <application
+        android:name=".SublemonableApp"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Sublemonable"
+        tools:targetApi="34">
+
+        <!-- Single-activity app. FLAG_SECURE is applied in onCreate BEFORE
+             setContent — every Activity that can render message content must
+             do the same (critical rule). -->
+        <!-- The launcher activity must be exported (mandatory since API 31 for
+             any activity with an intent-filter); it exposes no privileged
+             control surface — content sits behind the biometric gate. -->
+        <!-- nosemgrep: java.android.security.exported_activity.exported_activity -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.Sublemonable">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- QR scanner for contact exchange. Subclasses ZXing's CaptureActivity
+             only to apply FLAG_SECURE (see SecureCaptureActivity). Not exported —
+             launched in-process, never by another app. -->
+        <activity
+            android:name=".ui.components.SecureCaptureActivity"
+            android:exported="false"
+            android:screenOrientation="fullSensor"
+            android:stateNotNeeded="true"
+            android:theme="@style/Theme.Sublemonable" />
+    </application>
+</manifest>

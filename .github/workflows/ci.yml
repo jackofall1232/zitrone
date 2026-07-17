@@ -1,0 +1,153 @@
+# Sublemonable — Copyright (C) 2026 Sublemonable contributors
+# Licensed under the GNU Affero General Public License v3.0 or later.
+# SPDX-License-Identifier: AGPL-3.0-only
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  typescript:
+    name: TypeScript — packages & web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build packages
+        run: pnpm build:packages
+      - name: Test (Vitest)
+        run: pnpm -r test
+      - name: Build web app
+        run: pnpm --filter @sublemonable/web build
+      - name: Build website
+        run: pnpm --filter @sublemonable/website build
+
+  server:
+    name: Go server
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: server/go.sum
+      - run: go vet ./...
+      - run: go build ./...
+      - name: Test (go test)
+        run: go test -race ./...
+      - name: gofmt check
+        run: test -z "$(gofmt -l .)"
+
+  android:
+    name: Android — build & unit test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install SDK packages
+        run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
+      - name: Build debug + release APKs, run unit tests
+        working-directory: apps/android
+        # assembleRelease exercises R8/minification — the shipped APK is
+        # minified while debug is not, and v1.5.1's Settings crash existed
+        # only in the minified build. Release is unsigned here (no keystore
+        # secrets in CI); signing happens out-of-band on the release box.
+        run: ./gradlew --no-daemon --stacktrace :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest
+      - name: Verify R8 kept the LocalLifecycleOwner reflection target
+        working-directory: apps/android
+        # Guards the proguard-rules.pro keep for
+        # androidx.compose.ui.platform.AndroidCompositionLocals_androidKt.
+        # If R8 ever strips/renames it again, any lifecycle-compose API would
+        # crash on first composition in release builds only (v1.5.1 Settings bug).
+        shell: bash
+        run: |
+          apk=app/build/outputs/apk/release/app-release-unsigned.apk
+          [ -f "$apk" ] || { echo "Release APK not found at $apk — output path changed?"; exit 1; }
+          # Extract before grepping so an unzip failure reports as itself
+          # instead of masquerading as a stripped-class finding.
+          unzip -o -q "$apk" 'classes*.dex' -d r8check
+          grep -aq 'Landroidx/compose/ui/platform/AndroidCompositionLocals_androidKt;' r8check/classes*.dex \
+            || { echo 'R8 stripped AndroidCompositionLocals_androidKt — lifecycle-compose APIs would crash in release builds (see v1.5.1 Settings crash)'; exit 1; }
+
+  desktop-linux:
+    name: Desktop — Linux build (.deb, .AppImage, .rpm)
+    runs-on: ubuntu-22.04
+    needs: [typescript]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+          cache-on-failure: true
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsecret-1-dev libgtk-3-dev librsvg2-dev patchelf
+      - run: pnpm install --frozen-lockfile
+      - name: Build packages
+        run: pnpm build:packages
+      - name: Build web frontend
+        run: pnpm --filter @sublemonable/web build
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version '^2' --locked
+      - name: Build Linux bundles
+        working-directory: apps/desktop
+        run: cargo tauri build --bundles deb,appimage,rpm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sublemonable-linux-packages
+          path: apps/desktop/src-tauri/target/release/bundle/
+          retention-days: 30
+
+  security:
+    name: Security scanning
+    runs-on: ubuntu-latest
+    needs: [desktop-linux]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: auto
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+
+  docker:
+    name: Server image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build server image
+        run: docker build -t sublemonable-server:ci ./server
