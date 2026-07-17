@@ -50,3 +50,4 @@ apps/desktop/gen/
 *.swp
 .vscode/
 coverage/
+.l00prite/
