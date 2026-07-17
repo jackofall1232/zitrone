@@ -1,9 +1,9 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Tauri application host for the Sublemonable Linux desktop app.
+//! Tauri application host for the Zitrone Linux desktop app.
 //!
 //! The UI is the existing `apps/web` React build — this crate adds a native
 //! host: a libsecret keystore, Tor-first SOCKS5 detection, and a window focus
@@ -77,7 +77,7 @@ pub fn run() {
             transport::ws_close,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Sublemonable desktop application");
+        .expect("error while running Zitrone desktop application");
 }
 
 /// Structured logging only — errors and system events. Never message content,

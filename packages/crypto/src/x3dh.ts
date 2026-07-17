@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -15,7 +15,7 @@ import {
 } from "./keys.js";
 import { initRatchetAsInitiator, initRatchetAsResponder, type RatchetSession } from "./ratchet.js";
 
-const X3DH_INFO = "Sublemonable-X3DH-v1";
+const X3DH_INFO = "Zitrone-X3DH-v1";
 
 /** Peer's prekey bundle, decoded to raw bytes (fetched from the server). */
 export interface DecodedPreKeyBundle {

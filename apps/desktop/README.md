@@ -1,6 +1,6 @@
-# Sublemonable — Linux Desktop
+# Zitrone — Linux Desktop
 
-A native Linux desktop build of Sublemonable, packaged with [Tauri v2](https://tauri.app).
+A native Linux desktop build of Zitrone, packaged with [Tauri v2](https://tauri.app).
 Tauri was chosen over Electron deliberately: **no bundled Chromium**, a small Rust backend, and a
 much smaller attack surface. The UI is the exact same React app as the browser client
 ([`apps/web`](../web)) — it is **not** duplicated here. This crate adds only the three things a
@@ -23,21 +23,21 @@ All three are produced from a single Tauri bundler run.
 ## Installation — `.deb` (Debian, Ubuntu, Kali, Parrot, Pop!_OS)
 
 ```bash
-sudo dpkg -i sublemonable_1.0.0_amd64.deb
+sudo dpkg -i zitrone_1.0.0_amd64.deb
 sudo apt-get install -f   # pull in any missing dependencies
 ```
 
 ## Installation — `.AppImage` (any Linux distro)
 
 ```bash
-chmod +x Sublemonable_1.0.0_amd64.AppImage
-./Sublemonable_1.0.0_amd64.AppImage
+chmod +x Zitrone_1.0.0_amd64.AppImage
+./Zitrone_1.0.0_amd64.AppImage
 ```
 
 ## Installation — `.rpm` (Fedora, RHEL, CentOS — community-supported)
 
 ```bash
-sudo rpm -i sublemonable-1.0.0-1.x86_64.rpm
+sudo rpm -i zitrone-1.0.0-1.x86_64.rpm
 ```
 
 ## Screenshot protection
@@ -60,7 +60,7 @@ platform that can provide it.
 Keys are stored via the **Secret Service API** — GNOME Keyring on GNOME desktops, KWallet on KDE.
 If no Secret Service daemon is running (minimal desktops such as i3 or sway, or headless
 forwarding), an Argon2id+AES-256-GCM-encrypted file is used at
-`$XDG_DATA_HOME/sublemonable/vault.bin` (default `~/.local/share/sublemonable/vault.bin`).
+`$XDG_DATA_HOME/zitrone/vault.bin` (default `~/.local/share/zitrone/vault.bin`).
 
 In both cases the vault blob is **already encrypted** by `packages/crypto` (libsodium.js) before it
 reaches the Rust storage layer — Rust is a storage adapter only and never performs encryption or
@@ -77,10 +77,10 @@ Because Tauri's webview uses the system WebKit, which does not honour a process-
 
 ```bash
 # Recommended: launch through torsocks
-torsocks sublemonable
+torsocks zitrone
 
 # Or export ALL_PROXY before launching
-ALL_PROXY=socks5h://127.0.0.1:9050 sublemonable
+ALL_PROXY=socks5h://127.0.0.1:9050 zitrone
 ```
 
 The in-app connection-mode selector (Standard / Stealth / Ghost — already part of the web UI)

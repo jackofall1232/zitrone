@@ -7,6 +7,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0-beta] - 2026-07-17
+
+### Changed
+
+- **Zitrone rebrand — forked from sublemonable.** This repository is a fork of the
+  `sublemonable` project at its 2026-07-17 state, renamed throughout (code identifiers, app IDs,
+  package names, docs, marketing). Version numbering restarts at 0.6.0-beta; entries below this
+  header are the pre-fork history with the old name swept to Zitrone in place. New app identifiers
+  (`com.zitrone.app` / `org.zitrone.app`) mean Zitrone installs as a NEW app alongside any
+  existing sublemonable install — identities and history do not carry over. Wire-protocol
+  constants shared with the still-live sublemonable relay (login-challenge format, relay
+  endpoint/pins, safety-number prefix) are deliberately NOT renamed — see the
+  `TODO(zitrone-cutover)` markers; they change only in lockstep with the deferred server cutover.
+  No Zitrone release artifact has been built yet from this repo.
+
 ## [1.5.5-beta] - 2026-07-17
 
 ### Fixed
@@ -94,7 +109,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   handshake/version failure, or an unreachable relay) — written to an app-private file and shown
   as plain, selectable, copyable text. It requires no `adb`/`logcat` and no second machine, so a
   user stuck on “Connecting…” can read the exact failure and paste it into a bug report. The same
-  lines still go to logcat under the `SublemonableBoot` tag when `adb` *is* available. The log is
+  lines still go to logcat under the `ZitroneBoot` tag when `adb` *is* available. The log is
   capped at the 50 most recent lines and is never backed up (`allowBackup=false`). It contains no
   message content, keys, tokens, or account IDs by construction.
 
@@ -143,7 +158,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **Privacy view**: frosted-lemon blur with hold / tap-timed / tap-toggle reveal modes.
   - **Platform warning**: honest, dismissible notice when a participant is on a browser.
   - 256-byte message padding, and an encrypted `contact.info` signal for real-time platform exchange.
-- New `@sublemonable/relay-client` package (decoy scheduler, circuit construction, path selection).
+- New `@zitrone/relay-client` package (decoy scheduler, circuit construction, path selection).
 - UI reconciled from the `lemon-ui.jsx` brainstorm into the dark design system: progressive
   lemon-wheel fill, bouncing-drop typing indicator, and the squeeze send button.
 - **Desktop certificate-pinned transport.** Because the Linux app's WebView cannot pin TLS, the

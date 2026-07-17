@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -30,8 +30,8 @@ export function OpenSourceCallout() {
           We show our work.
         </h2>
         <p className="mt-6 max-w-xl text-lg leading-relaxed text-ink-secondary">
-          Sublemonable is open source. The encryption, the server, the apps — all of it auditable.
-          Trust shouldn&apos;t require faith.
+          Zitrone is open source. The encryption, the server, the apps — all of it auditable. Trust
+          shouldn&apos;t require faith.
         </p>
         <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer" className="btn-lemon mt-10">
           <GitHubIcon />

@@ -1,4 +1,4 @@
-# Self-Hosting Sublemonable
+# Self-Hosting Zitrone
 
 Run your own relay. The server is intentionally small: Go binary + PostgreSQL, nothing else.
 
@@ -12,8 +12,8 @@ Run your own relay. The server is intentionally small: Go binary + PostgreSQL, n
 ## Docker Compose quickstart
 
 ```bash
-git clone https://github.com/jackofall1232/sublemonable.git
-cd sublemonable
+git clone https://github.com/jackofall1232/zitrone.git
+cd zitrone
 cp server/.env.example .env            # edit values — see reference below
 
 # Generate JWT signing keys (mounted into the container)
@@ -107,7 +107,7 @@ Set the **same** primary + backup pins (and your host) in every client:
 | Client | File | What to set |
 | --- | --- | --- |
 | iOS | `apps/ios/Sources/Networking/PinnedSessionDelegate.swift` | `pinnedSPKISHA256` set; `APIClient.defaultBaseURL` + `WebSocketClient.defaultURL` |
-| Android | `apps/android/.../net/CertificatePinning.kt` | `API_HOST`, `PRIMARY_PIN`, `BACKUP_PIN`; URLs in `SublemonableApp.kt` |
+| Android | `apps/android/.../net/CertificatePinning.kt` | `API_HOST`, `PRIMARY_PIN`, `BACKUP_PIN`; URLs in `ZitroneApp.kt` |
 | Desktop | `apps/desktop/src-tauri/src/pinning.rs` | `API_HOST`, `PRIMARY_PIN`, `BACKUP_PIN` |
 
 The pin host **must** match the URL the client connects to, or the pin won't apply.
@@ -121,7 +121,7 @@ uses it when running under Tauri (and plain `fetch`/`WebSocket` in the browser).
 bundle with the server URL baked in so it targets your pinned host:
 
 ```bash
-VITE_SERVER_URL=https://relay.example.com pnpm --filter @sublemonable/web build
+VITE_SERVER_URL=https://relay.example.com pnpm --filter @zitrone/web build
 cd apps/desktop && pnpm tauri build
 ```
 
@@ -173,9 +173,9 @@ docker compose -f docker-compose.yml -f docker-compose.tor.yml up -d
 ### Read your addresses
 
 ```bash
-docker compose exec tor cat /var/lib/tor/sublemonable-mirror-public/hostname
-docker compose exec tor cat /var/lib/tor/sublemonable-mirror-secret/hostname
-docker compose exec tor cat /var/lib/tor/sublemonable-relay/hostname
+docker compose exec tor cat /var/lib/tor/zitrone-mirror-public/hostname
+docker compose exec tor cat /var/lib/tor/zitrone-mirror-secret/hostname
+docker compose exec tor cat /var/lib/tor/zitrone-relay/hostname
 ```
 
 ### Configure the server
@@ -231,7 +231,7 @@ the `onion-site/` directory, which is mounted read-only into the server:
 # previous APK first — the mirror serves the first *.apk it finds, so a leftover
 # older build keeps shipping.
 rm -f onion-site/*.apk
-cp sublemonable-v1.5.0-beta.apk onion-site/
+cp zitrone-v1.5.0-beta.apk onion-site/
 
 # Generate a checksum list the mirror serves at /SHA256SUMS. Run it from inside
 # onion-site so the file records basenames — testers download /SHA256SUMS next to
@@ -297,13 +297,13 @@ pnpm tauri build
 
 ### Back up your I2P destination key
 
-The destination key file (`sublemonable-relay.dat`) lives in the `i2p-data` Docker
+The destination key file (`zitrone-relay.dat`) lives in the `i2p-data` Docker
 volume. Losing it means losing the B32 address permanently — the same consequence
 as losing an onion key. Back it up alongside the Tor hidden service keys and the
 JWT signing keys:
 
 ```bash
-docker compose cp i2p:/home/i2pd/data/sublemonable-relay.dat ./i2p-key-backup/
+docker compose cp i2p:/home/i2pd/data/zitrone-relay.dat ./i2p-key-backup/
 ```
 
 ### Host-gating
@@ -335,7 +335,7 @@ Migrations are forward-only and applied on boot. Read the release notes before m
 There is intentionally little to back up — delivered messages are already gone. Back up:
 
 - The PostgreSQL volume (public keys + undelivered envelopes):
-  `docker compose exec postgres pg_dump -U sub sublemonable > backup.sql`
+  `docker compose exec postgres pg_dump -U sub zitrone > backup.sql`
 - Your JWT signing keys (`server/keys/`) — losing them logs every client out
 - Your Tor hidden service keys (`tor-data` volume) — all three `hs_ed25519_secret_key`
   files; losing any one permanently changes that service's `.onion` address

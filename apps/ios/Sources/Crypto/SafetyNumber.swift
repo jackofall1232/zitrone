@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -26,6 +26,7 @@ public enum SafetyNumber {
     public static func compute(identityKeyA: Data, identityKeyB: Data) -> String {
         let (first, second) = ordered(identityKeyA, identityKeyB)
         var hasher = SHA512()
+        // TODO(zitrone-cutover): domain-separation constant shared across installed clients — do not rename casually. (NOTE: Android/web currently hash WITHOUT this prefix — pre-existing cross-platform mismatch, tracked in todos.)
         hasher.update(data: Data("sublemonable-safety-number-v1".utf8))
         hasher.update(data: first)
         hasher.update(data: second)

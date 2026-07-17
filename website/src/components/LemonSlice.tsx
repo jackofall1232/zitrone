@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -53,7 +53,7 @@ export interface LemonSliceProps extends Omit<SVGProps<SVGSVGElement>, "viewBox"
 }
 
 /**
- * The signature Sublemonable mark: an 8-segment lemon slice.
+ * The signature Zitrone mark: an 8-segment lemon slice.
  * Used as logo, hero visual, loader, and section accent across the site.
  */
 export function LemonSlice({
@@ -63,7 +63,7 @@ export function LemonSlice({
   emptyColor = "#2E2B00",
   rindColor = "#D4C200",
   pipColor = "#E8B800",
-  label = "Sublemonable lemon slice mark",
+  label = "Zitrone lemon slice mark",
   ...rest
 }: LemonSliceProps) {
   const lit = Math.max(0, Math.min(SEGMENT_COUNT, Math.round(segments)));

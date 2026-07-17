@@ -1,11 +1,11 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import SwiftUI
 
-// Design tokens from sublemonable-MASTER.json → design_system.tokens.color
+// Design tokens from zitrone-MASTER.json → design_system.tokens.color
 //
 // CRITICAL RULES:
 // - Dark only. NEVER use white backgrounds — the minimum dark value is #1A1800.

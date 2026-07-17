@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -12,9 +12,9 @@ export function Footer() {
     <footer className="border-t border-line bg-bg-primary">
       <div className="mx-auto flex max-w-6xl flex-col items-center gap-8 px-6 py-14 sm:flex-row sm:justify-between">
         <div className="flex items-center gap-3">
-          <LemonSlice size={32} label="Sublemonable" />
+          <LemonSlice size={32} label="Zitrone" />
           <p className="font-display text-sm font-medium text-ink-secondary">
-            Sublemonable. Nothing lasts.
+            Zitrone. Nothing lasts.
           </p>
         </div>
         <nav className="flex flex-wrap items-center justify-center gap-x-8 gap-y-3 text-sm">

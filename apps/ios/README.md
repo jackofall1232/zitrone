@@ -1,4 +1,4 @@
-# Sublemonable for iOS
+# Zitrone for iOS
 
 Zero-knowledge, end-to-end encrypted ephemeral messaging. SwiftUI, iOS 16+.
 
@@ -14,11 +14,11 @@ Zero-knowledge, end-to-end encrypted ephemeral messaging. SwiftUI, iOS 16+.
 
 ```sh
 cd apps/ios
-xcodegen generate          # produces Sublemonable.xcodeproj from project.yml
-open Sublemonable.xcodeproj
+xcodegen generate          # produces Zitrone.xcodeproj from project.yml
+open Zitrone.xcodeproj
 ```
 
-Select the `Sublemonable` scheme and run on a device or simulator. Note that
+Select the `Zitrone` scheme and run on a device or simulator. Note that
 Secure Enclave key wrapping and biometrics are only fully exercised on a real
 device; on the simulator the app falls back to biometric-protected keychain
 items.
@@ -27,8 +27,8 @@ items.
 
 ```sh
 xcodebuild test \
-  -project Sublemonable.xcodeproj \
-  -scheme Sublemonable \
+  -project Zitrone.xcodeproj \
+  -scheme Zitrone \
   -destination 'platform=iOS Simulator,name=iPhone 15'
 ```
 
@@ -78,7 +78,7 @@ the WebSocket (Starscream).
 
 Settings → Network → "Route through Tor (Orbot)" is strictly opt-in (off by
 default). On iOS, [Orbot](https://orbot.app) runs as a system-wide VPN, so
-once its VPN is up, all Sublemonable traffic rides through Tor with no app
+once its VPN is up, all Zitrone traffic rides through Tor with no app
 changes. The toggle uses the `orbot://` URL scheme (declared in
 `LSApplicationQueriesSchemes`) to detect Orbot and deep-link the user into it;
 it cannot verify the circuit itself — open Orbot to confirm it's connected.
@@ -112,7 +112,7 @@ apps/ios
 ├── Support/Info.plist
 ├── NotificationService/         # content-free notification extension
 ├── Sources
-│   ├── SublemonableApp.swift    # entry: splash → onboarding → biometric gate → chats
+│   ├── ZitroneApp.swift    # entry: splash → onboarding → biometric gate → chats
 │   ├── Crypto/                  # SignalManager (libsignal), KeychainStore, SafetyNumber
 │   ├── Networking/              # APIClient, WebSocketClient, cert pinning, Orbot
 │   ├── Data/                    # MessageEnvelope (wire contract), Message/Conversation stores

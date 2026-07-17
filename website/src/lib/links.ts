@@ -1,9 +1,9 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-export const GITHUB_URL = "https://github.com/jackofall1232/sublemonable";
+export const GITHUB_URL = "https://github.com/jackofall1232/zitrone";
 export const SECURITY_MODEL_DOC = `${GITHUB_URL}/blob/main/docs/SECURITY_MODEL.md`;
 export const SELF_HOSTING_DOC = `${GITHUB_URL}/blob/main/docs/SELF_HOSTING.md`;
 export const SECURITY_POLICY = `${GITHUB_URL}/blob/main/SECURITY.md`;
@@ -16,12 +16,15 @@ export const GITHUB_ISSUES = `${GITHUB_URL}/issues`;
 // ANDROID_BETA_APK_URL, and paste the asset's SHA-256 into ANDROID_BETA_SHA256
 // (`sha256sum <file>`). Remove this block and the /download/beta page once the
 // app ships to the Play Store.
-export const ANDROID_BETA_VERSION = "v1.5.5-beta";
-export const ANDROID_BETA_APK_URL = `${GITHUB_URL}/releases/download/${ANDROID_BETA_VERSION}/sublemonable-${ANDROID_BETA_VERSION}.apk`;
+// TODO(zitrone-cutover): NO Zitrone release has been cut yet — this URL points at a release
+// that does not exist and the checksum is intentionally empty. Fill BOTH on the first real
+// Zitrone release (v0.6.0-beta) before the download page ships anywhere users can reach it:
+// the page renders the checksum for users to verify, so an empty value must never go live.
+export const ANDROID_BETA_VERSION = "v0.6.0-beta";
+export const ANDROID_BETA_APK_URL = `${GITHUB_URL}/releases/download/${ANDROID_BETA_VERSION}/zitrone-${ANDROID_BETA_VERSION}.apk`;
 // 64 hex chars. Must be byte-identical to onion-site/SHA256SUMS — both surfaces
-// must serve the same binary. Verify: sha256sum onion-site/sublemonable-v1.5.5-beta.apk
-export const ANDROID_BETA_SHA256 =
-  "e6eeded98d0e867d690bb76ccce68d4cff4806e711196e4662aac0d14c157d4c";
+// must serve the same binary. Verify: sha256sum onion-site/zitrone-v0.6.0-beta.apk
+export const ANDROID_BETA_SHA256 = "";
 export const ANDROID_BETA_MIN_OS = "Android 8.0 (Oreo)";
 
 // ── Tor download mirror ───────────────────────────────────────────────────────

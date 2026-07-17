@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -18,8 +18,8 @@ import {
 // Unlisted: shared by direct link with testers only, and kept out of search
 // indexes and the sitemap. This is a temporary page — delete it at store launch.
 export const metadata: Metadata = {
-  title: "Android beta — Sublemonable",
-  description: "Sideload the Sublemonable Android beta for testing.",
+  title: "Android beta — Zitrone",
+  description: "Sideload the Zitrone Android beta for testing.",
   robots: { index: false, follow: false },
 };
 
@@ -90,7 +90,7 @@ export default function AndroidBetaPage() {
               :
             </p>
             <pre className="mt-3 overflow-x-auto rounded-md border border-line bg-bg-secondary p-3 font-mono text-sm text-pulp">
-              <code>{`http://${PUBLIC_MIRROR_ONION}/sublemonable-${ANDROID_BETA_VERSION}.apk`}</code>
+              <code>{`http://${PUBLIC_MIRROR_ONION}/zitrone-${ANDROID_BETA_VERSION}.apk`}</code>
             </pre>
             <p className="mt-2 text-sm leading-relaxed text-ink-muted">
               The APK served there is identical to the direct download — verify with the same
@@ -116,7 +116,7 @@ export default function AndroidBetaPage() {
               Verify the file you downloaded matches:
             </p>
             <pre className="mt-2 overflow-x-auto rounded-md border border-line bg-bg-secondary p-4 font-mono text-sm leading-relaxed text-pulp">
-              <code>{`sha256sum sublemonable-${ANDROID_BETA_VERSION}.apk`}</code>
+              <code>{`sha256sum zitrone-${ANDROID_BETA_VERSION}.apk`}</code>
             </pre>
           </div>
         </section>

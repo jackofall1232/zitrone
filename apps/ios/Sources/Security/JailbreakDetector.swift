@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -54,7 +54,7 @@ public enum JailbreakDetector {
 
     /// The sandbox forbids writing outside the container; success means it is broken.
     private static func canWriteOutsideSandbox() -> Bool {
-        let probe = "/private/sublemonable_jb_probe_\(UUID().uuidString)"
+        let probe = "/private/zitrone_jb_probe_\(UUID().uuidString)"
         do {
             try "x".write(toFile: probe, atomically: true, encoding: .utf8)
             try? FileManager.default.removeItem(atPath: probe)

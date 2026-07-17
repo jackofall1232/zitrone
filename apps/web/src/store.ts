@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -31,7 +31,7 @@ import {
   x3dhInitiate,
   x3dhRespond,
   type KeyStore,
-} from "@sublemonable/crypto";
+} from "@zitrone/crypto";
 import {
   DROP_POW_DIFFICULTY,
   ONE_TIME_PREKEY_BATCH,
@@ -40,8 +40,8 @@ import {
   PROTOCOL_VERSION,
   type MessageEnvelope,
   type ServerEvent,
-} from "@sublemonable/protocol";
-import { DecoyScheduler } from "@sublemonable/relay-client";
+} from "@zitrone/protocol";
+import { DecoyScheduler } from "@zitrone/relay-client";
 import { create } from "zustand";
 import { useSettings } from "./settings.js";
 import { api } from "./lib/api.js";
@@ -153,6 +153,7 @@ export const useApp = create<AppState>((set, get) => {
     if (!keyStore) throw new Error("locked");
     const identity = deserializeIdentity(keyStore.identityKey as unknown as SerializedIdentity);
     const timestamp = Math.floor(Date.now() / 1000);
+    // TODO(zitrone-cutover): shared wire contract with the live relay — rename only in lockstep with the server.
     const challenge = utf8Encode(`sublemonable-login:${keyStore.accountId}:${timestamp}`);
     const signature = b64(await signWithIdentity(challenge, identity));
     const tokens = await api.createSession(keyStore.accountId, timestamp, signature);

@@ -1,4 +1,4 @@
-# Sublemonable Security Model
+# Zitrone Security Model
 
 This document describes the full technical security model for users and auditors. It is the
 authoritative reference — if the code disagrees with this document, that's a bug (see
@@ -6,7 +6,7 @@ authoritative reference — if the code disagrees with this document, that's a b
 
 ## Architecture overview
 
-Sublemonable is a zero-knowledge, store-and-forward message relay. The server never sees, stores,
+Zitrone is a zero-knowledge, store-and-forward message relay. The server never sees, stores,
 or logs plaintext message content under any circumstances — not by policy, but by construction.
 
 ```
@@ -102,7 +102,7 @@ separate, larger change, not required for correctness today.
   local data in EncryptedSharedPreferences.
 - **Linux:** Keys stored via the Secret Service API (GNOME Keyring on GNOME desktops, KWallet on
   KDE) using the secret-service Rust crate. If no Secret Service daemon is running, an
-  Argon2id+AES-256-GCM encrypted file is used at $XDG_DATA_HOME/sublemonable/vault.bin. The
+  Argon2id+AES-256-GCM encrypted file is used at $XDG_DATA_HOME/zitrone/vault.bin. The
   encryption is performed by packages/crypto (libsodium.js) before the vault blob reaches the Rust
   storage layer — Rust is a storage adapter only.
 
@@ -216,7 +216,7 @@ section below.**
 
 On Linux desktop, the app attempts Tor routing by default via a local tor daemon (port 9050) or Tor
 Browser (port 9150). For full Tor routing without a running tor daemon, launch via: `torsocks
-sublemonable`. The connection-mode badge shows Tor status — a yellow dot indicates clearnet fallback
+zitrone`. The connection-mode badge shows Tor status — a yellow dot indicates clearnet fallback
 is active.
 
 ## Contact verification

@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -8,9 +8,9 @@ import {
   ClearnetWarningBanner,
   LemonSlice,
   LemonSpinner,
-  SublemonableStyles,
-} from "@sublemonable/ui";
-import { isTauri } from "@sublemonable/crypto";
+  ZitroneStyles,
+} from "@zitrone/ui";
+import { isTauri } from "@zitrone/crypto";
 import { resolveTransport } from "./lib/transportResolver.js";
 import { ScreenshotShield, useDevToolsWarning } from "./components/ScreenshotShield.js";
 import { ChatList } from "./screens/ChatList.js";
@@ -67,7 +67,7 @@ export default function App() {
 
   return (
     <div className="relative h-full">
-      <SublemonableStyles />
+      <ZitroneStyles />
 
       {showClearnetBanner && (
         <ClearnetWarningBanner

@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -27,15 +27,15 @@ const jetbrainsMono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://sublemonable.com"),
-  title: "Sublemonable — Nothing lasts. That's the point.",
+  title: "Zitrone — Nothing lasts. That's the point.",
   description:
     "End-to-end encrypted messaging that disappears. No logs. No screenshots. No trace. Open source, zero-knowledge, no phone number required.",
   openGraph: {
-    title: "Sublemonable — Nothing lasts. That's the point.",
+    title: "Zitrone — Nothing lasts. That's the point.",
     description:
       "End-to-end encrypted messaging that disappears. No logs. No screenshots. No trace.",
     url: "https://sublemonable.com",
-    siteName: "Sublemonable",
+    siteName: "Zitrone",
     type: "website",
   },
 };

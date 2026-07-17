@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -36,8 +36,8 @@ public final class KeychainStore {
 
     public static let shared = KeychainStore()
 
-    private let service = "org.sublemonable.keys"
-    private let secureEnclaveTag = Data("org.sublemonable.se.wrapping-key".utf8)
+    private let service = "org.zitrone.keys"
+    private let secureEnclaveTag = Data("org.zitrone.se.wrapping-key".utf8)
 
     /// Reused so biometric evaluation happens once per session. `touchIDAuthenticationAllowableReuseDuration`
     /// lets keychain reads piggyback on the unlock-gate evaluation.

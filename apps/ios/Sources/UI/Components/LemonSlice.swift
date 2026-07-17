@@ -1,11 +1,11 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import SwiftUI
 
-/// The Lemon Slice — Sublemonable's signature element.
+/// The Lemon Slice — Zitrone's signature element.
 ///
 /// A segmented circle (8 wedges inside a rind ring) used as the logo mark,
 /// loading indicator, burn timer, security badge, and send button glyph.
@@ -153,7 +153,7 @@ public struct LemonSliceView: View {
 
     private var accessibilityText: Text {
         switch variant {
-        case .logoMark: return Text("Sublemonable")
+        case .logoMark: return Text("Zitrone")
         case .loadingSpinner: return Text("Loading")
         case .burnTimer: return Text("Message burn timer")
         case let .securityIndicator(segments): return Text("Security level \(segments) of 8")

@@ -1,6 +1,6 @@
-# Sublemonable — Android
+# Zitrone — Android
 
-Kotlin + Jetpack Compose client for [Sublemonable](../../README.md), the
+Kotlin + Jetpack Compose client for [Zitrone](../../README.md), the
 zero-knowledge, end-to-end encrypted ephemeral messenger.
 
 > Nothing lasts. That's the point.
@@ -31,7 +31,7 @@ supplies its own Gradle, or generate the wrapper with the command above.
 Two things are placeholders until you point the app at a real deployment:
 
 1. **API endpoints** — `AppContainer.API_BASE_URL` / `WS_URL` in
-   `app/src/main/java/com/sublemonable/app/SublemonableApp.kt`.
+   `app/src/main/java/com/zitrone/app/ZitroneApp.kt`.
 2. **Certificate pin** — see below. The app will (correctly) refuse to
    connect until you replace it.
 
@@ -57,7 +57,7 @@ your users out. Connections are TLS 1.3 only.
 `MainActivity` sets `WindowManager.LayoutParams.FLAG_SECURE` in `onCreate`,
 **before** any content is composed. This is the OS-level hard block: every
 screenshot, screen recording, and recent-apps thumbnail of this app renders
-black. It is the strongest screenshot protection of all three Sublemonable
+black. It is the strongest screenshot protection of all three Zitrone
 platforms and it must be applied to every Activity that can show message
 content — this app keeps that trivially true by having exactly one Activity.
 
@@ -93,9 +93,9 @@ register them in `ui/theme/Type.kt` to upgrade.
 ## Project layout
 
 ```
-app/src/main/java/com/sublemonable/app/
+app/src/main/java/com/zitrone/app/
 ├── MainActivity.kt            FLAG_SECURE + biometric gate + routing
-├── SublemonableApp.kt         Application + hand-rolled DI container
+├── ZitroneApp.kt         Application + hand-rolled DI container
 ├── MessagingCoordinator.kt    crypto <-> transport <-> repositories glue
 ├── crypto/                    libsignal wrapper, Keystore-encrypted stores
 ├── net/                       REST client, WebSocket client, cert pinning

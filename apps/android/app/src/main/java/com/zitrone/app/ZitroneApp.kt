@@ -1,0 +1,122 @@
+// Zitrone — Copyright (C) 2026 Zitrone contributors
+// Licensed under the GNU Affero General Public License v3.0 or later.
+// See the LICENSE file in the repository root for full license text.
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package com.zitrone.app
+
+import android.app.Application
+import android.util.Log
+import com.zitrone.app.crypto.EncryptedSignalProtocolStore
+import com.zitrone.app.crypto.KeyStoreManager
+import com.zitrone.app.crypto.SignalProtocolManager
+import com.zitrone.app.data.ConversationRepository
+import com.zitrone.app.data.MessageRepository
+import com.zitrone.app.data.SettingsRepository
+import com.zitrone.app.diagnostics.BootDiagnostics
+import com.zitrone.app.net.ApiClient
+import com.zitrone.app.net.CertificatePinning
+import com.zitrone.app.net.WsClient
+import com.zitrone.app.notifications.MessagingNotifications
+import com.zitrone.app.tor.TorIntegration
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+
+/**
+ * Application entry point. No analytics, no crash reporting, no telemetry —
+ * the only thing initialized here is the dependency graph and the
+ * content-free notification channel.
+ */
+class ZitroneApp : Application() {
+
+    lateinit var container: AppContainer
+        private set
+
+    override fun onCreate() {
+        super.onCreate()
+        container = AppContainer(this)
+        MessagingNotifications.ensureChannel(this)
+    }
+}
+
+/**
+ * Hand-rolled dependency container — deliberately no DI framework, so the
+ * complete object graph of a privacy-critical app stays auditable in one file.
+ */
+class AppContainer(private val app: Application) {
+
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    val keyStoreManager = KeyStoreManager(app)
+    val settingsRepository = SettingsRepository(keyStoreManager)
+    val signalStore = EncryptedSignalProtocolStore(keyStoreManager)
+    val signalManager = SignalProtocolManager(signalStore, keyStoreManager)
+
+    private var httpClient =
+        CertificatePinning.buildClient(torEnabled = settingsRepository.settings.value.torEnabled)
+
+    /** On-device, adb-free connection diagnostics (Settings → Diagnostics). */
+    val bootDiagnostics = BootDiagnostics(app)
+
+    val apiClient = ApiClient(API_BASE_URL, httpClient, keyStoreManager)
+
+    // WsClient shares the coordinator's diagnostic channel (logcat tag +
+    // on-device log) so socket-lifecycle failures land in Settings →
+    // Diagnostics next to the boot-stage lines. Privacy-safe by the same
+    // rule: fixed markers + exception metadata only.
+    val wsClient = WsClient(WS_URL, httpClient, scope) { line ->
+        Log.w("ZitroneBoot", line)
+        bootDiagnostics.record(line)
+    }
+
+    val messageRepository = MessageRepository(scope)
+    val conversationRepository = ConversationRepository()
+
+    val coordinator = MessagingCoordinator(
+        appContext = app,
+        scope = scope,
+        signal = signalManager,
+        api = apiClient,
+        ws = wsClient,
+        messages = messageRepository,
+        conversations = conversationRepository,
+        settings = settingsRepository,
+        diagnostics = bootDiagnostics,
+    )
+
+    init {
+        // Rebuild the transport whenever the Tor toggle changes (opt-in).
+        scope.launch {
+            settingsRepository.settings
+                .map { it.torEnabled }
+                .distinctUntilChanged()
+                .drop(1) // initial value already applied above
+                .collect { torEnabled -> applyTorSetting(torEnabled) }
+        }
+    }
+
+    private fun applyTorSetting(torEnabled: Boolean) {
+        if (torEnabled) {
+            TorIntegration.requestOrbotStart(app)
+        }
+        httpClient = CertificatePinning.buildClient(torEnabled)
+        apiClient.updateClient(httpClient)
+        wsClient.updateClient(httpClient)
+        // Reconnect over the new transport.
+        wsClient.disconnect()
+        apiClient.accessToken?.let(wsClient::connect)
+    }
+
+    companion object {
+        // Self-hosters: point these at your deployment AND replace the
+        // certificate pin in net/CertificatePinning.kt.
+        // TODO(zitrone-cutover): live relay endpoint — repoint only at deploy cutover.
+        const val API_BASE_URL = "https://relay.sublemonable.com"
+        const val WS_URL = "wss://relay.sublemonable.com/ws"
+    }
+}

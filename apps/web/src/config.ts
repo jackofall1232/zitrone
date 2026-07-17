@@ -1,12 +1,12 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
 // Build-time configuration injected by Vite (see vite.config.ts).
 
-import type { TransportState } from "@sublemonable/protocol";
-import { isTauri } from "@sublemonable/crypto";
+import type { TransportState } from "@zitrone/protocol";
+import { isTauri } from "@zitrone/crypto";
 
 /**
  * The relay onion address. NEVER published in docs or committed to source — it

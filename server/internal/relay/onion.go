@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -10,7 +10,7 @@
 //
 // Each layer is a libsodium sealed box (crypto_box_seal), which Go's
 // nacl/box Anonymous API is wire-compatible with. Per-layer cleartext framing
-// matches the client (@sublemonable/crypto onion.ts):
+// matches the client (@zitrone/crypto onion.ts):
 //
 //	addrLen(2, big-endian) || addr || innerPayload
 //

@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -55,7 +55,7 @@ export const VAULT_KEY_BYTES = 32;
 
 // Associated data binds a wrapped key to its purpose. It is intentionally
 // generic — it names nothing about vault ordering, count, or "decoy" status.
-const SLOT_AD = utf8Encode("Sublemonable-Vault-Slot-v1");
+const SLOT_AD = utf8Encode("Zitrone-Vault-Slot-v1");
 
 /**
  * One key slot as it sits on disk: a salt and a wrapped key. Both fields are

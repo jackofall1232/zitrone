@@ -1,4 +1,4 @@
-# Contributing to Sublemonable
+# Contributing to Zitrone
 
 ## Before contributing
 

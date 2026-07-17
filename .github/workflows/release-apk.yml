@@ -1,4 +1,4 @@
-# Sublemonable — Copyright (C) 2026 Sublemonable contributors
+# Zitrone — Copyright (C) 2026 Zitrone contributors
 # Licensed under the GNU Affero General Public License v3.0 or later.
 # SPDX-License-Identifier: AGPL-3.0-only
 #
@@ -119,10 +119,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/dist"
           if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
             SRC=app/build/outputs/apk/release/app-release.apk
-            OUT="sublemonable-$TAG.apk"
+            OUT="zitrone-$TAG.apk"
           else
             SRC=app/build/outputs/apk/release/app-release-unsigned.apk
-            OUT="sublemonable-$TAG-unsigned.apk"
+            OUT="zitrone-$TAG-unsigned.apk"
           fi
           cp "$SRC" "$RUNNER_TEMP/dist/$OUT"
           ( cd "$RUNNER_TEMP/dist" && sha256sum "$OUT" > SHA256SUMS )
@@ -180,7 +180,7 @@ jobs:
           TAG="${{ steps.meta.outputs.tag }}"
           APK="${{ steps.stage.outputs.apk }}"
           {
-            echo "Sublemonable Android ${TAG}."
+            echo "Zitrone Android ${TAG}."
             echo ""
             echo "Verify before installing:"
             echo "- APK SHA-256: \`${{ steps.stage.outputs.sha256 }}\` (\`sha256sum ${APK}\`)"
@@ -200,7 +200,7 @@ jobs:
         if: steps.signing.outputs.signed == 'false'
         uses: actions/upload-artifact@v4
         with:
-          name: sublemonable-${{ steps.meta.outputs.tag }}-unsigned
+          name: zitrone-${{ steps.meta.outputs.tag }}-unsigned
           path: ${{ runner.temp }}/dist/
           retention-days: 14
 
@@ -210,12 +210,12 @@ jobs:
           TAG="${{ steps.meta.outputs.tag }}"
           {
             echo "### Unsigned build — sign locally, then create the Release"
-            echo "Download the \`sublemonable-${TAG}-unsigned\` artifact, then on trusted hardware:"
+            echo "Download the \`zitrone-${TAG}-unsigned\` artifact, then on trusted hardware:"
             echo '```bash'
-            echo "zipalign -p -f 4 sublemonable-${TAG}-unsigned.apk sublemonable-${TAG}-aligned.apk"
-            echo "apksigner sign --ks release.jks --out sublemonable-${TAG}.apk sublemonable-${TAG}-aligned.apk"
-            echo "apksigner verify --print-certs sublemonable-${TAG}.apk"
-            echo "sha256sum sublemonable-${TAG}.apk"
+            echo "zipalign -p -f 4 zitrone-${TAG}-unsigned.apk zitrone-${TAG}-aligned.apk"
+            echo "apksigner sign --ks release.jks --out zitrone-${TAG}.apk zitrone-${TAG}-aligned.apk"
+            echo "apksigner verify --print-certs zitrone-${TAG}.apk"
+            echo "sha256sum zitrone-${TAG}.apk"
             echo '```'
-            echo "Then \`gh release create ${TAG} sublemonable-${TAG}.apk --prerelease\` and update links.ts."
+            echo "Then \`gh release create ${TAG} zitrone-${TAG}.apk --prerelease\` and update links.ts."
           } >> "$GITHUB_STEP_SUMMARY"

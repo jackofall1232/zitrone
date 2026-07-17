@@ -1,21 +1,21 @@
 <div align="center">
 
-<img src="website/public/lemon-slice.svg" alt="Sublemonable lemon slice logo" width="96" height="96" />
+<img src="website/public/lemon-slice.svg" alt="Zitrone lemon slice logo" width="96" height="96" />
 
-# SubLEMONable
+# Zitrone
 
 **Nothing lasts. That's the point.**
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-F5E642.svg)](LICENSE)
-[![Build](https://img.shields.io/github/actions/workflow/status/jackofall1232/sublemonable/ci.yml?branch=main)](.github/workflows/ci.yml)
+[![Build](https://img.shields.io/github/actions/workflow/status/jackofall1232/zitrone/ci.yml?branch=main)](.github/workflows/ci.yml)
 [![Platforms](https://img.shields.io/badge/Platforms-iOS%20%7C%20Android%20%7C%20Linux%20%7C%20Browser-F5E642.svg)](#platforms)
 [![Encryption](https://img.shields.io/badge/Encryption-Signal%20Protocol-F5E642.svg)](docs/SECURITY_MODEL.md)
 
 </div>
 
-## What is Sublemonable?
+## What is Zitrone?
 
-Sublemonable is end-to-end encrypted ephemeral messaging for browser, iOS, and Android. Every
+Zitrone is end-to-end encrypted ephemeral messaging for browser, iOS, and Android. Every
 message is encrypted on your device with the Signal Protocol (X3DH + Double Ratchet) before it goes
 anywhere, and the server deletes each message the instant it's delivered. Messages can burn on read
 or self-destruct on a timer — from 30 seconds to a week — enforced on both sides of the
@@ -84,7 +84,7 @@ server, web app, and mobile apps locally.
 
 ## Self-hosting
 
-Sublemonable is designed to be self-hosted on a small VPS with Docker Compose, including an
+Zitrone is designed to be self-hosted on a small VPS with Docker Compose, including an
 optional Tor hidden service. See [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md).
 
 The Tor overlay also serves a static no-JS download mirror at the root of the `.onion`. Two
@@ -112,5 +112,5 @@ Found a vulnerability? **Do not open a public issue.** Follow the responsible di
 
 ## License
 
-[AGPL-3.0](LICENSE) — anyone running a modified Sublemonable as a service must open source their
+[AGPL-3.0](LICENSE) — anyone running a modified Zitrone as a service must open source their
 changes.

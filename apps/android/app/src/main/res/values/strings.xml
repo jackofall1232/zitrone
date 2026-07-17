@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Sublemonable — Copyright (C) 2026 Sublemonable contributors
+  Zitrone — Copyright (C) 2026 Zitrone contributors
   Licensed under the GNU Affero General Public License v3.0 or later.
   See the LICENSE file in the repository root for full license text.
   SPDX-License-Identifier: AGPL-3.0-only
 -->
 <resources>
-    <string name="app_name">Sublemonable</string>
+    <string name="app_name">Zitrone</string>
     <string name="tagline">Nothing lasts. That\'s the point.</string>
 
     <!-- Notifications: content is ALWAYS this string. Never message content. -->
@@ -15,7 +15,7 @@
     <string name="notification_new_message">New message</string>
 
     <!-- Biometric gate -->
-    <string name="biometric_title">Unlock Sublemonable</string>
+    <string name="biometric_title">Unlock Zitrone</string>
     <string name="biometric_subtitle">Your keys stay locked until you do this</string>
     <string name="biometric_negative">Cancel</string>
 </resources>

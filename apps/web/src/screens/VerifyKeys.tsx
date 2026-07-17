@@ -1,10 +1,10 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { useEffect, useState } from "react";
-import { KeyFingerprintDisplay, LemonSpinner } from "@sublemonable/ui";
+import { KeyFingerprintDisplay, LemonSpinner } from "@zitrone/ui";
 import { useApp } from "../store.js";
 
 export function VerifyKeys({ peerId, onClose }: { peerId: string; onClose: () => void }) {

@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -54,10 +54,10 @@ import {
   WRAPPED_KEY_BYTES,
   type KeySlot,
   type KeyStore,
-} from "@sublemonable/crypto";
+} from "@zitrone/crypto";
 import { unlockVaultOffThread } from "./vaultWorker.js";
 
-const DB_NAME = "sublemonable";
+const DB_NAME = "zitrone";
 const STORE = "vault";
 const IMAGE_KEY = "image";
 /** v1 single-blob record — deleted on upgrade, never read. */
@@ -83,7 +83,7 @@ export const IMAGE_BYTES = HEADER_BYTES + SLOT_TABLE_BYTES + SLOT_COUNT * SLOT_P
 
 // Associated data binds a payload to its purpose. Intentionally generic — it
 // names nothing about slot position, vault count, or "decoy" status.
-const PAYLOAD_AD = utf8Encode("Sublemonable-Vault-Payload-v1");
+const PAYLOAD_AD = utf8Encode("Zitrone-Vault-Payload-v1");
 
 /**
  * Handle to an unlocked vault: its data key, which slot it occupies, and that
@@ -292,7 +292,7 @@ function db(): Promise<IDBPDatabase> {
 // Cost: ~1 MiB backend read per persist — single-digit milliseconds on
 // IndexedDB, acceptable on the Tauri invoke path.
 
-const IMAGE_LOCK = "sublemonable-vault-image";
+const IMAGE_LOCK = "zitrone-vault-image";
 
 let imageOp: Promise<unknown> = Promise.resolve();
 

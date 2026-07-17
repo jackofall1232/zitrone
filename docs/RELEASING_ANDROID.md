@@ -1,7 +1,7 @@
 # Releasing the Android beta APK
 
-The registration/QR/connection fix ([#14](https://github.com/jackofall1232/sublemonable/pull/14))
-and the `1.5.1` version bump ([#15](https://github.com/jackofall1232/sublemonable/pull/15)) are in
+The registration/QR/connection fix ([#14](https://github.com/jackofall1232/zitrone/pull/14))
+and the `1.5.1` version bump ([#15](https://github.com/jackofall1232/zitrone/pull/15)) are in
 `main`, but a fix in source is not a fix in testers' hands. `/download/beta` serves whatever binary
 was last uploaded as a GitHub Release asset — until a signed `v1.5.1` APK is built and published,
 the download link keeps handing out the pre-fix `v1.5.0-beta` build. This is the runbook that closes
@@ -26,10 +26,10 @@ choose, not the default. Either way, two hard rules follow:
 
 ```bash
 # 1. What signed the live beta? Note the SHA-256 cert digest.
-apksigner verify --print-certs sublemonable-v1.5.0-beta.apk
+apksigner verify --print-certs zitrone-v1.5.0-beta.apk
 
 # 2. What will sign the new build? Must be the SAME digest as above.
-keytool -list -v -keystore release.jks -alias sublemonable    # compare SHA256 fingerprint
+keytool -list -v -keystore release.jks -alias zitrone    # compare SHA256 fingerprint
 ```
 
 If those two digests differ, stop — signing 1.5.1 with a different key breaks every existing install.
@@ -60,8 +60,8 @@ Verify and checksum it:
 
 ```bash
 apksigner verify --print-certs app/build/outputs/apk/release/app-release.apk
-cp app/build/outputs/apk/release/app-release.apk sublemonable-v1.5.1.apk
-sha256sum sublemonable-v1.5.1.apk    # keep this value — the website needs it
+cp app/build/outputs/apk/release/app-release.apk zitrone-v1.5.1.apk
+sha256sum zitrone-v1.5.1.apk    # keep this value — the website needs it
 ```
 
 > Without `keystore.properties` (or the equivalent env vars) the release build still succeeds but is
@@ -114,7 +114,7 @@ Do this **last** — flipping the pointer before the asset is uploaded 404s test
    rm -f onion-site/*.apk            # drop the previous build FIRST: the mirror serves
                                      # the first *.apk it finds (server/cmd/server/onion.go
                                      # findStagedAPK), so a leftover older APK keeps shipping
-   cp sublemonable-v1.5.1.apk onion-site/
+   cp zitrone-v1.5.1.apk onion-site/
    ( cd onion-site && sha256sum *.apk > SHA256SUMS )   # basenames — so testers' `sha256sum -c SHA256SUMS` matches
    ```
 3. Commit and push — Vercel redeploys and `/download/beta` serves the fixed build.

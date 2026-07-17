@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -6,7 +6,7 @@
 import SwiftUI
 
 // Spacing, radius, shadow and motion tokens from
-// sublemonable-MASTER.json → design_system.tokens
+// zitrone-MASTER.json → design_system.tokens
 
 /// Spacing scale, base unit 4pt: [0,4,8,12,16,20,24,32,40,48,64,80,96,128]
 public enum Spacing {

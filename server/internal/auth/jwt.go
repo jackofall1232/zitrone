@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -51,7 +51,7 @@ func (i *Issuer) IssueAccessToken(accountID uuid.UUID, now time.Time) (string, e
 		Subject:   accountID.String(),
 		IssuedAt:  jwt.NewNumericDate(now),
 		ExpiresAt: jwt.NewNumericDate(now.Add(AccessTokenTTL)),
-		Issuer:    "sublemonable",
+		Issuer:    "zitrone",
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodRS256, claims).SignedString(i.private)
 }
@@ -64,7 +64,7 @@ func (i *Issuer) ValidateAccessToken(token string) (uuid.UUID, error) {
 			return nil, fmt.Errorf("unexpected signing method")
 		}
 		return i.public, nil
-	}, jwt.WithIssuer("sublemonable"), jwt.WithExpirationRequired())
+	}, jwt.WithIssuer("zitrone"), jwt.WithExpirationRequired())
 	if err != nil {
 		return uuid.Nil, err
 	}
@@ -79,6 +79,7 @@ func (i *Issuer) ValidateAccessToken(token string) (uuid.UUID, error) {
 // the account. The message itself is identical across platforms — only the
 // signing scheme differs (see VerifyLogin).
 func LoginMessage(accountID uuid.UUID, timestamp time.Time) []byte {
+	// TODO(zitrone-cutover): 'sublemonable-login' is the live wire contract — every deployed client signs exactly these bytes. Rename ONLY in lockstep with a coordinated client+server cutover.
 	return []byte(fmt.Sprintf("sublemonable-login:%s:%d", accountID, timestamp.Unix()))
 }
 

@@ -1,11 +1,11 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import SwiftUI
 
-/// Chat list per design_system.screens.chat_list: SUBLEMONABLE wordmark
+/// Chat list per design_system.screens.chat_list: ZITRONE wordmark
 /// left-aligned, settings icon right, lemon-bordered pill search bar, and a
 /// lemon compose FAB bottom-right with a lemon-glow shadow.
 public struct ChatListView: View {
@@ -54,7 +54,7 @@ public struct ChatListView: View {
 
     private var header: some View {
         HStack {
-            Text("SUBLEMONABLE")
+            Text("ZITRONE")
                 .font(SubFont.display(TypeScale.lg, weight: .bold))
                 .tracking(4)
                 .foregroundColor(.lemon)

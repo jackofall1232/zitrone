@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -7,7 +7,7 @@
 // nothing content-bearing ever touches Cache Storage. Outbound messages
 // composed offline are queued in memory by the app and flushed on reconnect.
 
-const SHELL_CACHE = "sublemonable-shell-v1";
+const SHELL_CACHE = "zitrone-shell-v1";
 const SHELL_ASSETS = ["/", "/index.html", "/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (event) => {

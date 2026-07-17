@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -12,7 +12,7 @@
 
 import { utf8Decode, utf8Encode } from "./encoding.js";
 
-const MAGIC = 0x5b; // "[" — marks a Sublemonable watermark stream
+const MAGIC = 0x5b; // "[" — marks a Zitrone watermark stream
 
 /**
  * Embed payload bits into the LSB of the R/G/B channels of RGBA pixel data

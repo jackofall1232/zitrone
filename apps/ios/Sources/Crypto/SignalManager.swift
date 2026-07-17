@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -65,7 +65,7 @@ private func publicKeyFromRawBytes(_ raw: Data) throws -> PublicKey {
 
 /// Protocol-state store backed by KeychainStore. Never returns key material
 /// to disk; serialized records live only inside the data-protection keychain.
-public final class SublemonableProtocolStore: IdentityKeyStore, PreKeyStore,
+public final class ZitroneProtocolStore: IdentityKeyStore, PreKeyStore,
                                               SignedPreKeyStore, SessionStore,
                                               KyberPreKeyStore {
     private let keychain: KeychainStore
@@ -204,7 +204,7 @@ public final class SublemonableProtocolStore: IdentityKeyStore, PreKeyStore,
 
     // MARK: KyberPreKeyStore
     // Required by signalDecryptPreKey since libsignal added post-quantum
-    // (Kyber) prekeys. Sublemonable v1 bundles are Curve25519-only, so these
+    // (Kyber) prekeys. Zitrone v1 bundles are Curve25519-only, so these
     // records only appear if a future server adds Kyber bundles.
 
     public func loadKyberPreKey(id: UInt32, context: StoreContext) throws -> KyberPreKeyRecord {
@@ -261,9 +261,9 @@ public final class SignalManager {
     /// One-time prekey batch size, per the master spec.
     public static let oneTimePreKeyBatchSize = 100
 
-    public let store: SublemonableProtocolStore
+    public let store: ZitroneProtocolStore
     private let keychain: KeychainStore
-    private let queue = DispatchQueue(label: "org.sublemonable.signal")
+    private let queue = DispatchQueue(label: "org.zitrone.signal")
 
     /// Wired up at app start to APIClient.fetchPreKeyBundle — lets encrypt()
     /// run X3DH lazily on first message to a new contact.
@@ -284,7 +284,7 @@ public final class SignalManager {
 
     public init(keychain: KeychainStore = .shared) {
         self.keychain = keychain
-        self.store = SublemonableProtocolStore(keychain: keychain)
+        self.store = ZitroneProtocolStore(keychain: keychain)
     }
 
     // MARK: - Account identity
@@ -593,6 +593,7 @@ public final class SignalManager {
     public func loginSignature(accountID: UUID, unixTimestamp: Int) throws -> Data {
         try queue.sync {
             let identity = try store.identityKeyPair(context: NullContext())
+            // TODO(zitrone-cutover): shared wire contract with the live relay — rename only in lockstep with the server.
             let challenge = "sublemonable-login:\(accountID.uuidString.lowercased()):\(unixTimestamp)"
             return Data(identity.privateKey.generateSignature(message: Array(challenge.utf8)))
         }

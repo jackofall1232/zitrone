@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -18,9 +18,9 @@ public struct SettingsView: View {
     public var onDismiss: () -> Void
 
     // Privacy defaults applied to new messages (UI preferences, not secrets).
-    @AppStorage("org.sublemonable.default-ttl") private var defaultTTL: Int = 0
-    @AppStorage("org.sublemonable.default-burn-on-read") private var defaultBurnOnRead = false
-    @AppStorage("org.sublemonable.biometric-lock") private var biometricLock = true
+    @AppStorage("org.zitrone.default-ttl") private var defaultTTL: Int = 0
+    @AppStorage("org.zitrone.default-burn-on-read") private var defaultBurnOnRead = false
+    @AppStorage("org.zitrone.biometric-lock") private var biometricLock = true
 
     // Notification sound: "" (or missing) = branded default, "custom" = user
     // file. Mirrors NotificationSoundStore.preferenceKey so the row reflects
@@ -178,7 +178,7 @@ public struct SettingsView: View {
             HStack {
                 settingLabel("Notification sound", icon: "bell.badge")
                 Spacer()
-                Text(notificationSound == "custom" ? "Custom" : "Sublemonable")
+                Text(notificationSound == "custom" ? "Custom" : "Zitrone")
                     .font(SubFont.body(TypeScale.sm))
                     .foregroundColor(.textMuted)
             }
@@ -209,7 +209,7 @@ public struct SettingsView: View {
                 Button {
                     NotificationSoundStore.useDefault()
                 } label: {
-                    settingLabel("Reset to Sublemonable sound", icon: "arrow.uturn.backward")
+                    settingLabel("Reset to Zitrone sound", icon: "arrow.uturn.backward")
                 }
             }
 

@@ -1,7 +1,7 @@
 # v1.0 Audit — spec conformance pass
 
 This is the "soft audit" pass requested alongside the v1.5 build: a comparison of the **shipped v1.0
-code** against `sublemonable-MASTER.json`. It is a conformance/architecture review, **not** a
+code** against `zitrone-MASTER.json`. It is a conformance/architecture review, **not** a
 third-party security audit (that record lives in [AUDIT.md](../AUDIT.md)).
 
 Verdict: **v1.0 closely matches the master spec.** The architecture, crypto, server, packages, web
@@ -59,7 +59,7 @@ made account deletion purge pending envelopes explicitly in a transaction.
 
 ### 7. `apps/web` is not Prettier-clean — PRE-EXISTING, MINOR
 
-`pnpm --filter @sublemonable/web lint` reports formatting issues in several pre-existing `apps/web`
+`pnpm --filter @zitrone/web lint` reports formatting issues in several pre-existing `apps/web`
 source files (e.g. `store.ts`, `screens/*`). These predate the v1.5 work. Files touched during v1.5
 were formatted; the remaining v1 files should be run through `prettier --write` in a cleanup pass.
 

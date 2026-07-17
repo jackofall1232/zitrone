@@ -1,6 +1,6 @@
 # v1.5 implementation status
 
-This tracks the v1.5 ("security onion") build against `sublemonable-MASTER.json` — what is built and
+This tracks the v1.5 ("security onion") build against `zitrone-MASTER.json` — what is built and
 verified, and what remains. It follows the master's `versions.1.5.0.build_order`.
 
 ## Built and verified (tests passing)

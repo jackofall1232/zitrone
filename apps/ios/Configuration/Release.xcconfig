@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // SPDX-License-Identifier: AGPL-3.0-only
 //
@@ -16,8 +16,8 @@
 // shadows it, so the correct way to inject the value is to export it in the
 // environment that invokes the build, e.g.:
 //
-//   RELAY_ONION_ADDRESS=<relay>.onion xcodebuild -project Sublemonable.xcodeproj \
-//     -scheme Sublemonable -configuration Release archive ...
+//   RELAY_ONION_ADDRESS=<relay>.onion xcodebuild -project Zitrone.xcodeproj \
+//     -scheme Zitrone -configuration Release archive ...
 //
 // Support/Info.plist reads it via a RELAY_ONION_ADDRESS key set to
 // "$(RELAY_ONION_ADDRESS)", substituted from that build setting at build time;

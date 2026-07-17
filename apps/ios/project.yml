@@ -1,15 +1,15 @@
-# Sublemonable — Copyright (C) 2026 Sublemonable contributors
+# Zitrone — Copyright (C) 2026 Zitrone contributors
 # Licensed under the GNU Affero General Public License v3.0 or later.
 # See the LICENSE file in the repository root for full license text.
 # SPDX-License-Identifier: AGPL-3.0-only
 #
 # XcodeGen project definition. Run `xcodegen generate` in apps/ios to produce
-# Sublemonable.xcodeproj. See README.md in this directory for full build steps.
+# Zitrone.xcodeproj. See README.md in this directory for full build steps.
 
-name: Sublemonable
+name: Zitrone
 
 options:
-  bundleIdPrefix: org.sublemonable
+  bundleIdPrefix: org.zitrone
   deploymentTarget:
     iOS: "16.0"
   createIntermediateGroups: true
@@ -45,7 +45,7 @@ packages:
     from: "4.0.6"
 
 targets:
-  Sublemonable:
+  Zitrone:
     type: application
     platform: iOS
     deploymentTarget: "16.0"
@@ -61,7 +61,7 @@ targets:
     # xcodegen never overwrites it.
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: org.sublemonable.app
+        PRODUCT_BUNDLE_IDENTIFIER: org.zitrone.app
         INFOPLIST_FILE: Support/Info.plist
         GENERATE_INFOPLIST_FILE: "NO"
         SWIFT_OBJC_BRIDGING_HEADER: ""
@@ -77,35 +77,35 @@ targets:
           - "Info.plist"
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: org.sublemonable.app.notificationservice
+        PRODUCT_BUNDLE_IDENTIFIER: org.zitrone.app.notificationservice
         INFOPLIST_FILE: NotificationService/Info.plist
         GENERATE_INFOPLIST_FILE: "NO"
 
-  SublemonableTests:
+  ZitroneTests:
     type: bundle.unit-test
     platform: iOS
     deploymentTarget: "16.0"
     sources:
       - path: Tests
     dependencies:
-      - target: Sublemonable
+      - target: Zitrone
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: org.sublemonable.app.tests
+        PRODUCT_BUNDLE_IDENTIFIER: org.zitrone.app.tests
         GENERATE_INFOPLIST_FILE: "YES"
-        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Sublemonable.app/Sublemonable"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Zitrone.app/Zitrone"
         BUNDLE_LOADER: "$(TEST_HOST)"
 
 schemes:
-  Sublemonable:
+  Zitrone:
     build:
       targets:
-        Sublemonable: all
+        Zitrone: all
     run:
       config: Debug
     test:
       config: Debug
       targets:
-        - SublemonableTests
+        - ZitroneTests
     archive:
       config: Release

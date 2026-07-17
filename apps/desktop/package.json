@@ -1,8 +1,8 @@
 {
-  "name": "@sublemonable/desktop",
-  "version": "1.5.1",
+  "name": "@zitrone/desktop",
+  "version": "0.6.0-beta",
   "private": true,
-  "description": "Sublemonable Linux desktop app — Tauri v2 (frontend is apps/web)",
+  "description": "Zitrone Linux desktop app — Tauri v2 (frontend is apps/web)",
   "license": "AGPL-3.0-only",
   "scripts": {
     "dev": "cargo tauri dev",

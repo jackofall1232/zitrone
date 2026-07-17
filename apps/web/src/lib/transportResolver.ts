@@ -1,9 +1,9 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { CLEARNET_WARNING, type TransportResolution } from "@sublemonable/protocol";
+import { CLEARNET_WARNING, type TransportResolution } from "@zitrone/protocol";
 
 /**
  * Resolves the active transport by probing in a fixed fallback-chain order —

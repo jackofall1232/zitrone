@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -32,7 +32,7 @@ import (
 //
 // Ported from go.mau.fi/libsignal's ecc.verify (GPLv3), a Go reimplementation
 // of the same scheme libsignal-client itself uses, used in production by
-// Signal-protocol bridges that interoperate with real Signal/Sublemonable
+// Signal-protocol bridges that interoperate with real Signal/Zitrone
 // clients — chosen over a hand-derived implementation specifically to avoid
 // re-deriving signature-verification math from scratch for a security-
 // critical path. Verified against real libsignal-client-generated signature

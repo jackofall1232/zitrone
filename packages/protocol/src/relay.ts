@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -6,7 +6,7 @@
 /**
  * Multi-hop relay wire types (v1.5). Onion-routed delivery through three relay
  * nodes; no single node knows both sender and recipient. The crypto for building
- * and peeling onions lives in @sublemonable/crypto; this module describes the
+ * and peeling onions lives in @zitrone/crypto; this module describes the
  * registry entries and the forward-packet shape.
  */
 

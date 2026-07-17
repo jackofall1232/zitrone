@@ -1,10 +1,10 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
 /**
- * The Lemon Slice — Sublemonable's signature element. A segmented circle that
+ * The Lemon Slice — Zitrone's signature element. A segmented circle that
  * appears as the logo mark, loading spinner, burn timer, security indicator,
  * and send button. Every moment of waiting, protecting, or destroying is shown
  * through this one motif.
@@ -68,7 +68,7 @@ function segmentPath(
 }
 
 const DEFAULT_LABELS: Record<LemonSliceVariant, string> = {
-  logo_mark: "Sublemonable",
+  logo_mark: "Zitrone",
   loading_spinner: "Loading",
   burn_timer: "Time remaining",
   security_indicator: "Security level",

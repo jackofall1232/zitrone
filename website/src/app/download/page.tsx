@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -9,9 +9,9 @@ import { LemonSlice } from "@/components/LemonSlice";
 import { GITHUB_URL, SELF_HOSTING_DOC } from "@/lib/links";
 
 export const metadata: Metadata = {
-  title: "Download — Sublemonable",
+  title: "Download — Zitrone",
   description:
-    "Get Sublemonable for iOS, Android, or the browser. Or self-host the whole thing — it's open source.",
+    "Get Zitrone for iOS, Android, or the browser. Or self-host the whole thing — it's open source.",
 };
 
 function StoreBadge({ store, line1 }: { store: string; line1: string }) {
@@ -38,8 +38,8 @@ export default function DownloadPage() {
           Get the app
         </h1>
         <p className="mt-6 text-lg leading-relaxed text-ink-secondary">
-          Several ways to run Sublemonable — mobile, desktop, or the browser. And, if you count
-          running the entire thing yourself, one more — which we encourage.
+          Several ways to run Zitrone — mobile, desktop, or the browser. And, if you count running
+          the entire thing yourself, one more — which we encourage.
         </p>
 
         {/* App stores */}
@@ -157,7 +157,7 @@ export default function DownloadPage() {
           </p>
           <pre className="mt-6 overflow-x-auto rounded-md border border-line bg-bg-secondary p-5 font-mono text-sm leading-relaxed text-pulp">
             <code>{`git clone ${GITHUB_URL}.git
-cd sublemonable
+cd zitrone
 cp .env.example .env   # set DATABASE_URL, JWT key paths, TLS paths
 docker compose up -d   # server + postgres
 # optional Tor hidden service:

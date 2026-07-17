@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -8,14 +8,14 @@ import UserNotifications
 /// Notification Service Extension whose ONLY job is to guarantee that no
 /// notification ever shows message content or a sender name.
 ///
-/// The Sublemonable server is zero-knowledge — it has no content to push in
+/// The Zitrone server is zero-knowledge — it has no content to push in
 /// the first place. This extension is defense-in-depth: whatever arrives in
 /// the push payload (now or after any future server change, or from a
 /// malicious/compromised server), the user-visible notification is rewritten
-/// to the fixed strings "Sublemonable" / "New message" and every other field
+/// to the fixed strings "Zitrone" / "New message" and every other field
 /// is stripped.
 final class NotificationService: UNNotificationServiceExtension {
-    private static let fixedTitle = "Sublemonable"
+    private static let fixedTitle = "Zitrone"
     private static let fixedBody = "New message"
     // The extension resolves sounds against ITS OWN bundle, so it uses the
     // bundled brand default (new_message.wav ships in this target too). A

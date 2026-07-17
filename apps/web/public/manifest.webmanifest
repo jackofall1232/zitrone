@@ -1,6 +1,6 @@
 {
-  "name": "Sublemonable",
-  "short_name": "Sublemonable",
+  "name": "Zitrone",
+  "short_name": "Zitrone",
   "description": "End-to-end encrypted messaging that disappears. No logs. No screenshots. No trace.",
   "start_url": "/",
   "display": "standalone",

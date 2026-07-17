@@ -1,11 +1,11 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import Foundation
 
-/// REST client for the Sublemonable server (server.api.endpoints in the
+/// REST client for the Zitrone server (server.api.endpoints in the
 /// master spec):
 ///
 ///   POST   /api/v1/register           — public identity key + prekeys only
@@ -35,6 +35,7 @@ public actor APIClient {
 
     /// Self-hosters point this at their own deployment (and replace the
     /// certificate pin in PinnedSessionDelegate.swift).
+    // TODO(zitrone-cutover): live relay endpoint — repoint only at deploy cutover.
     public static let defaultBaseURL = URL(string: "https://relay.sublemonable.com")!
 
     private let baseURL: URL

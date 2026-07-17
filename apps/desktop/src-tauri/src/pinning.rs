@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -33,6 +33,7 @@
 /// Host these pins apply to. Must match the server URL the bundled web UI
 /// connects to (build the desktop bundle with
 /// `VITE_SERVER_URL=https://relay.sublemonable.com`).
+// TODO(zitrone-cutover): live relay endpoint — repoint to the zitrone domain only at deploy cutover.
 pub const API_HOST: &str = "relay.sublemonable.com";
 
 /// Primary pin — the live Let's Encrypt leaf key (stable across renewals).

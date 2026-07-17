@@ -1,11 +1,11 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { useState } from "react";
-import { ConversationList, LemonSlice } from "@sublemonable/ui";
-import { isUuid } from "@sublemonable/protocol";
+import { ConversationList, LemonSlice } from "@zitrone/ui";
+import { isUuid } from "@zitrone/protocol";
 import { useApp } from "../store.js";
 
 export function ChatList({ onOpenSettings }: { onOpenSettings: () => void }) {
@@ -33,7 +33,7 @@ export function ChatList({ onOpenSettings }: { onOpenSettings: () => void }) {
       <header className="flex items-center justify-between px-4 py-4">
         <div className="flex items-center gap-2">
           <LemonSlice variant="logo_mark" size={26} />
-          <span className="font-display text-lg font-bold tracking-wide text-lemon">SUBLEMONABLE</span>
+          <span className="font-display text-lg font-bold tracking-wide text-lemon">ZITRONE</span>
         </div>
         <button
           onClick={onOpenSettings}

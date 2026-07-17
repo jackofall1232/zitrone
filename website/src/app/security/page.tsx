@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -8,9 +8,9 @@ import { LemonSlice } from "@/components/LemonSlice";
 import { AUDIT_LOG, GITHUB_URL, SECURITY_MODEL_DOC, SECURITY_POLICY } from "@/lib/links";
 
 export const metadata: Metadata = {
-  title: "Security — Sublemonable",
+  title: "Security — Zitrone",
   description:
-    "How Sublemonable works under the hood: Signal Protocol, on-device keys, a server that stores almost nothing, screenshot protection, and optional Tor routing.",
+    "How Zitrone works under the hood: Signal Protocol, on-device keys, a server that stores almost nothing, screenshot protection, and optional Tor routing.",
 };
 
 export default function SecurityPage() {
@@ -20,7 +20,7 @@ export default function SecurityPage() {
         <header className="mb-4">
           <LemonSlice size={56} label="" />
           <h1 className="mt-8 font-display text-4xl font-bold tracking-display text-ink-primary sm:text-5xl">
-            How Sublemonable works
+            How Zitrone works
           </h1>
           <p className="mt-6 text-lg leading-relaxed text-ink-secondary">
             Zero-knowledge architecture means the server never sees, stores, or logs plaintext
@@ -31,10 +31,10 @@ export default function SecurityPage() {
 
         <h2 id="signal-protocol">Signal Protocol</h2>
         <p>
-          Sublemonable uses the Signal Protocol — the X3DH key agreement for establishing a shared
-          secret with someone you&apos;ve never messaged before, and the Double Ratchet for
-          everything after. It&apos;s the most scrutinized messaging cryptography in existence. We
-          didn&apos;t invent our own. You should be suspicious of anyone who does.
+          Zitrone uses the Signal Protocol — the X3DH key agreement for establishing a shared secret
+          with someone you&apos;ve never messaged before, and the Double Ratchet for everything
+          after. It&apos;s the most scrutinized messaging cryptography in existence. We didn&apos;t
+          invent our own. You should be suspicious of anyone who does.
         </p>
         <p>
           Every single message is encrypted with its own AES-256-GCM message key, derived by the
@@ -164,8 +164,8 @@ export default function SecurityPage() {
         <h2 id="tor">Tor routing</h2>
         <p>
           Network-level metadata — who connected, from where — is the hardest thing for any
-          messenger to hide. Sublemonable keeps stored metadata minimal, and for the network layer
-          it offers optional Tor routing: Orbot integration on iOS and Android, and a{" "}
+          messenger to hide. Zitrone keeps stored metadata minimal, and for the network layer it
+          offers optional Tor routing: Orbot integration on iOS and Android, and a{" "}
           <code>.onion</code> address for the browser app via Tor Browser. It&apos;s opt-in, not on
           by default, because it trades latency for anonymity and that should be your call.
         </p>
@@ -173,9 +173,9 @@ export default function SecurityPage() {
         <h2 id="open-source">Open source and audit history</h2>
         <p>
           Everything — the encryption, the server, all three apps — is open source under AGPL-3.0 at{" "}
-          <a href={GITHUB_URL}>github.com/jackofall1232/sublemonable</a>. The AGPL means anyone
-          running a modified Sublemonable as a service must publish their changes. No silent forks
-          with weakened crypto.
+          <a href={GITHUB_URL}>github.com/jackofall1232/zitrone</a>. The AGPL means anyone running a
+          modified Zitrone as a service must publish their changes. No silent forks with weakened
+          crypto.
         </p>
         <p>
           Audit history: no third-party audits have been conducted yet. We&apos;d rather tell you

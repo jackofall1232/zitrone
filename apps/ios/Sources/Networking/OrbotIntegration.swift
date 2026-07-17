@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -9,7 +9,7 @@ import UIKit
 /// Settings → Network. Disabled by default per the master spec.
 ///
 /// On iOS, Orbot runs as a system-wide VPN — once the user starts it, ALL of
-/// Sublemonable's traffic (REST + WebSocket) is routed through Tor without
+/// Zitrone's traffic (REST + WebSocket) is routed through Tor without
 /// any change to our networking stack. This integration therefore only:
 ///   1. detects whether Orbot is installed (orbot:// URL scheme — requires
 ///      "orbot" in LSApplicationQueriesSchemes),
@@ -23,7 +23,7 @@ public final class OrbotIntegration: ObservableObject {
     private static let orbotScheme = "orbot://"
     private static let orbotStartURL = "orbot://start"
     private static let appStoreURL = "https://apps.apple.com/app/orbot/id1609461599"
-    private static let preferenceKey = "org.sublemonable.tor-opt-in"
+    private static let preferenceKey = "org.zitrone.tor-opt-in"
 
     /// The user's opt-in choice. Turning this on does not guarantee Tor is
     /// active — Orbot's VPN must actually be running; we surface that nuance

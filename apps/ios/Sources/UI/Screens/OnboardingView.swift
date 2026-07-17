@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -124,7 +124,7 @@ public struct OnboardingView: View {
         default:
             // QR code with lemon-slice overlay.
             ZStack {
-                FingerprintQRCode(payload: "sublemonable://hello", size: 150)
+                FingerprintQRCode(payload: "zitrone://hello", size: 150)
                 LemonSliceView(variant: .logoMark)
                     .frame(width: 44, height: 44)
                     .background(Circle().fill(Color.backgroundPrimary).padding(-6))

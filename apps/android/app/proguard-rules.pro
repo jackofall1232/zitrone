@@ -1,4 +1,4 @@
-# Sublemonable — Copyright (C) 2026 Sublemonable contributors
+# Zitrone — Copyright (C) 2026 Zitrone contributors
 # Licensed under the GNU Affero General Public License v3.0 or later.
 # See the LICENSE file in the repository root for full license text.
 # SPDX-License-Identifier: AGPL-3.0-only
@@ -24,11 +24,11 @@
 # app/build.gradle.kts). Nothing references it yet (mobile onion direct-dial is
 # a future item), so R8 would strip the dead constant and the release APK would
 # ship WITHOUT the relay address. Keep the class so the baked value survives.
--keep class com.sublemonable.app.BuildConfig { *; }
+-keep class com.zitrone.app.BuildConfig { *; }
 
 # Never obfuscate away the protocol envelope (serialized via org.json by hand,
 # so reflection is not used — these rules are belt-and-braces only).
--keep class com.sublemonable.app.data.MessageEnvelope { *; }
+-keep class com.zitrone.app.data.MessageEnvelope { *; }
 
 # lifecycle-runtime-compose 2.8.x on Compose 1.6.x resolves LocalLifecycleOwner
 # by REFLECTING into this compose-ui class. R8 renamed it in the shipped v1.5.1
@@ -45,7 +45,7 @@
 # Release logging policy: strip verbose/debug/info AND wtf defensively (the
 # codebase uses none by policy; wtf in particular is noisy and can trigger
 # extra platform reporting). ONLY Log.w / Log.e survive minification — and
-# deliberately so: ALL transport diagnostics (tag "SublemonableBoot") log at
+# deliberately so: ALL transport diagnostics (tag "ZitroneBoot") log at
 # Log.w — the boot stages in MessagingCoordinator, the send-path stages in
 # sendText, and the WebSocket lifecycle lines WsClient emits through
 # AppContainer's diag lambda. Fixed stage/milestone markers + transport

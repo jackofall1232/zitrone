@@ -1,10 +1,10 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import XCTest
-@testable import Sublemonable
+@testable import Zitrone
 
 /// The envelope's JSON shape is a wire contract shared with packages/protocol
 /// and the Go server — these tests pin the exact snake_case field names.

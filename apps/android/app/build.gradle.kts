@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -48,15 +48,15 @@ if (!hasReleaseSigning && releaseSigningParams.any { !it.isNullOrBlank() }) {
 }
 
 android {
-    namespace = "com.sublemonable.app"
+    namespace = "com.zitrone.app"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.sublemonable.app"
+        applicationId = "com.zitrone.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.5.5"
+        versionCode = 1
+        versionName = "0.6.0-beta"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

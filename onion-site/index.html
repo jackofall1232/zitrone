@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  Sublemonable — Copyright (C) 2026 Sublemonable contributors
+  Zitrone — Copyright (C) 2026 Zitrone contributors
   Licensed under the GNU Affero General Public License v3.0 or later.
   SPDX-License-Identifier: AGPL-3.0-only
 
@@ -17,14 +17,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
-  <title>Sublemonable — onion mirror</title>
+  <title>Zitrone — onion mirror</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <main>
   <header class="masthead">
     <div class="logo" aria-hidden="true">🍋</div>
-    <h1>Sublemonable</h1>
+    <h1>Zitrone</h1>
     <p class="tagline">End-to-end encrypted messaging — official Tor mirror</p>
   </header>
 
@@ -112,7 +112,7 @@ sha256sum -c SHA256SUMS</code></pre>
     <ul>
       <li>
         Get the release from the official source:
-        <a href="https://github.com/jackofall1232/sublemonable/releases">github.com/jackofall1232/sublemonable/releases</a>,
+        <a href="https://github.com/jackofall1232/zitrone/releases">github.com/jackofall1232/zitrone/releases</a>,
         and always verify its SHA-256 before installing.
       </li>
       <li>
@@ -120,7 +120,7 @@ sha256sum -c SHA256SUMS</code></pre>
         matching <code>SHA256SUMS</code> into the <code>onion-site/</code>
         directory, then the download and verification steps appear here
         automatically. See the
-        <a href="https://github.com/jackofall1232/sublemonable/blob/main/docs/SELF_HOSTING.md">self-hosting guide</a>.
+        <a href="https://github.com/jackofall1232/zitrone/blob/main/docs/SELF_HOSTING.md">self-hosting guide</a>.
       </li>
     </ul>
   </section>
@@ -132,8 +132,8 @@ sha256sum -c SHA256SUMS</code></pre>
       The server is a Go binary, a PostgreSQL database, and a Docker Compose
       file. Run your own relay, including this very onion mirror:
     </p>
-    <pre><code>git clone https://github.com/jackofall1232/sublemonable.git
-cd sublemonable
+    <pre><code>git clone https://github.com/jackofall1232/zitrone.git
+cd zitrone
 cp server/.env.example .env            # set DATABASE_URL, JWT key paths
 
 # JWT signing keys (mounted into the server container)
@@ -143,7 +143,7 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
 openssl rsa -in server/keys/jwt.pem -pubout -out server/keys/jwt.pub.pem
 
 # Stage the release APK + checksums into the mirror (not committed to git):
-cp sublemonable-v1.5.0-beta.apk onion-site/
+cp zitrone-v1.5.0-beta.apk onion-site/
 sha256sum onion-site/*.apk > onion-site/SHA256SUMS
 
 # Server + Postgres
@@ -153,7 +153,7 @@ docker compose up -d
 docker compose -f docker-compose.yml -f docker-compose.tor.yml up -d
 
 # Read your own .onion address:
-docker compose exec tor cat /var/lib/tor/sublemonable/hostname</code></pre>
+docker compose exec tor cat /var/lib/tor/zitrone/hostname</code></pre>
     <p>
       Then set <code>TOR_ENABLED=true</code> and <code>ONION_ADDRESS</code> (the
       hostname you just read) in <code>.env</code> and restart the server so it
@@ -164,15 +164,15 @@ docker compose exec tor cat /var/lib/tor/sublemonable/hostname</code></pre>
       read-only into the server, which serves it at the root of the hidden
       service — and only there. Full instructions — TLS, certificate pinning,
       environment variables, APK staging, backups — are in the
-      <a href="https://github.com/jackofall1232/sublemonable/blob/main/docs/SELF_HOSTING.md">self-hosting guide</a>.
+      <a href="https://github.com/jackofall1232/zitrone/blob/main/docs/SELF_HOSTING.md">self-hosting guide</a>.
     </p>
   </section>
 
   <footer>
     <p>
       Free software under the
-      <a href="https://github.com/jackofall1232/sublemonable/blob/main/LICENSE">GNU AGPL v3.0</a>.
-      Source: <a href="https://github.com/jackofall1232/sublemonable">github.com/jackofall1232/sublemonable</a>.
+      <a href="https://github.com/jackofall1232/zitrone/blob/main/LICENSE">GNU AGPL v3.0</a>.
+      Source: <a href="https://github.com/jackofall1232/zitrone">github.com/jackofall1232/zitrone</a>.
     </p>
     <p class="muted">No cookies. No logs of you. No JavaScript.</p>
   </footer>

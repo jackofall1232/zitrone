@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -40,7 +40,7 @@ public final class BootDiagnostics: ObservableObject {
     private let fileURL: URL?
     // Serializes file IO + entry mutation; record() is called from arbitrary
     // threads (socket delegate, async boot task) while SwiftUI observes.
-    private let queue = DispatchQueue(label: "org.sublemonable.diagnostics")
+    private let queue = DispatchQueue(label: "org.zitrone.diagnostics")
 
     private static let timestampFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()

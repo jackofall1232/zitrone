@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -14,13 +14,13 @@
  * nowhere, so the relay holds it briefly and the TTL purges it, undelivered.
  */
 
-import { aeadEncrypt, pad, randomBytes, toBase64 } from "@sublemonable/crypto";
+import { aeadEncrypt, pad, randomBytes, toBase64 } from "@zitrone/crypto";
 import {
   PROTOCOL_VERSION,
   type CoverTrafficIntensity,
   type MessageEnvelope,
   DECOY_CADENCE_SECONDS,
-} from "@sublemonable/protocol";
+} from "@zitrone/protocol";
 import { cadenceMeanSeconds, poissonIntervalMs, type UniformRng } from "./poisson.js";
 
 /** Random UUID v4. Decoys are addressed to addresses that resolve to nowhere. */

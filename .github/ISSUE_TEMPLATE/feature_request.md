@@ -8,7 +8,7 @@ assignees: ""
 
 ## Feature description
 
-<!-- What should Sublemonable do? -->
+<!-- What should Zitrone do? -->
 
 ## Use case
 

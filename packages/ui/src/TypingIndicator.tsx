@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -8,7 +8,7 @@
  * lemon-ui.jsx brainstorm into the dark design system: lemon-yellow drops on a
  * received-message bubble background, never the brainstorm's white card.
  *
- * Requires the `sub-drop-bounce` keyframe from <SublemonableStyles />.
+ * Requires the `sub-drop-bounce` keyframe from <ZitroneStyles />.
  */
 
 import { color } from "./tokens.js";

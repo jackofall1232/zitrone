@@ -1,7 +1,7 @@
 {
-  "name": "@sublemonable/crypto",
-  "version": "1.0.0",
-  "description": "Crypto primitives for the Sublemonable web client — wraps libsodium.js",
+  "name": "@zitrone/crypto",
+  "version": "0.6.0-beta",
+  "description": "Crypto primitives for the Zitrone web client — wraps libsodium.js",
   "license": "AGPL-3.0-only",
   "type": "module",
   "main": "./dist/index.js",

@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Sublemonable — Copyright (C) 2026 Sublemonable contributors
+  Zitrone — Copyright (C) 2026 Zitrone contributors
   Licensed under the GNU Affero General Public License v3.0 or later.
   See the LICENSE file in the repository root for full license text.
   SPDX-License-Identifier: AGPL-3.0-only
 -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100" role="img" aria-label="Sublemonable lemon slice mark">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100" role="img" aria-label="Zitrone lemon slice mark">
   <circle cx="50" cy="50" r="46" fill="none" stroke="#D4C200" stroke-width="5"/>
   <path d="M 50.86 39.03 L 52.98 12.12 A 38 38 0 0 1 74.68 21.10 L 57.14 41.64 A 11 11 0 0 0 50.86 39.03 Z" fill="#F5E642"/>
   <path d="M 58.36 42.86 L 78.90 25.32 A 38 38 0 0 1 87.88 47.02 L 60.97 49.14 A 11 11 0 0 0 58.36 42.86 Z" fill="#F5E642"/>

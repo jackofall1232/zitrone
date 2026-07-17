@@ -1,4 +1,4 @@
-# Sublemonable — Copyright (C) 2026 Sublemonable contributors
+# Zitrone — Copyright (C) 2026 Zitrone contributors
 # Licensed under the GNU Affero General Public License v3.0 or later.
 # SPDX-License-Identifier: AGPL-3.0-only
 #
@@ -11,9 +11,9 @@
 #   docker compose -f docker-compose.yml -f docker-compose.tor.yml up -d
 #
 # Read your .onion addresses:
-#   docker compose exec tor cat /var/lib/tor/sublemonable-mirror-public/hostname
-#   docker compose exec tor cat /var/lib/tor/sublemonable-mirror-secret/hostname
-#   docker compose exec tor cat /var/lib/tor/sublemonable-relay/hostname
+#   docker compose exec tor cat /var/lib/tor/zitrone-mirror-public/hostname
+#   docker compose exec tor cat /var/lib/tor/zitrone-mirror-secret/hostname
+#   docker compose exec tor cat /var/lib/tor/zitrone-relay/hostname
 #
 # Then set PUBLIC_ONION_ADDRESS, SECRET_ONION_ADDRESS, RELAY_ONION_ADDRESS,
 # and TOR_ENABLED=true in .env and restart: docker compose ... up -d server

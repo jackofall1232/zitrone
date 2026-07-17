@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -18,13 +18,13 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 
-	"github.com/sublemonable/server/internal/api"
-	"github.com/sublemonable/server/internal/auth"
-	"github.com/sublemonable/server/internal/config"
-	"github.com/sublemonable/server/internal/db"
-	"github.com/sublemonable/server/internal/janitor"
-	"github.com/sublemonable/server/internal/ratelimit"
-	"github.com/sublemonable/server/internal/ws"
+	"github.com/zitrone/server/internal/api"
+	"github.com/zitrone/server/internal/auth"
+	"github.com/zitrone/server/internal/config"
+	"github.com/zitrone/server/internal/db"
+	"github.com/zitrone/server/internal/janitor"
+	"github.com/zitrone/server/internal/ratelimit"
+	"github.com/zitrone/server/internal/ws"
 )
 
 func main() {

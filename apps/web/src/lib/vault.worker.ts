@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -8,7 +8,7 @@
 // maximal isolation), which is CPU-heavy; running it here keeps the render
 // thread responsive while every slot is still tried with identical timing.
 
-import { tryPassphrase, type KeySlot, type VaultUnlock } from "@sublemonable/crypto";
+import { tryPassphrase, type KeySlot, type VaultUnlock } from "@zitrone/crypto";
 
 // Typed locally to avoid DOM/WebWorker lib clashes in the shared tsconfig.
 const ctx = self as unknown as {

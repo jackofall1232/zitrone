@@ -1,4 +1,4 @@
-# Sublemonable — Copyright (C) 2026 Sublemonable contributors
+# Zitrone — Copyright (C) 2026 Zitrone contributors
 # Licensed under the GNU Affero General Public License v3.0 or later.
 # SPDX-License-Identifier: AGPL-3.0-only
 
@@ -29,9 +29,9 @@ jobs:
       - name: Test (Vitest)
         run: pnpm -r test
       - name: Build web app
-        run: pnpm --filter @sublemonable/web build
+        run: pnpm --filter @zitrone/web build
       - name: Build website
-        run: pnpm --filter @sublemonable/website build
+        run: pnpm --filter @zitrone/website build
 
   server:
     name: Go server
@@ -113,7 +113,7 @@ jobs:
       - name: Build packages
         run: pnpm build:packages
       - name: Build web frontend
-        run: pnpm --filter @sublemonable/web build
+        run: pnpm --filter @zitrone/web build
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version '^2' --locked
       - name: Build Linux bundles
@@ -121,7 +121,7 @@ jobs:
         run: cargo tauri build --bundles deb,appimage,rpm
       - uses: actions/upload-artifact@v4
         with:
-          name: sublemonable-linux-packages
+          name: zitrone-linux-packages
           path: apps/desktop/src-tauri/target/release/bundle/
           retention-days: 30
 
@@ -150,4 +150,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build server image
-        run: docker build -t sublemonable-server:ci ./server
+        run: docker build -t zitrone-server:ci ./server

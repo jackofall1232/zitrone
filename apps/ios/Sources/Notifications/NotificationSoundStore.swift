@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -7,7 +7,7 @@ import AVFoundation
 import Foundation
 import UserNotifications
 
-/// Decides which sound a Sublemonable notification plays, and lets the user
+/// Decides which sound a Zitrone notification plays, and lets the user
 /// replace the branded default with their own audio.
 ///
 /// iOS has no system UI to change a single app's notification sound (unlike
@@ -31,13 +31,13 @@ public enum NotificationSoundStore {
     public static let defaultSoundName = "new_message.wav"
 
     /// Fixed on-disk name for the user's imported sound.
-    static let customSoundName = "sublemonable_custom.caf"
+    static let customSoundName = "zitrone_custom.caf"
 
     /// Apple's hard cap for custom notification sounds.
     static let maxDurationSeconds: Double = 30
 
     /// UserDefaults key. "" / missing → brand default; "custom" → user file.
-    public static let preferenceKey = "org.sublemonable.notification-sound"
+    public static let preferenceKey = "org.zitrone.notification-sound"
 
     private static var defaults: UserDefaults { .standard }
 

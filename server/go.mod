@@ -1,4 +1,4 @@
-module github.com/sublemonable/server
+module github.com/zitrone/server
 
 go 1.25.0
 

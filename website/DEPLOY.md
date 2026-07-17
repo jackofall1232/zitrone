@@ -6,7 +6,7 @@ project root.
 
 ## One-time Vercel setup (Git integration)
 
-1. In the Vercel dashboard: **Add New → Project → Import** the `jackofall1232/sublemonable` repo.
+1. In the Vercel dashboard: **Add New → Project → Import** the `jackofall1232/zitrone` repo.
 2. Set **Root Directory** to `website`.
 3. Leave the framework as **Next.js** (auto-detected). Defaults are correct:
    - Install Command: `pnpm install` (Vercel detects `pnpm-lock.yaml` at the repo root)
@@ -32,10 +32,10 @@ The unlisted page `/download/beta` links to a GitHub Release asset. To publish a
 1. Build the **release** APK (with the `relay.sublemonable.com` certificate pin compiled in — see
    `docs/SELF_HOSTING.md`).
 2. Create a GitHub pre-release with tag matching `ANDROID_BETA_VERSION` in `src/lib/links.ts`
-   (currently `v1.5.0-beta`) and upload the APK named `sublemonable-<tag>.apk`.
+   (currently `v1.5.0-beta`) and upload the APK named `zitrone-<tag>.apk`.
 3. Compute the checksum and paste it into `ANDROID_BETA_SHA256` in `src/lib/links.ts`:
    ```bash
-   sha256sum sublemonable-v1.5.0-beta.apk
+   sha256sum zitrone-v1.5.0-beta.apk
    ```
 4. Commit and push — Vercel redeploys, and the page shows the live download + checksum.
 

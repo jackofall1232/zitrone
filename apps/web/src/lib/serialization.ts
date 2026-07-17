@@ -1,9 +1,9 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import type { IdentityKeyPair, OneTimePrekey, RatchetSession, SignedPrekey } from "@sublemonable/crypto";
+import type { IdentityKeyPair, OneTimePrekey, RatchetSession, SignedPrekey } from "@zitrone/crypto";
 import { b64, unb64 } from "./bytes.js";
 
 /** JSON-safe form of a Double Ratchet session for the encrypted keystore. */

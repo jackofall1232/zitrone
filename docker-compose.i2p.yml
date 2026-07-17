@@ -1,4 +1,4 @@
-# docker-compose.i2p.yml — I2P overlay for the Sublemonable stack.
+# docker-compose.i2p.yml — I2P overlay for the Zitrone stack.
 #
 # Start with:
 #   docker compose -f docker-compose.yml -f docker-compose.i2p.yml up -d
@@ -14,7 +14,7 @@
 #   export RELAY_I2P_DEST=<b32address>.b32.i2p
 #   pnpm tauri build
 #
-# Key backup: the destination key (sublemonable-relay.dat) lives in the i2p-data
+# Key backup: the destination key (zitrone-relay.dat) lives in the i2p-data
 # volume. Losing this volume permanently changes the B32 address. Back up the
 # volume's data directory alongside tor-data and server/keys.
 

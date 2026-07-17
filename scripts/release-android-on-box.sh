@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sublemonable — Copyright (C) 2026 Sublemonable contributors
+# Zitrone — Copyright (C) 2026 Zitrone contributors
 # Licensed under the GNU Affero General Public License v3.0 or later.
 # SPDX-License-Identifier: AGPL-3.0-only
 #
@@ -28,7 +28,7 @@
 #   RELEASE_TAG            tag to release (default: v<versionName> from gradle)
 #   KEYSTORE_FILE          path to release .jks (default: /root/sublemonable-release.jks,
 #                          falling back to ~/onion-key-backup/sublemonable-release.jks)
-#   KEY_ALIAS              keystore alias (default: sublemonable)
+#   KEY_ALIAS              keystore alias (default: zitrone)
 #   RELAY_ONION_ADDRESS    relay onion baked into the build (default: read from repo .env)
 #   EXPECTED_CERT_SHA256   pinned signing-cert digest (default: the digest that has
 #                          signed every release so far — override ONLY for a deliberate,
@@ -46,12 +46,12 @@ note() { echo "==> $*"; }
 # identity keys and history — so both the keystore and the built APK are checked
 # against this digest and the script refuses to continue on a mismatch.
 EXPECTED_CERT_SHA256="${EXPECTED_CERT_SHA256:-6c7f92a7b817f8ab975d0ac9ca8ff1d42641311a07aabd2a4142c21722892753}"
-KEY_ALIAS="${KEY_ALIAS:-sublemonable}"
+KEY_ALIAS="${KEY_ALIAS:-zitrone}"
 
 norm_hex() { printf '%s' "$1" | tr 'A-F' 'a-f' | tr -cd '0-9a-f'; }
 
 # ── Locate the repo and read the version the checkout will build ─────────────
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || fail "run this from inside the sublemonable checkout"
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || fail "run this from inside the zitrone checkout"
 cd "$REPO_ROOT"
 GRADLE_FILE="apps/android/app/build.gradle.kts"
 [ -f "$GRADLE_FILE" ] && [ -x apps/android/gradlew ] || fail "missing $GRADLE_FILE or gradle wrapper — wrong directory?"
@@ -99,6 +99,7 @@ export RELAY_ONION_ADDRESS
 # ── Keystore: locate, prompt for passwords, verify continuity BEFORE building ─
 KEYSTORE_FILE="${KEYSTORE_FILE:-}"
 if [ -z "$KEYSTORE_FILE" ]; then
+# TODO(zitrone-cutover): these are the REAL keystore paths on the box (signing continuity) — do not rename.
   for cand in /root/sublemonable-release.jks "$HOME/onion-key-backup/sublemonable-release.jks"; do
     [ -f "$cand" ] && KEYSTORE_FILE="$cand" && break
   done
@@ -174,7 +175,7 @@ else
 fi
 
 # ── Name, checksum, and stage into the Tor mirror ────────────────────────────
-APK_NAME="sublemonable-$RELEASE_TAG.apk"
+APK_NAME="zitrone-$RELEASE_TAG.apk"
 cp "$APK_SRC" "$APK_NAME"
 APK_SHA256="$(sha256sum "$APK_NAME" | cut -d' ' -f1)"
 
@@ -187,7 +188,7 @@ cp "$APK_NAME" onion-site/
 note "Staged onion-site/$APK_NAME + SHA256SUMS (mirror serves it on the next request)."
 
 # ── Publish the GitHub Release ────────────────────────────────────────────────
-NOTES="Sublemonable Android $RELEASE_TAG.
+NOTES="Zitrone Android $RELEASE_TAG.
 
 Verify before installing:
 - APK SHA-256: \`$APK_SHA256\` (\`sha256sum $APK_NAME\`)
@@ -198,7 +199,7 @@ Also available from the Tor onion mirror (same binary, same checksum)."
 if [ -n "${GITHUB_TOKEN:-}" ]; then
   command -v curl >/dev/null || fail "curl not on PATH"
   command -v python3 >/dev/null || fail "python3 not on PATH (needed for JSON encoding/parsing)"
-  API="https://api.github.com/repos/jackofall1232/sublemonable"
+  API="https://api.github.com/repos/jackofall1232/zitrone"
   AUTH=(-H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json")
   # Never clobber a live release's assets in place — same rule as the CI workflow.
   if curl -fsS "${AUTH[@]}" "$API/releases/tags/$RELEASE_TAG" >/dev/null 2>&1; then
@@ -226,12 +227,12 @@ if [ -n "${GITHUB_TOKEN:-}" ]; then
     curl -fsS "${AUTH[@]}" -H "Content-Type: application/octet-stream" \
       --data-binary @"$asset" "$UPLOAD_URL?name=$(basename "$asset")" >/dev/null
   done
-  note "Release published: https://github.com/jackofall1232/sublemonable/releases/tag/$RELEASE_TAG"
+  note "Release published: https://github.com/jackofall1232/zitrone/releases/tag/$RELEASE_TAG"
 else
   cat <<EOF
 
 ── No GITHUB_TOKEN set — publish manually (same as last time) ─────────────────
-1. Open https://github.com/jackofall1232/sublemonable/releases/new
+1. Open https://github.com/jackofall1232/zitrone/releases/new
 2. Tag: $RELEASE_TAG · Title: $RELEASE_TAG · check "pre-release"
    Target: commit $HEAD_SHA (use "Recent Commits" if main has moved since this build)
 3. Upload BOTH files from $REPO_ROOT:

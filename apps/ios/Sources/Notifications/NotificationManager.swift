@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -17,8 +17,8 @@ import UserNotifications
 public final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     public static let shared = NotificationManager()
 
-    /// The only strings a Sublemonable notification may ever contain.
-    public static let fixedTitle = "Sublemonable"
+    /// The only strings a Zitrone notification may ever contain.
+    public static let fixedTitle = "Zitrone"
     public static let fixedBody = "New message"
 
     // Sound resolution lives in NotificationSoundStore: the branded default

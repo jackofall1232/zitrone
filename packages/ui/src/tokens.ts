@@ -1,10 +1,10 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
 /**
- * Sublemonable Design System tokens, v1.0.0.
+ * Zitrone Design System tokens, v1.0.0.
  * "Secure doesn't have to feel cold." Dark only — no light mode in v1.
  * Lemon yellow owns ALL interactivity; blue is never used for interactive
  * elements, and nothing renders on a background lighter than #1A1800.

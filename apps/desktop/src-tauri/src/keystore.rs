@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -31,10 +31,10 @@ use std::path::PathBuf;
 use zeroize::Zeroize;
 
 /// Collection / label / attribute constants for the Secret Service item.
-const COLLECTION_LABEL: &str = "Sublemonable";
-const ITEM_LABEL: &str = "sublemonable-vault";
+const COLLECTION_LABEL: &str = "Zitrone";
+const ITEM_LABEL: &str = "zitrone-vault";
 const ATTR_APPLICATION: &str = "application";
-const ATTR_APPLICATION_VALUE: &str = "sublemonable";
+const ATTR_APPLICATION_VALUE: &str = "zitrone";
 const CONTENT_TYPE: &str = "application/octet-stream";
 
 /// Owned secret bytes that zero themselves on drop. Used so the encrypted blob
@@ -47,11 +47,11 @@ impl Drop for SecretBytes {
     }
 }
 
-/// Path to the file-fallback vault: `$XDG_DATA_HOME/sublemonable/vault.bin`
+/// Path to the file-fallback vault: `$XDG_DATA_HOME/zitrone/vault.bin`
 /// (falling back to `~/.local/share/...` via the `dirs` crate).
 fn fallback_path() -> Result<PathBuf, String> {
     let base = dirs::data_dir().ok_or_else(|| "no XDG data dir available".to_string())?;
-    Ok(base.join("sublemonable").join("vault.bin"))
+    Ok(base.join("zitrone").join("vault.bin"))
 }
 
 fn attributes() -> HashMap<&'static str, &'static str> {

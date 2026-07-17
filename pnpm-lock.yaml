@@ -23,16 +23,16 @@ importers:
 
   apps/web:
     dependencies:
-      '@sublemonable/crypto':
+      '@zitrone/crypto':
         specifier: workspace:*
         version: link:../../packages/crypto
-      '@sublemonable/protocol':
+      '@zitrone/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
-      '@sublemonable/relay-client':
+      '@zitrone/relay-client':
         specifier: workspace:*
         version: link:../../packages/relay-client
-      '@sublemonable/ui':
+      '@zitrone/ui':
         specifier: workspace:*
         version: link:../../packages/ui
       '@tauri-apps/api':
@@ -106,10 +106,10 @@ importers:
 
   packages/relay-client:
     dependencies:
-      '@sublemonable/crypto':
+      '@zitrone/crypto':
         specifier: workspace:*
         version: link:../crypto
-      '@sublemonable/protocol':
+      '@zitrone/protocol':
         specifier: workspace:*
         version: link:../protocol
     devDependencies:

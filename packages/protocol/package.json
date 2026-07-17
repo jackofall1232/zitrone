@@ -1,7 +1,7 @@
 {
-  "name": "@sublemonable/protocol",
-  "version": "1.0.0",
-  "description": "Shared message format, types, and serialization for Sublemonable",
+  "name": "@zitrone/protocol",
+  "version": "0.6.0-beta",
+  "description": "Shared message format, types, and serialization for Zitrone",
   "license": "AGPL-3.0-only",
   "type": "module",
   "main": "./dist/index.js",

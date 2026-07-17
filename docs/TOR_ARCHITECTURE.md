@@ -1,5 +1,5 @@
 <!--
-  Sublemonable — Copyright (C) 2026 Sublemonable contributors
+  Zitrone — Copyright (C) 2026 Zitrone contributors
   Licensed under the GNU Affero General Public License v3.0 or later.
   SPDX-License-Identifier: AGPL-3.0-only
 -->
@@ -8,7 +8,7 @@
 
 ## 1. Overview
 
-Sublemonable runs **three separate Tor v3 hidden services on the same physical
+Zitrone runs **three separate Tor v3 hidden services on the same physical
 server**. Each has a distinct `.onion` address and a distinct purpose, but they
 share a single Go binary and a single internal port (`8443`). The server tells
 them apart by the request `Host` header — the v3 `.onion` address the client
@@ -95,9 +95,9 @@ Each hidden service generates, under its `HiddenServiceDir`:
 These live in the `tor-data` Docker volume:
 
 ```
-/var/lib/tor/sublemonable-mirror-public/
-/var/lib/tor/sublemonable-mirror-secret/
-/var/lib/tor/sublemonable-relay/
+/var/lib/tor/zitrone-mirror-public/
+/var/lib/tor/zitrone-mirror-secret/
+/var/lib/tor/zitrone-relay/
 ```
 
 **Losing a key means losing that `.onion` address permanently** — there is no
@@ -156,7 +156,7 @@ too.
 `docker-compose.i2p.yml` runs a `purplei2p/i2pd` container configured as a server
 tunnel: it creates an I2P destination (`.b32.i2p` address) derived from a
 persistent key file and forwards inbound I2P connections to the Go server on
-`server:8443`. The destination key (`sublemonable-relay.dat`) lives in the
+`server:8443`. The destination key (`zitrone-relay.dat`) lives in the
 `i2p-data` named volume; losing the volume means losing the B32 address permanently
 — the same consequence as losing an onion key, so back up the volume alongside the
 `hs_ed25519_secret_key` files (§5). Host-gating is automatic: an I2P client sends a
@@ -285,9 +285,9 @@ Stated plainly, so nobody mistakes scope for a security claim:
 
 After deployment, verify:
 
-- [ ] `docker compose exec tor cat /var/lib/tor/sublemonable-mirror-public/hostname` — prints a valid `.onion`
-- [ ] `docker compose exec tor cat /var/lib/tor/sublemonable-mirror-secret/hostname` — different address from public
-- [ ] `docker compose exec tor cat /var/lib/tor/sublemonable-relay/hostname` — different address from both mirrors
+- [ ] `docker compose exec tor cat /var/lib/tor/zitrone-mirror-public/hostname` — prints a valid `.onion`
+- [ ] `docker compose exec tor cat /var/lib/tor/zitrone-mirror-secret/hostname` — different address from public
+- [ ] `docker compose exec tor cat /var/lib/tor/zitrone-relay/hostname` — different address from both mirrors
 - [ ] Tor Browser → public `.onion` → index page renders with download section (APK staged) or staging guidance (not staged). No API routes visible.
 - [ ] Tor Browser → secret `.onion` → same mirror page. No API routes visible.
 - [ ] Tor Browser → relay `.onion` → API responds (e.g. `/healthz`). Mirror page does **not** render.

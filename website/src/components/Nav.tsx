@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -18,7 +18,7 @@ export function Nav() {
             className="transition duration-slow ease-brand group-hover:rotate-45"
           />
           <span className="font-display text-lg font-semibold tracking-display text-ink-primary">
-            SUBLEMONABLE
+            ZITRONE
           </span>
         </Link>
         <div className="flex items-center gap-6 text-sm">

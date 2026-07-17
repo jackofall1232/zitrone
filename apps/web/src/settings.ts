@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -18,11 +18,11 @@ import {
   type PrivacyViewSettings,
   type RevealMode,
   type TransportState,
-} from "@sublemonable/protocol";
-import { isTauri } from "@sublemonable/crypto";
+} from "@zitrone/protocol";
+import { isTauri } from "@zitrone/crypto";
 import { create } from "zustand";
 
-const STORAGE_KEY = "sublemonable.settings.v1_5";
+const STORAGE_KEY = "zitrone.settings.v1_5";
 
 interface PersistedSettings {
   connectionMode: ConnectionMode;

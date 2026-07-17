@@ -1,7 +1,7 @@
 {
-  "name": "@sublemonable/ui",
-  "version": "1.0.0",
-  "description": "Sublemonable shared React component library — the lemon slice lives here",
+  "name": "@zitrone/ui",
+  "version": "0.6.0-beta",
+  "description": "Zitrone shared React component library — the lemon slice lives here",
   "license": "AGPL-3.0-only",
   "type": "module",
   "main": "./dist/index.js",

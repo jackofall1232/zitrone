@@ -1,11 +1,11 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { generateInvisibleWatermark } from "@sublemonable/crypto";
-import { platformWarning, TTL_OPTIONS_SECONDS } from "@sublemonable/protocol";
+import { generateInvisibleWatermark } from "@zitrone/crypto";
+import { platformWarning, TTL_OPTIONS_SECONDS } from "@zitrone/protocol";
 import {
   ComposeBar,
   ConnectionModeBadge,
@@ -13,7 +13,7 @@ import {
   PlatformWarningBadge,
   PrivacyView,
   SecurityBadge,
-} from "@sublemonable/ui";
+} from "@zitrone/ui";
 import { MESSAGES_CONTAINER_ID } from "../components/ScreenshotShield.js";
 import { useApp } from "../store.js";
 import { useSettings } from "../settings.js";

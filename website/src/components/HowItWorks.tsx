@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -8,7 +8,7 @@
 import { motion } from "framer-motion";
 import { LemonSlice } from "@/components/LemonSlice";
 
-// Copy is verbatim from sublemonable-MASTER.json -> marketing_site.pages.home.how_it_works
+// Copy is verbatim from zitrone-MASTER.json -> marketing_site.pages.home.how_it_works
 const STEPS = [
   {
     label: "Generate keys",

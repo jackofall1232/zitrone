@@ -1,9 +1,9 @@
 {
-  "name": "@sublemonable/website",
-  "version": "1.5.1",
+  "name": "@zitrone/website",
+  "version": "0.6.0-beta",
   "private": true,
   "license": "AGPL-3.0-only",
-  "description": "Marketing website for Sublemonable — sublemonable.com",
+  "description": "Marketing website for Zitrone — sublemonable.com",
   "scripts": {
     "dev": "NEXT_TELEMETRY_DISABLED=1 next dev",
     "build": "NEXT_TELEMETRY_DISABLED=1 next build",

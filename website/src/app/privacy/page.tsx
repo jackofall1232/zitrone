@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -8,7 +8,7 @@ import Link from "next/link";
 import { LemonSlice } from "@/components/LemonSlice";
 
 export const metadata: Metadata = {
-  title: "Privacy Policy — Sublemonable",
+  title: "Privacy Policy — Zitrone",
   description:
     "The shortest privacy policy you'll read this year, because there's nothing to collect.",
 };

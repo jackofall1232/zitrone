@@ -1,10 +1,10 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
 /** Keyframes and base rules the components rely on. Render once near the app root. */
-export const sublemonableCss = `
+export const zitroneCss = `
 @keyframes sub-burn-particle {
   0%   { transform: translate(0, 0) scale(1); opacity: 1; }
   100% { transform: translate(var(--sub-drift, 0px), -64px) scale(0.2); opacity: 0; }
@@ -62,6 +62,6 @@ export const sublemonableCss = `
 `;
 
 /** Injects the shared keyframes/rules. Render exactly once, near the app root. */
-export function SublemonableStyles() {
-  return <style dangerouslySetInnerHTML={{ __html: sublemonableCss }} />;
+export function ZitroneStyles() {
+  return <style dangerouslySetInnerHTML={{ __html: zitroneCss }} />;
 }

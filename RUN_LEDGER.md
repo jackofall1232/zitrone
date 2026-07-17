@@ -116,7 +116,7 @@ throws; wrong-key/filler payloads never open; two-vault end-to-end unlock via
 - `pnpm typecheck` — clean, all packages.
 - `pnpm test` — crypto 26/26 (timing-parity suite untouched and green),
   relay-client 12/12, web 8/8.
-- `pnpm --filter @sublemonable/web build` — production build + worker bundling OK.
+- `pnpm --filter @zitrone/web build` — production build + worker bundling OK.
 - `pnpm lint` — all files changed by this branch are Prettier-clean. Pre-existing
   failures on files this branch does not touch: `website` (2 files, confirmed
   present on the clean tree via `git stash`) and `apps/web` (4 files —

@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -15,7 +15,7 @@
 //!
 //! NOTE on routing: Tauri's webview uses the system WebKit, which does not honour
 //! a SOCKS5 proxy set from inside the process. Real traffic routing is done at
-//! the OS/process level — launch via `torsocks sublemonable`, or export
+//! the OS/process level — launch via `torsocks zitrone`, or export
 //! `ALL_PROXY=socks5h://127.0.0.1:9050` before launch (see apps/desktop/README.md).
 //! These commands manage and verify the proxy configuration the frontend reads;
 //! they do not themselves rewrite the webview's sockets.
@@ -184,7 +184,7 @@ pub async fn detect_and_announce(app: AppHandle) {
         }
         _ => {
             let hint = if torsocks_on_path() {
-                "No Tor SOCKS proxy reachable. torsocks is installed — relaunch via `torsocks sublemonable` for Tor routing."
+                "No Tor SOCKS proxy reachable. torsocks is installed — relaunch via `torsocks zitrone` for Tor routing."
             } else {
                 "No Tor SOCKS proxy reachable and torsocks not found. Running on clearnet."
             };

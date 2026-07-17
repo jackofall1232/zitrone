@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -30,7 +30,7 @@ export interface KeyStore {
   verifiedContacts: Record<string, string>;
 }
 
-const KEYSTORE_AD = utf8Encode("Sublemonable-KeyStore-v1");
+const KEYSTORE_AD = utf8Encode("Zitrone-KeyStore-v1");
 
 /** Encrypt the key store for storage at rest (AES-256-GCM, fresh nonce inside). */
 export async function encryptKeyStore(

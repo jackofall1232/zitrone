@@ -1,4 +1,4 @@
-// Sublemonable — Copyright (C) 2026 Sublemonable contributors
+// Zitrone — Copyright (C) 2026 Zitrone contributors
 // Licensed under the GNU Affero General Public License v3.0 or later.
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -6,7 +6,7 @@
 import SwiftUI
 
 /// Splash per design_system.screens.splash: lemon slice segments animate in
-/// clockwise, then pulse once; SUBLEMONABLE wordmark in display type, lemon
+/// clockwise, then pulse once; ZITRONE wordmark in display type, lemon
 /// yellow, tracked wide; tagline "Nothing lasts. That's the point."
 public struct SplashView: View {
     public var onFinished: (() -> Void)?
@@ -39,7 +39,7 @@ public struct SplashView: View {
                 .shadow(color: Color.lemon.opacity(pulse ? 0.35 : 0.1), radius: 40)
 
                 VStack(spacing: Spacing.s3) {
-                    Text("SUBLEMONABLE")
+                    Text("ZITRONE")
                         .font(SubFont.display(TypeScale.xxl, weight: .bold))
                         .tracking(8)
                         .foregroundColor(.lemon)

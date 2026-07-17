@@ -26,8 +26,8 @@ sudo apt-get install -y libwebkit2gtk-4.1-dev libsecret-1-dev libgtk-3-dev librs
 ## Clone and install
 
 ```bash
-git clone https://github.com/jackofall1232/sublemonable.git
-cd sublemonable
+git clone https://github.com/jackofall1232/zitrone.git
+cd zitrone
 pnpm install
 pnpm build:packages   # builds packages/protocol, packages/crypto, packages/ui
 ```
@@ -42,7 +42,7 @@ cp server/.env.example server/.env
 
 | Variable | Description | Example |
 | --- | --- | --- |
-| `DATABASE_URL` | PostgreSQL connection string | `postgres://sub:sub@localhost:5432/sublemonable?sslmode=disable` |
+| `DATABASE_URL` | PostgreSQL connection string | `postgres://sub:sub@localhost:5432/zitrone?sslmode=disable` |
 | `JWT_PRIVATE_KEY_PATH` | RS256 private key (PEM) | `./keys/jwt.pem` |
 | `JWT_PUBLIC_KEY_PATH` | RS256 public key (PEM) | `./keys/jwt.pub.pem` |
 | `SERVER_PORT` | Listen port | `8443` |
@@ -81,8 +81,8 @@ Set `VITE_SERVER_URL` in `apps/web/.env` if the server isn't on `localhost:8443`
 
 ```bash
 cd apps/ios
-xcodegen generate                      # project.yml → Sublemonable.xcodeproj
-open Sublemonable.xcodeproj            # ⌘R on an iOS 16+ simulator
+xcodegen generate                      # project.yml → Zitrone.xcodeproj
+open Zitrone.xcodeproj            # ⌘R on an iOS 16+ simulator
 ```
 
 ## Run the Android emulator
@@ -101,7 +101,7 @@ feature working.
 pnpm test                              # Vitest — packages + web
 cd server && go test ./...             # Go server tests
 cd apps/android && ./gradlew test      # JUnit
-# iOS: ⌘U in Xcode, or: xcodebuild test -scheme Sublemonable -destination 'platform=iOS Simulator,name=iPhone 15'
+# iOS: ⌘U in Xcode, or: xcodebuild test -scheme Zitrone -destination 'platform=iOS Simulator,name=iPhone 15'
 ```
 
 ## Run the Linux desktop app
