@@ -3,6 +3,7 @@
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import { Audiences } from "@/components/Audiences";
 import { Features } from "@/components/Features";
 import { Hero } from "@/components/Hero";
 import { HowItWorks } from "@/components/HowItWorks";
@@ -15,6 +16,7 @@ export default function HomePage() {
       <Hero />
       <Features />
       <HowItWorks />
+      <Audiences />
       <PlatformBadges />
       <OpenSourceCallout />
     </main>

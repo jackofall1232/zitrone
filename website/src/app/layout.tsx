@@ -57,6 +57,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         />
       </head>
       <body className="bg-bg-primary font-body text-ink-primary antialiased">
+        <div className="grain-overlay" aria-hidden />
         <Nav />
         {children}
         <Footer />

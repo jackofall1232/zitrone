@@ -27,6 +27,42 @@ body {
   color: #0d0c00;
 }
 
+/* Keyboard focus is always visible — a lemon ring on the dark ground. */
+:focus-visible {
+  outline: 2px solid #f5e642;
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Quality floor: honor a reduced-motion preference. Ambient/decorative motion
+   (particles, glow pulse, the rotating slice, scroll cues) collapses to static;
+   scroll-reveal transforms are neutralized by framer-motion's own reduced-motion
+   handling. */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Filmic grain — a single fixed layer that gives the flat dark ground some
+   tooth without shifting any color. Static (no motion), pointer-transparent. */
+.grain-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0.035;
+  mix-blend-mode: soft-light;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
 @layer components {
   .btn-lemon {
     @apply inline-flex items-center justify-center gap-2 rounded-pill bg-lemon px-7 py-3.5 font-display text-base font-semibold text-ink-onlemon transition duration-base ease-brand hover:bg-lemon-bright hover:shadow-lemon-sm active:scale-95;

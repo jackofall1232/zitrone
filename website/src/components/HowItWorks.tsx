@@ -36,24 +36,31 @@ export function HowItWorks() {
   return (
     <section id="how-it-works" className="border-y border-line bg-bg-secondary px-6 py-28">
       <div className="mx-auto max-w-6xl">
-        <motion.h2
-          className="font-display text-3xl font-semibold tracking-display text-ink-primary sm:text-4xl"
+        <motion.div
           initial={{ opacity: 0, y: 32 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true, margin: "-80px" }}
           transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
         >
-          How it works
-        </motion.h2>
-        <p className="mt-4 max-w-md text-ink-secondary">
-          Five steps. Zero knowledge on our end, start to finish.
-        </p>
+          <div className="flex items-center gap-3">
+            <span className="h-px w-8 bg-lemon" aria-hidden />
+            <span className="font-mono text-xs uppercase tracking-[0.22em] text-lemon">
+              The flow
+            </span>
+          </div>
+          <h2 className="mt-5 font-display text-3xl font-semibold tracking-display text-ink-primary sm:text-4xl">
+            How it works
+          </h2>
+          <p className="mt-4 max-w-md text-ink-secondary">
+            Five steps. Zero knowledge on our end, start to finish.
+          </p>
+        </motion.div>
 
         <div className="mt-14 flex snap-x snap-mandatory gap-6 overflow-x-auto pb-6 lg:grid lg:grid-cols-5 lg:overflow-visible">
           {STEPS.map((step, i) => (
             <motion.div
               key={step.label}
-              className="flex w-64 shrink-0 snap-start flex-col gap-4 rounded-lg border border-line bg-bg-elevated p-6 shadow-card lg:w-auto"
+              className="flex w-64 shrink-0 snap-start flex-col gap-4 rounded-lg border border-line bg-bg-elevated p-6 shadow-card transition duration-base ease-brand hover:-translate-y-1 hover:border-lemon/50 hover:shadow-lemon-sm lg:w-auto"
               initial={{ opacity: 0, y: 32 }}
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true, margin: "-60px" }}

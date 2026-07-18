@@ -26,7 +26,12 @@ export function OpenSourceCallout() {
         viewport={{ once: true, margin: "-80px" }}
         transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
       >
-        <h2 className="font-display text-4xl font-semibold tracking-display text-ink-primary sm:text-5xl">
+        <div className="flex items-center gap-3">
+          <span className="h-px w-8 bg-lemon" aria-hidden />
+          <span className="font-mono text-xs uppercase tracking-[0.22em] text-lemon">AGPL-3.0</span>
+          <span className="h-px w-8 bg-lemon" aria-hidden />
+        </div>
+        <h2 className="mt-6 font-display text-4xl font-semibold tracking-display text-ink-primary sm:text-5xl">
           We show our work.
         </h2>
         <p className="mt-6 max-w-xl text-lg leading-relaxed text-ink-secondary">
