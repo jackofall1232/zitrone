@@ -155,7 +155,7 @@ public final class MessageStore: ObservableObject {
             // Strip length-hiding padding; a legacy (pre-padding) sender's
             // bytes pass through unchanged — see MessagePadding.
             let body = MessagePadding.unpadOrNil(plaintext) ?? plaintext
-            let text = String(decoding: body, as: UTF8.self)
+            var text = String(decoding: body, as: UTF8.self)
             // Read receipts ride inside ordinary envelopes as encrypted
             // control payloads (packages/protocol/src/receipts.ts, PR #24) —
             // recognize them BEFORE treating the payload as conversation
@@ -166,6 +166,22 @@ public final class MessageStore: ObservableObject {
             if Self.isControlPayload(text) {
                 try? socket.send(.messageAck(messageID: envelope.id))
                 return
+            }
+            // Attachments (Android/web, this release) also ride as control
+            // payloads — an envelope of media_type "text" whose plaintext is
+            // `{"v":1,"control":"attachment.v1",...}` — and, like receipts,
+            // must never reach the text pipeline: a control payload can
+            // carry key material, and any future control kind we don't
+            // recognize yet deserves the same caution. iOS has no attachment
+            // support yet (future work), so show a placeholder for the one
+            // kind we know and silently drop anything else, same as an
+            // unrecognized receipt above.
+            if let control = Self.controlKind(text) {
+                guard control == "attachment.v1" else {
+                    try? socket.send(.messageAck(messageID: envelope.id))
+                    return
+                }
+                text = "📎 Attachment — not supported on iOS yet"
             }
             let message = Message(
                 id: UUID(uuidString: envelope.id) ?? UUID(),
@@ -306,5 +322,19 @@ public final class MessageStore: ObservableObject {
         return (dict["v"] as? Int) == 1
             && (dict["control"] as? String) == "receipt.read"
             && dict["message_ids"] is [Any]
+    }
+
+    /// Returns the `control` discriminator for ANY control payload — numeric
+    /// `v` plus a string `control`, regardless of value — broader than
+    /// isControlPayload's strict receipt.read match. Lets receive() catch
+    /// forward-compatible control kinds (e.g. attachment.v1) it doesn't
+    /// otherwise recognize, so they're never rendered as raw text. Never
+    /// throws on malformed input.
+    nonisolated internal static func controlKind(_ plaintext: String) -> String? {
+        guard plaintext.hasPrefix("{"),
+              let object = try? JSONSerialization.jsonObject(with: Data(plaintext.utf8)),
+              let dict = object as? [String: Any],
+              (dict["v"] as? Int) != nil else { return nil }
+        return dict["control"] as? String
     }
 }

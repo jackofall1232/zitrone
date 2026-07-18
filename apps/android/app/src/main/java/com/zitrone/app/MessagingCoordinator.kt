@@ -6,14 +6,19 @@
 package com.zitrone.app
 
 import android.content.Context
+import android.util.Base64
 import android.util.Log
+import com.zitrone.app.crypto.AttachmentCrypto
 import com.zitrone.app.crypto.MessagePadding
 import com.zitrone.app.crypto.SignalProtocolManager
 import com.zitrone.app.diagnostics.BootDiagnostics
+import com.zitrone.app.data.AttachmentControlPayload
+import com.zitrone.app.data.AttachmentLoadState
 import com.zitrone.app.data.ControlPayload
 import com.zitrone.app.data.Conversation
 import com.zitrone.app.data.ConversationRepository
 import com.zitrone.app.data.Message
+import com.zitrone.app.data.MessageAttachment
 import com.zitrone.app.data.MessageEnvelope
 import com.zitrone.app.data.MessageRepository
 import com.zitrone.app.data.MessageState
@@ -304,6 +309,13 @@ class MessagingCoordinator(
         diagnostics.record(line)
     }
 
+    // Standard base64 WITH padding (NO_WRAP keeps the `=` pad, strips only line
+    // breaks) — the wire format the control payload's length-validated fields
+    // and the blob store both expect, matching the web/desktop client.
+    private fun b64(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.NO_WRAP)
+
+    private fun unb64(value: String): ByteArray = Base64.decode(value, Base64.NO_WRAP)
+
     /**
      * Encrypt-then-send. X3DH session is established lazily on first send.
      *
@@ -403,6 +415,148 @@ class MessagingCoordinator(
                     ?.let { " server_error=$it" }
                     .orEmpty()
                 diag("send: failed at stage=$stage: ${e.javaClass.name}: ${e.message}$bodySuffix")
+            }
+        }
+    }
+
+    /**
+     * Encrypt-then-sideload an attachment. The bytes are already prepared in
+     * memory (downscaled/EXIF-stripped image, or a capped raw file — see
+     * ui/AttachmentLoader); nothing here ever touches disk.
+     *
+     * Flow (contract-mandated): encrypt the blob under a fresh random key →
+     * ratchet-encrypt a small control payload referencing it → upload the blob
+     * to the blind store FIRST → only then hand the envelope to the socket, so
+     * the recipient can always redeem the blob the envelope points at. The
+     * envelope rides media_type "text" exactly like a receipt: the reserved
+     * MEDIA_IMAGE/MEDIA_FILE values are NEVER emitted on the wire (that would
+     * label the message for the relay). The [caption] is the compose-bar draft,
+     * if any.
+     *
+     * Failure handling mirrors [sendText]: a key-substitution refusal aborts
+     * before anything is uploaded; a post-upload failure leaves the local copy
+     * in SENDING (there is no FAILED state) and the orphaned blob TTLs out in
+     * 72h. The sender's own copy renders immediately from the prepared bytes.
+     */
+    fun sendAttachment(
+        conversation: Conversation,
+        bytes: ByteArray,
+        kind: String,
+        mimetype: String,
+        filename: String?,
+        caption: String?,
+        ttlSeconds: Int?,
+        burnOnRead: Boolean,
+    ) {
+        scope.launch {
+            val accountId = api.accountId ?: return@launch
+            var stage = "encrypt-blob"
+            runCatching {
+                val blob = AttachmentCrypto.encrypt(bytes)
+                // filename is forced null for images inside serialize(); mirror
+                // that here so the local copy's metadata matches the wire.
+                val controlFilename = if (kind == AttachmentControlPayload.KIND_IMAGE) null else filename
+                val controlJson = AttachmentControlPayload.serialize(
+                    kind = kind,
+                    blobToken = b64(blob.token),
+                    key = b64(blob.key),
+                    mimetype = mimetype,
+                    filename = filename,
+                    size = blob.size,
+                    sha256 = b64(blob.sha256),
+                    caption = caption,
+                )
+                // Session establishment + ratchet-encrypt hold the per-contact
+                // lock so a concurrent receipt/text send can't fork the ratchet.
+                // The key-substitution guard runs here, BEFORE the blob is
+                // uploaded, so a refused send never orphans a blob.
+                stage = "check-session"
+                val encrypted = withSessionLock(conversation.contactId) {
+                    if (!signal.hasSession(conversation.contactId)) {
+                        stage = "fetch-prekey-bundle"
+                        diag("send: no session — firing GET prekey bundle")
+                        val bundle = api.fetchPreKeyBundle(conversation.contactId)
+                        val pinned = conversation.pinnedIdentityKeyBase64
+                        if (pinned != null && pinned != bundle.identityKeyBase64) {
+                            diag("send: identity key mismatch — send refused, warning raised")
+                            conversations.flagIdentityMismatch(conversation.contactId)
+                            return@withSessionLock null
+                        }
+                        stage = "establish-session"
+                        signal.establishSession(conversation.contactId, bundle)
+                        diag("send: X3DH session established")
+                        conversations.upsert(
+                            conversation.copy(contactIdentityKeyBase64 = bundle.identityKeyBase64),
+                        )
+                    }
+                    stage = "encrypt"
+                    // Control JSON is padded with the DEFAULT 256-byte block like
+                    // any message plaintext; only the blob uses 64 KiB buckets.
+                    signal.encrypt(
+                        conversation.contactId,
+                        MessagePadding.pad(controlJson.toByteArray(Charsets.UTF_8)),
+                    )
+                } ?: return@launch
+
+                val messageId = UUID.randomUUID().toString()
+                val local = Message(
+                    id = messageId,
+                    conversationId = conversation.id,
+                    text = "",
+                    isMine = true,
+                    timestampMs = System.currentTimeMillis(),
+                    ttlSeconds = ttlSeconds,
+                    burnOnRead = burnOnRead,
+                    state = MessageState.SENDING,
+                    attachment = MessageAttachment(
+                        kind = kind,
+                        mimetype = mimetype,
+                        filename = controlFilename,
+                        size = blob.size,
+                        caption = caption,
+                        // The sender already holds the plaintext — render it now.
+                        loadState = AttachmentLoadState.LOADED,
+                        bytes = bytes,
+                    ),
+                )
+                messages.addOutgoing(local)
+                conversations.onOutgoingMessage(conversation.id)
+
+                // Blob to the blind store FIRST — the recipient must be able to
+                // redeem it the moment the envelope arrives.
+                stage = "upload-blob"
+                diag("send: uploading attachment blob")
+                api.uploadBlob(b64(blob.blobId), b64(blob.box))
+
+                val envelope = MessageEnvelope(
+                    id = messageId,
+                    senderId = accountId,
+                    recipientId = conversation.contactId,
+                    ciphertext = encrypted.ciphertextBase64,
+                    ephemeralKey = encrypted.ephemeralKeyBase64,
+                    preKeyId = encrypted.preKeyId,
+                    messageNumber = encrypted.messageNumber,
+                    previousChainLength = 0,
+                    timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now()),
+                    ttlSeconds = ttlSeconds,
+                    burnOnRead = burnOnRead,
+                    // NEVER MEDIA_IMAGE/MEDIA_FILE — the relay must not be able to
+                    // tell an attachment from conversation text (see the control
+                    // payload rationale).
+                    mediaType = MessageEnvelope.MEDIA_TEXT,
+                )
+                stage = "ws-send"
+                if (ws.sendMessage(envelope)) {
+                    messages.markDelivered(messageId)
+                } else {
+                    diag("send: hand-off failed — socket not open (${ws.connectionState.value})")
+                }
+            }.onFailure { e ->
+                if (e is CancellationException) throw e
+                val bodySuffix = (e as? ApiClient.ApiException)?.responseBody
+                    ?.let { " server_error=$it" }
+                    .orEmpty()
+                diag("send: attachment failed at stage=$stage: ${e.javaClass.name}: ${e.message}$bodySuffix")
             }
         }
     }
@@ -539,16 +693,68 @@ class MessagingCoordinator(
                     ws.ackMessage(envelope.id)
                     return@runCatching
                 }
+                val deliveredAtMs = runCatching {
+                    Instant.parse(envelope.timestamp).toEpochMilli()
+                }.getOrDefault(System.currentTimeMillis())
                 val conversation = conversations.onIncomingMessage(envelope.senderId)
+                // Attachments ride inside ordinary envelopes too (see
+                // AttachmentControlPayload) — recognize them AFTER receipts but
+                // BEFORE treating the payload as text: the blob is redeemed and
+                // decrypted from memory once the placeholder is on screen.
+                AttachmentControlPayload.parse(text)?.let { attachment ->
+                    messages.addIncoming(
+                        Message(
+                            id = envelope.id,
+                            conversationId = conversation.id,
+                            text = "",
+                            isMine = false,
+                            timestampMs = deliveredAtMs,
+                            ttlSeconds = envelope.ttlSeconds,
+                            burnOnRead = envelope.burnOnRead,
+                            state = MessageState.DELIVERED,
+                            attachment = MessageAttachment(
+                                kind = attachment.kind,
+                                mimetype = attachment.mimetype,
+                                filename = attachment.filename,
+                                size = attachment.size,
+                                caption = attachment.caption,
+                                loadState = AttachmentLoadState.LOADING,
+                            ),
+                        ),
+                    )
+                    ws.ackMessage(envelope.id)
+                    MessagingNotifications.showNewMessage(appContext)
+                    redeemAttachment(envelope.id, attachment)
+                    return@runCatching
+                }
+                // A control payload this build can't parse (a newer client's,
+                // or a near-miss attachment) — a generic placeholder, NEVER the
+                // raw text, which may carry key material.
+                if (AttachmentControlPayload.isControlPayload(text)) {
+                    messages.addIncoming(
+                        Message(
+                            id = envelope.id,
+                            conversationId = conversation.id,
+                            text = "",
+                            isMine = false,
+                            timestampMs = deliveredAtMs,
+                            ttlSeconds = envelope.ttlSeconds,
+                            burnOnRead = envelope.burnOnRead,
+                            state = MessageState.DELIVERED,
+                            unsupported = true,
+                        ),
+                    )
+                    ws.ackMessage(envelope.id)
+                    MessagingNotifications.showNewMessage(appContext)
+                    return@runCatching
+                }
                 messages.addIncoming(
                     Message(
                         id = envelope.id,
                         conversationId = conversation.id,
                         text = text,
                         isMine = false,
-                        timestampMs = runCatching {
-                            Instant.parse(envelope.timestamp).toEpochMilli()
-                        }.getOrDefault(System.currentTimeMillis()),
+                        timestampMs = deliveredAtMs,
                         ttlSeconds = envelope.ttlSeconds,
                         burnOnRead = envelope.burnOnRead,
                         state = MessageState.DELIVERED,
@@ -560,6 +766,33 @@ class MessagingCoordinator(
                 ws.ackMessage(envelope.id)
                 // Content-free notification: always just "New message".
                 MessagingNotifications.showNewMessage(appContext)
+            }
+        }
+    }
+
+    /**
+     * Redeem the sideloaded blob for a just-received attachment, decrypt and
+     * verify it, then swap the bytes into the on-screen placeholder — all in
+     * memory, never a cache file. Redemption is one-shot: a 404 (expired or
+     * already fetched) or a verification failure (size/hash mismatch, tampered
+     * ciphertext) is terminal, so the placeholder flips to a persistent
+     * "unavailable" state rather than crashing or retrying.
+     */
+    private fun redeemAttachment(messageId: String, attachment: AttachmentControlPayload.Attachment) {
+        scope.launch {
+            runCatching {
+                val ciphertext = api.redeemBlob(attachment.blobToken)
+                val plain = AttachmentCrypto.decrypt(
+                    key = unb64(attachment.key),
+                    box = unb64(ciphertext),
+                    expectedSha256 = unb64(attachment.sha256),
+                    expectedSize = attachment.size,
+                )
+                messages.attachmentLoaded(messageId, plain)
+            }.onFailure { e ->
+                if (e is CancellationException) throw e
+                messages.attachmentUnavailable(messageId)
+                diag("attachment: redeem/decrypt failed: ${e.javaClass.name}: ${e.message}")
             }
         }
     }

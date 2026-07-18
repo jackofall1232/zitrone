@@ -83,3 +83,17 @@ RETURNING ciphertext;
 
 -- name: PurgeExpiredDrops :execrows
 DELETE FROM drops WHERE expires_at <= $1;
+
+-- Blind blob store (attachments). No sender/recipient/account/key column exists,
+-- by design — mirrors drops.
+
+-- name: StoreBlob :execrows
+INSERT INTO blobs (blob_id, ciphertext, expires_at)
+VALUES ($1, $2, $3) ON CONFLICT (blob_id) DO NOTHING;
+
+-- name: RedeemBlob :one
+DELETE FROM blobs WHERE blob_id = $1 AND expires_at > now()
+RETURNING ciphertext;
+
+-- name: PurgeExpiredBlobs :execrows
+DELETE FROM blobs WHERE expires_at <= $1;

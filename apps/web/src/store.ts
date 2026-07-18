@@ -9,6 +9,8 @@
 // constant payload size and AES-256-GCM-encrypted under this vault's key.
 
 import {
+  decryptAttachmentBlob,
+  encryptAttachmentBlob,
   fromBase64,
   generateDropToken,
   generateIdentityKeyPair,
@@ -36,8 +38,10 @@ import {
   DROP_POW_DIFFICULTY,
   ONE_TIME_PREKEY_BATCH,
   parseEnvelope,
-  parseReadReceipt,
   PROTOCOL_VERSION,
+  serializeAttachment,
+  type AttachmentKind,
+  type AttachmentPayload,
   type MessageEnvelope,
   type ServerEvent,
 } from "@zitrone/protocol";
@@ -45,6 +49,8 @@ import { DecoyScheduler } from "@zitrone/relay-client";
 import { create } from "zustand";
 import { useSettings } from "./settings.js";
 import { api } from "./lib/api.js";
+import { classifyIncoming } from "./lib/incoming.js";
+import { bytesToBlob, type PreparedAttachment } from "./lib/attachments.js";
 import { b64, unb64 } from "./lib/bytes.js";
 import {
   deserializeIdentity,
@@ -81,6 +87,23 @@ export interface ContactRecord {
   pendingPrekeyId: number | null;
 }
 
+/**
+ * In-memory view of an attachment on a message. Decrypted bytes live only in
+ * the `blob` here — the same memory-only policy as message plaintext; nothing
+ * attachment-bearing is ever persisted.
+ */
+export interface AttachmentView {
+  kind: AttachmentKind;
+  mimetype: string;
+  filename: string | null;
+  size: number;
+  caption: string | null;
+  /** loading → redeeming/decrypting; ready → renderable; expired → gone. */
+  status: "loading" | "ready" | "expired";
+  /** Decrypted bytes, present only when status is "ready". */
+  blob?: Blob;
+}
+
 export interface Message {
   id: string;
   peerId: string;
@@ -92,6 +115,10 @@ export interface Message {
   deliveredAt: number;
   burning: boolean;
   opened: boolean;
+  /** Present when this message carries an attachment (image/file). */
+  attachment?: AttachmentView;
+  /** A control payload this client can't render — shown as a generic notice. */
+  unsupported?: boolean;
 }
 
 type Phase = "loading" | "setup" | "unlock" | "ready";
@@ -117,6 +144,13 @@ interface AppState {
   sendMessage: (
     peerId: string,
     text: string,
+    opts: { ttlSeconds: number | null; burnOnRead: boolean },
+  ) => Promise<void>;
+  /** Encrypt + upload an attachment blob, then send its control payload through
+   *  the ordinary send path. Throws (blob upload failed) → message not sent. */
+  sendAttachment: (
+    peerId: string,
+    prepared: PreparedAttachment,
     opts: { ttlSeconds: number | null; burnOnRead: boolean },
   ) => Promise<void>;
   openMessage: (peerId: string, messageId: string) => void;
@@ -254,8 +288,145 @@ export const useApp = create<AppState>((set, get) => {
     }));
   };
 
-  // Establish a responder session from an X3DH initial message.
-  const respondToInitialMessage = async (envelope: MessageEnvelope): Promise<ContactRecord> => {
+  const updateAttachment = (
+    peerId: string,
+    messageId: string,
+    patch: Partial<AttachmentView>,
+  ): void => {
+    set((s) => ({
+      messages: {
+        ...s.messages,
+        [peerId]: (s.messages[peerId] ?? []).map((m) =>
+          m.id === messageId && m.attachment
+            ? { ...m, attachment: { ...m.attachment, ...patch } }
+            : m,
+        ),
+      },
+    }));
+  };
+
+  // Redeem an attachment blob and decrypt it into the placeholder bubble. Runs
+  // as soon as the envelope arrives: one-shot redeem semantics mean "online for
+  // the envelope" is "online for the blob". A 404 (expired / already redeemed)
+  // and a decrypt/verify failure both land on the same persistent "expired or
+  // unavailable" state — never an error toast, never a crash. We never log the
+  // blob or key material.
+  const redeemAttachment = async (
+    peerId: string,
+    messageId: string,
+    payload: AttachmentPayload,
+  ): Promise<void> => {
+    try {
+      const { ciphertext } = await api.redeemBlob(payload.blob_token);
+      const box = await fromBase64(ciphertext);
+      const plain = await decryptAttachmentBlob(
+        unb64(payload.key),
+        box,
+        unb64(payload.sha256),
+        payload.size,
+      );
+      const blob = bytesToBlob(plain, payload.mimetype);
+      updateAttachment(peerId, messageId, { status: "ready", blob });
+    } catch {
+      // Redeem 404 (expired / already redeemed) and decrypt/verify failure both
+      // land here — a persistent "expired or unavailable" state, never a crash
+      // or toast. We never log the blob or key material.
+      updateAttachment(peerId, messageId, { status: "expired" });
+    }
+  };
+
+  // Encrypt (ratchet), build, and submit an ordinary envelope for `plaintext`.
+  // The single wire path for BOTH text and attachments: media_type stays "text"
+  // (an attachment is indistinguishable from a message on the wire — see
+  // packages/protocol attachments.ts). Returns the envelope id/timestamp, or
+  // null when there's nothing to send over (no contact/account/socket).
+  const buildAndSend = async (
+    peerId: string,
+    plaintext: string,
+    opts: { ttlSeconds: number | null; burnOnRead: boolean },
+  ): Promise<{ id: string; timestamp: string } | null> => {
+    const { contacts, accountId, ws } = get();
+    const contact = contacts[peerId];
+    if (!contact || !accountId || !ws) return null;
+
+    const session = deserializeSession(contact.session);
+    // Pad the plaintext to a 256-byte block before encrypting so ciphertext
+    // length leaks nothing — and so decoy traffic is the same size as real.
+    const encrypted = await ratchetEncrypt(session, await pad(utf8Encode(plaintext)));
+    contact.session = serializeSession(session);
+    set((s) => ({ contacts: { ...s.contacts, [peerId]: { ...contact } } }));
+
+    const envelope: MessageEnvelope = {
+      id: crypto.randomUUID(),
+      sender_id: accountId,
+      recipient_id: peerId,
+      ciphertext: b64(encrypted.blob),
+      ephemeral_key: contact.pendingEphemeralKey,
+      prekey_id: contact.pendingPrekeyId,
+      message_number: encrypted.messageNumber,
+      previous_chain_length: encrypted.previousChainLength,
+      timestamp: new Date().toISOString(),
+      ttl_seconds: opts.ttlSeconds,
+      burn_on_read: opts.burnOnRead,
+      media_type: "text",
+      version: PROTOCOL_VERSION,
+    };
+    ws.send({ type: "message.send", envelope });
+    return { id: envelope.id, timestamp: envelope.timestamp };
+  };
+
+  // Post-decryption dispatch for a delivered message. Follows the canonical
+  // parse order (see lib/incoming.ts): receipts are swallowed, attachments show
+  // a placeholder and redeem immediately, unrecognized control payloads render
+  // a generic notice (NEVER raw text — a near-miss may carry key material), and
+  // everything else is conversation text.
+  const deliverIncoming = (envelope: MessageEnvelope, text: string): void => {
+    const classified = classifyIncoming(text);
+    if (classified.kind === "receipt") {
+      // The web client doesn't yet track per-message read state; the receipt is
+      // still acked by the caller so the server deletes its copy.
+      return;
+    }
+    const base = {
+      id: envelope.id,
+      peerId: envelope.sender_id,
+      direction: "received" as const,
+      timestamp: envelope.timestamp,
+      ttlSeconds: envelope.ttl_seconds,
+      burnOnRead: envelope.burn_on_read,
+      deliveredAt: Date.now(),
+      burning: false,
+      opened: false,
+    };
+    if (classified.kind === "attachment") {
+      const p = classified.payload;
+      appendMessage(envelope.sender_id, {
+        ...base,
+        text: "",
+        attachment: {
+          kind: p.kind,
+          mimetype: p.mimetype,
+          filename: p.filename,
+          size: p.size,
+          caption: p.caption,
+          status: "loading",
+        },
+      });
+      void redeemAttachment(envelope.sender_id, envelope.id, p);
+    } else if (classified.kind === "unsupported") {
+      appendMessage(envelope.sender_id, { ...base, text: "", unsupported: true });
+    } else {
+      appendMessage(envelope.sender_id, { ...base, text: classified.text });
+    }
+  };
+
+  // Establish a responder session from an X3DH initial message. Returns the
+  // decrypted plaintext; the caller runs the shared post-decryption dispatch so
+  // a first message that is a receipt/attachment/control payload is handled the
+  // same way as any subsequent one.
+  const respondToInitialMessage = async (
+    envelope: MessageEnvelope,
+  ): Promise<{ contact: ContactRecord; text: string }> => {
     const { keyStore } = get();
     if (!keyStore || !envelope.ephemeral_key) throw new Error("bad initial message");
     const identity = deserializeIdentity(keyStore.identityKey as unknown as SerializedIdentity);
@@ -303,19 +474,7 @@ export const useApp = create<AppState>((set, get) => {
           pendingPrekeyId: null,
         };
         set((s) => ({ contacts: { ...s.contacts, [envelope.sender_id]: contact } }));
-        appendMessage(envelope.sender_id, {
-          id: envelope.id,
-          peerId: envelope.sender_id,
-          direction: "received",
-          text: utf8Decode(unpad(plaintextProbe)),
-          timestamp: envelope.timestamp,
-          ttlSeconds: envelope.ttl_seconds,
-          burnOnRead: envelope.burn_on_read,
-          deliveredAt: Date.now(),
-          burning: false,
-          opened: false,
-        });
-        return contact;
+        return { contact, text: utf8Decode(unpad(plaintextProbe)) };
       } catch (e) {
         lastError = e;
       }
@@ -331,8 +490,9 @@ export const useApp = create<AppState>((set, get) => {
           const { contacts, ws } = get();
           const contact = contacts[envelope.sender_id];
           try {
+            let text: string;
             if (!contact) {
-              await respondToInitialMessage(envelope);
+              ({ text } = await respondToInitialMessage(envelope));
             } else {
               const session = deserializeSession(contact.session);
               const plaintext = await ratchetDecrypt(session, {
@@ -345,30 +505,12 @@ export const useApp = create<AppState>((set, get) => {
               contact.pendingEphemeralKey = null;
               contact.pendingPrekeyId = null;
               set((s) => ({ contacts: { ...s.contacts, [envelope.sender_id]: { ...contact } } }));
-              const text = utf8Decode(unpad(plaintext));
-              // Read receipts ride inside ordinary envelopes so the relay
-              // can't tell them from messages — recognize and swallow them
-              // here instead of rendering the control JSON as text. (The web
-              // client doesn't yet track per-message read state; the receipt
-              // is still acked so the server deletes its copy.)
-              if (parseReadReceipt(text) !== null) {
-                ws?.send({ type: "message.ack", message_id: envelope.id });
-                await persist();
-                break;
-              }
-              appendMessage(envelope.sender_id, {
-                id: envelope.id,
-                peerId: envelope.sender_id,
-                direction: "received",
-                text,
-                timestamp: envelope.timestamp,
-                ttlSeconds: envelope.ttl_seconds,
-                burnOnRead: envelope.burn_on_read,
-                deliveredAt: Date.now(),
-                burning: false,
-                opened: false,
-              });
+              text = utf8Decode(unpad(plaintext));
             }
+            // Shared post-decryption dispatch: receipts swallowed, attachments
+            // redeemed, unknown control payloads shown as a generic notice,
+            // everything else rendered as text (see lib/incoming.ts).
+            deliverIncoming(envelope, text);
             // Ack triggers immediate server-side deletion of the envelope.
             ws?.send({ type: "message.ack", message_id: envelope.id });
             await persist();
@@ -539,44 +681,76 @@ export const useApp = create<AppState>((set, get) => {
     },
 
     async sendMessage(peerId, text, opts) {
-      const { contacts, accountId, ws } = get();
-      const contact = contacts[peerId];
-      if (!contact || !accountId || !ws) return;
-
-      const session = deserializeSession(contact.session);
-      // Pad the plaintext to a 256-byte block before encrypting so ciphertext
-      // length leaks nothing — and so decoy traffic is the same size as real.
-      const encrypted = await ratchetEncrypt(session, await pad(utf8Encode(text)));
-      contact.session = serializeSession(session);
-      set((s) => ({ contacts: { ...s.contacts, [peerId]: { ...contact } } }));
-
-      const envelope: MessageEnvelope = {
-        id: crypto.randomUUID(),
-        sender_id: accountId,
-        recipient_id: peerId,
-        ciphertext: b64(encrypted.blob),
-        ephemeral_key: contact.pendingEphemeralKey,
-        prekey_id: contact.pendingPrekeyId,
-        message_number: encrypted.messageNumber,
-        previous_chain_length: encrypted.previousChainLength,
-        timestamp: new Date().toISOString(),
-        ttl_seconds: opts.ttlSeconds,
-        burn_on_read: opts.burnOnRead,
-        media_type: "text",
-        version: PROTOCOL_VERSION,
-      };
-      ws.send({ type: "message.send", envelope });
+      const sent = await buildAndSend(peerId, text, opts);
+      if (!sent) return;
       appendMessage(peerId, {
-        id: envelope.id,
+        id: sent.id,
         peerId,
         direction: "sent",
         text,
-        timestamp: envelope.timestamp,
+        timestamp: sent.timestamp,
         ttlSeconds: opts.ttlSeconds,
         burnOnRead: opts.burnOnRead,
         deliveredAt: Date.now(),
         burning: false,
         opened: true,
+      });
+      await persist();
+    },
+
+    async sendAttachment(peerId, prepared, opts) {
+      // Guard BEFORE encrypt+upload: uploading first and then finding no socket
+      // would orphan a blob on the relay (72h TTL) with nothing on screen.
+      const { contacts, accountId, ws } = get();
+      if (!contacts[peerId] || !accountId || !ws) return;
+
+      // Encrypt under a fresh random key and upload the blob FIRST. Only once
+      // the relay holds it do we send the envelope that references it — an
+      // upload failure throws here, so the message is never sent.
+      const blob = await encryptAttachmentBlob(prepared.bytes);
+      const token = await freshToken();
+      await api.depositBlob(
+        { blob_id: b64(blob.blobId), ciphertext: await toBase64(blob.box) },
+        token,
+      );
+
+      // The envelope plaintext is the control payload — routed through the
+      // ordinary send path (padding + ratchet + media_type "text").
+      const plaintext = serializeAttachment({
+        kind: prepared.kind,
+        blobToken: b64(blob.token),
+        key: b64(blob.key),
+        mimetype: prepared.mimetype,
+        filename: prepared.filename,
+        size: blob.size,
+        sha256: b64(blob.sha256),
+        caption: prepared.caption,
+      });
+      const sent = await buildAndSend(peerId, plaintext, opts);
+      if (!sent) return;
+
+      // Render our own copy from the in-memory bytes we just encrypted — same
+      // memory-only storage policy as message plaintext (nothing persisted).
+      appendMessage(peerId, {
+        id: sent.id,
+        peerId,
+        direction: "sent",
+        text: "",
+        timestamp: sent.timestamp,
+        ttlSeconds: opts.ttlSeconds,
+        burnOnRead: opts.burnOnRead,
+        deliveredAt: Date.now(),
+        burning: false,
+        opened: true,
+        attachment: {
+          kind: prepared.kind,
+          mimetype: prepared.mimetype,
+          filename: prepared.filename,
+          size: blob.size,
+          caption: prepared.caption,
+          status: "ready",
+          blob: bytesToBlob(prepared.bytes, prepared.mimetype),
+        },
       });
       await persist();
     },
@@ -660,6 +834,14 @@ export const useApp = create<AppState>((set, get) => {
     openMessage(peerId, messageId) {
       const message = (get().messages[peerId] ?? []).find((m) => m.id === messageId);
       if (!message || message.opened) return;
+      // An attachment isn't "read" until its bytes have arrived (or failed to):
+      // hold off opening while it's still loading. This matters for burn-on-read
+      // — ChatView's auto-open effect fires the moment the placeholder bubble
+      // mounts, and burning then would destroy the message before the recipient
+      // ever saw the image (the async redeem hasn't resolved yet). redeemAttachment
+      // updates the message once the blob lands, which re-runs that effect, and we
+      // open (and burn) then — with content on screen.
+      if (message.attachment && message.attachment.status === "loading") return;
       set((s) => ({
         messages: {
           ...s.messages,

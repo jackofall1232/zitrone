@@ -15,6 +15,8 @@ import {
   SecurityBadge,
 } from "@zitrone/ui";
 import { MESSAGES_CONTAINER_ID } from "../components/ScreenshotShield.js";
+import { Attachment } from "../components/Attachment.js";
+import { AttachmentTooLargeError, prepareAttachment } from "../lib/attachments.js";
 import { useApp } from "../store.js";
 import { useSettings } from "../settings.js";
 
@@ -33,6 +35,7 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
   const messages = useApp((s) => s.messages[peerId] ?? []);
   const accountId = useApp((s) => s.accountId);
   const sendMessage = useApp((s) => s.sendMessage);
+  const sendAttachment = useApp((s) => s.sendAttachment);
   const sendDeadDrop = useApp((s) => s.sendDeadDrop);
   const openMessage = useApp((s) => s.openMessage);
   const finishBurn = useApp((s) => s.finishBurn);
@@ -48,6 +51,8 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
   const [burnOnRead, setBurnOnRead] = useState(false);
   const [warningDismissed, setWarningDismissed] = useState(false);
   const [dropToken, setDropToken] = useState<string | null>(null);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -94,6 +99,30 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
   const onPrimarySend = ghost
     ? onSendDeadDrop
     : (text: string) => void sendMessage(peerId, text, { ttlSeconds: ttl, burnOnRead });
+
+  const onAttach = () => {
+    setAttachError(null);
+    fileInputRef.current?.click();
+  };
+
+  const onFileChosen = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    // Clear the input so picking the same file again re-fires onChange.
+    event.target.value = "";
+    if (!file) return;
+    void (async () => {
+      try {
+        const prepared = await prepareAttachment(file);
+        await sendAttachment(peerId, prepared, { ttlSeconds: ttl, burnOnRead });
+      } catch (err) {
+        setAttachError(
+          err instanceof AttachmentTooLargeError
+            ? err.message
+            : "Couldn't send the attachment — try again.",
+        );
+      }
+    })();
+  };
 
   return (
     <section className="flex h-full flex-1 flex-col bg-bg-primary">
@@ -158,7 +187,16 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
                 minute: "2-digit",
               })}
             >
-              {m.text}
+              {m.attachment ? (
+                <div className="flex flex-col gap-1.5">
+                  <Attachment view={m.attachment} />
+                  {m.attachment.caption && <span>{m.attachment.caption}</span>}
+                </div>
+              ) : m.unsupported ? (
+                <span className="italic opacity-70">Unsupported message — update Zitrone</span>
+              ) : (
+                m.text
+              )}
             </MessageBubble>
           </PrivacyView>
         ))}
@@ -191,8 +229,25 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
         </button>
       </div>
 
+      {attachError && (
+        <div className="border-t border-line bg-bg-secondary px-4 py-1.5 text-[12px] text-burn-orange">
+          {attachError}
+        </div>
+      )}
+
+      {/* Attachments ride the direct WebSocket envelope, so they're offered only
+          when a direct channel exists — not in Ghost mode, which routes every
+          message through dead drops to avoid exposing the persistent recipient. */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        className="hidden"
+        onChange={onFileChosen}
+        aria-hidden
+      />
       <ComposeBar
         onSend={onPrimarySend}
+        onAttach={ghost ? undefined : onAttach}
         onSendAsDeadDrop={ghost ? undefined : onSendDeadDrop}
         placeholder={ghost ? "Message (dead drop)" : "Message"}
       />

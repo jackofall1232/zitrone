@@ -22,6 +22,50 @@ data class Message(
     /** Epoch millis of delivery — TTL countdown starts here (timer_starts: on_delivery). */
     val deliveredAtMs: Long? = null,
     val state: MessageState = MessageState.SENDING,
+    /**
+     * A sideloaded image/file when this message carries an attachment; null for
+     * a plain text message. The decrypted bytes live ONLY here, in memory —
+     * exactly like [text] (see [MessageRepository]'s no-disk rule).
+     */
+    val attachment: MessageAttachment? = null,
+    /**
+     * A control payload from a newer client that this build can't parse (see
+     * [AttachmentControlPayload.isControlPayload]). Rendered as a generic
+     * "unsupported message" placeholder — NEVER as [text], which may carry key
+     * material. When true, [text] is left empty.
+     */
+    val unsupported: Boolean = false,
+)
+
+/** Whether an attachment's decrypted bytes are in hand yet. */
+enum class AttachmentLoadState {
+    /** Redeeming + decrypting the blob (incoming, first display). */
+    LOADING,
+    /** Bytes present in memory ([MessageAttachment.bytes] non-null). */
+    LOADED,
+    /** Blob expired, already redeemed, or failed verification — persistent. */
+    UNAVAILABLE,
+}
+
+/**
+ * An image or file attachment. The decrypted [bytes] are in-memory only and
+ * never persisted; they are decoded straight into a Bitmap for images or
+ * exported on an explicit user Save for files. Metadata comes from the
+ * (encrypted) control payload; [bytes] is populated after the blob is redeemed
+ * and verified (or on the sender's own copy, immediately).
+ */
+data class MessageAttachment(
+    /** [AttachmentControlPayload.KIND_IMAGE] or KIND_FILE. */
+    val kind: String,
+    val mimetype: String,
+    /** Display filename for files; null for images (metadata minimization). */
+    val filename: String?,
+    /** Plaintext byte length (pre-padding). */
+    val size: Int,
+    val caption: String?,
+    val loadState: AttachmentLoadState,
+    /** Decrypted bytes — non-null only when [loadState] is LOADED. */
+    val bytes: ByteArray? = null,
 )
 
 enum class MessageState {

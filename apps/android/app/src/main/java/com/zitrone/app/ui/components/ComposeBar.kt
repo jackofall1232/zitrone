@@ -19,8 +19,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
 import androidx.compose.material.icons.filled.LocalFireDepartment
+import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Timer
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -28,7 +33,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
@@ -72,6 +79,8 @@ fun ComposeBar(
     onToggleBurnOnRead: () -> Unit,
     ttlSeconds: Int?,
     onCycleTtl: () -> Unit,
+    onAttachImage: () -> Unit,
+    onAttachFile: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
@@ -84,6 +93,47 @@ fun ComposeBar(
             verticalAlignment = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            // Attach — a paperclip that opens a small chooser (photo/file). The
+            // photo picker needs no permission; the file picker uses SAF.
+            var attachMenuOpen by remember { mutableStateOf(false) }
+            Box {
+                IconButton(onClick = { attachMenuOpen = true }) {
+                    Icon(
+                        imageVector = Icons.Outlined.AttachFile,
+                        contentDescription = "Attach a photo or file",
+                        tint = TextSecondary,
+                    )
+                }
+                DropdownMenu(
+                    expanded = attachMenuOpen,
+                    onDismissRequest = { attachMenuOpen = false },
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Photo") },
+                        leadingIcon = {
+                            Icon(imageVector = Icons.Outlined.Image, contentDescription = null)
+                        },
+                        onClick = {
+                            attachMenuOpen = false
+                            onAttachImage()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("File") },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Outlined.InsertDriveFile,
+                                contentDescription = null,
+                            )
+                        },
+                        onClick = {
+                            attachMenuOpen = false
+                            onAttachFile()
+                        },
+                    )
+                }
+            }
+
             // Burn-on-read toggle — flame lights orange when armed.
             IconButton(onClick = onToggleBurnOnRead) {
                 Icon(

@@ -5,6 +5,9 @@
 
 package com.zitrone.app.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -30,14 +33,18 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.zitrone.app.data.Conversation
 import com.zitrone.app.data.Message
 import com.zitrone.app.data.MessageState
+import com.zitrone.app.ui.AttachmentLoader
 import com.zitrone.app.ui.components.ComposeBar
 import com.zitrone.app.ui.components.LemonAvatar
 import com.zitrone.app.ui.components.MessageBubble
@@ -51,6 +58,7 @@ import com.zitrone.app.ui.theme.MonoFamily
 import com.zitrone.app.ui.theme.TextMuted
 import com.zitrone.app.ui.theme.TextPrimary
 import com.zitrone.app.ui.theme.TypeScale
+import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -78,6 +86,15 @@ fun ChatScreen(
     onVerifyKeys: () -> Unit,
     onBurnAll: () -> Unit,
     onSend: (text: String, ttlSeconds: Int?, burnOnRead: Boolean) -> Unit,
+    onSendAttachment: (
+        bytes: ByteArray,
+        kind: String,
+        mimetype: String,
+        filename: String?,
+        caption: String?,
+        ttlSeconds: Int?,
+        burnOnRead: Boolean,
+    ) -> Unit,
     onMessagesSeen: (messageIds: List<String>) -> Unit,
     modifier: Modifier = Modifier,
     onTyping: (Boolean) -> Unit = {},
@@ -96,6 +113,49 @@ fun ChatScreen(
     val burnOnRead = burnOnReadOverride ?: defaultBurnOnRead
     val ttlIndex = ttlOverrideIndex ?: ttlOptions.indexOf(defaultTtlSeconds).coerceAtLeast(0)
     val ttlSeconds = ttlOptions.getOrNull(ttlIndex)
+
+    // Attachment picking. The stream is read STRAIGHT into memory off the main
+    // thread (see AttachmentLoader) — never a cache file. The current draft
+    // rides along as the caption. A friendly error surfaces above the compose
+    // bar (oversize file, undecodable image).
+    val context = LocalContext.current
+    val pickScope = rememberCoroutineScope()
+    var attachmentError by remember { mutableStateOf<String?>(null) }
+    val prepareAndSend: (suspend () -> AttachmentLoader.Prepared) -> Unit = { prepare ->
+        val caption = draft.trim().ifBlank { null }
+        pickScope.launch {
+            runCatching { prepare() }
+                .onSuccess { prepared ->
+                    attachmentError = null
+                    draft = ""
+                    onSendAttachment(
+                        prepared.bytes,
+                        prepared.kind,
+                        prepared.mimetype,
+                        prepared.filename,
+                        caption,
+                        ttlSeconds,
+                        burnOnRead,
+                    )
+                }
+                .onFailure { e ->
+                    attachmentError = when (e) {
+                        is AttachmentLoader.TooLargeException -> e.message
+                        else -> "Couldn't attach that."
+                    }
+                }
+        }
+    }
+    val imagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null) prepareAndSend { AttachmentLoader.prepareImage(context, uri) }
+    }
+    val filePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) prepareAndSend { AttachmentLoader.prepareFile(context, uri) }
+    }
 
     // Opening the chat (or a new message arriving while it is open) marks
     // incoming messages as seen — the trigger for burn-on-read grace timers
@@ -220,6 +280,21 @@ fun ChatScreen(
             }
         }
 
+        // Attachment error (oversize file, undecodable image) — transient,
+        // cleared on the next successful pick or send.
+        attachmentError?.let { error ->
+            Text(
+                text = error,
+                fontFamily = MonoFamily,
+                fontSize = TypeScale.Xs,
+                color = BurnOrange,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+            )
+        }
+
         ComposeBar(
             value = draft,
             onValueChange = { draft = it },
@@ -233,6 +308,14 @@ fun ChatScreen(
             onToggleBurnOnRead = { burnOnReadOverride = !burnOnRead },
             ttlSeconds = ttlSeconds,
             onCycleTtl = { ttlOverrideIndex = (ttlIndex + 1) % ttlOptions.size },
+            onAttachImage = {
+                imagePicker.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                )
+            },
+            // "*/*" — any document. SAF grants a one-shot read on the returned
+            // uri; we consume it straight into memory and never persist it.
+            onAttachFile = { filePicker.launch(arrayOf("*/*")) },
         )
     }
 }

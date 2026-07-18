@@ -70,6 +70,13 @@ export {
 } from "./vault.js";
 export { pad, unpad, paddedBlockCount, BLOCK_BYTES } from "./padding.js";
 export {
+  encryptAttachmentBlob,
+  decryptAttachmentBlob,
+  BLOB_BUCKET_BYTES,
+  BLOB_TOKEN_BYTES,
+  type EncryptedAttachmentBlob,
+} from "./attachments.js";
+export {
   generateDropToken,
   dropIdFromToken,
   solveProofOfWork,

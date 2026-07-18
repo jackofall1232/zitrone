@@ -54,7 +54,11 @@ func main() {
 	// No access logging, no body logging — application errors only.
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: false,
-		BodyLimit:             512 * 1024,
+		// Raised to fit a base64 blob upload (attachments). The previous 512 KiB
+		// ceiling is re-imposed on every route except the blob upload by
+		// handlers.BodyLimitGuard below, so the DoS posture is unchanged for
+		// everything else — only /api/v1/blobs may send a large body.
+		BodyLimit: api.BlobBodyLimit(cfg),
 		// Preserve intentional HTTP statuses (fiber.ErrUnauthorized /
 		// fiber.ErrUpgradeRequired from the /ws middleware below). Flattening
 		// everything to 500 made an auth-rejected WebSocket handshake
@@ -78,6 +82,9 @@ func main() {
 	})
 
 	app.Use(securityHeaders)
+	// Content-Length guard: the app-wide BodyLimit is raised for blob uploads, so
+	// this re-imposes the pre-attachment 512 KiB cap on every other route (413).
+	app.Use(handlers.BodyLimitGuard)
 
 	v1 := app.Group("/api/v1")
 	v1.Post("/register", handlers.Register)
@@ -93,6 +100,12 @@ func main() {
 	// stands in for auth; redemption is gated only by the one-time token.
 	v1.Post("/drops", handlers.DepositDrop)
 	v1.Post("/drops/redeem", handlers.RedeemDrop)
+
+	// Blind blob store (attachments, 0.7.0-beta). Upload is JWT-authenticated as spam
+	// control; redemption is unauthenticated — the one-time token is the entire
+	// capability, so the relay cannot link a fetch to an account (see blobs.go).
+	v1.Post("/blobs", handlers.RequireAuth, handlers.DepositBlob)
+	v1.Post("/blobs/redeem", handlers.RedeemBlob)
 
 	// Multi-hop relay forwarding (v1.5). Served only when this deployment is
 	// configured as a relay node (RELAY_PRIVATE_KEY set).
