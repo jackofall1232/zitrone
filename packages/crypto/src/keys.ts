@@ -95,19 +95,33 @@ export async function signWithIdentity(
 }
 
 /**
- * Safety Number for contact verification: SHA-512 over both identity keys,
- * ordered lexicographically so both sides compute the same value.
+ * Domain-separation constant for the two-key safety number. CLIENT-SIDE
+ * visual-verification value only (never sent to or verified by the relay), so
+ * it is NOT server-cutover gated. MUST stay byte-identical across
+ * Web/iOS/Android (`SafetyNumber.swift`, `SafetyNumber.kt`) or the same key
+ * pair produces a different number per platform and verification silently
+ * fails. The `-v1` suffix is the migration lever.
+ */
+export const SAFETY_NUMBER_DOMAIN = "zitrone-safety-number-v1";
+
+/**
+ * Safety Number for contact verification: SHA-512 over a domain prefix plus
+ * both identity keys, ordered lexicographically so both sides compute the same
+ * value. Displayed as the first 30 digest bytes = 60 UPPERCASE hex chars, in
+ * 15 groups of 4.
  */
 export async function safetyNumber(identityA: Uint8Array, identityB: Uint8Array): Promise<string> {
   await ready();
   const [first, second] =
     compareBytes(identityA, identityB) <= 0 ? [identityA, identityB] : [identityB, identityA];
-  const joined = new Uint8Array(first.length + second.length);
-  joined.set(first, 0);
-  joined.set(second, first.length);
+  const prefix = sodium.from_string(SAFETY_NUMBER_DOMAIN);
+  const joined = new Uint8Array(prefix.length + first.length + second.length);
+  joined.set(prefix, 0);
+  joined.set(first, prefix.length);
+  joined.set(second, prefix.length + first.length);
   const digest = sodium.crypto_hash_sha512(joined);
-  // Groups of 4 hex chars separated by spaces, 60 chars of entropy shown
-  const hex = sodium.to_hex(digest).slice(0, 60);
+  // 60 hex chars (30 bytes) of entropy shown, uppercase, groups of 4.
+  const hex = sodium.to_hex(digest).slice(0, 60).toUpperCase();
   return hex.match(/.{1,4}/g)!.join(" ");
 }
 

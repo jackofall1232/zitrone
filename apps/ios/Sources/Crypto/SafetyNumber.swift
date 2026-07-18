@@ -18,6 +18,17 @@ public enum SafetyNumber {
     public static let displayedHexLength = 60
     public static let groupSize = 4
 
+    /// Domain-separation constants. These are CLIENT-SIDE visual-verification
+    /// values only — never sent to, computed by, or verified by the relay — so
+    /// unlike the `sublemonable-login:` challenge they are NOT server-cutover
+    /// gated. They MUST stay byte-identical across iOS/Android/Web
+    /// (`SafetyNumber.kt`, `packages/crypto/src/keys.ts`) or the same key pair
+    /// produces different numbers per platform and cross-platform verification
+    /// silently fails. The `-v1` suffix is the migration lever if the
+    /// construction ever changes.
+    public static let safetyNumberDomain = "zitrone-safety-number-v1"
+    public static let fingerprintDomain = "zitrone-key-fingerprint-v1"
+
     /// Computes the shared safety number for a pair of identity keys.
     ///
     /// The two public keys are ordered lexicographically before hashing so
@@ -26,8 +37,7 @@ public enum SafetyNumber {
     public static func compute(identityKeyA: Data, identityKeyB: Data) -> String {
         let (first, second) = ordered(identityKeyA, identityKeyB)
         var hasher = SHA512()
-        // TODO(zitrone-cutover): domain-separation constant shared across installed clients — do not rename casually. (NOTE: Android/web currently hash WITHOUT this prefix — pre-existing cross-platform mismatch, tracked in todos.)
-        hasher.update(data: Data("sublemonable-safety-number-v1".utf8))
+        hasher.update(data: Data(safetyNumberDomain.utf8))
         hasher.update(data: first)
         hasher.update(data: second)
         let digest = Data(hasher.finalize())
@@ -36,8 +46,13 @@ public enum SafetyNumber {
     }
 
     /// Local-only fingerprint of a single identity key (Settings → Account).
+    /// Uses a DISTINCT domain constant from `compute` so a single-key
+    /// fingerprint can never coincide with a two-key safety number.
     public static func fingerprint(identityKey: Data) -> String {
-        let digest = Data(SHA512.hash(data: identityKey))
+        var hasher = SHA512()
+        hasher.update(data: Data(fingerprintDomain.utf8))
+        hasher.update(data: identityKey)
+        let digest = Data(hasher.finalize())
         let hex = hexString(digest)
         return format(String(hex.prefix(displayedHexLength)))
     }

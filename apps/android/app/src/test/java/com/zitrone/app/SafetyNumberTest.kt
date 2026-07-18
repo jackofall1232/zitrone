@@ -32,10 +32,33 @@ class SafetyNumberTest {
     fun `fingerprint renders as groups of four hex chars`() {
         val fingerprint = SafetyNumber.compute(keyA, keyB)
         val groups = fingerprint.split(" ")
-        assertEquals(16, groups.size) // 32 bytes -> 64 hex chars -> 16 groups
+        assertEquals(15, groups.size) // 30 bytes -> 60 hex chars -> 15 groups
         groups.forEach { group ->
             assertTrue("group '$group' malformed", group.matches(Regex("[0-9A-F]{4}")))
         }
+    }
+
+    // Canonical cross-platform vectors — pinned identically in the iOS
+    // (SafetyNumberTests.swift) and Web (crypto.test.ts) suites. If any
+    // platform's construction drifts (prefix, ordering, truncation, hex case),
+    // one of the three suites goes red. Keys are the raw 32-byte published wire
+    // form, matching production.
+    private val vectorKeyA = ByteArray(32) { (it + 1).toByte() }   // 0x01..0x20
+    private val vectorKeyB = ByteArray(32) { (255 - it).toByte() } // 0xFF..0xE0
+
+    @Test
+    fun `safety number matches the canonical cross-platform vector`() {
+        val expected = "005C 0F07 1A4A BF49 3872 21C2 7A0C 8F44 A791 A7A6 DCD2 535C 7815 0963 79A4"
+        assertEquals(expected, SafetyNumber.compute(vectorKeyA, vectorKeyB))
+        assertEquals(expected, SafetyNumber.compute(vectorKeyB, vectorKeyA))
+    }
+
+    @Test
+    fun `single-key fingerprint matches the canonical vector`() {
+        assertEquals(
+            "B7BA C2F0 B9B6 550A 5383 387F 4252 561F BDD2 B4C7 D750 9D3D 7ADC 5AA2 B92E",
+            SafetyNumber.fingerprintOf(vectorKeyA),
+        )
     }
 
     @Test

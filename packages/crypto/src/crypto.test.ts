@@ -77,7 +77,20 @@ describe("prekeys", () => {
     const ab = await safetyNumber(a.publicKey, b.publicKey);
     const ba = await safetyNumber(b.publicKey, a.publicKey);
     expect(ab).toBe(ba);
-    expect(ab).toMatch(/^([0-9a-f]{4} )+[0-9a-f]{4}$/);
+    expect(ab).toMatch(/^([0-9A-F]{4} ){14}[0-9A-F]{4}$/);
+  });
+
+  // Canonical cross-platform vector — pinned identically in the iOS
+  // (SafetyNumberTests.swift) and Android (SafetyNumberTest.kt) suites. If any
+  // platform's construction drifts (prefix, ordering, truncation, hex case),
+  // one of the three suites goes red. Keys are the raw 32-byte published wire
+  // form.
+  it("safety number matches the canonical cross-platform vector", async () => {
+    const keyA = new Uint8Array(Array.from({ length: 32 }, (_, i) => i + 1)); // 0x01..0x20
+    const keyB = new Uint8Array(Array.from({ length: 32 }, (_, i) => 255 - i)); // 0xFF..0xE0
+    const expected = "005C 0F07 1A4A BF49 3872 21C2 7A0C 8F44 A791 A7A6 DCD2 535C 7815 0963 79A4";
+    expect(await safetyNumber(keyA, keyB)).toBe(expected);
+    expect(await safetyNumber(keyB, keyA)).toBe(expected);
   });
 });
 

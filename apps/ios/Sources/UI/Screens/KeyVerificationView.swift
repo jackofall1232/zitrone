@@ -66,7 +66,12 @@ public struct KeyVerificationView: View {
                     // Groups of 4 hex, JetBrains Mono — always.
                     KeyFingerprintView(fingerprint: safetyNumber)
 
-                    FingerprintQRCode(payload: safetyNumber)
+                    // Machine-comparison form, shared with Android
+                    // (KeyVerificationScreen): "zitrone:verify:" + the 60 hex
+                    // chars, spaces stripped.
+                    FingerprintQRCode(
+                        payload: "zitrone:verify:" + safetyNumber.replacingOccurrences(of: " ", with: "")
+                    )
 
                     if !contact.verified {
                         Button {

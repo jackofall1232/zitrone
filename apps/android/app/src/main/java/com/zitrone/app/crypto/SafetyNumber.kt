@@ -16,8 +16,19 @@ import java.security.MessageDigest
  */
 object SafetyNumber {
 
-    /** Number of fingerprint bytes rendered (64 hex chars -> 16 groups of 4). */
-    private const val DISPLAY_BYTES = 32
+    /** Number of digest bytes rendered (60 hex chars -> 15 groups of 4). */
+    private const val DISPLAY_BYTES = 30
+
+    /**
+     * Domain-separation constants. CLIENT-SIDE visual-verification values only
+     * (never sent to or verified by the relay), so unlike the login challenge
+     * they are NOT server-cutover gated. They MUST stay byte-identical across
+     * Android/iOS/Web (`SafetyNumber.swift`, `packages/crypto/src/keys.ts`) or
+     * the same key pair yields different numbers per platform. The `-v1` suffix
+     * is the migration lever.
+     */
+    const val SAFETY_NUMBER_DOMAIN = "zitrone-safety-number-v1"
+    const val FINGERPRINT_DOMAIN = "zitrone-key-fingerprint-v1"
 
     /**
      * Computes the shared safety number for two serialized public identity
@@ -34,15 +45,23 @@ object SafetyNumber {
             identityKeyB to identityKeyA
         }
         val digest = MessageDigest.getInstance("SHA-512").apply {
+            update(SAFETY_NUMBER_DOMAIN.toByteArray(Charsets.UTF_8))
             update(first)
             update(second)
         }.digest()
         return formatFingerprint(digest.copyOf(DISPLAY_BYTES))
     }
 
-    /** SHA-512 fingerprint of a single identity key (settings display). */
+    /**
+     * SHA-512 fingerprint of a single identity key (settings display). Uses a
+     * DISTINCT domain constant from [compute] so a single-key fingerprint can
+     * never coincide with a two-key safety number.
+     */
     fun fingerprintOf(identityKey: ByteArray): String {
-        val digest = MessageDigest.getInstance("SHA-512").digest(identityKey)
+        val digest = MessageDigest.getInstance("SHA-512").apply {
+            update(FINGERPRINT_DOMAIN.toByteArray(Charsets.UTF_8))
+            update(identityKey)
+        }.digest()
         return formatFingerprint(digest.copyOf(DISPLAY_BYTES))
     }
 

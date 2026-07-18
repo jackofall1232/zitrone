@@ -74,6 +74,36 @@ final class SafetyNumberTests: XCTestCase {
 
     func testMatchesIgnoresCaseAndSpacing() {
         XCTAssertTrue(SafetyNumber.matches("A1B2 C3D4", "a1b2c3d4"))
-        XCTAssertFalse(SafetyNumber.matches("A1B2 C3D4", "A1B2 C3D5"))
+        XCTAssertFalse(SafetyNumber.matches("A1B2 C3D5", "A1B2 C3D4"))
+    }
+
+    // MARK: canonical cross-platform vectors
+    //
+    // These EXACT strings are pinned identically in the Android
+    // (SafetyNumberTest.kt) and Web (crypto.test.ts) suites. If any platform's
+    // construction drifts — prefix, ordering, truncation, or hex case — one of
+    // the three suites goes red. Keys are the raw 32-byte published wire form
+    // (no 0x05 tag), matching production.
+
+    private let vectorKeyA = Data((0..<32).map { UInt8(1 + $0) })     // 0x01..0x20
+    private let vectorKeyB = Data((0..<32).map { UInt8(255 - $0) })   // 0xFF..0xE0
+
+    func testComputeMatchesCanonicalVector() {
+        XCTAssertEqual(
+            SafetyNumber.compute(identityKeyA: vectorKeyA, identityKeyB: vectorKeyB),
+            "005C 0F07 1A4A BF49 3872 21C2 7A0C 8F44 A791 A7A6 DCD2 535C 7815 0963 79A4"
+        )
+        // order-independent — same number whoever computes it
+        XCTAssertEqual(
+            SafetyNumber.compute(identityKeyA: vectorKeyB, identityKeyB: vectorKeyA),
+            "005C 0F07 1A4A BF49 3872 21C2 7A0C 8F44 A791 A7A6 DCD2 535C 7815 0963 79A4"
+        )
+    }
+
+    func testFingerprintMatchesCanonicalVector() {
+        XCTAssertEqual(
+            SafetyNumber.fingerprint(identityKey: vectorKeyA),
+            "B7BA C2F0 B9B6 550A 5383 387F 4252 561F BDD2 B4C7 D750 9D3D 7ADC 5AA2 B92E"
+        )
     }
 }
