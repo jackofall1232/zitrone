@@ -20,9 +20,10 @@ enum class CoverTrafficIntensity { OFF, LOW, MEDIUM, HIGH }
  *
  * The relay transport hierarchy is fixed, not user-selectable: I2P is the
  * primary anonymous transport, Tor is the fallback when I2P is unavailable,
- * and clearnet is the last resort. I2P is a skeleton in v1.5 — never emitted —
- * but present so this enum stays in lockstep with packages/protocol and a
- * future release can enable it.
+ * and clearnet is the last resort. On Android all three are live: I2P is
+ * resolved by net/TransportResolver.kt (probing a local i2pd SOCKS router), so
+ * [I2P] is emitted whenever a router is ready. Values stay in lockstep with
+ * packages/protocol connection.ts.
  */
 enum class TransportState { I2P, TOR, CLEARNET_FALLBACK, OFFLINE }
 

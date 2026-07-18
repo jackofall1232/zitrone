@@ -36,6 +36,7 @@ import com.zitrone.app.MessagingCoordinator
 import com.zitrone.app.notifications.MessagingNotifications
 import com.zitrone.app.data.SettingsRepository
 import com.zitrone.app.data.TransportState
+import com.zitrone.app.i2p.I2pIntegration
 import com.zitrone.app.tor.TorIntegration
 import com.zitrone.app.ui.components.KeyFingerprintDisplay
 import com.zitrone.app.ui.components.LemonSliceSecurity
@@ -65,7 +66,10 @@ fun SettingsScreen(
     accountId: String?,
     identityFingerprint: String,
     connectivity: MessagingCoordinator.Connectivity,
+    transportState: TransportState,
     torAvailable: Boolean,
+    i2pdInstalled: Boolean,
+    javaRouterInstalled: Boolean,
     onBack: () -> Unit,
     onDeleteAccount: () -> Unit,
     onOpenDiagnostics: () -> Unit,
@@ -74,13 +78,13 @@ fun SettingsScreen(
     val settings by settingsRepository.settings.collectAsState()
     val context = LocalContext.current
 
-    // Live transport, derived only from facts we actually hold. I2P is never
-    // emitted on mobile (no in-process router SDK — see ConnectionMode.kt); the
-    // real universe here is Tor-over-Orbot or clearnet. Clearnet is always
-    // flagged per the locked I2P -> Tor -> clearnet hierarchy.
+    // Live transport. connectivity stays authoritative for connecting/offline
+    // (the resolver's TransportState can't grow a CONNECTING member — it's in
+    // lockstep with packages/protocol); when ONLINE we overlay the resolver's
+    // actual leg (I2P / Tor / clearnet) from the fixed I2P -> Tor -> clearnet
+    // chain (see net/TransportResolver.kt).
     val transport = when (connectivity) {
-        MessagingCoordinator.Connectivity.ONLINE ->
-            if (settings.torEnabled && torAvailable) TransportState.TOR else TransportState.CLEARNET_FALLBACK
+        MessagingCoordinator.Connectivity.ONLINE -> transportState
         MessagingCoordinator.Connectivity.CONNECTING -> null
         MessagingCoordinator.Connectivity.OFFLINE -> TransportState.OFFLINE
     }
@@ -213,6 +217,39 @@ fun SettingsScreen(
 
         // ----- Network -------------------------------------------------------
         SectionHeader("Network")
+        // I2P is the fixed-primary relay transport (opt-OUT, unlike Tor). The
+        // toggle only gates auto-detection of a local i2pd router; when a router
+        // isn't ready the chain falls through to Tor/clearnet on its own.
+        ToggleRow(
+            title = "Route through I2P",
+            subtitle = when {
+                !settings.i2pEnabled -> "Off — the transport chain starts at Tor."
+                transport == TransportState.I2P -> "Active — routing via i2pd's local SOCKS proxy."
+                i2pdInstalled -> "i2pd found — building tunnels. This can take a minute or two."
+                javaRouterInstalled ->
+                    "An I2P app is installed, but Zitrone needs i2pd for relay routing."
+                else -> "Auto-detects a local i2pd router. Install i2pd to enable it."
+            },
+            checked = settings.i2pEnabled,
+            onToggle = settingsRepository::setI2pEnabled,
+        )
+        // No i2pd? Offer a path to it (Play first, F-Droid second — our audience
+        // skews F-Droid). The Java-I2P hint above already explains why i2pd
+        // specifically; still surface install actions so the user isn't stuck.
+        if (!i2pdInstalled) {
+            ClickableRow(
+                title = "Get i2pd",
+                subtitle = "Install the I2P router app, then come back — routing turns on automatically.",
+                titleColor = Lemon,
+                onClick = { openI2pdInstall(context) },
+            )
+            ClickableRow(
+                title = "…or get i2pd on F-Droid",
+                subtitle = I2pIntegration.I2PD_FDROID_URL,
+                subtitleMono = true,
+                onClick = { context.startActivitySafely(I2pIntegration.i2pdFDroidIntent()) },
+            )
+        }
         ToggleRow(
             title = "Route through Tor",
             subtitle = if (torAvailable) {
@@ -411,6 +448,16 @@ private fun ClickableRow(
 private fun openOrbotInstall(context: Context) {
     if (!context.startActivitySafely(TorIntegration.orbotInstallIntent())) {
         context.startActivitySafely(TorIntegration.orbotFDroidIntent())
+    }
+}
+
+/**
+ * Opens i2pd's install page — Play Store first, F-Droid fallback on a store-less
+ * (e.g. de-Googled) device. Never throws; a missing handler is a no-op.
+ */
+private fun openI2pdInstall(context: Context) {
+    if (!context.startActivitySafely(I2pIntegration.i2pdInstallIntent())) {
+        context.startActivitySafely(I2pIntegration.i2pdFDroidIntent())
     }
 }
 

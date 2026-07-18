@@ -70,6 +70,28 @@ android {
             // the env var as a build input and the configuration cache stays valid.
             "\"${providers.environmentVariable("RELAY_ONION_ADDRESS").orNull ?: ""}\""
         )
+
+        // Relay I2P destination (the .b32.i2p address) — same rationale as the
+        // onion address above: NEVER published or committed, injected from the
+        // build environment via providers.environmentVariable so Gradle tracks it
+        // as a build input. Empty string when unset, in which case I2P routing is
+        // impossible and the transport chain falls through to Tor/clearnet (see
+        // net/TransportResolver.kt — mirrors the desktop i2p.rs RELAY_I2P_DEST).
+        buildConfigField(
+            "String",
+            "RELAY_I2P_DEST",
+            "\"${providers.environmentVariable("RELAY_I2P_DEST").orNull ?: ""}\""
+        )
+
+        // Host of the local I2P router's SOCKS5 proxy (i2pd default 127.0.0.1:4447).
+        // Env-overridable dev/emulator escape hatch: an emulator reaches a
+        // host-side i2pd at 10.0.2.2 rather than 127.0.0.1. The port (4447) is
+        // fixed in i2p/I2pIntegration.kt.
+        buildConfigField(
+            "String",
+            "I2P_PROXY_HOST",
+            "\"${providers.environmentVariable("I2P_PROXY_HOST").orNull ?: "127.0.0.1"}\""
+        )
     }
 
     signingConfigs {

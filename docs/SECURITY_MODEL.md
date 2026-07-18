@@ -313,8 +313,11 @@ An anonymous transport is now the **default**; clearnet is a fallback shown with
 indicator (a yellow dot on the connection-mode badge — informative, not alarming). The relay
 transport hierarchy is **fixed, not user-selectable**: I2P is the primary relay transport, Tor is
 the fallback when I2P is unavailable, and clearnet is the last resort. This replaced the earlier
-v1.5 `tor_first`/`i2p_first` user-choice model. Native clients run Tor in-process (Guardian Project
-`Tor.framework` / `tor-android`) with no Orbot dependency; browser clients auto-detect an `.onion`
+v1.5 `tor_first`/`i2p_first` user-choice model. Mobile clients integrate **external router
+apps** rather than embedding routers: Orbot for Tor (opt-in), and on Android the i2pd router app
+for I2P (auto-detected; primary transport when present, 0.7.0-beta). In-process embedding was
+considered and rejected — no maintained embeddable I2P artifact exists, and bundling routers cuts
+against the project's dependency philosophy. Browser clients auto-detect an `.onion`
 host. Only v3 onion addresses are used. Full rationale for I2P-first is in
 [`docs/TOR_ARCHITECTURE.md`](TOR_ARCHITECTURE.md) §6.
 
@@ -345,7 +348,7 @@ threat model and key backup, is in [`docs/TOR_ARCHITECTURE.md`](TOR_ARCHITECTURE
 
 | Threat | Protected? | Notes |
 | --- | --- | --- |
-| Client IP exposed to relay | ✅ via I2P or Tor | I2P is primary relay transport: live on server + Linux desktop (REST; WS unverified); skeleton on mobile/browser — chain falls to Tor which hides client IP via the relay onion |
+| Client IP exposed to relay | ✅ via I2P or Tor | I2P is primary relay transport: live on server, Linux desktop (REST + WS, verified 2026-07-02), and Android via the external i2pd router app (0.7.0-beta; live-network verification pending); skeleton on iOS/browser — chain falls to Tor which hides client IP via the relay onion |
 | Server location hidden | ❌ | Hetzner IP is public; this is honest and documented |
 | APK distribution takedown | Partial ✅ | Two mirrors (public + secret), more nodes planned |
 | Clearnet traffic analysis | ⚠️ Fallback only | Clearnet is last resort with explicit warning; message confidentiality is unaffected — only anonymity |
