@@ -37,14 +37,18 @@ import kotlin.coroutines.resumeWithException
  */
 class ApiClient(
     baseUrl: String,
-    private var client: OkHttpClient,
+    client: OkHttpClient,
     keyStoreManager: KeyStoreManager,
 ) {
 
-    // Swapped alongside [client] when the transport changes: over I2P the app
-    // dials the http://<b32> relay, over Tor/clearnet the https clearnet host.
-    // @Volatile for the same reason as WsClient's url: written from the
-    // container's apply loop, read on request threads.
+    // Both are swapped together when the transport changes (updateClient +
+    // updateBaseUrl, from AppContainer's apply loop on Dispatchers.Default) and
+    // read on request-issuing threads — so BOTH must be @Volatile for the write
+    // to be visible cross-thread. Over I2P the app dials the http://<b32> relay
+    // through the SOCKS-proxied client; over Tor/clearnet the https clearnet host.
+    @Volatile
+    private var client: OkHttpClient = client
+
     @Volatile
     private var baseUrl: String = baseUrl
 
