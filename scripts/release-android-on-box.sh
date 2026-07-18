@@ -28,7 +28,8 @@
 #   RELEASE_TAG            tag to release (default: v<versionName> from gradle)
 #   KEYSTORE_FILE          path to release .jks (default: /root/sublemonable-release.jks,
 #                          falling back to ~/onion-key-backup/sublemonable-release.jks)
-#   KEY_ALIAS              keystore alias (default: zitrone)
+#   KEY_ALIAS              keystore alias (default: sublemonable — the real alias
+#                          in the existing keystore; see TODO(zitrone-cutover) below)
 #   RELAY_ONION_ADDRESS    relay onion baked into the build (default: read from repo .env)
 #   EXPECTED_CERT_SHA256   pinned signing-cert digest (default: the digest that has
 #                          signed every release so far — override ONLY for a deliberate,
@@ -46,7 +47,12 @@ note() { echo "==> $*"; }
 # identity keys and history — so both the keystore and the built APK are checked
 # against this digest and the script refuses to continue on a mismatch.
 EXPECTED_CERT_SHA256="${EXPECTED_CERT_SHA256:-6c7f92a7b817f8ab975d0ac9ca8ff1d42641311a07aabd2a4142c21722892753}"
-KEY_ALIAS="${KEY_ALIAS:-zitrone}"
+# TODO(zitrone-cutover): the physical keystore's alias is still "sublemonable"
+# (a binary file the rename sweep could not touch — the sweep incorrectly swept
+# this default to "zitrone" and broke the first release cut). It stays
+# "sublemonable" until a deliberate key rotation, same as the keystore file
+# paths above. Do not rename without rotating the actual keystore.
+KEY_ALIAS="${KEY_ALIAS:-sublemonable}"
 
 norm_hex() { printf '%s' "$1" | tr 'A-F' 'a-f' | tr -cd '0-9a-f'; }
 
