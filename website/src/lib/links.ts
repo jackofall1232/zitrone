@@ -16,16 +16,15 @@ export const GITHUB_ISSUES = `${GITHUB_URL}/issues`;
 // ANDROID_BETA_APK_URL, and paste the asset's SHA-256 into ANDROID_BETA_SHA256
 // (`sha256sum <file>`). Remove this block and the /download/beta page once the
 // app ships to the Play Store.
-// TODO(zitrone-cutover): NO Zitrone release has been cut yet — this URL points at a release
-// that does not exist and the checksum is intentionally empty. Fill BOTH on the first real
-// Zitrone release (v0.6.0-beta) before the download page ships anywhere users can reach it:
-// the page renders the checksum for users to verify, so an empty value must never go live.
-export const ANDROID_BETA_VERSION = "v0.6.0-beta";
+// Release pointer — updated every Android release (version tag + asset checksum).
+// Both surfaces (this GitHub Release asset and the Tor onion mirror) must serve a
+// byte-identical binary with a matching checksum.
+export const ANDROID_BETA_VERSION = "v0.7.0-beta";
 export const ANDROID_BETA_APK_URL = `${GITHUB_URL}/releases/download/${ANDROID_BETA_VERSION}/zitrone-${ANDROID_BETA_VERSION}.apk`;
 // 64 hex chars. Must be byte-identical to onion-site/SHA256SUMS — both surfaces
-// must serve the same binary. Verify: sha256sum onion-site/zitrone-v0.6.0-beta.apk
+// must serve the same binary. Verify: sha256sum onion-site/zitrone-v0.7.0-beta.apk
 export const ANDROID_BETA_SHA256 =
-  "6e68556f26cd5b07c5301effd65070ab5d236abc8d45f71816e9e8c8177c83a1";
+  "c029fc89fefa4942bc86efd66ae21a2e205c31643e48f523136b663e99776aae";
 export const ANDROID_BETA_MIN_OS = "Android 8.0 (Oreo)";
 
 // Single source of truth for "is there actually a downloadable release?".
