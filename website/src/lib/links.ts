@@ -27,6 +27,14 @@ export const ANDROID_BETA_APK_URL = `${GITHUB_URL}/releases/download/${ANDROID_B
 export const ANDROID_BETA_SHA256 = "";
 export const ANDROID_BETA_MIN_OS = "Android 8.0 (Oreo)";
 
+// Single source of truth for "is there actually a downloadable release?".
+// Every download CTA gates on this so the site never links to a release asset
+// that doesn't exist yet (a 404 is a bad look AND dishonest). It flips to true
+// automatically the moment ANDROID_BETA_SHA256 is filled with the real 64-char
+// checksum on the first Zitrone release — no other code change needed to go
+// live. (A populated checksum is the tell: it only exists once a build is cut.)
+export const ANDROID_BETA_PUBLISHED = /^[0-9a-f]{64}$/i.test(ANDROID_BETA_SHA256);
+
 // ── Tor download mirror ───────────────────────────────────────────────────────
 // Public .onion address for the APK download mirror (served by the Tor hidden
 // service overlay). This is the publicly-published address — never the relay or

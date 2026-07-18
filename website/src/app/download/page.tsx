@@ -6,7 +6,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { LemonSlice } from "@/components/LemonSlice";
-import { GITHUB_URL, SELF_HOSTING_DOC } from "@/lib/links";
+import { ANDROID_BETA_PUBLISHED, GITHUB_URL, SELF_HOSTING_DOC } from "@/lib/links";
 
 export const metadata: Metadata = {
   title: "Download — Zitrone",
@@ -56,20 +56,24 @@ export default function DownloadPage() {
             <StoreBadge line1="Coming soon to" store="Google Play" />
           </div>
           {/* Deliberately version-agnostic: the beta page owns version and
-              checksum details (they come from lib/links.ts there). */}
+              checksum details (they come from lib/links.ts there). Label and
+              copy reflect whether a build actually exists yet — no overclaim. */}
           <Link
             href="/download/beta"
             className="mt-6 block rounded-md border border-lemon/40 bg-bg-elevated px-5 py-4 transition duration-base ease-brand hover:border-lemon"
           >
             <div className="font-mono text-[10px] uppercase tracking-wide text-lemon">
-              Available now
+              {ANDROID_BETA_PUBLISHED ? "Available now" : "Coming soon"}
             </div>
             <div className="mt-1 font-display text-base font-semibold text-ink-primary">
-              Android beta — sideload while we finish Play Store review
+              {ANDROID_BETA_PUBLISHED
+                ? "Android beta — sideload while we finish Play Store review"
+                : "Android beta — not yet available to download"}
             </div>
             <div className="mt-1 text-sm leading-relaxed text-ink-secondary">
-              A signed APK with SHA-256 checksum and verification steps. It&apos;s a pre-release —
-              expect rough edges.
+              {ANDROID_BETA_PUBLISHED
+                ? "A signed APK with SHA-256 checksum and verification steps. It's a pre-release — expect rough edges."
+                : "No public build has been cut yet. See what a beta install will involve, and track releases on GitHub."}
             </div>
           </Link>
         </section>
