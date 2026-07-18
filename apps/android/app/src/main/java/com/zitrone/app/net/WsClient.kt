@@ -64,16 +64,21 @@ import kotlin.math.min
  */
 class WsClient(
     wsUrl: String,
-    private var client: OkHttpClient,
+    client: OkHttpClient,
     private val scope: CoroutineScope,
     private val diag: (String) -> Unit = {},
 ) {
 
-    // Swapped alongside [client] when the transport changes: ws://<b32>/ws over
-    // I2P, wss://<clearnet-host>/ws over Tor/clearnet. @Volatile for the same
-    // reason as the socket fields below — read on OkHttp callback threads.
+    // client and wsUrl change together on a transport swap (ws://<b32>/ws over
+    // I2P, wss://<clearnet-host>/ws over Tor/clearnet) and openSocket() reads
+    // both — the URL to build the request, the client to open it. Holding them
+    // in one immutable value swapped with a single @Volatile write keeps that
+    // pair consistent, so a swap mid-open can't dial the b32 URL with the
+    // clearnet client (or vice versa). Captured once per openSocket().
+    private class Transport(val client: OkHttpClient, val wsUrl: String)
+
     @Volatile
-    private var wsUrl: String = wsUrl
+    private var transport: Transport = Transport(client, wsUrl)
 
     /** Inbound events, fully typed. No raw frames escape this class. */
     interface Listener {
@@ -124,13 +129,13 @@ class WsClient(
     @Volatile
     private var currentToken: String? = null
 
-    fun updateClient(newClient: OkHttpClient) {
-        client = newClient
-    }
-
-    /** Repoint at a new socket URL — the I2P b32 relay vs the clearnet host. */
-    fun updateUrl(newWsUrl: String) {
-        wsUrl = newWsUrl
+    /**
+     * Swap the OkHttp client and socket URL together when the transport changes.
+     * One @Volatile write, so an openSocket() racing the swap never pairs a
+     * mismatched client/URL.
+     */
+    fun updateTransport(newClient: OkHttpClient, newWsUrl: String) {
+        transport = Transport(newClient, newWsUrl)
     }
 
     /** Opens the socket with the current JWT. Reconnects automatically. */
@@ -188,13 +193,15 @@ class WsClient(
         previous?.close(CLOSE_NORMAL, null)
         _connectionState.value = ConnectionState.CONNECTING
         diag("ws[$reconnectAttempts]: firing WS /ws handshake")
+        // One snapshot: dial this URL with the client that matches it.
+        val t = transport
         val request = Request.Builder()
-            .url(wsUrl)
+            .url(t.wsUrl)
             // The server's /ws middleware authenticates from THIS header (or a
             // ?token= query param) — NOT Authorization, which it never reads.
             .header("Sec-WebSocket-Protocol", token)
             .build()
-        webSocket = client.newWebSocket(request, socketListener)
+        webSocket = t.client.newWebSocket(request, socketListener)
     }
 
     // The listener is shared across sockets. Every callback first checks it came

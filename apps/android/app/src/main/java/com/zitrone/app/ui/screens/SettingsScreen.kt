@@ -217,18 +217,27 @@ fun SettingsScreen(
 
         // ----- Network -------------------------------------------------------
         SectionHeader("Network")
-        // I2P is the fixed-primary relay transport (opt-OUT, unlike Tor). The
-        // toggle only gates auto-detection of a local i2pd router; when a router
-        // isn't ready the chain falls through to Tor/clearnet on its own.
+        // I2P is opt-OUT auto-detect (unlike Tor's opt-in): the toggle only
+        // permits Zitrone to USE a local i2pd router if one is present and its
+        // tunnels are ready. When it isn't, the chain falls through to
+        // Tor/clearnet on its own — the toggle being on does NOT mean traffic is
+        // being routed through I2P. The title and the default-state subtitle are
+        // written so a default-on toggle can't be misread as "routing is active"
+        // (that misread produced a false "app defaults to I2P" bug report).
         ToggleRow(
-            title = "Route through I2P",
+            title = "Use I2P when available",
             subtitle = when {
-                !settings.i2pEnabled -> "Off — the transport chain starts at Tor."
-                transport == TransportState.I2P -> "Active — routing via i2pd's local SOCKS proxy."
+                !settings.i2pEnabled -> "Off — Zitrone won't use I2P even if a router is present."
+                transport == TransportState.I2P -> "Active — routing through i2pd's local SOCKS proxy."
                 i2pdInstalled -> "i2pd found — building tunnels. This can take a minute or two."
                 javaRouterInstalled ->
                     "An I2P app is installed, but Zitrone needs i2pd for relay routing."
-                else -> "Auto-detects a local i2pd router. Install i2pd to enable it."
+                // On + no router: the fresh-install default. Describe the fallback
+                // as what Zitrone WILL use, not what's active now — this row is
+                // shown regardless of online/offline/connecting, so a present-tense
+                // "using your normal connection" would misstate an offline device.
+                else -> "On, but no i2pd router found — Zitrone will use your normal " +
+                    "connection. Install i2pd to upgrade automatically."
             },
             checked = settings.i2pEnabled,
             onToggle = settingsRepository::setI2pEnabled,

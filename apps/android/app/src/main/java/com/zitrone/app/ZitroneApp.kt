@@ -147,10 +147,8 @@ class AppContainer(private val app: Application) {
         // the resolved transport — this is what the post-unlock coordinator.start()
         // picks up.
         httpClient = client
-        apiClient.updateClient(httpClient)
-        apiClient.updateBaseUrl(apiBase)
-        wsClient.updateClient(httpClient)
-        wsClient.updateUrl(ws)
+        apiClient.updateTransport(httpClient, apiBase)
+        wsClient.updateTransport(httpClient, ws)
         // Side effect of choosing Tor kept here (not in the Context-free
         // resolver): ask Orbot to start, exactly as applyTorSetting did. This is
         // a broadcast to Orbot, not a connection of ours — safe pre-unlock, and
