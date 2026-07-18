@@ -3,7 +3,7 @@
   "version": "0.6.0-beta",
   "private": true,
   "license": "AGPL-3.0-only",
-  "description": "Marketing website for Zitrone — sublemonable.com",
+  "description": "Marketing website for Zitrone — zitrone.app",
   "scripts": {
     "dev": "NEXT_TELEMETRY_DISABLED=1 next dev",
     "build": "NEXT_TELEMETRY_DISABLED=1 next build",

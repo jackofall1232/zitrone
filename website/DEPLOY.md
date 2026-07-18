@@ -21,9 +21,12 @@ unlisted `/download/beta` page.
 
 ### Custom domain
 
-Add `sublemonable.com` under the project's **Domains** tab and point DNS as Vercel instructs
-(apex `A`/`ALIAS` or `CNAME` for `www`). This is independent of the `relay.sublemonable.com` host,
-which stays on the self-hosted box behind Caddy.
+Add `zitrone.app` under the project's **Domains** tab and point DNS as Vercel instructs. For DNS
+kept at Porkbun, the standard records are an apex `A` → `76.76.21.21` and a `www` `CNAME` →
+`cname.vercel-dns.com` (use whatever the Domains tab shows for your project — it is authoritative).
+Note `.app` is HSTS-preloaded, so the site is HTTPS-only; Vercel provisions the TLS cert
+automatically. This is independent of the `relay.sublemonable.com` host, which stays on the
+self-hosted box behind Caddy and is NOT repointed as part of the website deploy.
 
 ## Android beta APK (temporary)
 

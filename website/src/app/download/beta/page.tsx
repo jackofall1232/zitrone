@@ -9,9 +9,11 @@ import { LemonSlice } from "@/components/LemonSlice";
 import {
   ANDROID_BETA_APK_URL,
   ANDROID_BETA_MIN_OS,
+  ANDROID_BETA_PUBLISHED,
   ANDROID_BETA_SHA256,
   ANDROID_BETA_VERSION,
   GITHUB_ISSUES,
+  GITHUB_URL,
   PUBLIC_MIRROR_ONION,
 } from "@/lib/links";
 
@@ -51,95 +53,129 @@ export default function AndroidBetaPage() {
           </ul>
         </div>
 
-        {/* Download */}
-        <section className="mt-12">
-          <div className="flex flex-col gap-4 sm:flex-row sm:gap-6">
-            {/* Clearnet download */}
-            <a
-              href={ANDROID_BETA_APK_URL}
-              className="inline-flex items-center gap-3 rounded-md border border-line bg-bg-elevated px-6 py-4 text-left transition duration-base ease-brand hover:border-lemon hover:text-lemon"
-            >
-              <LemonSlice size={32} label="" />
-              <span>
-                <span className="block font-mono text-[10px] uppercase tracking-wide text-ink-muted">
-                  Direct download · {ANDROID_BETA_MIN_OS}+
-                </span>
-                <span className="block font-display text-lg font-semibold text-ink-primary">
-                  Download .apk ({ANDROID_BETA_VERSION})
-                </span>
-              </span>
-            </a>
-          </div>
-
-          {/* Tor mirror callout */}
-          <div className="mt-6 rounded-md border border-line bg-bg-elevated p-5">
-            <p className="font-display text-sm font-semibold text-ink-primary">
-              Want stronger anonymity? Use the Tor mirror.
-            </p>
-            <p className="mt-2 leading-relaxed text-ink-secondary">
-              Downloading over clearnet reveals your IP address to anyone monitoring connections to{" "}
-              <span className="text-ink-primary">sublemonable.com</span>. The Tor onion mirror
-              serves the same APK — same binary, same checksum — without exposing your IP. Open the
-              address below in{" "}
-              <a
-                href="https://www.torproject.org/download/"
-                className="text-lemon underline decoration-lemon/40 underline-offset-4 transition duration-base hover:decoration-lemon"
-              >
-                Tor Browser
-              </a>
-              :
-            </p>
-            <pre className="mt-3 overflow-x-auto rounded-md border border-line bg-bg-secondary p-3 font-mono text-sm text-pulp">
-              <code>{`http://${PUBLIC_MIRROR_ONION}/zitrone-${ANDROID_BETA_VERSION}.apk`}</code>
-            </pre>
-            <p className="mt-2 text-sm leading-relaxed text-ink-muted">
-              The APK served there is identical to the direct download — verify with the same
-              checksum below regardless of which path you use.
-            </p>
-          </div>
-
-          {/* Checksum — single source of truth for both download paths */}
-          <div className="mt-6">
-            <p className="font-mono text-[11px] uppercase tracking-wide text-ink-muted">
-              SHA-256 checksum
-            </p>
-            {ANDROID_BETA_SHA256 ? (
-              <pre className="mt-2 overflow-x-auto rounded-md border border-line bg-bg-secondary p-4 font-mono text-sm text-pulp">
-                <code>{ANDROID_BETA_SHA256}</code>
-              </pre>
-            ) : (
-              <p className="mt-2 leading-relaxed text-ink-secondary">
-                Published with the release once the build is uploaded. Verify before installing.
+        {!ANDROID_BETA_PUBLISHED && (
+          /* No release cut yet — never render a download link that 404s. This
+             whole block is replaced by the real download UI automatically once
+             ANDROID_BETA_SHA256 is filled (ANDROID_BETA_PUBLISHED). */
+          <section className="mt-12">
+            <div className="rounded-md border border-line bg-bg-elevated p-6">
+              <p className="font-display text-lg font-semibold text-ink-primary">
+                No build published yet
               </p>
-            )}
-            <p className="mt-3 leading-relaxed text-ink-secondary">
-              Verify the file you downloaded matches:
-            </p>
-            <pre className="mt-2 overflow-x-auto rounded-md border border-line bg-bg-secondary p-4 font-mono text-sm leading-relaxed text-pulp">
-              <code>{`sha256sum zitrone-${ANDROID_BETA_VERSION}.apk`}</code>
-            </pre>
-          </div>
-        </section>
+              <p className="mt-3 leading-relaxed text-ink-secondary">
+                The Android beta isn&apos;t available to download yet — no release has been cut.
+                When the first signed build ships, the direct <code>.apk</code> download, its
+                SHA-256 checksum, the Tor mirror, and install steps will appear right here. Until
+                then, follow along on GitHub.
+              </p>
+              <a
+                href={`${GITHUB_URL}/releases`}
+                className="mt-5 inline-flex items-center gap-3 rounded-md border border-lemon/40 bg-bg-elevated px-6 py-4 transition duration-base ease-brand hover:border-lemon hover:text-lemon"
+              >
+                <LemonSlice size={28} label="" />
+                <span className="font-display text-base font-semibold text-ink-primary">
+                  Track releases on GitHub
+                </span>
+              </a>
+            </div>
+          </section>
+        )}
 
-        {/* Install steps */}
-        <section className="mt-12">
-          <h2 className="font-display text-2xl font-semibold tracking-display text-ink-primary">
-            Installing
-          </h2>
-          <ol className="mt-4 list-decimal space-y-2 pl-5 leading-relaxed text-ink-secondary">
-            <li>Download the .apk to your Android device (or transfer it over).</li>
-            <li>
-              Open it. Android will ask to allow installs from your browser or file manager — grant{" "}
-              <span className="text-ink-primary">Install unknown apps</span> for that app (Settings
-              → Apps → Special access → Install unknown apps).
-            </li>
-            <li>Confirm the install. Play Protect may warn you because the app is sideloaded.</li>
-            <li>
-              To update, download a newer .apk and install over the top — verify its checksum each
-              time.
-            </li>
-          </ol>
-        </section>
+        {ANDROID_BETA_PUBLISHED && (
+          <>
+            {/* Download */}
+            <section className="mt-12">
+              <div className="flex flex-col gap-4 sm:flex-row sm:gap-6">
+                {/* Clearnet download */}
+                <a
+                  href={ANDROID_BETA_APK_URL}
+                  className="inline-flex items-center gap-3 rounded-md border border-line bg-bg-elevated px-6 py-4 text-left transition duration-base ease-brand hover:border-lemon hover:text-lemon"
+                >
+                  <LemonSlice size={32} label="" />
+                  <span>
+                    <span className="block font-mono text-[10px] uppercase tracking-wide text-ink-muted">
+                      Direct download · {ANDROID_BETA_MIN_OS}+
+                    </span>
+                    <span className="block font-display text-lg font-semibold text-ink-primary">
+                      Download .apk ({ANDROID_BETA_VERSION})
+                    </span>
+                  </span>
+                </a>
+              </div>
+
+              {/* Tor mirror callout */}
+              <div className="mt-6 rounded-md border border-line bg-bg-elevated p-5">
+                <p className="font-display text-sm font-semibold text-ink-primary">
+                  Want stronger anonymity? Use the Tor mirror.
+                </p>
+                <p className="mt-2 leading-relaxed text-ink-secondary">
+                  Downloading over clearnet reveals your IP address to anyone monitoring connections
+                  to <span className="text-ink-primary">zitrone.app</span>. The Tor onion mirror
+                  serves the same APK — same binary, same checksum — without exposing your IP. Open
+                  the address below in{" "}
+                  <a
+                    href="https://www.torproject.org/download/"
+                    className="text-lemon underline decoration-lemon/40 underline-offset-4 transition duration-base hover:decoration-lemon"
+                  >
+                    Tor Browser
+                  </a>
+                  :
+                </p>
+                <pre className="mt-3 overflow-x-auto rounded-md border border-line bg-bg-secondary p-3 font-mono text-sm text-pulp">
+                  <code>{`http://${PUBLIC_MIRROR_ONION}/zitrone-${ANDROID_BETA_VERSION}.apk`}</code>
+                </pre>
+                <p className="mt-2 text-sm leading-relaxed text-ink-muted">
+                  The APK served there is identical to the direct download — verify with the same
+                  checksum below regardless of which path you use.
+                </p>
+              </div>
+
+              {/* Checksum — single source of truth for both download paths */}
+              <div className="mt-6">
+                <p className="font-mono text-[11px] uppercase tracking-wide text-ink-muted">
+                  SHA-256 checksum
+                </p>
+                {ANDROID_BETA_SHA256 ? (
+                  <pre className="mt-2 overflow-x-auto rounded-md border border-line bg-bg-secondary p-4 font-mono text-sm text-pulp">
+                    <code>{ANDROID_BETA_SHA256}</code>
+                  </pre>
+                ) : (
+                  <p className="mt-2 leading-relaxed text-ink-secondary">
+                    Published with the release once the build is uploaded. Verify before installing.
+                  </p>
+                )}
+                <p className="mt-3 leading-relaxed text-ink-secondary">
+                  Verify the file you downloaded matches:
+                </p>
+                <pre className="mt-2 overflow-x-auto rounded-md border border-line bg-bg-secondary p-4 font-mono text-sm leading-relaxed text-pulp">
+                  <code>{`sha256sum zitrone-${ANDROID_BETA_VERSION}.apk`}</code>
+                </pre>
+              </div>
+            </section>
+
+            {/* Install steps */}
+            <section className="mt-12">
+              <h2 className="font-display text-2xl font-semibold tracking-display text-ink-primary">
+                Installing
+              </h2>
+              <ol className="mt-4 list-decimal space-y-2 pl-5 leading-relaxed text-ink-secondary">
+                <li>Download the .apk to your Android device (or transfer it over).</li>
+                <li>
+                  Open it. Android will ask to allow installs from your browser or file manager —
+                  grant <span className="text-ink-primary">Install unknown apps</span> for that app
+                  (Settings → Apps → Special access → Install unknown apps).
+                </li>
+                <li>
+                  Confirm the install. Play Protect may warn you because the app is sideloaded.
+                </li>
+                <li>
+                  To update, download a newer .apk and install over the top — verify its checksum
+                  each time.
+                </li>
+              </ol>
+            </section>
+          </>
+        )}
 
         {/* Feedback */}
         <section className="mt-12">

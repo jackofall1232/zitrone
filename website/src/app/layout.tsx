@@ -26,7 +26,7 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://sublemonable.com"),
+  metadataBase: new URL("https://zitrone.app"),
   title: "Zitrone — Nothing lasts. That's the point.",
   description:
     "End-to-end encrypted messaging that disappears. No logs. No screenshots. No trace. Open source, zero-knowledge, no phone number required.",
@@ -34,7 +34,7 @@ export const metadata: Metadata = {
     title: "Zitrone — Nothing lasts. That's the point.",
     description:
       "End-to-end encrypted messaging that disappears. No logs. No screenshots. No trace.",
-    url: "https://sublemonable.com",
+    url: "https://zitrone.app",
     siteName: "Zitrone",
     type: "website",
   },
