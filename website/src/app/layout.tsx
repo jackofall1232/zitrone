@@ -27,11 +27,11 @@ const jetbrainsMono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://zitrone.app"),
-  title: "Zitrone — Nothing lasts. That's the point.",
+  title: "Zitrone — Privacy, with zest.",
   description:
     "End-to-end encrypted messaging that disappears. No logs. No screenshots. No trace. Open source, zero-knowledge, no phone number required.",
   openGraph: {
-    title: "Zitrone — Nothing lasts. That's the point.",
+    title: "Zitrone — Privacy, with zest.",
     description:
       "End-to-end encrypted messaging that disappears. No logs. No screenshots. No trace.",
     url: "https://zitrone.app",

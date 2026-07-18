@@ -39,7 +39,7 @@ const AUDIENCES: Audience[] = [
   {
     concern: "Data posture",
     who: "Enterprise executives",
-    body: "The safest data is the data you never keep. Messages are store-and-forward only — deleted the instant they're delivered, with burn-on-read and expiry timers on top. No analytics pipeline, no ad model, no logs to subpoena. “Nothing lasts” is a data-minimization posture, not just a tagline.",
+    body: "The safest data is the data you never keep. Messages are store-and-forward only — deleted the instant they're delivered, with burn-on-read and expiry timers on top. No analytics pipeline, no ad model, no logs to subpoena. Data minimization isn't a slogan here — it's the architecture.",
     segments: 8,
   },
   {

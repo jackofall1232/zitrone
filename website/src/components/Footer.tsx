@@ -14,7 +14,7 @@ export function Footer() {
         <div className="flex items-center gap-3">
           <LemonSlice size={32} label="Zitrone" />
           <p className="font-display text-sm font-medium text-ink-secondary">
-            Zitrone. Nothing lasts.
+            Zitrone. Privacy, with zest.
           </p>
         </div>
         <nav className="flex flex-wrap items-center justify-center gap-x-8 gap-y-3 text-sm">
@@ -26,6 +26,12 @@ export function Footer() {
           >
             GitHub
           </a>
+          <Link
+            href="/why-zitrone"
+            className="text-ink-secondary transition duration-base hover:text-lemon"
+          >
+            Why Zitrone
+          </Link>
           <Link
             href="/security"
             className="text-ink-secondary transition duration-base hover:text-lemon"

@@ -23,6 +23,12 @@ export function Nav() {
         </Link>
         <div className="flex items-center gap-6 text-sm">
           <Link
+            href="/why-zitrone"
+            className="hidden text-ink-secondary transition duration-base hover:text-lemon sm:block"
+          >
+            Why Zitrone
+          </Link>
+          <Link
             href="/security"
             className="hidden text-ink-secondary transition duration-base hover:text-lemon sm:block"
           >

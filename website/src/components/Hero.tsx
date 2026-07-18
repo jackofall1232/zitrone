@@ -7,7 +7,7 @@
 
 import { motion } from "framer-motion";
 import Link from "next/link";
-import { LemonSlice } from "@/components/LemonSlice";
+import { HeroLemon } from "@/components/HeroLemon";
 import { ParticleField } from "@/components/ParticleField";
 
 export function Hero() {
@@ -27,14 +27,10 @@ export function Hero() {
         className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_50%,rgba(0,0,0,0.55)_100%)]"
       />
 
-      <motion.div
-        aria-hidden
-        className="relative mb-10 drop-shadow-[0_0_60px_rgba(245,230,66,0.25)]"
-        animate={{ rotate: 360 }}
-        transition={{ duration: 120, ease: "linear", repeat: Infinity }}
-      >
-        <LemonSlice size={220} label="" className="h-[160px] w-[160px] sm:h-[220px] sm:w-[220px]" />
-      </motion.div>
+      {/* One-time entrance (droplet → splash → lemon → cut → spin) that settles
+          on the same static wheel this block always rendered. Reduced-motion
+          visitors get the settled wheel immediately — see HeroLemon. */}
+      <HeroLemon />
 
       <motion.h1
         className="text-center font-display font-bold tracking-display text-ink-primary"
@@ -42,8 +38,8 @@ export function Hero() {
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
       >
-        <span className="block text-5xl sm:text-hero">Nothing lasts.</span>
-        <span className="mt-2 block text-5xl text-lemon sm:text-hero">That&apos;s the point.</span>
+        <span className="block text-5xl sm:text-hero">Privacy,</span>
+        <span className="mt-2 block text-5xl text-lemon sm:text-hero">with zest.</span>
       </motion.h1>
 
       <motion.p
