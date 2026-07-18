@@ -114,6 +114,8 @@ separate, larger change, not required for correctness today.
 - Public identity key (Curve25519)
 - Public prekeys (one-time and signed)
 - Encrypted message envelopes (opaque blob only)
+- Encrypted attachment blobs (opaque, keyed by a token hash — no owner column; see the
+  attachments section below)
 - Delivery receipts (hash of message ID only)
 - Account creation timestamp
 
@@ -361,6 +363,40 @@ Asynchronous, anonymous deposit with no direct channel between the two parties:
 - The drop table has **no sender column**, by construction. Redemption presents the token, returns
   the envelope, and destroys the drop in one operation. A replayed token returns 404. Uncollected
   drops are purged at their 72-hour TTL.
+
+### Attachments (encrypted sideloaded blobs — 0.7.0-beta)
+
+Images and files never ride inside a message envelope. The sender encrypts the attachment
+under a **fresh random AES-256-GCM key**, pads the ciphertext to **64 KiB buckets** (so the
+stored size reveals only a bucket count), and uploads it to a **blind blob store** on the
+relay; the message then carries only a small control payload — token, key, hash, size,
+type — inside its ordinary ratchet-encrypted plaintext.
+
+- **The wire stays uniform.** The envelope's cleartext `media_type` field remains `"text"`
+  for attachment messages — the reserved `"image"`/`"file"` values are deliberately never
+  emitted, because labeling an envelope would hand the relay per-message attachment
+  presence. Like read receipts, attachments are recognized only after decryption; the
+  256-byte envelope padding (and decoy-traffic indistinguishability) is unaffected.
+- **The blob store is blind by the dead-drop construction.** A blob is stored under
+  `SHA-256(token)` with no sender, recipient, or account column; upload is
+  JWT-authenticated purely as spam control, while **redemption is unauthenticated** — the
+  token is the capability, so the relay cannot link a fetch to an account. Redemption
+  atomically returns and destroys the blob (single-use; a replay returns 404), and
+  unredeemed blobs are purged at a 72-hour TTL.
+- **Integrity is sender-bound.** The control payload carries the plaintext's SHA-256 and
+  length; the recipient verifies both after decryption and rejects any mismatch, so
+  neither the relay nor a blob-ID guesser can substitute content.
+- **Metadata hygiene.** Images are downscaled and re-encoded on the sending device, which
+  strips EXIF (location, camera identifiers) before encryption; image filenames are never
+  transmitted. Size cap 8 MiB.
+- **At rest.** Decrypted attachment bytes follow each platform's message-storage policy —
+  on Android that means memory only, never a database, file cache, or disk; saving a
+  received file is an explicit user action through the system file picker, the same
+  sanctioned path as the user copying text.
+- **Unknown control payloads never render.** A payload shaped like a control message that
+  a client does not recognize (a newer client's feature, or an attachment that failed
+  validation) renders as a generic "unsupported message" placeholder — never as raw text,
+  which could paint key material into a chat bubble.
 
 ### Decoy (cover) traffic
 

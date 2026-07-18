@@ -23,6 +23,9 @@ import (
 // ErrDropExists is returned when a deposit collides with an existing drop ID.
 var ErrDropExists = errors.New("drop already exists")
 
+// ErrBlobExists is returned when a blob upload collides with an existing blob ID.
+var ErrBlobExists = errors.New("blob already exists")
+
 //go:embed schema.sql
 var schemaSQL string
 
@@ -240,6 +243,42 @@ func (s *Store) RedeemDrop(ctx context.Context, dropID []byte) ([]byte, error) {
 // PurgeExpiredDrops deletes drops past their TTL whether collected or not.
 func (s *Store) PurgeExpiredDrops(ctx context.Context, now time.Time) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM drops WHERE expires_at <= $1`, now)
+	return tag.RowsAffected(), err
+}
+
+// ── blind blob store (attachments) ───────────────────────────────────────────
+
+// StoreBlob stores an encrypted attachment under a blob ID (hash of a one-time
+// token). No sender/recipient is recorded — the table has no column for it. A
+// duplicate blob ID is rejected so a token cannot be silently overwritten.
+func (s *Store) StoreBlob(ctx context.Context, blobID, ciphertext []byte, expiresAt time.Time) error {
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO blobs (blob_id, ciphertext, expires_at)
+		VALUES ($1, $2, $3) ON CONFLICT (blob_id) DO NOTHING`,
+		blobID, ciphertext, expiresAt)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrBlobExists
+	}
+	return nil
+}
+
+// RedeemBlob returns and destroys a blob in a single statement — single-use by
+// design. A second redemption of the same token hits no row and returns
+// pgx.ErrNoRows, which the handler maps to 404. Expired blobs are not returned.
+func (s *Store) RedeemBlob(ctx context.Context, blobID []byte) ([]byte, error) {
+	var ciphertext []byte
+	err := s.pool.QueryRow(ctx, `
+		DELETE FROM blobs WHERE blob_id = $1 AND expires_at > now()
+		RETURNING ciphertext`, blobID).Scan(&ciphertext)
+	return ciphertext, err
+}
+
+// PurgeExpiredBlobs deletes blobs past their TTL whether collected or not.
+func (s *Store) PurgeExpiredBlobs(ctx context.Context, now time.Time) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM blobs WHERE expires_at <= $1`, now)
 	return tag.RowsAffected(), err
 }
 

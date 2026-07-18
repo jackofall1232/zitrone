@@ -76,3 +76,18 @@ CREATE TABLE IF NOT EXISTS drops (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS drops_expires_idx ON drops (expires_at);
+
+-- Blind blob store (attachments): sideloaded encrypted attachment bytes that
+-- never ride in a message envelope. Stored under the hash of a one-time token
+-- (blob_id = SHA-256(token)), exactly like drops — the relay never sees the
+-- token until redemption. There is intentionally NO sender/recipient/account/key
+-- column: the store is blind by construction, so a deposit cannot be linked to
+-- an account and a redemption cannot be linked to a deposit. A blob is single-use
+-- and is destroyed on pickup or when its TTL expires, whichever comes first.
+CREATE TABLE IF NOT EXISTS blobs (
+    blob_id    BYTEA PRIMARY KEY,        -- SHA-256(token); no sender field, by design
+    ciphertext BYTEA NOT NULL,           -- opaque, bucket-padded AEAD ciphertext
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS blobs_expires_idx ON blobs (expires_at);

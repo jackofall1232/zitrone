@@ -32,10 +32,17 @@ object MessagePadding {
 
     private val random = SecureRandom()
 
-    /** Pads [plaintext] to the next [BLOCK_BYTES] boundary (minimum one block). */
-    fun pad(plaintext: ByteArray): ByteArray {
+    /**
+     * Pads [plaintext] to the next [block] boundary (minimum one block). The
+     * [block] parameter defaults to [BLOCK_BYTES] for message plaintext;
+     * attachment blobs pad to a 64 KiB block so the stored ciphertext length
+     * reveals only a bucket count (see crypto/AttachmentCrypto). The layout is
+     * identical at either granularity, matching packages/crypto padding.ts
+     * `pad(plaintext, block)`.
+     */
+    fun pad(plaintext: ByteArray, block: Int = BLOCK_BYTES): ByteArray {
         val bodyLen = LEN_PREFIX_BYTES + plaintext.size
-        val totalLen = maxOf(((bodyLen + BLOCK_BYTES - 1) / BLOCK_BYTES) * BLOCK_BYTES, BLOCK_BYTES)
+        val totalLen = maxOf(((bodyLen + block - 1) / block) * block, block)
         val out = ByteArray(totalLen)
         out[0] = (plaintext.size ushr 24).toByte()
         out[1] = (plaintext.size ushr 16).toByte()

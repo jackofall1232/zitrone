@@ -283,6 +283,18 @@ private fun ZitroneRoot(
                         onSend = { text, ttl, burn ->
                             container.coordinator.sendText(conversation, text, ttl, burn)
                         },
+                        onSendAttachment = { bytes, kind, mimetype, filename, caption, ttl, burn ->
+                            container.coordinator.sendAttachment(
+                                conversation = conversation,
+                                bytes = bytes,
+                                kind = kind,
+                                mimetype = mimetype,
+                                filename = filename,
+                                caption = caption,
+                                ttlSeconds = ttl,
+                                burnOnRead = burn,
+                            )
+                        },
                         // Through the coordinator (not the repository directly):
                         // seen messages arm burn-on-read timers AND, when
                         // enabled, send the encrypted read receipt.

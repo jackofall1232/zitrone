@@ -204,6 +204,37 @@ class ApiClient(
         return json.getInt("count")
     }
 
+    /**
+     * POST /api/v1/blobs — deposit an encrypted attachment blob (JWT-auth;
+     * upload metadata is no more revealing than message.send). The blob ID is
+     * SHA-256(token), so the relay never sees the token until redemption — the
+     * same blindness construction as dead drops. A 409 (duplicate blob_id) or
+     * any other non-2xx surfaces as an [ApiException] so the send fails cleanly.
+     * Both arguments are STANDARD base64 (see crypto/AttachmentCrypto).
+     */
+    suspend fun uploadBlob(blobIdBase64: String, ciphertextBase64: String) {
+        val body = JSONObject().apply {
+            put("blob_id", blobIdBase64)
+            put("ciphertext", ciphertextBase64)
+        }
+        execute(post("/api/v1/blobs", body))
+    }
+
+    /**
+     * POST /api/v1/blobs/redeem — present the token; receive the blob; the blob
+     * is destroyed in the same operation (single-use; a replay returns 404). NO
+     * authentication: the token is the capability, and an unauthenticated fetch
+     * means the relay cannot link a redemption to any account. Returns the
+     * ciphertext as STANDARD base64. A 404 (expired or already redeemed) is an
+     * [ApiException] with code 404 — callers surface it as "unavailable", not a
+     * crash.
+     */
+    suspend fun redeemBlob(tokenBase64: String): String {
+        val body = JSONObject().put("token", tokenBase64)
+        val json = execute(post("/api/v1/blobs/redeem", body, authenticated = false))
+        return json.getString("ciphertext")
+    }
+
     /** DELETE /api/v1/account — full, irreversible purge of all server data. */
     suspend fun deleteAccount() {
         try {

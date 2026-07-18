@@ -10,6 +10,9 @@ import type {
   DropDepositRequest,
   DropDepositResponse,
   DropRedeemResponse,
+  BlobDepositRequest,
+  BlobDepositResponse,
+  BlobRedeemResponse,
 } from "@zitrone/protocol";
 import { isTauri, nativeRequest } from "./nativeTransport.js";
 import { getServerUrl, SERVER_URL } from "../config.js";
@@ -132,5 +135,18 @@ export const api = {
 
   redeemDrop(token: string): Promise<DropRedeemResponse> {
     return request("/api/v1/drops/redeem", { method: "POST", body: JSON.stringify({ token }) });
+  },
+
+  // Attachment blobs (v1.6) — sideloaded, blind store. Deposit is JWT-auth'd
+  // (spam control, same posture as message.send); redeem is unauthenticated —
+  // the token is the capability and an anonymous fetch keeps the relay from
+  // linking a redemption to any account. Both ride the same transport
+  // abstraction as every other call (Tauri native pinned/I2P client on desktop).
+  depositBlob(body: BlobDepositRequest, token: string): Promise<BlobDepositResponse> {
+    return request("/api/v1/blobs", { method: "POST", body: JSON.stringify(body) }, token);
+  },
+
+  redeemBlob(token: string): Promise<BlobRedeemResponse> {
+    return request("/api/v1/blobs/redeem", { method: "POST", body: JSON.stringify({ token }) });
   },
 };

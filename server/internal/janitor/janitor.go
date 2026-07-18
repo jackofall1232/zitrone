@@ -37,6 +37,13 @@ func Run(ctx context.Context, store *db.Store, ttl time.Duration) {
 			} else if drops > 0 {
 				log.Printf("janitor: purged %d expired dead drops", drops)
 			}
+			// Attachment blobs are destroyed at their TTL whether redeemed or not.
+			blobs, err := store.PurgeExpiredBlobs(ctx, time.Now())
+			if err != nil {
+				log.Printf("janitor: blob purge failed: %v", err)
+			} else if blobs > 0 {
+				log.Printf("janitor: purged %d expired attachment blobs", blobs)
+			}
 		}
 	}
 }

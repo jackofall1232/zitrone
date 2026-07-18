@@ -36,13 +36,18 @@ type Config struct {
 	SecretOnionAddress string // unpublished, word-of-mouth — same mirror content, separate address
 	RelayOnionAddress  string // unpublished, baked into app binary — serves the API relay only
 	// I2P skeleton — parsed but unused in v1.5 (see docs/TOR_ARCHITECTURE.md §7).
-	I2PEnabled        bool     // future master switch for live I2P traffic
-	I2PEepsiteDest    string   // future: base64 I2P destination
-	DropTTLHours      int      // dead-drop lifetime, collected or not
-	DropPoWDifficulty int      // leading zero bits required on deposit proof-of-work
-	RelayPrivateKey   string   // base64 Curve25519 private key; enables /relay/forward when set
-	RelayPublicKey    string   // base64 Curve25519 public key advertised in the relay registry
-	RelayPeers        []string // allowlist of next-hop forward URLs; forwarding fails closed otherwise
+	I2PEnabled        bool   // future master switch for live I2P traffic
+	I2PEepsiteDest    string // future: base64 I2P destination
+	DropTTLHours      int    // dead-drop lifetime, collected or not
+	DropPoWDifficulty int    // leading zero bits required on deposit proof-of-work
+	// Blind blob store (attachments). BlobMaxBytes caps the *plaintext-equivalent*
+	// attachment size; the server enforces a slightly larger ciphertext cap that
+	// accounts for bucket padding + AEAD overhead (see api.BlobEffectiveCap).
+	BlobMaxBytes    int      // max attachment plaintext bytes (ciphertext cap adds slack)
+	BlobTTLHours    int      // blob lifetime, redeemed or not
+	RelayPrivateKey string   // base64 Curve25519 private key; enables /relay/forward when set
+	RelayPublicKey  string   // base64 Curve25519 public key advertised in the relay registry
+	RelayPeers      []string // allowlist of next-hop forward URLs; forwarding fails closed otherwise
 }
 
 func Load() (*Config, error) {
@@ -66,6 +71,8 @@ func Load() (*Config, error) {
 		I2PEepsiteDest:             os.Getenv("I2P_EEPSITE_DEST"),
 		DropTTLHours:               envInt("DROP_TTL_HOURS", 72),
 		DropPoWDifficulty:          envInt("DROP_POW_DIFFICULTY", 20),
+		BlobMaxBytes:               envInt("BLOB_MAX_BYTES", 8*1024*1024),
+		BlobTTLHours:               envInt("BLOB_TTL_HOURS", 72),
 		RelayPrivateKey:            os.Getenv("RELAY_PRIVATE_KEY"),
 		RelayPublicKey:             os.Getenv("RELAY_PUBLIC_KEY"),
 		RelayPeers:                 splitCSV(os.Getenv("RELAY_PEERS")),

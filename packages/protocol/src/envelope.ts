@@ -3,7 +3,15 @@
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-/** Media types a message envelope may carry. The payload is always an opaque ciphertext. */
+/**
+ * Media types a message envelope may carry. The payload is always an opaque
+ * ciphertext. NOTE: "image" and "file" are reserved but DELIBERATELY NEVER
+ * EMITTED — media_type is cleartext the relay can read, so labeling an
+ * envelope "image" would leak per-message attachment presence. Attachment
+ * messages ride "text" and are recognized after decryption by their control
+ * payload (attachments.ts), exactly like read receipts (receipts.ts). The
+ * values stay in the schema so older parsers keep accepting them.
+ */
 export type MediaType = "text" | "image" | "file";
 
 export const PROTOCOL_VERSION = "1" as const;

@@ -104,6 +104,48 @@ class MessageRepository(
         ) != null
     }
 
+    /**
+     * The redeemed attachment blob decrypted and verified — swap the in-memory
+     * bytes into the placeholder bubble and flip it to LOADED. The bytes stay
+     * in memory only, like every decrypted plaintext. No-op if the message
+     * burned away or carries no attachment while the redeem was in flight.
+     */
+    fun attachmentLoaded(messageId: String, bytes: ByteArray) {
+        update(
+            messageId,
+            precondition = { it.attachment != null },
+            transform = {
+                it.copy(
+                    attachment = it.attachment!!.copy(
+                        loadState = AttachmentLoadState.LOADED,
+                        bytes = bytes,
+                    ),
+                )
+            },
+        )
+    }
+
+    /**
+     * The blob is gone (expired, already redeemed, or failed verification) —
+     * flip the placeholder to a persistent UNAVAILABLE state rather than
+     * crashing or retrying. One-shot redemption means a lost blob never comes
+     * back, so this is terminal.
+     */
+    fun attachmentUnavailable(messageId: String) {
+        update(
+            messageId,
+            precondition = { it.attachment != null },
+            transform = {
+                it.copy(
+                    attachment = it.attachment!!.copy(
+                        loadState = AttachmentLoadState.UNAVAILABLE,
+                        bytes = null,
+                    ),
+                )
+            },
+        )
+    }
+
     /** The peer's read receipt arrived — flip our outgoing copy to READ. */
     fun onPeerRead(messageId: String) {
         update(
