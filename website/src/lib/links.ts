@@ -24,7 +24,8 @@ export const ANDROID_BETA_VERSION = "v0.6.0-beta";
 export const ANDROID_BETA_APK_URL = `${GITHUB_URL}/releases/download/${ANDROID_BETA_VERSION}/zitrone-${ANDROID_BETA_VERSION}.apk`;
 // 64 hex chars. Must be byte-identical to onion-site/SHA256SUMS — both surfaces
 // must serve the same binary. Verify: sha256sum onion-site/zitrone-v0.6.0-beta.apk
-export const ANDROID_BETA_SHA256 = "";
+export const ANDROID_BETA_SHA256 =
+  "6e68556f26cd5b07c5301effd65070ab5d236abc8d45f71816e9e8c8177c83a1";
 export const ANDROID_BETA_MIN_OS = "Android 8.0 (Oreo)";
 
 // Single source of truth for "is there actually a downloadable release?".
