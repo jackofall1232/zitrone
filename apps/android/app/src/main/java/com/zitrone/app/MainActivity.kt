@@ -34,6 +34,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.zitrone.app.data.Conversation
+import com.zitrone.app.i2p.I2pIntegration
 import com.zitrone.app.security.RootDetection
 import com.zitrone.app.tor.TorIntegration
 import com.zitrone.app.ui.components.buildContactExchangePayload
@@ -171,6 +172,7 @@ private fun ZitroneRoot(
     val allMessages by container.messageRepository.messages.collectAsState()
     val typingPeers by container.coordinator.typingPeers.collectAsState()
     val connectivity by container.coordinator.connectivity.collectAsState()
+    val transportState by container.transportResolver.state.collectAsState()
     val accountId by container.apiClient.accountIdFlow.collectAsState()
 
     var route by remember { mutableStateOf<Route>(Route.Splash) }
@@ -308,11 +310,21 @@ private fun ZitroneRoot(
                 var torAvailable by remember {
                     mutableStateOf(TorIntegration.isOrbotInstalled(context))
                 }
+                // Same re-check for the I2P router apps: the user may install
+                // i2pd (or a Java I2P app) via the actions below and return here.
+                var i2pdInstalled by remember {
+                    mutableStateOf(I2pIntegration.isI2pdInstalled(context))
+                }
+                var javaRouterInstalled by remember {
+                    mutableStateOf(I2pIntegration.isJavaRouterInstalled(context))
+                }
                 val lifecycleOwner = LocalLifecycleOwner.current
                 DisposableEffect(lifecycleOwner, context) {
                     val observer = LifecycleEventObserver { _, event ->
                         if (event == Lifecycle.Event.ON_RESUME) {
                             torAvailable = TorIntegration.isOrbotInstalled(context)
+                            i2pdInstalled = I2pIntegration.isI2pdInstalled(context)
+                            javaRouterInstalled = I2pIntegration.isJavaRouterInstalled(context)
                         }
                     }
                     lifecycleOwner.lifecycle.addObserver(observer)
@@ -334,7 +346,10 @@ private fun ZitroneRoot(
                     accountId = accountId,
                     identityFingerprint = identityFingerprint,
                     connectivity = connectivity,
+                    transportState = transportState,
                     torAvailable = torAvailable,
+                    i2pdInstalled = i2pdInstalled,
+                    javaRouterInstalled = javaRouterInstalled,
                     onBack = { route = Route.ChatList },
                     onDeleteAccount = {
                         container.coordinator.deleteAccountAndWipe {

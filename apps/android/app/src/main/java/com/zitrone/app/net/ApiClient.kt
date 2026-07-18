@@ -36,10 +36,17 @@ import kotlin.coroutines.resumeWithException
  * Request/response bodies are JSON. Nothing here is ever logged.
  */
 class ApiClient(
-    private val baseUrl: String,
+    baseUrl: String,
     private var client: OkHttpClient,
     keyStoreManager: KeyStoreManager,
 ) {
+
+    // Swapped alongside [client] when the transport changes: over I2P the app
+    // dials the http://<b32> relay, over Tor/clearnet the https clearnet host.
+    // @Volatile for the same reason as WsClient's url: written from the
+    // container's apply loop, read on request threads.
+    @Volatile
+    private var baseUrl: String = baseUrl
 
     private val authPrefs = keyStoreManager.prefs(KeyStoreManager.PREFS_AUTH)
 
@@ -67,6 +74,11 @@ class ApiClient(
     /** Swap the transport (e.g. after toggling Tor). */
     fun updateClient(newClient: OkHttpClient) {
         client = newClient
+    }
+
+    /** Repoint at a new base URL — the I2P b32 relay vs the clearnet host. */
+    fun updateBaseUrl(newBaseUrl: String) {
+        baseUrl = newBaseUrl
     }
 
     // -- token storage (EncryptedSharedPreferences — never plaintext) ---------

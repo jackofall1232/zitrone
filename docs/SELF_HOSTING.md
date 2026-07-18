@@ -295,6 +295,20 @@ export RELAY_I2P_DEST=<b32address>.b32.i2p
 pnpm tauri build
 ```
 
+### Bake the destination into Android builds (0.7.0-beta)
+
+The Android app reads the same `RELAY_I2P_DEST` env var at build time
+(BuildConfig, same pattern as `RELAY_ONION_ADDRESS`). Leave it unset for a
+build without I2P support — the transport chain then starts at Tor. Users
+additionally need the i2pd router app (`org.purplei2p.i2pd`) installed on the
+device; Zitrone routes through its SOCKS5 proxy at `127.0.0.1:4447` and never
+bundles a router.
+
+```bash
+export RELAY_I2P_DEST=<b32address>.b32.i2p
+./gradlew :app:assembleRelease
+```
+
 ### Back up your I2P destination key
 
 The destination key file (`zitrone-relay.dat`) lives in the `i2p-data` Docker

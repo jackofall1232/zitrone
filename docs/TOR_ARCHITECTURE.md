@@ -122,9 +122,9 @@ adversary attempting timing correlation must compromise two separately-built
 paths rather than one shared circuit. That is a stronger fit for relay
 (messaging) traffic than Tor's bidirectional circuits. Tor remains the fallback
 specifically for its much larger anonymity set, which matters when I2P isn't
-reachable. In v1.5 I2P is a skeleton (§7), so the chain always falls through to
-Tor; live I2P support in a future release requires no change to the chain
-itself, only to `detectI2P()`.
+reachable. On iOS and in the browser I2P remains a skeleton (§7) and the chain
+falls through to Tor; Linux desktop and — as of 0.7.0-beta — Android resolve I2P
+live. The chain itself needed no change for that, only per-platform detection.
 
 The download/mirror transport is unchanged and independent of this chain: Tor
 onion primary, clearnet fallback (§2).
@@ -146,10 +146,10 @@ connection refused" and does not connect over clearnet at all.
 
 ## 7. I2P — status and scope
 
-I2P is a **live relay transport** on the server and Linux desktop. It remains a
-**skeleton on mobile (iOS, Android) and browser** — the same in-process SDK
-constraint that blocks Tor on mobile (§8, `docs/V1_5_STATUS.md`) blocks I2P there
-too.
+I2P is a **live relay transport** on the server, Linux desktop, and — as of
+0.7.0-beta — **Android** (external router app; see below). It remains a
+**skeleton on iOS and browser**: iOS has neither an embeddable I2P SDK nor an
+external-router ecosystem, and browser JavaScript cannot control proxies.
 
 ### Server
 
@@ -227,13 +227,40 @@ survived 60 s idle across one server ping cycle (each saw a server ping at ~50 s
 and auto-ponged); and a post-idle message round-tripped, confirming neither side
 silently dropped. `TODO(i2p-ws-verify)` is **closed**.
 
-### Mobile (iOS, Android) — blocked
+### Android — external router app (0.7.0-beta)
 
-No production-ready I2P router SDK for iOS or Android exists for in-process
-embedding. `detectI2P()` always returns false on mobile; the chain falls through to
-Tor. Adding in-process I2P on mobile is tracked in `docs/V1_5_STATUS.md` as a
-future item with the same dependency class as in-process Tor (Guardian Project
-`Tor.framework` / `tor-android`).
+No maintained embeddable I2P artifact exists (the Java router's Android client
+AAR is frozen at 0.9.49/~2021; i2pd-android ships only as an APK), so Android
+follows the **Orbot pattern**: depend on an external router app instead of
+bundling one.
+
+- **Router**: i2pd for Android (`org.purplei2p.i2pd`), via its default SOCKS5
+  proxy at `127.0.0.1:4447`. OkHttp's SOCKS support passes the unresolved
+  `.b32.i2p` hostname through as a SOCKS5 domain address — the same mechanism
+  the Orbot wiring uses — so REST and WebSocket work with no manual CONNECT.
+  The official Java I2P app is *detected* (both of its package IDs,
+  `net.i2p.android` on Play and `net.i2p.android.router` on F-Droid) but not
+  wired in v1 — its SOCKS support is weak; the UI tells those users i2pd is
+  needed for relay routing.
+- **Endpoint**: the client dials `http://<b32>` / `ws://<b32>/ws` directly —
+  there is no clearnet-hostname-through-proxy shortcut for I2P. The destination
+  is baked at build time via the `RELAY_I2P_DEST` env var (BuildConfig, same
+  pattern as `RELAY_ONION_ADDRESS`). No TLS and no pin over I2P — the B32
+  address is the identity (§4); Android's cleartext policy is opened for
+  `b32.i2p` subdomains only (network security config). WS auth keeps the
+  `Sec-WebSocket-Protocol` token header — transport-independent.
+- **Readiness**: the router accepts SOCKS connections before its tunnels are
+  built, so a bare TCP probe of 4447 proves nothing. Readiness is a real SOCKS5
+  CONNECT to the relay destination; while tunnels build (1–3 min after router
+  start) the chain runs on Tor/clearnet and the client polls in the background,
+  promoting to I2P when the probe succeeds.
+- **Status**: implemented in 0.7.0-beta with unit-tested chain resolution;
+  live-network verification against the production i2pd tunnel is pending.
+
+### iOS — blocked
+
+Neither an embeddable I2P SDK nor an external I2P router app exists for iOS.
+`detectI2P()` remains an honest stub; the chain falls through to Tor.
 
 ### Browser — blocked
 

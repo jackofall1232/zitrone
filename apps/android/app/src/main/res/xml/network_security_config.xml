@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Zitrone — Copyright (C) 2026 Zitrone contributors
+  Licensed under the GNU Affero General Public License v3.0 or later.
+  See the LICENSE file in the repository root for full license text.
+  SPDX-License-Identifier: AGPL-3.0-only
+-->
+<!--
+  Cleartext is BLOCKED everywhere by default (base-config). The single exception
+  is the .b32.i2p namespace: every I2P destination is a `<52-chars>.b32.i2p`
+  name, and the relay endpoint is reached over plain http:// and ws:// because
+  I2P itself is the transport-security layer (the b32 address is the destination's
+  cryptographic identity — see docs/TOR_ARCHITECTURE.md §4/§7). includeSubdomains
+  covers the actual `<b32>.b32.i2p` host. relay.sublemonable.com (clearnet/Tor)
+  keeps TLS-only — it never appears here.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">b32.i2p</domain>
+    </domain-config>
+</network-security-config>

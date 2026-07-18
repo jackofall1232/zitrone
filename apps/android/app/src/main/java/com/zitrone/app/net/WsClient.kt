@@ -63,11 +63,17 @@ import kotlin.math.min
  * "Connecting…" (exactly how v1.5.3 failed).
  */
 class WsClient(
-    private val wsUrl: String,
+    wsUrl: String,
     private var client: OkHttpClient,
     private val scope: CoroutineScope,
     private val diag: (String) -> Unit = {},
 ) {
+
+    // Swapped alongside [client] when the transport changes: ws://<b32>/ws over
+    // I2P, wss://<clearnet-host>/ws over Tor/clearnet. @Volatile for the same
+    // reason as the socket fields below — read on OkHttp callback threads.
+    @Volatile
+    private var wsUrl: String = wsUrl
 
     /** Inbound events, fully typed. No raw frames escape this class. */
     interface Listener {
@@ -120,6 +126,11 @@ class WsClient(
 
     fun updateClient(newClient: OkHttpClient) {
         client = newClient
+    }
+
+    /** Repoint at a new socket URL — the I2P b32 relay vs the clearnet host. */
+    fun updateUrl(newWsUrl: String) {
+        wsUrl = newWsUrl
     }
 
     /** Opens the socket with the current JWT. Reconnects automatically. */

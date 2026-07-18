@@ -25,16 +25,17 @@ verified, and what remains. It follows the master's `versions.1.5.0.build_order`
 - **In-process Tor** (`Tor.framework` on iOS, `tor-android` on Android). The Tor-first *model* and
   badge exist; embedding the Tor binaries requires the Guardian Project libraries and a device/SDK
   build. Web Tor works today via the Tor Browser + `.onion` host (already detected).
-- **In-process I2P on mobile and WS-over-I2P on desktop.** The I2P relay transport is live on
-  server (docker-compose.i2p.yml, i2pd server tunnel, B32 destination) and Linux desktop (startup
-  probe via `check_i2p_connectivity`, REST routing through `i2p_request`). Two items remain blocked:
-  (1) **Mobile in-process I2P** — no production I2P router SDK exists for iOS/Android in-process
-  embedding (same SDK dependency class as Guardian Project's `Tor.framework`/`tor-android`);
-  `detectI2P()` is an honest stub on mobile, the chain falls correctly to Tor; (2) **WS-over-I2P**
-  — WebSocket upgrade through i2pd's HTTP CONNECT proxy is not trivially supported by
-  `tokio-tungstenite` and has not been empirically verified on a live I2P network; `TODO(i2p-ws-verify)`
-  in `i2p.rs`. Browser I2P is architecturally blocked (JS cannot set proxy). Neither mobile nor
-  browser I2P is complete or shippable.
+- **I2P client coverage.** The I2P relay transport is live on server (docker-compose.i2p.yml, i2pd
+  server tunnel, B32 destination) and Linux desktop — including **WS-over-I2P, verified end-to-end
+  on a live i2pd tunnel 2026-07-02** (manual CONNECT through the local HTTP proxy;
+  `TODO(i2p-ws-verify)` is closed — see `docs/TOR_ARCHITECTURE.md` §7, which this file previously
+  contradicted). **Android I2P landed in 0.7.0-beta** via the external i2pd router app
+  (`org.purplei2p.i2pd`, SOCKS5 `127.0.0.1:4447`) — the earlier "needs an in-process SDK" framing
+  was superseded once research showed no maintained embeddable artifact exists (Java client AAR
+  frozen at 0.9.49; i2pd-android is APK-only); the Orbot-style external-app pattern is the viable
+  path, and live-network verification is pending. Still blocked: **iOS** (no embeddable SDK *or*
+  external router app exists) and **browser** (architecturally — JS cannot set proxies); on both,
+  `detectI2P()` is an honest stub and the chain falls correctly to Tor.
 - **Web multi-vault storage wiring.** The vault crypto (`packages/crypto/vault.ts`) is complete and
   timing-parity tested. Wiring it into `apps/web` `lib/storage.ts` + the unlock/setup flow was
   deliberately *not* shipped half-finished: correct plausible-deniability storage requires every

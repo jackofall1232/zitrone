@@ -29,6 +29,14 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
         val readReceipts: Boolean = true,
         /** Tor via Orbot — strictly opt-in (security.transport.tor). */
         val torEnabled: Boolean = false,
+        /**
+         * I2P via a local router (i2pd). Opt-OUT (default ON) — the ASYMMETRY
+         * with Tor is deliberate: I2P is the fixed-primary relay transport, and
+         * auto-detecting a running router is cheap and has no downside, so it's
+         * on by default and simply falls through the chain when no router is
+         * present. Tor stays opt-in because it's a user-chosen fallback.
+         */
+        val i2pEnabled: Boolean = true,
     )
 
     private val _settings = MutableStateFlow(load())
@@ -49,6 +57,8 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
 
     fun setTorEnabled(enabled: Boolean) = put { putBoolean(KEY_TOR, enabled) }
 
+    fun setI2pEnabled(enabled: Boolean) = put { putBoolean(KEY_I2P, enabled) }
+
     private fun put(edit: android.content.SharedPreferences.Editor.() -> Unit) {
         prefs.edit().apply(edit).apply()
         _settings.value = load()
@@ -61,6 +71,7 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
         burnOnReadDefault = prefs.getBoolean(KEY_BURN_ON_READ, false),
         readReceipts = prefs.getBoolean(KEY_READ_RECEIPTS, true),
         torEnabled = prefs.getBoolean(KEY_TOR, false),
+        i2pEnabled = prefs.getBoolean(KEY_I2P, true),
     )
 
     companion object {
@@ -71,5 +82,6 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
         private const val KEY_BURN_ON_READ = "burn_on_read_default"
         private const val KEY_READ_RECEIPTS = "read_receipts"
         private const val KEY_TOR = "tor_enabled"
+        private const val KEY_I2P = "i2p_enabled"
     }
 }
