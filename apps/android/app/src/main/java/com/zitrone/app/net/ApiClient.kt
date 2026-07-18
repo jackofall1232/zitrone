@@ -41,16 +41,20 @@ class ApiClient(
     keyStoreManager: KeyStoreManager,
 ) {
 
-    // Both are swapped together when the transport changes (updateClient +
-    // updateBaseUrl, from AppContainer's apply loop on Dispatchers.Default) and
-    // read on request-issuing threads — so BOTH must be @Volatile for the write
-    // to be visible cross-thread. Over I2P the app dials the http://<b32> relay
+    // client and baseUrl change together on a transport swap (from AppContainer's
+    // apply loop on Dispatchers.Default) and must be read as a CONSISTENT PAIR:
+    // request() reads baseUrl to build the URL, execute() reads the client to run
+    // it — two reads a mid-flight swap could otherwise straddle, pairing e.g. the
+    // I2P SOCKS client with the clearnet https URL (a request that would then
+    // fail spuriously). Holding both in one immutable value swapped with a single
+    // @Volatile write makes the swap atomic; request() captures one snapshot and
+    // rides the matching client along on the Request tag so execute() runs the
+    // exact client that built the URL. Over I2P the app dials http://<b32>
     // through the SOCKS-proxied client; over Tor/clearnet the https clearnet host.
-    @Volatile
-    private var client: OkHttpClient = client
+    private class Transport(val client: OkHttpClient, val baseUrl: String)
 
     @Volatile
-    private var baseUrl: String = baseUrl
+    private var transport: Transport = Transport(client, baseUrl)
 
     private val authPrefs = keyStoreManager.prefs(KeyStoreManager.PREFS_AUTH)
 
@@ -75,14 +79,13 @@ class ApiClient(
 
     data class SessionTokens(val accessToken: String, val refreshToken: String)
 
-    /** Swap the transport (e.g. after toggling Tor). */
-    fun updateClient(newClient: OkHttpClient) {
-        client = newClient
-    }
-
-    /** Repoint at a new base URL — the I2P b32 relay vs the clearnet host. */
-    fun updateBaseUrl(newBaseUrl: String) {
-        baseUrl = newBaseUrl
+    /**
+     * Swap the OkHttp client and endpoint URL together when the transport
+     * changes (I2P b32 vs clearnet host). One @Volatile write, so a concurrent
+     * request never sees a half-updated client/URL pair.
+     */
+    fun updateTransport(newClient: OkHttpClient, newBaseUrl: String) {
+        transport = Transport(newClient, newBaseUrl)
     }
 
     // -- token storage (EncryptedSharedPreferences — never plaintext) ---------
@@ -270,7 +273,13 @@ class ApiClient(
     )
 
     private fun request(path: String, authenticated: Boolean = true): Request.Builder {
-        val builder = Request.Builder().url(baseUrl.trimEnd('/') + path)
+        // One snapshot: the URL and the client that will run it must match, so
+        // capture both from the same Transport and carry the client on the tag
+        // for execute() to read (see the Transport field comment).
+        val t = transport
+        val builder = Request.Builder()
+            .url(t.baseUrl.trimEnd('/') + path)
+            .tag(OkHttpClient::class.java, t.client)
         if (authenticated) {
             accessToken?.let { builder.header("Authorization", "Bearer $it") }
         }
@@ -284,7 +293,11 @@ class ApiClient(
 
     private suspend fun execute(req: Request): JSONObject =
         suspendCancellableCoroutine { continuation ->
-            val call = client.newCall(req)
+            // Use the client captured alongside this request's URL (request()
+            // tagged it), so a transport swap between build and execute can't
+            // pair a mismatched client/URL. Fallback covers any request not
+            // built via request() — there are none today.
+            val call = (req.tag(OkHttpClient::class.java) ?: transport.client).newCall(req)
             continuation.invokeOnCancellation { call.cancel() }
             call.enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {

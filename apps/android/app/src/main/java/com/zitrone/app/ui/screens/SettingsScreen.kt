@@ -232,10 +232,12 @@ fun SettingsScreen(
                 i2pdInstalled -> "i2pd found — building tunnels. This can take a minute or two."
                 javaRouterInstalled ->
                     "An I2P app is installed, but Zitrone needs i2pd for relay routing."
-                // On + no router: the fresh-install default. Say plainly that the
-                // normal connection is in use, so this never reads as "on I2P".
-                else -> "On, but no i2pd router found — using your normal connection. " +
-                    "Install i2pd and Zitrone upgrades automatically."
+                // On + no router: the fresh-install default. Describe the fallback
+                // as what Zitrone WILL use, not what's active now — this row is
+                // shown regardless of online/offline/connecting, so a present-tense
+                // "using your normal connection" would misstate an offline device.
+                else -> "On, but no i2pd router found — Zitrone will use your normal " +
+                    "connection. Install i2pd to upgrade automatically."
             },
             checked = settings.i2pEnabled,
             onToggle = settingsRepository::setI2pEnabled,
