@@ -7,6 +7,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0-beta] - 2026-07-18
+
+### Added
+
+- **I2P relay transport on Android** via an external i2pd router app (`org.purplei2p.i2pd`,
+  SOCKS5 `127.0.0.1:4447`), Orbot-style — no bundled router. The fixed I2P -> Tor -> clearnet
+  chain now resolves live on Android: real SOCKS5 tunnel-readiness probing (a listening proxy is
+  not a ready router), background promotion while tunnels build (1-3 min), and demotion with
+  automatic re-promotion if the router stops mid-session. The relay's `.b32.i2p` destination is
+  baked at build time (`RELAY_I2P_DEST`); cleartext is permitted for `b32.i2p` subdomains only
+  (the B32 address is the destination's identity — no TLS/pin over I2P). The official Java I2P
+  app is detected (both package ids) for UI guidance but not wired in v1.
+- **End-to-end encrypted image/file attachments** on web, desktop, and Android (iOS renders an
+  honest placeholder; full iOS support is future work). Signal-style sideloading: each attachment
+  is encrypted under a fresh random AES-256-GCM key, bucket-padded to 64 KiB, and stored in a new
+  blind relay blob store (blob under SHA-256(token), no owner columns, unauthenticated single-use
+  redemption, 72 h TTL — the dead-drop construction). The message carries only a small control
+  payload inside its ordinary ratchet-encrypted plaintext; on the wire an attachment message is
+  `media_type: "text"` (the reserved "image"/"file" values are deliberately never emitted — the
+  field is relay-visible). Images are downscaled/re-encoded on-device, stripping EXIF before
+  encryption; recipients verify size + SHA-256 after decryption. 8 MiB cap. Android renders
+  attachments from memory only — never a cache dir. **Requires a relay running this release**
+  (`/api/v1/blobs` endpoints); against an older relay, attachment sends fail cleanly and text
+  messaging is unaffected.
+- **Website**: new tagline "Privacy, with zest." sitewide, a one-time hero lemon entrance
+  animation (droplet -> splash -> lemon -> cross-cut -> spin; respects `prefers-reduced-motion`),
+  and the `/why-zitrone` brand-story page.
+
+### Security
+
+- Control-shaped message payloads that a client does not recognize (newer clients' features, or
+  malformed attachment payloads) now render as an "unsupported message" placeholder on every
+  platform — never as raw text, which could paint key material into a chat bubble.
+
 ## [0.6.0-beta] - 2026-07-17
 
 ### Changed

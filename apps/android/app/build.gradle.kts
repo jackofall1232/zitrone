@@ -55,8 +55,8 @@ android {
         applicationId = "com.zitrone.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.6.0-beta"
+        versionCode = 2
+        versionName = "0.7.0-beta"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
