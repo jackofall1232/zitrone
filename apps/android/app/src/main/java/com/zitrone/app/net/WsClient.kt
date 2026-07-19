@@ -88,6 +88,23 @@ class WsClient(
         /** The recipient destroyed a message — burn our copy too. */
         fun onMessageBurned(messageId: String)
 
+        /**
+         * The relay stored our envelope (`message.stored`) — the SENT tick. This
+         * is server-originated on the same connection that sent `message.send`
+         * and confirms only that the relay has it, NOT that the recipient does.
+         */
+        fun onMessageStored(messageId: String)
+
+        /**
+         * The recipient acknowledged receipt (`message.delivered`) — the
+         * DELIVERED tick. Peer-routed: the server relays the recipient's
+         * `message.received` back to us (zero-knowledge, the relay never stored
+         * who the sender was). This is the FIRST honest proof the message
+         * reached the other device, so it — not ws-enqueue — is what advances
+         * the tick and starts the sender-side TTL.
+         */
+        fun onMessageDelivered(messageId: String)
+
         fun onTyping(senderId: String, started: Boolean)
 
         /** Server-side one-time prekey stock is low — upload another batch. */
@@ -172,6 +189,18 @@ class WsClient(
      */
     fun burnMessage(messageId: String, peerId: String): Boolean =
         send(messageBurnFrame(messageId, peerId))
+
+    /**
+     * message.received — the recipient's delivery receipt, addressed back to the
+     * sender by [peerId] (the sender's account id, read from the decrypted
+     * envelope). The relay routes it by peer_id and re-emits it to the sender as
+     * `message.delivered`, exactly like the burn relay — so the server confirms
+     * delivery without ever learning or storing who the original sender was
+     * (zero-knowledge). Sent right where the recipient already sends
+     * `message.ack`.
+     */
+    fun sendReceived(messageId: String, peerId: String): Boolean =
+        send(messageReceivedFrame(messageId, peerId))
 
     fun typingStart(peerId: String): Boolean = send(typingFrame(started = true, peerId = peerId))
 
@@ -275,6 +304,15 @@ class WsClient(
             // empty peer id would e.g. pollute the typing-peers set).
             "message.burned" -> frame.optString("message_id")
                 .takeIf { it.isNotEmpty() }?.let(l::onMessageBurned)
+            // Relay stored our envelope → SENT tick. An empty id is malformed;
+            // dropping it avoids advancing an unrelated message's state.
+            "message.stored" -> frame.optString("message_id")
+                .takeIf { it.isNotEmpty() }?.let(l::onMessageStored)
+            // Recipient's peer-routed delivery receipt → DELIVERED tick (and the
+            // sender-side TTL start). peer_id here is our own account id (routing
+            // metadata) and is not needed to advance our copy — only the id is.
+            "message.delivered" -> frame.optString("message_id")
+                .takeIf { it.isNotEmpty() }?.let(l::onMessageDelivered)
             "typing.start" -> frame.optString("peer_id")
                 .takeIf { it.isNotEmpty() }?.let { l.onTyping(it, started = true) }
             "typing.stop" -> frame.optString("peer_id")
@@ -320,6 +358,11 @@ class WsClient(
 
         internal fun messageBurnFrame(messageId: String, peerId: String): JSONObject =
             JSONObject().put("type", "message.burn")
+                .put("message_id", messageId)
+                .put("peer_id", peerId)
+
+        internal fun messageReceivedFrame(messageId: String, peerId: String): JSONObject =
+            JSONObject().put("type", "message.received")
                 .put("message_id", messageId)
                 .put("peer_id", peerId)
 

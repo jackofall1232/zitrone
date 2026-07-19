@@ -306,6 +306,9 @@ private fun ZitroneRoot(
                         onTyping = { started ->
                             container.coordinator.sendTyping(conversation, started)
                         },
+                        onRetry = { messageId ->
+                            container.coordinator.retry(messageId)
+                        },
                     )
                 }
             }

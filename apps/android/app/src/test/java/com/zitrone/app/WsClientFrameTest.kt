@@ -77,6 +77,16 @@ class WsClientFrameTest {
     }
 
     @Test
+    fun `received frame carries message_id and peer_id at top level`() {
+        val frame = WsClient.messageReceivedFrame("msg-1", "sender-1")
+        assertEquals("message.received", frame.getString("type"))
+        assertEquals("msg-1", frame.getString("message_id"))
+        // peer_id addresses the receipt back to the SENDER for peer-routing.
+        assertEquals("sender-1", frame.getString("peer_id"))
+        assertFalse(frame.has("payload"))
+    }
+
+    @Test
     fun `typing frames use peer_id, not recipient_id`() {
         val start = WsClient.typingFrame(started = true, peerId = "peer-1")
         val stop = WsClient.typingFrame(started = false, peerId = "peer-1")
@@ -97,6 +107,8 @@ class WsClientFrameTest {
     private class RecordingListener : WsClient.Listener {
         var delivered: MessageEnvelope? = null
         var burnedId: String? = null
+        var storedId: String? = null
+        var deliveredId: String? = null
         var typing: Pair<String, Boolean>? = null
         var preKeyRemaining: Int? = null
         var revoked = false
@@ -104,6 +116,8 @@ class WsClientFrameTest {
 
         override fun onMessageDeliver(envelope: MessageEnvelope) { delivered = envelope }
         override fun onMessageBurned(messageId: String) { burnedId = messageId }
+        override fun onMessageStored(messageId: String) { storedId = messageId }
+        override fun onMessageDelivered(messageId: String) { deliveredId = messageId }
         override fun onTyping(senderId: String, started: Boolean) { typing = senderId to started }
         override fun onPreKeyLow(remaining: Int) { preKeyRemaining = remaining }
         override fun onSessionRevoked() { revoked = true }
@@ -145,6 +159,19 @@ class WsClientFrameTest {
     }
 
     @Test
+    fun `flat stored and delivered receipt frames dispatch by message_id`() {
+        val listener = RecordingListener()
+        val ws = clientWith(listener)
+        // SENT tick: server-originated, carries only the envelope's own id.
+        ws.dispatchFrame("""{"type":"message.stored","message_id":"m-stored"}""")
+        // DELIVERED tick: peer-routed relay; peer_id is the sender's own id and
+        // is not needed to advance the copy — only message_id is consumed.
+        ws.dispatchFrame("""{"type":"message.delivered","message_id":"m-deliv","peer_id":"me"}""")
+        assertEquals("m-stored", listener.storedId)
+        assertEquals("m-deliv", listener.deliveredId)
+    }
+
+    @Test
     fun `malformed and unknown frames are dropped without dispatch`() {
         val listener = RecordingListener()
         val ws = clientWith(listener)
@@ -155,8 +182,15 @@ class WsClientFrameTest {
         ws.dispatchFrame("""{"type":"message.burned","payload":{"message_id":"m1"}}""")
         ws.dispatchFrame("""{"type":"typing.start","payload":{"recipient_id":"p1"}}""")
         ws.dispatchFrame("""{"type":"prekey.low"}""")
+        // Receipt frames with an empty/absent id are malformed — dropped, never
+        // dispatched to advance an unrelated message's state.
+        ws.dispatchFrame("""{"type":"message.stored"}""")
+        ws.dispatchFrame("""{"type":"message.stored","message_id":""}""")
+        ws.dispatchFrame("""{"type":"message.delivered","peer_id":"me"}""")
         assertNull(listener.delivered)
         assertNull(listener.burnedId)
+        assertNull(listener.storedId)
+        assertNull(listener.deliveredId)
         assertNull(listener.typing)
         assertNull(listener.preKeyRemaining)
     }
