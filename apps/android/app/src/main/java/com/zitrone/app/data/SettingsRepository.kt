@@ -30,7 +30,7 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
         /** Tor via Orbot — strictly opt-in (security.transport.tor). */
         val torEnabled: Boolean = false,
         /**
-         * I2P via a local router (i2pd). Opt-OUT (default ON) — the ASYMMETRY
+         * I2P via a local router (the official I2P app). Opt-OUT (default ON) — the ASYMMETRY
          * with Tor is deliberate: I2P is the fixed-primary relay transport, and
          * auto-detecting a running router is cheap and has no downside, so it's
          * on by default and simply falls through the chain when no router is

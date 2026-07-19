@@ -30,7 +30,7 @@ import kotlinx.coroutines.launch
  * lives in AppContainer's apply step, not here.
  *
  * Resolution, on every input change:
- *  1. I2P candidate = destination baked in AND setting on AND i2pd installed.
+ *  1. I2P candidate = destination baked in AND setting on AND the I2P app installed.
  *  2. If a candidate, a QUICK probe (short timeout). READY -> I2P, done.
  *  3. Otherwise fall through immediately to Tor (when torEnabled && Orbot
  *     installed) else clearnet — and if I2P was a candidate that simply wasn't
@@ -44,7 +44,7 @@ class TransportResolver(
     private val relayI2pDest: String,
     private val i2pProxyHost: String,
     private val inputs: StateFlow<Inputs>,
-    private val isI2pdInstalled: () -> Boolean,
+    private val isRouterInstalled: () -> Boolean,
     private val isOrbotInstalled: () -> Boolean,
     private val prober: I2pProber,
     private val scope: CoroutineScope,
@@ -71,7 +71,7 @@ class TransportResolver(
     }
 
     private suspend fun resolve(input: Inputs) {
-        val i2pCandidate = relayI2pDest.isNotEmpty() && input.i2pEnabled && isI2pdInstalled()
+        val i2pCandidate = relayI2pDest.isNotEmpty() && input.i2pEnabled && isRouterInstalled()
         if (!i2pCandidate) {
             _state.value = fallbackState(input)
             return
@@ -102,14 +102,14 @@ class TransportResolver(
     /** Holds the I2P state until the local proxy port stops answering. */
     private suspend fun monitorWhileProxyUp() {
         while (currentCoroutineContext().isActive &&
-            prober.proxyUp(i2pProxyHost, I2pIntegration.SOCKS_PORT, MONITOR_TIMEOUT_MS)
+            prober.proxyUp(i2pProxyHost, I2pIntegration.HTTP_PROXY_PORT, MONITOR_TIMEOUT_MS)
         ) {
             delay(MONITOR_INTERVAL_MS)
         }
     }
 
     private suspend fun probeReady(timeoutMs: Int): Boolean =
-        prober.probe(i2pProxyHost, I2pIntegration.SOCKS_PORT, relayI2pDest, timeoutMs) ==
+        prober.probe(i2pProxyHost, I2pIntegration.HTTP_PROXY_PORT, relayI2pDest, timeoutMs) ==
             I2pProber.Readiness.READY
 
     private fun fallbackState(input: Inputs): TransportState =
@@ -120,8 +120,14 @@ class TransportResolver(
         /** Candidate check — must be snappy so boot isn't stalled on a cold router. */
         private const val QUICK_TIMEOUT_MS = 4_000
 
-        /** Background poll — generous, since a warm handshake still lags tunnel build. */
-        private const val POLL_TIMEOUT_MS = 15_000
+        /**
+         * Background poll — generous, since a warm handshake still lags tunnel
+         * build. 30s: the first leaseset lookup to a fresh destination took ~19s
+         * on an otherwise-warm router (2026-07-19), so the old 15s would
+         * chronically time out the promotion poll. Matches desktop i2p.rs's 30s
+         * WS_I2P_STEP_TIMEOUT.
+         */
+        private const val POLL_TIMEOUT_MS = 30_000
 
         /** Poll cadence while waiting for tunnels (1–3 min typical). */
         private const val POLL_INTERVAL_MS = 20_000L

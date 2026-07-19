@@ -9,8 +9,10 @@ import com.zitrone.app.i2p.I2pIntegration
 import com.zitrone.app.tor.TorIntegration
 import okhttp3.CertificatePinner
 import okhttp3.ConnectionSpec
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.TlsVersion
+import java.net.InetAddress
 import java.util.concurrent.TimeUnit
 
 /**
@@ -82,26 +84,49 @@ object CertificatePinning {
     /**
      * Builds the OkHttp client for I2P transport — a SIBLING of [buildClient],
      * deliberately not a branch inside it, so the Tor/clearnet path keeps its
-     * exact behavior (TLS 1.3 only, no cleartext). I2P differs on two axes:
+     * exact behavior (TLS 1.3 only, no cleartext). I2P differs on three axes:
      *
-     *  - Proxy: the local i2pd SOCKS5 at [host]:4447. Proxy.Type.SOCKS forwards
-     *    the unresolved .b32.i2p host as a SOCKS5 domain address, so REST and
-     *    WebSocket both route to the I2P destination with plain OkHttp.
+     *  - Transport: an [I2pConnectSocketFactory] whose sockets HTTP-CONNECT to the
+     *    baked-in [relayDest] via the official I2P app's local HTTP proxy at
+     *    [host]:4444. One opaque CONNECT tunnel carries BOTH REST and WebSocket —
+     *    the proxy cannot see or rewrite Authorization / Sec-WebSocket-Protocol.
+     *    NO `.proxy(...)` is set: a configured HTTP proxy would make OkHttp emit
+     *    absolute-form request lines through the already-established tunnel, which
+     *    the origin server rejects. (This REPLACES the former i2pd SOCKS5 path —
+     *    real-device testing found i2pd's tunnels unreliable and the official app
+     *    healthy; see i2p/I2pIntegration.kt.)
+     *  - Dns: overridden to a placeholder loopback IP carrying the requested
+     *    hostname, so OkHttp never tries to DNS-resolve the (unresolvable)
+     *    .b32.i2p host. The socket factory ignores the target address entirely —
+     *    it always tunnels to [relayDest] — so no hostname recovery is needed.
      *  - Connection spec: [ConnectionSpec.CLEARTEXT] is ALLOWED — the b32
      *    endpoint is plain http/ws (I2P is the transport-security layer; the
      *    b32 address is the destination's cryptographic identity). The TLS-1.3
      *    spec would reject it outright.
+     *
+     * connectTimeout is a generous 60s (not the 20s the other builders copy): the
+     * factory's connect() covers the TCP dial to 4444 PLUS the CONNECT-response
+     * read, and the proxy stalls that 200 during destination lookup — empirically
+     * ~5.6s for an unreachable dest's 504 and up to tens of seconds for a cold
+     * leaseset lookup.
      *
      * The certificate [pinner] stays attached: it is host-scoped to
      * relay.sublemonable.com, so it never matches the .b32.i2p host and is inert
      * here — leaving it on keeps a single client-hardening path and guards the
      * (impossible-by-construction) case of a TLS connection to the pinned host.
      */
-    fun buildI2pClient(host: String): OkHttpClient = OkHttpClient.Builder()
+    fun buildI2pClient(host: String, relayDest: String): OkHttpClient = OkHttpClient.Builder()
         .certificatePinner(pinner)
         .connectionSpecs(listOf(ConnectionSpec.CLEARTEXT))
-        .proxy(I2pIntegration.socksProxy(host))
-        .connectTimeout(20, TimeUnit.SECONDS)
+        .socketFactory(I2pConnectSocketFactory(host, I2pIntegration.HTTP_PROXY_PORT, relayDest))
+        // Placeholder resolution: attach the requested hostname to a loopback IP
+        // with no real lookup (the NetCipher trick). The socket factory ignores it.
+        // Dns is a plain interface (not a fun interface), so an explicit object.
+        .dns(object : Dns {
+            override fun lookup(hostname: String): List<InetAddress> =
+                listOf(InetAddress.getByAddress(hostname, byteArrayOf(127, 0, 0, 1)))
+        })
+        .connectTimeout(60, TimeUnit.SECONDS) // TCP-to-4444 + CONNECT lookup; see kdoc
         .readTimeout(0, TimeUnit.MILLISECONDS) // WebSocket: no read timeout
         .writeTimeout(20, TimeUnit.SECONDS)
         .pingInterval(30, TimeUnit.SECONDS)

@@ -7,6 +7,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.3-beta] - Unreleased
+
+### Changed
+
+- **Android I2P retargeted from i2pd to the official I2P app.** The Android relay
+  transport now wires the **official I2P app** (`net.i2p.android` on Play /
+  `net.i2p.android.router` on F-Droid) via its local **HTTP proxy** at
+  `127.0.0.1:4444`, replacing the former i2pd SOCKS5 path (`127.0.0.1:4447`). One
+  opaque HTTP `CONNECT <b32>:80` tunnel now carries both REST and WebSocket — the
+  same mechanism the Linux desktop uses — so the proxy cannot see or rewrite the
+  `Authorization` / `Sec-WebSocket-Protocol` headers. **Why:** real-device testing
+  found i2pd failed to build tunnels reliably on a physical device, while the
+  official I2P app warmed up and stayed healthy (~73s to first peers, ~13 active /
+  513 known by 3 min, ~50% green by 5 min). i2pd is still *detected* only to hint
+  that the official app is now the wired router. Readiness is a real HTTP CONNECT
+  returning `HTTP/1.x 200` (an unreachable dest returns `504`); the background
+  promotion-poll budget grew 15s -> 30s to cover a first-leaseset lookup (~19s
+  measured). See `docs/TOR_ARCHITECTURE.md` §7. Chain-resolution and CONNECT wire
+  encoding are unit-tested; an opt-in JVM integration test
+  (`I2pLiveIntegrationTest`, gated on `I2P_TEST_DEST`) exercises the real proxy.
+
 ## [0.7.1-beta] - 2026-07-19
 
 ### Fixed

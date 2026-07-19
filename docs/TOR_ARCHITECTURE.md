@@ -227,35 +227,55 @@ survived 60 s idle across one server ping cycle (each saw a server ping at ~50 s
 and auto-ponged); and a post-idle message round-tripped, confirming neither side
 silently dropped. `TODO(i2p-ws-verify)` is **closed**.
 
-### Android — external router app (0.7.0-beta)
+### Android — external router app (0.7.0-beta, retargeted 0.7.3-beta)
 
 No maintained embeddable I2P artifact exists (the Java router's Android client
-AAR is frozen at 0.9.49/~2021; i2pd-android ships only as an APK), so Android
+AAR is frozen at 0.9.49/~2021; both router apps ship only as APKs), so Android
 follows the **Orbot pattern**: depend on an external router app instead of
 bundling one.
 
-- **Router**: i2pd for Android (`org.purplei2p.i2pd`), via its default SOCKS5
-  proxy at `127.0.0.1:4447`. OkHttp's SOCKS support passes the unresolved
-  `.b32.i2p` hostname through as a SOCKS5 domain address — the same mechanism
-  the Orbot wiring uses — so REST and WebSocket work with no manual CONNECT.
-  The official Java I2P app is *detected* (both of its package IDs,
-  `net.i2p.android` on Play and `net.i2p.android.router` on F-Droid) but not
-  wired in v1 — its SOCKS support is weak; the UI tells those users i2pd is
-  needed for relay routing.
+**Router reversal (0.7.3-beta).** 0.7.0-beta wired **i2pd** (`org.purplei2p.i2pd`,
+SOCKS5 `127.0.0.1:4447`). Real-device testing then overrode that choice: i2pd
+failed to build tunnels reliably on a physical device, while the **official I2P
+app** warmed up and stayed healthy (~73s to first peers, ~13 active / 513 known
+by 3 min, ~50% green by 5 min). 0.7.3-beta retargets to the official app. Do NOT
+revert to i2pd without re-testing on-device — firsthand device results take
+priority over the earlier SOCKS/i2pd investigation.
+
+- **Router**: the official I2P app — `net.i2p.android` (Play/canonical) or
+  `net.i2p.android.router` (F-Droid) — via its default **HTTP proxy** at
+  `127.0.0.1:4444`. The proxy answers `CONNECT <b32>:80` with `HTTP/1.1 200`
+  (after destination lookup), and the resulting tunnel carries arbitrary bytes
+  verbatim — so ONE opaque CONNECT tunnel serves both REST and WebSocket, the
+  identical mechanism the Linux desktop uses (`apps/desktop/src-tauri/src/i2p.rs`).
+  A CONNECT tunnel is opaque, so the proxy cannot filter or rewrite headers
+  (Authorization, `Sec-WebSocket-Protocol`). On Android this is an OkHttp
+  `SocketFactory` whose sockets run the CONNECT handshake on connect(); the
+  client sets NO `.proxy(...)` (a configured proxy would emit absolute-form
+  request lines the origin rejects) and overrides Dns to a placeholder so the
+  unresolvable `.b32.i2p` host is never looked up. i2pd is still *detected* only
+  so the UI can tell an i2pd-only user the official app is now the wired router.
 - **Endpoint**: the client dials `http://<b32>` / `ws://<b32>/ws` directly —
   there is no clearnet-hostname-through-proxy shortcut for I2P. The destination
   is baked at build time via the `RELAY_I2P_DEST` env var (BuildConfig, same
   pattern as `RELAY_ONION_ADDRESS`). No TLS and no pin over I2P — the B32
   address is the identity (§4); Android's cleartext policy is opened for
   `b32.i2p` subdomains only (network security config). WS auth keeps the
-  `Sec-WebSocket-Protocol` token header — transport-independent.
-- **Readiness**: the router accepts SOCKS connections before its tunnels are
-  built, so a bare TCP probe of 4447 proves nothing. Readiness is a real SOCKS5
-  CONNECT to the relay destination; while tunnels build (1–3 min after router
-  start) the chain runs on Tor/clearnet and the client polls in the background,
+  `Sec-WebSocket-Protocol` token header — transport-independent, and the opaque
+  tunnel forwards it untouched.
+- **Readiness**: on the official Android app, port 4444 does not even listen
+  until the HTTP-client tunnel is built (a connect is refused during startup), so
+  a bare TCP probe proves nothing. Readiness is a real HTTP `CONNECT` to the
+  relay destination returning `HTTP/1.x 200`; an unreachable dest returns `504`
+  (~5.6s) and a malformed dest closes instantly. While tunnels build (1–3 min
+  after router start; first leaseset lookup measured ~19s) the chain runs on
+  Tor/clearnet and the client polls in the background (30s probe budget),
   promoting to I2P when the probe succeeds.
-- **Status**: implemented in 0.7.0-beta with unit-tested chain resolution;
-  live-network verification against the production i2pd tunnel is pending.
+- **Status**: implemented in 0.7.0-beta, retargeted in 0.7.3-beta, with
+  unit-tested chain resolution and CONNECT wire encoding. The proxy semantics are
+  verified against the Java I2P router 2.12.1 (identical i2ptunnel code) via an
+  opt-in JVM integration test (`I2pLiveIntegrationTest`); a physical-device pass
+  (package detection, launch intent) is still pending.
 
 ### iOS — blocked
 
