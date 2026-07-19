@@ -261,3 +261,22 @@ verify the commit actually landed before assuming so):
 plus the matching line in onion-site/SHA256SUMS, then merge to main so
 Vercel redeploys /download/beta.
 EOF
+
+# ── Post-release live-link verification (non-fatal) ──────────────────────────
+# The release itself is already done and published above; this is a courtesy
+# sanity sweep of the LIVE site's release-critical links. It CANNOT undo or fail
+# the release — it only surfaces problems loudly. (The onion mirror won't reflect
+# a brand-new build until website/src/lib/links.ts is merged and Vercel redeploys,
+# so a FAIL here right after publishing is expected and harmless.)
+LINK_CHECK="$REPO_ROOT/scripts/check-live-links.sh"
+if [ -x "$LINK_CHECK" ] || [ -f "$LINK_CHECK" ]; then
+  echo
+  echo "── Live-link verification (non-fatal) ──────────────────────────────────────────"
+  if bash "$LINK_CHECK"; then
+    echo "Live-link check: all passed."
+  else
+    echo "!! Live-link check reported FAILURES above — the release still stands, but"
+    echo "!! investigate before announcing (expected right after publish until the"
+    echo "!! website links.ts change is merged and Vercel redeploys)."
+  fi
+fi

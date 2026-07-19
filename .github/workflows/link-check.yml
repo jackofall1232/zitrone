@@ -1,0 +1,75 @@
+# Zitrone — Copyright (C) 2026 Zitrone contributors
+# Licensed under the GNU Affero General Public License v3.0 or later.
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Verifies the RELEASE-CRITICAL external links on the LIVE, deployed zitrone.app
+# pages after a push — see scripts/check-live-links.sh for what is checked and
+# why (a broken Tor onion mirror link once shipped past a links.ts-only lint).
+# The onion-mirror-live check reaches the hidden service over Tor, so this job
+# installs and boots tor on the runner. Pass/fail shows as the normal Actions
+# status on the commit; there is no extra notification.
+name: link-check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "website/**"
+      - "scripts/check-live-links.sh"
+      - ".github/workflows/link-check.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: link-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live-links:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install and start Tor
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tor
+          sudo service tor start || (tor --runasdaemon 1)
+
+      - name: Wait for the Tor SOCKS proxy to bootstrap
+        run: |
+          # Give Tor up to ~90s to bootstrap, then prove the SOCKS proxy can
+          # actually reach a hidden service using a known-good onion.
+          KNOWN_ONION="duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion"
+          ok=0
+          for i in $(seq 1 18); do
+            if curl -s --socks5-hostname 127.0.0.1:9050 --max-time 30 \
+                 -o /dev/null -w '%{http_code}' "https://$KNOWN_ONION/" | grep -qE '^(200|30[0-9])$'; then
+              echo "Tor SOCKS proxy is up and reaching hidden services."
+              ok=1
+              break
+            fi
+            echo "waiting for Tor bootstrap ... ($i/18)"
+            sleep 5
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "Tor did not bootstrap in time; the onion check may fail." >&2
+          fi
+
+      - name: Run live-link check (allow for Vercel deploy lag)
+        env:
+          TOR_SOCKS: 127.0.0.1:9050
+        run: |
+          # Vercel deploys the same push that triggered this workflow, so give
+          # the deploy time to go live before asserting on rendered HTML. If the
+          # first run fails it may be deploy lag rather than a real break — wait
+          # and retry once to tell the two apart.
+          echo "Waiting 90s for Vercel to deploy this push ..."
+          sleep 90
+          if bash scripts/check-live-links.sh; then
+            exit 0
+          fi
+          echo "First run failed — retrying once in 60s (deploy lag vs. real breakage) ..."
+          sleep 60
+          bash scripts/check-live-links.sh
