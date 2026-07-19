@@ -1,0 +1,28 @@
+# docker-compose.continuity.yml — CX23 PRODUCTION continuity overlay.
+#
+# Production runs zitrone's CODE but keeps sublemonable's INFRASTRUCTURE
+# IDENTITY (compose project name, volume names, Postgres database name, onion
+# keys, keystore). See docs/DEPLOYMENT.md — this is deliberate, not a leftover.
+#
+# This overlay pins the server + postgres back to the existing `sublemonable`
+# database so the cutover reuses the live data (35+ accounts) instead of
+# initialising a fresh empty `zitrone` DB. Always run with -p sublemonable.
+#
+# Usage:
+#   docker compose -p sublemonable \
+#     -f docker-compose.yml -f docker-compose.tor.yml \
+#     -f docker-compose.i2p.yml -f docker-compose.continuity.yml up -d
+
+services:
+  server:
+    environment:
+      DATABASE_URL: postgres://sub:${POSTGRES_PASSWORD:-sub}@postgres:5432/sublemonable?sslmode=disable
+
+  postgres:
+    environment:
+      POSTGRES_DB: sublemonable
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sub -d sublemonable"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

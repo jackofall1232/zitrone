@@ -13,6 +13,13 @@
 
 </div>
 
+> [!IMPORTANT]
+> **Production (CX23) runs zitrone's code on infrastructure still named
+> `sublemonable` — on purpose.** The compose project, volumes, Postgres DB,
+> onion address, and keystore keep the `sublemonable` identity for continuity;
+> renaming them regenerates onion keys and destroys data. Do **not** "fix" the
+> naming. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) before touching production.
+
 ## What is Zitrone?
 
 Zitrone is end-to-end encrypted ephemeral messaging for browser, iOS, and Android. Every
