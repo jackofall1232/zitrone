@@ -5,6 +5,7 @@
 
 package com.zitrone.app.crypto
 
+import android.util.Base64
 import org.signal.libsignal.protocol.IdentityKey
 import org.signal.libsignal.protocol.IdentityKeyPair
 import org.signal.libsignal.protocol.InvalidKeyIdException
@@ -199,6 +200,36 @@ class EncryptedSignalProtocolStore(
 
     fun countOneTimePreKeys(): Int =
         prefs.all.keys.count { it.startsWith(KEY_PREKEY) }
+
+    /**
+     * Distinct remote-contact account-ids that still hold an identity record,
+     * each paired with that stored remote identity key (base64), or null if it
+     * can't be read.
+     *
+     * WHY this exists: the contact roster used to live ONLY in an in-memory
+     * StateFlow, so any full process restart (an app update forces one) wiped
+     * it. The Signal store, however, IS persisted — so `remote_identity:` (and
+     * `session:`) records for previously-messaged contacts survive as orphans.
+     * They are the only on-disk trace of who the user had been talking to, so
+     * [com.zitrone.app.data.ConversationRepository]'s one-time repair path
+     * rebuilds a bare roster from them (display names are unrecoverable). Reuses
+     * the same prefs.all.keys prefix-scan style as the prekey/session accessors.
+     */
+    fun knownRemoteContacts(): List<Pair<String, String?>> =
+        prefs.all.keys
+            .filter { it.startsWith(KEY_REMOTE_IDENTITY) }
+            .mapNotNull { key ->
+                key.removePrefix(KEY_REMOTE_IDENTITY)
+                    .substringBeforeLast(':') // strip the :deviceId suffix
+                    .takeIf { it.isNotEmpty() }
+            }
+            .distinct()
+            .map { accountId ->
+                val b64 = keyStoreManager
+                    .getBytes(prefs, "$KEY_REMOTE_IDENTITY$accountId:$DEFAULT_DEVICE_ID")
+                    ?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
+                accountId to b64
+            }
 
     /** Full local wipe — account deletion. Irreversible by design. */
     fun wipe() {

@@ -62,5 +62,11 @@ class KeyStoreManager(private val context: Context) {
         const val PREFS_SIGNAL_STORE = "zitrone_signal_store"
         const val PREFS_SETTINGS = "zitrone_settings"
         const val PREFS_AUTH = "zitrone_auth"
+
+        // The contact roster (display names + pinned identity keys + verified/
+        // key-changed flags). Its own encrypted file, separate from the Signal
+        // store so a roster read glitch can never reach key material. See
+        // data/RosterStore.kt for WHY the roster must be persisted at all.
+        const val PREFS_CONTACTS = "zitrone_contacts"
     }
 }
