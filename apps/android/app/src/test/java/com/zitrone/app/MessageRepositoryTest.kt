@@ -146,6 +146,97 @@ class MessageRepositoryTest {
         }
 
     @Test
+    fun `outgoing state advances SENDING to SENT to DELIVERED to READ on real acks`() = runTest {
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+        assertEquals(MessageState.SENDING, repo.conversationMessages("c1").single().state)
+
+        repo.markSent("m1") // relay stored it (message.stored)
+        assertEquals(MessageState.SENT, repo.conversationMessages("c1").single().state)
+
+        repo.markDelivered("m1") // recipient received it (message.delivered)
+        assertEquals(MessageState.DELIVERED, repo.conversationMessages("c1").single().state)
+
+        repo.onPeerRead("m1") // peer read receipt
+        assertEquals(MessageState.READ, repo.conversationMessages("c1").single().state)
+    }
+
+    @Test
+    fun `markDelivered accepts SENDING directly when the stored ack was lost`() = runTest {
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+        repo.markDelivered("m1") // no markSent in between
+        assertEquals(MessageState.DELIVERED, repo.conversationMessages("c1").single().state)
+    }
+
+    @Test
+    fun `receipts are monotonic — a late stored or delivered never downgrades`() = runTest {
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+        repo.markSent("m1")
+        repo.markDelivered("m1")
+        repo.onPeerRead("m1") // READ
+
+        // Out-of-order frames arriving after READ must not regress the state.
+        repo.markSent("m1")
+        repo.markDelivered("m1")
+        assertEquals(MessageState.READ, repo.conversationMessages("c1").single().state)
+    }
+
+    @Test
+    fun `markFailed flips an unsent message to FAILED and retryable re-arms it`() = runTest {
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+
+        repo.markFailed("m1")
+        assertEquals(MessageState.FAILED, repo.conversationMessages("c1").single().state)
+
+        // retryable flips FAILED→SENDING and returns the retained message.
+        val armed = repo.retryable("m1")
+        assertEquals("m1", armed?.id)
+        assertEquals(MessageState.SENDING, repo.conversationMessages("c1").single().state)
+        // A non-FAILED message is not retryable (stray tap = no-op).
+        assertNull(repo.retryable("m1"))
+    }
+
+    @Test
+    fun `stored and delivered acks never resurrect a burned or removed message`() = runTest {
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+        repo.burn("m1", notifyPeer = false) // BURNING
+
+        repo.markSent("m1")
+        repo.markDelivered("m1")
+        repo.markFailed("m1")
+        assertEquals(MessageState.BURNING, repo.conversationMessages("c1").single().state)
+
+        // After the dissolve the message is gone — acks for it are pure no-ops.
+        advanceTimeBy(MessageRepository.BURN_ANIMATION_MS + 1)
+        repo.markSent("m1")
+        repo.markDelivered("m1")
+        assertTrue(repo.conversationMessages("c1").isEmpty())
+    }
+
+    @Test
+    fun `sender TTL starts on DELIVERED, not on send`() = runTest {
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true, ttlSeconds = 30))
+        runCurrent()
+
+        // Enqueued but undelivered: the TTL has NOT started (it used to start on
+        // ws-enqueue — the false-optimism bug), so the message does not burn.
+        advanceTimeBy(30_000L + 1)
+        assertEquals(MessageState.SENDING, repo.conversationMessages("c1").single().state)
+
+        // Real delivery (message.delivered receipt) starts the countdown here.
+        repo.markDelivered("m1")
+        assertEquals(MessageState.DELIVERED, repo.conversationMessages("c1").single().state)
+        advanceTimeBy(30_000L + 1)
+        // TTL enforced both sides independently — burns locally, no peer signal.
+        assertEquals(MessageState.BURNING, repo.conversationMessages("c1").single().state)
+    }
+
+    @Test
     fun `ttl burn still fires locally without notifying the peer`() = runTest {
         val repo = repository()
         val burnedIds = mutableListOf<String>()

@@ -52,6 +52,7 @@ import com.zitrone.app.ui.theme.BubbleSentShape
 import com.zitrone.app.ui.theme.BackgroundMessageReceived
 import com.zitrone.app.ui.theme.BackgroundMessageSent
 import com.zitrone.app.ui.theme.BurnOrange
+import com.zitrone.app.ui.theme.ErrorRed
 import com.zitrone.app.ui.theme.MonoFamily
 import com.zitrone.app.ui.theme.TextMuted
 import com.zitrone.app.ui.theme.TextOnLemon
@@ -79,6 +80,7 @@ private val TimeFormatter: DateTimeFormatter =
 fun MessageBubble(
     message: Message,
     modifier: Modifier = Modifier,
+    onRetry: () -> Unit = {},
 ) {
     val isMine = message.isMine
     val burning = message.state == MessageState.BURNING
@@ -175,26 +177,53 @@ fun MessageBubble(
                                     modifier = Modifier.size(13.dp),
                                 )
                             }
-                            // Outgoing status: "…" sending, "✓" handed to the
-                            // relay (the protocol has no per-device delivered
-                            // event), "✓✓" only when the peer's encrypted read
-                            // receipt arrives — so the double mark is a real
-                            // read confirmation, never an approximation.
+                            // Outgoing status — HONEST ticks, each backed by a
+                            // real acknowledgement (see MessageState):
+                            //   "…"  SENDING   — handed to the socket, no ack yet
+                            //   "✓"  SENT      — relay stored it (message.stored)
+                            //   "✓✓" DELIVERED — recipient got it (message.delivered)
+                            //   "✓✓" READ      — peer read receipt (accent color)
+                            //   "!"  FAILED    — never reached the relay; tap to retry
+                            // The double mark is NEVER an approximation: it only
+                            // appears once the other device has actually confirmed
+                            // receipt, so we never paint a false "sent"/"delivered".
                             if (isMine) {
+                                val failed = message.state == MessageState.FAILED
                                 Text(
                                     text = when (message.state) {
                                         MessageState.SENDING -> "…"
+                                        MessageState.SENT -> "✓"
+                                        MessageState.DELIVERED -> "✓✓"
                                         MessageState.READ -> "✓✓"
-                                        else -> "✓"
+                                        MessageState.FAILED -> "!"
+                                        // BURNING keeps a mark until the dissolve
+                                        // removes the bubble entirely.
+                                        MessageState.BURNING -> "✓"
                                     },
                                     fontFamily = MonoFamily,
                                     fontSize = TypeScale.Xs,
-                                    color = if (message.state == MessageState.READ) {
-                                        TextOnLemon
+                                    color = when (message.state) {
+                                        MessageState.READ -> TextOnLemon
+                                        MessageState.FAILED -> ErrorRed
+                                        else -> TextOnLemon.copy(alpha = 0.45f)
+                                    },
+                                    // A failed send is the one tick that is
+                                    // actionable: tapping it re-runs the send.
+                                    modifier = if (failed) {
+                                        Modifier.clickable(onClick = onRetry)
                                     } else {
-                                        TextOnLemon.copy(alpha = 0.45f)
+                                        Modifier
                                     },
                                 )
+                                if (failed) {
+                                    Text(
+                                        text = "Tap to retry",
+                                        fontFamily = MonoFamily,
+                                        fontSize = TypeScale.Xs,
+                                        color = ErrorRed,
+                                        modifier = Modifier.clickable(onClick = onRetry),
+                                    )
+                                }
                             }
                         }
                     }

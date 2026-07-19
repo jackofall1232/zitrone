@@ -69,12 +69,23 @@ data class MessageAttachment(
 )
 
 enum class MessageState {
+    /** Composed and handed to the socket; no relay/peer acknowledgement yet. */
     SENDING,
+    /** The relay acknowledged storing the envelope (`message.stored`) — one tick. */
     SENT,
+    /** The recipient acknowledged receipt (`message.delivered`) — two ticks; sender TTL starts here. */
     DELIVERED,
     READ,
     /** Burn animation in flight — particles dissolving upward. */
     BURNING,
+    /**
+     * The send did not reach the relay — the blob upload threw, or the socket
+     * was down when we tried to hand the envelope off. Terminal until the user
+     * taps retry (which flips it back to [SENDING]); see
+     * [MessageRepository.retryable]. Honest: we never paint a tick for a message
+     * the relay never got.
+     */
+    FAILED,
 }
 
 data class Conversation(

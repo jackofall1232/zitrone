@@ -70,13 +70,80 @@ class MessageRepository(
         scheduleTtl(delivered)
     }
 
-    /** Sent message confirmed delivered — the TTL countdown starts NOW. */
+    /**
+     * The relay stored our envelope (`message.stored`) — advance to SENT (one
+     * tick, "the relay has it"). Guarded to SENDING inside the CAS: monotonic,
+     * so an out-of-order stored ack can never downgrade a message that already
+     * reached DELIVERED/READ, and it can never resurrect a BURNING/removed or
+     * FAILED message.
+     */
+    fun markSent(messageId: String) {
+        update(
+            messageId,
+            precondition = { it.state == MessageState.SENDING },
+            transform = { it.copy(state = MessageState.SENT) },
+        )
+    }
+
+    /**
+     * The recipient acknowledged receipt (`message.delivered`) — advance to
+     * DELIVERED (two ticks) and START THE SENDER-SIDE TTL HERE. This is the
+     * honesty fix: the TTL used to start on ws-enqueue (false optimism — the
+     * message might never arrive), and now starts on the real, peer-originated
+     * delivery receipt. Incoming messages still start their TTL on arrival
+     * ([addIncoming], unchanged).
+     *
+     * Guarded inside the CAS: allows SENDING→DELIVERED directly (a lost
+     * `message.stored` must not block DELIVERED) and SENT→DELIVERED, but is
+     * monotonic — it will not regress READ→DELIVERED on an out-of-order frame,
+     * nor resurrect a BURNING/removed or FAILED message. scheduleTtl only fires
+     * on the one real transition (update returns non-null), so a duplicate
+     * receipt cannot double-arm the timer.
+     */
     fun markDelivered(messageId: String) {
-        val updated = update(messageId) {
-            it.copy(state = MessageState.DELIVERED, deliveredAtMs = it.deliveredAtMs ?: clock())
-        }
+        val updated = update(
+            messageId,
+            precondition = {
+                it.state == MessageState.SENDING || it.state == MessageState.SENT
+            },
+            transform = {
+                it.copy(state = MessageState.DELIVERED, deliveredAtMs = it.deliveredAtMs ?: clock())
+            },
+        )
         updated?.let(::scheduleTtl)
     }
+
+    /**
+     * The send never reached the relay (blob upload threw, or the socket was
+     * down at hand-off) — flip to FAILED so the bubble shows "!" + retry rather
+     * than a dishonest "sent". Guarded to the pre-delivery states (SENDING/SENT)
+     * inside the CAS: a late failure signal can never overwrite a message that
+     * actually reached DELIVERED/READ, nor resurrect a BURNING/removed one.
+     * FAILED is terminal until [retryable].
+     */
+    fun markFailed(messageId: String) {
+        update(
+            messageId,
+            precondition = {
+                it.state == MessageState.SENDING || it.state == MessageState.SENT
+            },
+            transform = { it.copy(state = MessageState.FAILED) },
+        )
+    }
+
+    /**
+     * Arm a FAILED message for a user-initiated retry: flip it back to SENDING
+     * and return it (with its retained in-memory [Message.text] /
+     * [Message.attachment] bytes) so the coordinator can re-encrypt and re-send
+     * under the SAME message id. Returns null when the message is not FAILED
+     * (already sent, burned, or removed) so a stray retry tap is a no-op.
+     */
+    fun retryable(messageId: String): Message? =
+        update(
+            messageId,
+            precondition = { it.state == MessageState.FAILED },
+            transform = { it.copy(state = MessageState.SENDING) },
+        )
 
     /**
      * Marks an incoming message read. Burn-on-read messages flip to READ
