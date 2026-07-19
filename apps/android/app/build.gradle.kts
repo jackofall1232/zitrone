@@ -55,8 +55,8 @@ android {
         applicationId = "com.zitrone.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.7.1-beta"
+        versionCode = 4
+        versionName = "0.7.3-beta"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -83,10 +83,10 @@ android {
             "\"${providers.environmentVariable("RELAY_I2P_DEST").orNull ?: ""}\""
         )
 
-        // Host of the local I2P router's SOCKS5 proxy (i2pd default 127.0.0.1:4447).
-        // Env-overridable dev/emulator escape hatch: an emulator reaches a
-        // host-side i2pd at 10.0.2.2 rather than 127.0.0.1. The port (4447) is
-        // fixed in i2p/I2pIntegration.kt.
+        // Host of the local I2P router's HTTP proxy (the official I2P app's default
+        // 127.0.0.1:4444). Env-overridable dev/emulator escape hatch: an emulator
+        // reaches a host-side router at 10.0.2.2 rather than 127.0.0.1. The port
+        // (4444) is fixed in i2p/I2pIntegration.kt.
         buildConfigField(
             "String",
             "I2P_PROXY_HOST",

@@ -322,21 +322,21 @@ private fun ZitroneRoot(
                 var torAvailable by remember {
                     mutableStateOf(TorIntegration.isOrbotInstalled(context))
                 }
-                // Same re-check for the I2P router apps: the user may install
-                // i2pd (or a Java I2P app) via the actions below and return here.
+                // Same re-check for the I2P router apps: the user may install the
+                // official I2P app (or i2pd) via the actions below and return here.
+                var officialRouterInstalled by remember {
+                    mutableStateOf(I2pIntegration.isOfficialRouterInstalled(context))
+                }
                 var i2pdInstalled by remember {
                     mutableStateOf(I2pIntegration.isI2pdInstalled(context))
-                }
-                var javaRouterInstalled by remember {
-                    mutableStateOf(I2pIntegration.isJavaRouterInstalled(context))
                 }
                 val lifecycleOwner = LocalLifecycleOwner.current
                 DisposableEffect(lifecycleOwner, context) {
                     val observer = LifecycleEventObserver { _, event ->
                         if (event == Lifecycle.Event.ON_RESUME) {
                             torAvailable = TorIntegration.isOrbotInstalled(context)
+                            officialRouterInstalled = I2pIntegration.isOfficialRouterInstalled(context)
                             i2pdInstalled = I2pIntegration.isI2pdInstalled(context)
-                            javaRouterInstalled = I2pIntegration.isJavaRouterInstalled(context)
                         }
                     }
                     lifecycleOwner.lifecycle.addObserver(observer)
@@ -360,8 +360,8 @@ private fun ZitroneRoot(
                     connectivity = connectivity,
                     transportState = transportState,
                     torAvailable = torAvailable,
+                    officialRouterInstalled = officialRouterInstalled,
                     i2pdInstalled = i2pdInstalled,
-                    javaRouterInstalled = javaRouterInstalled,
                     onBack = { route = Route.ChatList },
                     onDeleteAccount = {
                         container.coordinator.deleteAccountAndWipe {

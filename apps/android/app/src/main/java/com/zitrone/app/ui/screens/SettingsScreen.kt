@@ -68,8 +68,8 @@ fun SettingsScreen(
     connectivity: MessagingCoordinator.Connectivity,
     transportState: TransportState,
     torAvailable: Boolean,
+    officialRouterInstalled: Boolean,
     i2pdInstalled: Boolean,
-    javaRouterInstalled: Boolean,
     onBack: () -> Unit,
     onDeleteAccount: () -> Unit,
     onOpenDiagnostics: () -> Unit,
@@ -218,7 +218,7 @@ fun SettingsScreen(
         // ----- Network -------------------------------------------------------
         SectionHeader("Network")
         // I2P is opt-OUT auto-detect (unlike Tor's opt-in): the toggle only
-        // permits Zitrone to USE a local i2pd router if one is present and its
+        // permits Zitrone to USE the local I2P app's router if it's present and its
         // tunnels are ready. When it isn't, the chain falls through to
         // Tor/clearnet on its own — the toggle being on does NOT mean traffic is
         // being routed through I2P. The title and the default-state subtitle are
@@ -228,35 +228,39 @@ fun SettingsScreen(
             title = "Use I2P when available",
             subtitle = when {
                 !settings.i2pEnabled -> "Off — Zitrone won't use I2P even if a router is present."
-                transport == TransportState.I2P -> "Active — routing through i2pd's local SOCKS proxy."
-                i2pdInstalled -> "i2pd found — building tunnels. This can take a minute or two."
-                javaRouterInstalled ->
-                    "An I2P app is installed, but Zitrone needs i2pd for relay routing."
+                transport == TransportState.I2P ->
+                    "Active — routing through the I2P app's local HTTP proxy."
+                officialRouterInstalled ->
+                    "I2P app found — building tunnels. This can take a few minutes."
+                // i2pd-only: the reversal hint. Zitrone wired i2pd historically but
+                // now uses the official app (real-device: i2pd tunnels unreliable).
+                i2pdInstalled ->
+                    "i2pd is installed, but Zitrone now uses the official I2P app for relay routing."
                 // On + no router: the fresh-install default. Describe the fallback
                 // as what Zitrone WILL use, not what's active now — this row is
                 // shown regardless of online/offline/connecting, so a present-tense
                 // "using your normal connection" would misstate an offline device.
-                else -> "On, but no i2pd router found — Zitrone will use your normal " +
-                    "connection. Install i2pd to upgrade automatically."
+                else -> "On, but no I2P app found — Zitrone will use your normal " +
+                    "connection. Install the official I2P app to upgrade automatically."
             },
             checked = settings.i2pEnabled,
             onToggle = settingsRepository::setI2pEnabled,
         )
-        // No i2pd? Offer a path to it (Play first, F-Droid second — our audience
-        // skews F-Droid). The Java-I2P hint above already explains why i2pd
-        // specifically; still surface install actions so the user isn't stuck.
-        if (!i2pdInstalled) {
+        // No official I2P app? Offer a path to it (Play first, F-Droid second —
+        // our audience skews F-Droid). Shown for i2pd-only users too: the hint
+        // above tells them why the official app, these give them the way to it.
+        if (!officialRouterInstalled) {
             ClickableRow(
-                title = "Get i2pd",
-                subtitle = "Install the I2P router app, then come back — routing turns on automatically.",
+                title = "Get the I2P app",
+                subtitle = "Install the official I2P app, then come back — routing turns on automatically.",
                 titleColor = Lemon,
-                onClick = { openI2pdInstall(context) },
+                onClick = { openI2pInstall(context) },
             )
             ClickableRow(
-                title = "…or get i2pd on F-Droid",
-                subtitle = I2pIntegration.I2PD_FDROID_URL,
+                title = "…or get the I2P app on F-Droid",
+                subtitle = I2pIntegration.I2P_FDROID_URL,
                 subtitleMono = true,
-                onClick = { context.startActivitySafely(I2pIntegration.i2pdFDroidIntent()) },
+                onClick = { context.startActivitySafely(I2pIntegration.i2pFDroidIntent()) },
             )
         }
         ToggleRow(
@@ -461,12 +465,13 @@ private fun openOrbotInstall(context: Context) {
 }
 
 /**
- * Opens i2pd's install page — Play Store first, F-Droid fallback on a store-less
- * (e.g. de-Googled) device. Never throws; a missing handler is a no-op.
+ * Opens the official I2P app's install page — Play Store first, F-Droid fallback
+ * on a store-less (e.g. de-Googled) device. Never throws; a missing handler is a
+ * no-op.
  */
-private fun openI2pdInstall(context: Context) {
-    if (!context.startActivitySafely(I2pIntegration.i2pdInstallIntent())) {
-        context.startActivitySafely(I2pIntegration.i2pdFDroidIntent())
+private fun openI2pInstall(context: Context) {
+    if (!context.startActivitySafely(I2pIntegration.i2pInstallIntent())) {
+        context.startActivitySafely(I2pIntegration.i2pFDroidIntent())
     }
 }
 

@@ -18,7 +18,7 @@ import com.zitrone.app.diagnostics.BootDiagnostics
 import com.zitrone.app.i2p.I2pIntegration
 import com.zitrone.app.net.ApiClient
 import com.zitrone.app.net.CertificatePinning
-import com.zitrone.app.net.SocksI2pProber
+import com.zitrone.app.net.HttpConnectI2pProber
 import com.zitrone.app.net.TransportResolver
 import com.zitrone.app.net.WsClient
 import com.zitrone.app.notifications.MessagingNotifications
@@ -67,8 +67,8 @@ class AppContainer(private val app: Application) {
 
     /**
      * Resolves the fixed I2P -> Tor -> clearnet chain. Context-free by design —
-     * the router checks and the SOCKS readiness probe are injected, and the one
-     * Context-bound side effect (asking Orbot to start) lives in [applyTransport]
+     * the router checks and the HTTP-CONNECT readiness probe are injected, and the
+     * one Context-bound side effect (asking Orbot to start) lives in [applyTransport]
      * below. Inputs mirror the user's I2P/Tor toggles.
      */
     private val transportInputs: StateFlow<TransportResolver.Inputs> =
@@ -86,9 +86,9 @@ class AppContainer(private val app: Application) {
         relayI2pDest = BuildConfig.RELAY_I2P_DEST,
         i2pProxyHost = BuildConfig.I2P_PROXY_HOST,
         inputs = transportInputs,
-        isI2pdInstalled = { I2pIntegration.isI2pdInstalled(app) },
+        isRouterInstalled = { I2pIntegration.isOfficialRouterInstalled(app) },
         isOrbotInstalled = { TorIntegration.isOrbotInstalled(app) },
-        prober = SocksI2pProber(),
+        prober = HttpConnectI2pProber(),
         scope = scope,
     )
 
@@ -134,7 +134,10 @@ class AppContainer(private val app: Application) {
     private fun applyTransport(state: TransportState) {
         val (client, apiBase, ws) = when (state) {
             TransportState.I2P -> Triple(
-                CertificatePinning.buildI2pClient(BuildConfig.I2P_PROXY_HOST),
+                CertificatePinning.buildI2pClient(
+                    BuildConfig.I2P_PROXY_HOST,
+                    BuildConfig.RELAY_I2P_DEST,
+                ),
                 i2pApiBaseUrl,
                 i2pWsUrl,
             )

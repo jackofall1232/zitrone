@@ -26,12 +26,14 @@
     <queries>
         <!-- Orbot (Tor). -->
         <package android:name="org.torproject.android" />
-        <!-- i2pd — the router Zitrone wires (SOCKS5 4447). -->
-        <package android:name="org.purplei2p.i2pd" />
-        <!-- Official Java I2P — ships under BOTH ids (Play + F-Droid); detected
-             only so the UI can say "i2pd needed" instead of a blind install prompt. -->
+        <!-- Official I2P app — the router Zitrone wires (HTTP proxy 4444 via
+             CONNECT). Ships under BOTH ids: net.i2p.android (Play/canonical) and
+             net.i2p.android.router (F-Droid). -->
         <package android:name="net.i2p.android" />
         <package android:name="net.i2p.android.router" />
+        <!-- i2pd — no longer wired; detected only so the UI can tell an i2pd-only
+             user that Zitrone now uses the official I2P app for relay routing. -->
+        <package android:name="org.purplei2p.i2pd" />
     </queries>
 
     <application

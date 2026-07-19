@@ -48,13 +48,13 @@ class TransportResolverTest {
         inputs: MutableStateFlow<TransportResolver.Inputs>,
         prober: I2pProber,
         relayI2pDest: String = dest,
-        i2pdInstalled: Boolean = true,
+        routerInstalled: Boolean = true,
         orbotInstalled: Boolean = true,
     ) = TransportResolver(
         relayI2pDest = relayI2pDest,
         i2pProxyHost = "127.0.0.1",
         inputs = inputs,
-        isI2pdInstalled = { i2pdInstalled },
+        isRouterInstalled = { routerInstalled },
         isOrbotInstalled = { orbotInstalled },
         prober = prober,
         scope = backgroundScope,
@@ -89,9 +89,9 @@ class TransportResolverTest {
     }
 
     @Test
-    fun `no i2pd installed is never I2P`() = runTest {
+    fun `no router installed is never I2P`() = runTest {
         val prober = FakeProber(I2pProber.Readiness.READY)
-        val r = resolver(inputs(i2p = true, tor = false), prober, i2pdInstalled = false)
+        val r = resolver(inputs(i2p = true, tor = false), prober, routerInstalled = false)
         runCurrent()
         assertEquals(TransportState.CLEARNET_FALLBACK, r.state.value)
         assertEquals(0, prober.calls)
@@ -146,7 +146,7 @@ class TransportResolverTest {
         runCurrent()
         assertEquals(TransportState.I2P, r.state.value)
 
-        // The user stops i2pd: the proxy port goes dead. The next liveness check
+        // The user stops the I2P app: the proxy port goes dead. The next liveness check
         // (30s cadence) demotes to the Tor fallback.
         prober.proxyListening = false
         prober.readiness = I2pProber.Readiness.PROXY_DOWN
@@ -154,7 +154,7 @@ class TransportResolverTest {
         runCurrent()
         assertEquals(TransportState.TOR, r.state.value)
 
-        // i2pd comes back with tunnels built: background polling re-promotes.
+        // The I2P app comes back with tunnels built: background polling re-promotes.
         prober.proxyListening = true
         prober.readiness = I2pProber.Readiness.READY
         advanceTimeBy(pastPollInterval)
