@@ -11,6 +11,7 @@ import com.zitrone.app.crypto.EncryptedSignalProtocolStore
 import com.zitrone.app.crypto.KeyStoreManager
 import com.zitrone.app.crypto.SignalProtocolManager
 import com.zitrone.app.data.ConversationRepository
+import com.zitrone.app.data.EncryptedRosterStore
 import com.zitrone.app.data.MessageRepository
 import com.zitrone.app.data.SettingsRepository
 import com.zitrone.app.data.TransportState
@@ -107,7 +108,10 @@ class AppContainer(private val app: Application) {
     }
 
     val messageRepository = MessageRepository(scope)
-    val conversationRepository = ConversationRepository()
+    // Roster is persisted (encrypted) — the old in-memory-only ConversationRepository
+    // was wiped on every process restart/update, losing pinned keys + verified flags.
+    val conversationRepository =
+        ConversationRepository(EncryptedRosterStore(keyStoreManager, signalStore))
 
     val coordinator = MessagingCoordinator(
         appContext = app,

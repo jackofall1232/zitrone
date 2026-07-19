@@ -327,62 +327,98 @@ class MessagingCoordinator(
      */
     fun sendText(conversation: Conversation, text: String, ttlSeconds: Int?, burnOnRead: Boolean) {
         scope.launch {
-            val accountId = api.accountId ?: return@launch
-            // Stage marker for the diagnostic log in onFailure below.
-            // Stage names only — never data.
-            var stage = "check-session"
-            runCatching {
-                // Session establishment + encrypt hold the per-contact lock so
-                // a concurrent receipt send can't fork the ratchet.
-                val encrypted = withSessionLock(conversation.contactId) {
-                    if (!signal.hasSession(conversation.contactId)) {
-                        stage = "fetch-prekey-bundle"
-                        diag("send: no session — firing GET prekey bundle")
-                        val bundle = api.fetchPreKeyBundle(conversation.contactId)
-                        val pinned = conversation.pinnedIdentityKeyBase64
-                        if (pinned != null && pinned != bundle.identityKeyBase64) {
-                            // The relay returned a different identity key than the
-                            // one exchanged out of band (contact QR). That is a
-                            // key-substitution attempt — refuse to establish the
-                            // session or send, and raise the warning badge instead
-                            // of silently trusting the relay's key.
-                            diag("send: identity key mismatch — send refused, warning raised")
-                            conversations.flagIdentityMismatch(conversation.contactId)
-                            return@withSessionLock null
-                        }
-                        stage = "establish-session"
-                        signal.establishSession(conversation.contactId, bundle)
-                        diag("send: X3DH session established")
-                        conversations.upsert(
-                            conversation.copy(contactIdentityKeyBase64 = bundle.identityKeyBase64),
-                        )
-                    }
-                    stage = "encrypt"
-                    // Length-hiding padding before encryption — see MessagePadding.
-                    signal.encrypt(
-                        conversation.contactId,
-                        MessagePadding.pad(text.toByteArray(Charsets.UTF_8)),
-                    )
-                } ?: return@launch
-                val envelope = MessageEnvelope(
-                    id = UUID.randomUUID().toString(),
-                    senderId = accountId,
-                    recipientId = conversation.contactId,
-                    ciphertext = encrypted.ciphertextBase64,
-                    ephemeralKey = encrypted.ephemeralKeyBase64,
-                    preKeyId = encrypted.preKeyId,
-                    messageNumber = encrypted.messageNumber,
-                    // libsignal's Java API does not expose the previous chain
-                    // length; the field is carried for protocol compatibility.
-                    previousChainLength = 0,
-                    timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now()),
-                    ttlSeconds = ttlSeconds,
-                    burnOnRead = burnOnRead,
-                    mediaType = MessageEnvelope.MEDIA_TEXT,
-                )
+            deliverText(
+                conversation = conversation,
+                messageId = UUID.randomUUID().toString(),
+                text = text,
+                ttlSeconds = ttlSeconds,
+                burnOnRead = burnOnRead,
+                existing = false,
+            )
+        }
+    }
 
+    /**
+     * Encrypt + hand off one text message under a fixed [messageId]. Shared by
+     * the initial [sendText] ([existing] = false, adds the local bubble on a
+     * successful encrypt) and [retry] ([existing] = true, the bubble is already
+     * on screen and was just flipped back to SENDING).
+     *
+     * Honesty change (see [MessageState]): a successful ws-enqueue no longer
+     * marks the message delivered — it merely means the socket accepted the
+     * bytes, not that the relay stored them or the peer received them. The
+     * message STAYS in SENDING until the relay's `message.stored` (→ SENT) and
+     * the recipient's peer-routed `message.delivered` (→ DELIVERED, TTL start)
+     * arrive. A dead socket (ws.sendMessage == false) or a crypto/transport
+     * throw flips it to FAILED so the bubble shows "!" + retry rather than a
+     * false tick. markFailed on an id whose bubble was never added (an encrypt
+     * throw before addOutgoing) is a harmless no-op.
+     */
+    private suspend fun deliverText(
+        conversation: Conversation,
+        messageId: String,
+        text: String,
+        ttlSeconds: Int?,
+        burnOnRead: Boolean,
+        existing: Boolean,
+    ) {
+        val accountId = api.accountId ?: return
+        // Stage marker for the diagnostic log in onFailure below.
+        // Stage names only — never data.
+        var stage = "check-session"
+        runCatching {
+            // Session establishment + encrypt hold the per-contact lock so
+            // a concurrent receipt send can't fork the ratchet.
+            val encrypted = withSessionLock(conversation.contactId) {
+                if (!signal.hasSession(conversation.contactId)) {
+                    stage = "fetch-prekey-bundle"
+                    diag("send: no session — firing GET prekey bundle")
+                    val bundle = api.fetchPreKeyBundle(conversation.contactId)
+                    val pinned = conversation.pinnedIdentityKeyBase64
+                    if (pinned != null && pinned != bundle.identityKeyBase64) {
+                        // The relay returned a different identity key than the
+                        // one exchanged out of band (contact QR). That is a
+                        // key-substitution attempt — refuse to establish the
+                        // session or send, and raise the warning badge instead
+                        // of silently trusting the relay's key.
+                        diag("send: identity key mismatch — send refused, warning raised")
+                        conversations.flagIdentityMismatch(conversation.contactId)
+                        return@withSessionLock null
+                    }
+                    stage = "establish-session"
+                    signal.establishSession(conversation.contactId, bundle)
+                    diag("send: X3DH session established")
+                    conversations.upsert(
+                        conversation.copy(contactIdentityKeyBase64 = bundle.identityKeyBase64),
+                    )
+                }
+                stage = "encrypt"
+                // Length-hiding padding before encryption — see MessagePadding.
+                signal.encrypt(
+                    conversation.contactId,
+                    MessagePadding.pad(text.toByteArray(Charsets.UTF_8)),
+                )
+            } ?: return
+            val envelope = MessageEnvelope(
+                id = messageId,
+                senderId = accountId,
+                recipientId = conversation.contactId,
+                ciphertext = encrypted.ciphertextBase64,
+                ephemeralKey = encrypted.ephemeralKeyBase64,
+                preKeyId = encrypted.preKeyId,
+                messageNumber = encrypted.messageNumber,
+                // libsignal's Java API does not expose the previous chain
+                // length; the field is carried for protocol compatibility.
+                previousChainLength = 0,
+                timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now()),
+                ttlSeconds = ttlSeconds,
+                burnOnRead = burnOnRead,
+                mediaType = MessageEnvelope.MEDIA_TEXT,
+            )
+
+            if (!existing) {
                 val local = Message(
-                    id = envelope.id,
+                    id = messageId,
                     conversationId = conversation.id,
                     text = text,
                     isMine = true,
@@ -393,29 +429,31 @@ class MessagingCoordinator(
                 )
                 messages.addOutgoing(local)
                 conversations.onOutgoingMessage(conversation.id)
-
-                stage = "ws-send"
-                if (ws.sendMessage(envelope)) {
-                    // The protocol has no sender-side delivery receipt event,
-                    // so the sender's TTL clock starts at hand-off — the
-                    // conservative choice (never outlives the recipient copy
-                    // by more than transit time).
-                    messages.markDelivered(envelope.id)
-                } else {
-                    // Socket not open: the message stays local in SENDING.
-                    // Connection state only — never the envelope.
-                    diag("send: hand-off failed — socket not open (${ws.connectionState.value})")
-                }
-            }.onFailure { e ->
-                if (e is CancellationException) throw e
-                // Same discrimination logic as the boot loop: exception class +
-                // message + the server's {"error": code} body when present —
-                // never message content, keys, or ids.
-                val bodySuffix = (e as? ApiClient.ApiException)?.responseBody
-                    ?.let { " server_error=$it" }
-                    .orEmpty()
-                diag("send: failed at stage=$stage: ${e.javaClass.name}: ${e.message}$bodySuffix")
             }
+
+            stage = "ws-send"
+            if (ws.sendMessage(envelope)) {
+                // Enqueued — but honestly still just SENDING. The tick waits for
+                // the relay's message.stored (→SENT) and the recipient's
+                // message.delivered (→DELIVERED); see [MessageState].
+            } else {
+                // Socket not open: the send did not reach the relay.
+                // Connection state only — never the envelope.
+                diag("send: hand-off failed — socket not open (${ws.connectionState.value})")
+                messages.markFailed(messageId)
+            }
+        }.onFailure { e ->
+            if (e is CancellationException) throw e
+            // The message never made it out — surface FAILED so the user can
+            // retry (no-op if the bubble was never added).
+            messages.markFailed(messageId)
+            // Same discrimination logic as the boot loop: exception class +
+            // message + the server's {"error": code} body when present —
+            // never message content, keys, or ids.
+            val bodySuffix = (e as? ApiClient.ApiException)?.responseBody
+                ?.let { " server_error=$it" }
+                .orEmpty()
+            diag("send: failed at stage=$stage: ${e.javaClass.name}: ${e.message}$bodySuffix")
         }
     }
 
@@ -434,9 +472,10 @@ class MessagingCoordinator(
      * if any.
      *
      * Failure handling mirrors [sendText]: a key-substitution refusal aborts
-     * before anything is uploaded; a post-upload failure leaves the local copy
-     * in SENDING (there is no FAILED state) and the orphaned blob TTLs out in
-     * 72h. The sender's own copy renders immediately from the prepared bytes.
+     * before anything is uploaded; a blob-upload throw or a dead socket flips
+     * the local copy to FAILED (bubble shows "!" + retry) and the orphaned blob,
+     * if any, TTLs out in 72h. The sender's own copy renders immediately from
+     * the prepared bytes, which stay in memory so [retry] can re-upload them.
      */
     fun sendAttachment(
         conversation: Conversation,
@@ -449,56 +488,92 @@ class MessagingCoordinator(
         burnOnRead: Boolean,
     ) {
         scope.launch {
-            val accountId = api.accountId ?: return@launch
-            var stage = "encrypt-blob"
-            runCatching {
-                val blob = AttachmentCrypto.encrypt(bytes)
-                // filename is forced null for images inside serialize(); mirror
-                // that here so the local copy's metadata matches the wire.
-                val controlFilename = if (kind == AttachmentControlPayload.KIND_IMAGE) null else filename
-                val controlJson = AttachmentControlPayload.serialize(
-                    kind = kind,
-                    blobToken = b64(blob.token),
-                    key = b64(blob.key),
-                    mimetype = mimetype,
-                    filename = filename,
-                    size = blob.size,
-                    sha256 = b64(blob.sha256),
-                    caption = caption,
-                )
-                // Session establishment + ratchet-encrypt hold the per-contact
-                // lock so a concurrent receipt/text send can't fork the ratchet.
-                // The key-substitution guard runs here, BEFORE the blob is
-                // uploaded, so a refused send never orphans a blob.
-                stage = "check-session"
-                val encrypted = withSessionLock(conversation.contactId) {
-                    if (!signal.hasSession(conversation.contactId)) {
-                        stage = "fetch-prekey-bundle"
-                        diag("send: no session — firing GET prekey bundle")
-                        val bundle = api.fetchPreKeyBundle(conversation.contactId)
-                        val pinned = conversation.pinnedIdentityKeyBase64
-                        if (pinned != null && pinned != bundle.identityKeyBase64) {
-                            diag("send: identity key mismatch — send refused, warning raised")
-                            conversations.flagIdentityMismatch(conversation.contactId)
-                            return@withSessionLock null
-                        }
-                        stage = "establish-session"
-                        signal.establishSession(conversation.contactId, bundle)
-                        diag("send: X3DH session established")
-                        conversations.upsert(
-                            conversation.copy(contactIdentityKeyBase64 = bundle.identityKeyBase64),
-                        )
-                    }
-                    stage = "encrypt"
-                    // Control JSON is padded with the DEFAULT 256-byte block like
-                    // any message plaintext; only the blob uses 64 KiB buckets.
-                    signal.encrypt(
-                        conversation.contactId,
-                        MessagePadding.pad(controlJson.toByteArray(Charsets.UTF_8)),
-                    )
-                } ?: return@launch
+            deliverAttachment(
+                conversation = conversation,
+                messageId = UUID.randomUUID().toString(),
+                bytes = bytes,
+                kind = kind,
+                mimetype = mimetype,
+                filename = filename,
+                caption = caption,
+                ttlSeconds = ttlSeconds,
+                burnOnRead = burnOnRead,
+                existing = false,
+            )
+        }
+    }
 
-                val messageId = UUID.randomUUID().toString()
+    /**
+     * Encrypt-blob + sideload-upload + hand off one attachment under a fixed
+     * [messageId]. Shared by the initial [sendAttachment] ([existing] = false)
+     * and [retry] ([existing] = true, re-uploading a fresh blob from the
+     * retained in-memory [bytes] under the same message id). Same honesty rules
+     * as [deliverText]: a successful ws-enqueue leaves the message SENDING; the
+     * tick advances only on the relay/peer acks; an upload throw or dead socket
+     * flips it to FAILED.
+     */
+    private suspend fun deliverAttachment(
+        conversation: Conversation,
+        messageId: String,
+        bytes: ByteArray,
+        kind: String,
+        mimetype: String,
+        filename: String?,
+        caption: String?,
+        ttlSeconds: Int?,
+        burnOnRead: Boolean,
+        existing: Boolean,
+    ) {
+        val accountId = api.accountId ?: return
+        var stage = "encrypt-blob"
+        runCatching {
+            val blob = AttachmentCrypto.encrypt(bytes)
+            // filename is forced null for images inside serialize(); mirror
+            // that here so the local copy's metadata matches the wire.
+            val controlFilename = if (kind == AttachmentControlPayload.KIND_IMAGE) null else filename
+            val controlJson = AttachmentControlPayload.serialize(
+                kind = kind,
+                blobToken = b64(blob.token),
+                key = b64(blob.key),
+                mimetype = mimetype,
+                filename = filename,
+                size = blob.size,
+                sha256 = b64(blob.sha256),
+                caption = caption,
+            )
+            // Session establishment + ratchet-encrypt hold the per-contact
+            // lock so a concurrent receipt/text send can't fork the ratchet.
+            // The key-substitution guard runs here, BEFORE the blob is
+            // uploaded, so a refused send never orphans a blob.
+            stage = "check-session"
+            val encrypted = withSessionLock(conversation.contactId) {
+                if (!signal.hasSession(conversation.contactId)) {
+                    stage = "fetch-prekey-bundle"
+                    diag("send: no session — firing GET prekey bundle")
+                    val bundle = api.fetchPreKeyBundle(conversation.contactId)
+                    val pinned = conversation.pinnedIdentityKeyBase64
+                    if (pinned != null && pinned != bundle.identityKeyBase64) {
+                        diag("send: identity key mismatch — send refused, warning raised")
+                        conversations.flagIdentityMismatch(conversation.contactId)
+                        return@withSessionLock null
+                    }
+                    stage = "establish-session"
+                    signal.establishSession(conversation.contactId, bundle)
+                    diag("send: X3DH session established")
+                    conversations.upsert(
+                        conversation.copy(contactIdentityKeyBase64 = bundle.identityKeyBase64),
+                    )
+                }
+                stage = "encrypt"
+                // Control JSON is padded with the DEFAULT 256-byte block like
+                // any message plaintext; only the blob uses 64 KiB buckets.
+                signal.encrypt(
+                    conversation.contactId,
+                    MessagePadding.pad(controlJson.toByteArray(Charsets.UTF_8)),
+                )
+            } ?: return
+
+            if (!existing) {
                 val local = Message(
                     id = messageId,
                     conversationId = conversation.id,
@@ -521,42 +596,93 @@ class MessagingCoordinator(
                 )
                 messages.addOutgoing(local)
                 conversations.onOutgoingMessage(conversation.id)
+            }
 
-                // Blob to the blind store FIRST — the recipient must be able to
-                // redeem it the moment the envelope arrives.
-                stage = "upload-blob"
-                diag("send: uploading attachment blob")
-                api.uploadBlob(b64(blob.blobId), b64(blob.box))
+            // Blob to the blind store FIRST — the recipient must be able to
+            // redeem it the moment the envelope arrives.
+            stage = "upload-blob"
+            diag("send: uploading attachment blob")
+            api.uploadBlob(b64(blob.blobId), b64(blob.box))
 
-                val envelope = MessageEnvelope(
-                    id = messageId,
-                    senderId = accountId,
-                    recipientId = conversation.contactId,
-                    ciphertext = encrypted.ciphertextBase64,
-                    ephemeralKey = encrypted.ephemeralKeyBase64,
-                    preKeyId = encrypted.preKeyId,
-                    messageNumber = encrypted.messageNumber,
-                    previousChainLength = 0,
-                    timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now()),
-                    ttlSeconds = ttlSeconds,
-                    burnOnRead = burnOnRead,
-                    // NEVER MEDIA_IMAGE/MEDIA_FILE — the relay must not be able to
-                    // tell an attachment from conversation text (see the control
-                    // payload rationale).
-                    mediaType = MessageEnvelope.MEDIA_TEXT,
-                )
-                stage = "ws-send"
-                if (ws.sendMessage(envelope)) {
-                    messages.markDelivered(messageId)
-                } else {
-                    diag("send: hand-off failed — socket not open (${ws.connectionState.value})")
+            val envelope = MessageEnvelope(
+                id = messageId,
+                senderId = accountId,
+                recipientId = conversation.contactId,
+                ciphertext = encrypted.ciphertextBase64,
+                ephemeralKey = encrypted.ephemeralKeyBase64,
+                preKeyId = encrypted.preKeyId,
+                messageNumber = encrypted.messageNumber,
+                previousChainLength = 0,
+                timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now()),
+                ttlSeconds = ttlSeconds,
+                burnOnRead = burnOnRead,
+                // NEVER MEDIA_IMAGE/MEDIA_FILE — the relay must not be able to
+                // tell an attachment from conversation text (see the control
+                // payload rationale).
+                mediaType = MessageEnvelope.MEDIA_TEXT,
+            )
+            stage = "ws-send"
+            if (ws.sendMessage(envelope)) {
+                // Enqueued — honestly still SENDING until the relay/peer acks.
+            } else {
+                diag("send: hand-off failed — socket not open (${ws.connectionState.value})")
+                messages.markFailed(messageId)
+            }
+        }.onFailure { e ->
+            if (e is CancellationException) throw e
+            // Upload throw or transport error — the attachment never made it out.
+            messages.markFailed(messageId)
+            val bodySuffix = (e as? ApiClient.ApiException)?.responseBody
+                ?.let { " server_error=$it" }
+                .orEmpty()
+            diag("send: attachment failed at stage=$stage: ${e.javaClass.name}: ${e.message}$bodySuffix")
+        }
+    }
+
+    /**
+     * User tapped retry on a FAILED bubble. Flips it back to SENDING and re-runs
+     * the send under the SAME message id — re-encrypting + re-uploading a fresh
+     * blob from the retained in-memory attachment bytes, or re-sending the text
+     * envelope. A no-op if the message is not FAILED (already sent/burned) or its
+     * conversation is gone. An attachment whose bytes were somehow evicted can't
+     * be re-uploaded — it is left FAILED (should not happen: a sender's own copy
+     * stays LOADED in memory).
+     */
+    fun retry(messageId: String) {
+        scope.launch {
+            val message = messages.retryable(messageId) ?: return@launch
+            val conversation = conversations.find(message.conversationId) ?: run {
+                messages.markFailed(messageId)
+                return@launch
+            }
+            val attachment = message.attachment
+            if (attachment != null) {
+                val bytes = attachment.bytes
+                if (bytes == null) {
+                    messages.markFailed(messageId)
+                    return@launch
                 }
-            }.onFailure { e ->
-                if (e is CancellationException) throw e
-                val bodySuffix = (e as? ApiClient.ApiException)?.responseBody
-                    ?.let { " server_error=$it" }
-                    .orEmpty()
-                diag("send: attachment failed at stage=$stage: ${e.javaClass.name}: ${e.message}$bodySuffix")
+                deliverAttachment(
+                    conversation = conversation,
+                    messageId = messageId,
+                    bytes = bytes,
+                    kind = attachment.kind,
+                    mimetype = attachment.mimetype,
+                    filename = attachment.filename,
+                    caption = attachment.caption,
+                    ttlSeconds = message.ttlSeconds,
+                    burnOnRead = message.burnOnRead,
+                    existing = true,
+                )
+            } else {
+                deliverText(
+                    conversation = conversation,
+                    messageId = messageId,
+                    text = message.text,
+                    ttlSeconds = message.ttlSeconds,
+                    burnOnRead = message.burnOnRead,
+                    existing = true,
+                )
             }
         }
     }
@@ -723,6 +849,12 @@ class MessagingCoordinator(
                         ),
                     )
                     ws.ackMessage(envelope.id)
+                    // Delivery receipt back to the SENDER (peer-routed by the
+                    // relay → their message.delivered). senderId comes from the
+                    // decrypted envelope; the relay never stored it, preserving
+                    // zero-knowledge. Best-effort: a dropped receipt just means
+                    // the sender stays at SENT, never worse.
+                    ws.sendReceived(envelope.id, envelope.senderId)
                     MessagingNotifications.showNewMessage(appContext)
                     redeemAttachment(envelope.id, attachment)
                     return@runCatching
@@ -764,6 +896,10 @@ class MessagingCoordinator(
                 // the server delete its copy (store-and-forward, zero
                 // retention).
                 ws.ackMessage(envelope.id)
+                // Delivery receipt to the SENDER (peer-routed → their
+                // message.delivered). See the attachment branch above for the
+                // zero-knowledge rationale.
+                ws.sendReceived(envelope.id, envelope.senderId)
                 // Content-free notification: always just "New message".
                 MessagingNotifications.showNewMessage(appContext)
             }
@@ -799,6 +935,21 @@ class MessagingCoordinator(
 
     override fun onMessageBurned(messageId: String) {
         messages.onRemoteBurn(messageId)
+    }
+
+    /** Relay stored our envelope → SENT tick (one tick, "the relay has it"). */
+    override fun onMessageStored(messageId: String) {
+        messages.markSent(messageId)
+    }
+
+    /**
+     * Recipient's peer-routed delivery receipt → DELIVERED tick. This is the
+     * FIRST honest proof the message reached the other device, so it — not
+     * ws-enqueue — advances the tick AND starts the sender-side TTL (see
+     * [MessageRepository.markDelivered]).
+     */
+    override fun onMessageDelivered(messageId: String) {
+        messages.markDelivered(messageId)
     }
 
     override fun onTyping(senderId: String, started: Boolean) {

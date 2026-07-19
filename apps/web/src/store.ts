@@ -38,6 +38,7 @@ import {
   DROP_POW_DIFFICULTY,
   ONE_TIME_PREKEY_BATCH,
   parseEnvelope,
+  parseReadReceipt,
   PROTOCOL_VERSION,
   serializeAttachment,
   type AttachmentKind,
@@ -104,6 +105,17 @@ export interface AttachmentView {
   blob?: Blob;
 }
 
+/**
+ * Send-state for an outgoing message. Honest per-frame:
+ *   sending   composed, awaiting the relay's "stored" ack (or offline queue)
+ *   sent      relay stored the envelope (message.stored) — one tick
+ *   delivered recipient decrypted+stored it (message.delivered) — two ticks
+ *   read      recipient opened it (peer read receipt) — two ticks, accent
+ *   failed    the send could not be handed to the relay — "!" + retry
+ * Received messages carry "delivered" and never render ticks.
+ */
+export type SendStatus = "sending" | "sent" | "delivered" | "read" | "failed";
+
 export interface Message {
   id: string;
   peerId: string;
@@ -112,7 +124,14 @@ export interface Message {
   timestamp: string;
   ttlSeconds: number | null;
   burnOnRead: boolean;
-  deliveredAt: number;
+  /** Outgoing send-state (see SendStatus). Not rendered for received messages. */
+  status: SendStatus;
+  /**
+   * When the self-destruct timer starts. Incoming: on arrival. Outgoing: only
+   * once DELIVERED (a real receipt) — null until then, so the countdown never
+   * runs against a message the recipient hasn't got yet.
+   */
+  deliveredAt: number | null;
   burning: boolean;
   opened: boolean;
   /** Present when this message carries an attachment (image/file). */
@@ -153,6 +172,8 @@ interface AppState {
     prepared: PreparedAttachment,
     opts: { ttlSeconds: number | null; burnOnRead: boolean },
   ) => Promise<void>;
+  /** Re-run the send for a FAILED outgoing message (re-encrypt + re-upload). */
+  retryMessage: (peerId: string, messageId: string) => Promise<void>;
   openMessage: (peerId: string, messageId: string) => void;
   finishBurn: (peerId: string, messageId: string) => void;
   /** Encrypt a message to a contact and deposit it as a dead drop; returns the
@@ -288,6 +309,54 @@ export const useApp = create<AppState>((set, get) => {
     }));
   };
 
+  // ── outgoing send-state ──────────────────────────────────────────────────────
+  // Monotonic ranking of the positive transitions. FAILED is off-ladder: it is
+  // terminal until an explicit user retry, so a late frame never un-fails it.
+  const RANK: Record<SendStatus, number> = {
+    sending: 0,
+    sent: 1,
+    delivered: 2,
+    read: 3,
+    failed: -1,
+  };
+
+  // How to re-drive a FAILED send. Memory-only (like the plaintext); keyed by
+  // message id. Populated when a message is composed, dropped once terminal.
+  const retries = new Map<string, () => Promise<void>>();
+
+  // Mutate a single OUTGOING message wherever it lives, without touching others.
+  const patchOutgoing = (messageId: string, patch: (m: Message) => Message): void => {
+    set((s) => {
+      for (const [peerId, list] of Object.entries(s.messages)) {
+        const current = list.find((m) => m.id === messageId && m.direction === "sent");
+        if (!current) continue;
+        return {
+          messages: {
+            ...s.messages,
+            [peerId]: list.map((m) => (m === current ? patch(current) : m)),
+          },
+        };
+      }
+      return s;
+    });
+  };
+
+  // Apply a server-driven positive transition (sent/delivered/read). Monotonic
+  // (never regresses on out-of-order frames), a no-op on an unknown/burned id
+  // (never resurrects a removed message) and on a FAILED message, and starts the
+  // sender-side TTL the first time we reach DELIVERED/READ (a real receipt).
+  const advanceStatus = (messageId: string, next: "sent" | "delivered" | "read"): void => {
+    patchOutgoing(messageId, (m) => {
+      if (m.status === "failed" || RANK[m.status] >= RANK[next]) return m;
+      const startsTtl = next !== "sent" && m.deliveredAt == null;
+      return { ...m, status: next, deliveredAt: startsTtl ? Date.now() : m.deliveredAt };
+    });
+  };
+
+  const markFailed = (messageId: string): void => {
+    patchOutgoing(messageId, (m) => (m.status === "failed" ? m : { ...m, status: "failed" }));
+  };
+
   const updateAttachment = (
     peerId: string,
     messageId: string,
@@ -344,6 +413,7 @@ export const useApp = create<AppState>((set, get) => {
     peerId: string,
     plaintext: string,
     opts: { ttlSeconds: number | null; burnOnRead: boolean },
+    id: string,
   ): Promise<{ id: string; timestamp: string } | null> => {
     const { contacts, accountId, ws } = get();
     const contact = contacts[peerId];
@@ -357,7 +427,7 @@ export const useApp = create<AppState>((set, get) => {
     set((s) => ({ contacts: { ...s.contacts, [peerId]: { ...contact } } }));
 
     const envelope: MessageEnvelope = {
-      id: crypto.randomUUID(),
+      id,
       sender_id: accountId,
       recipient_id: peerId,
       ciphertext: b64(encrypted.blob),
@@ -383,8 +453,11 @@ export const useApp = create<AppState>((set, get) => {
   const deliverIncoming = (envelope: MessageEnvelope, text: string): void => {
     const classified = classifyIncoming(text);
     if (classified.kind === "receipt") {
-      // The web client doesn't yet track per-message read state; the receipt is
-      // still acked by the caller so the server deletes its copy.
+      // A read receipt names the outgoing messages the peer has now opened —
+      // advance each to READ. The receipt is still acked by the caller so the
+      // server deletes its copy.
+      const receipt = parseReadReceipt(text);
+      if (receipt) for (const id of receipt.message_ids) advanceStatus(id, "read");
       return;
     }
     const base = {
@@ -394,6 +467,9 @@ export const useApp = create<AppState>((set, get) => {
       timestamp: envelope.timestamp,
       ttlSeconds: envelope.ttl_seconds,
       burnOnRead: envelope.burn_on_read,
+      // Incoming TTL starts on arrival (unchanged). status is unused for
+      // received messages (no ticks) — a terminal value keeps the type honest.
+      status: "delivered" as const,
       deliveredAt: Date.now(),
       burning: false,
       opened: false,
@@ -513,11 +589,31 @@ export const useApp = create<AppState>((set, get) => {
             deliverIncoming(envelope, text);
             // Ack triggers immediate server-side deletion of the envelope.
             ws?.send({ type: "message.ack", message_id: envelope.id });
+            // Delivery receipt: tell the ORIGINAL sender we got it, addressed
+            // back to them by peer_id (their account id, from the decrypted
+            // envelope). The relay peer-routes it as message.delivered without
+            // ever having stored who the sender was (zero-knowledge preserved).
+            ws?.send({
+              type: "message.received",
+              message_id: envelope.id,
+              peer_id: envelope.sender_id,
+            });
             await persist();
           } catch {
             // Undecryptable envelope: never ack what we couldn't deliver to
             // the user, and never log payloads.
           }
+          break;
+        }
+        case "message.stored": {
+          // The relay persisted our envelope — one tick (SENT).
+          advanceStatus(event.message_id, "sent");
+          break;
+        }
+        case "message.delivered": {
+          // The recipient decrypted+stored it — two ticks (DELIVERED). This is
+          // where the sender-side self-destruct timer starts (see advanceStatus).
+          advanceStatus(event.message_id, "delivered");
           break;
         }
         case "message.burned": {
@@ -681,78 +777,103 @@ export const useApp = create<AppState>((set, get) => {
     },
 
     async sendMessage(peerId, text, opts) {
-      const sent = await buildAndSend(peerId, text, opts);
-      if (!sent) return;
+      // Show the bubble immediately as SENDING, then hand it to the relay. The
+      // envelope keeps this id so message.stored/delivered can find it, and a
+      // send that never reaches the relay lands on FAILED with a retry.
+      const id = crypto.randomUUID();
       appendMessage(peerId, {
-        id: sent.id,
+        id,
         peerId,
         direction: "sent",
         text,
-        timestamp: sent.timestamp,
+        timestamp: new Date().toISOString(),
         ttlSeconds: opts.ttlSeconds,
         burnOnRead: opts.burnOnRead,
-        deliveredAt: Date.now(),
+        status: "sending",
+        deliveredAt: null,
         burning: false,
         opened: true,
       });
-      await persist();
+      const attempt = async (): Promise<void> => {
+        try {
+          const sent = await buildAndSend(peerId, text, opts, id);
+          // null = no contact/account/socket — nothing was encrypted or sent.
+          if (!sent) markFailed(id);
+          else await persist();
+        } catch {
+          markFailed(id);
+        }
+      };
+      retries.set(id, attempt);
+      await attempt();
     },
 
     async sendAttachment(peerId, prepared, opts) {
-      // Guard BEFORE encrypt+upload: uploading first and then finding no socket
-      // would orphan a blob on the relay (72h TTL) with nothing on screen.
+      // Guard BEFORE showing anything: no contact/account/socket means there is
+      // nowhere to send, so don't paint a bubble that could only ever fail.
       const { contacts, accountId, ws } = get();
       if (!contacts[peerId] || !accountId || !ws) return;
 
-      // Encrypt under a fresh random key and upload the blob FIRST. Only once
-      // the relay holds it do we send the envelope that references it — an
-      // upload failure throws here, so the message is never sent.
-      const blob = await encryptAttachmentBlob(prepared.bytes);
-      const token = await freshToken();
-      await api.depositBlob(
-        { blob_id: b64(blob.blobId), ciphertext: await toBase64(blob.box) },
-        token,
-      );
-
-      // The envelope plaintext is the control payload — routed through the
-      // ordinary send path (padding + ratchet + media_type "text").
-      const plaintext = serializeAttachment({
-        kind: prepared.kind,
-        blobToken: b64(blob.token),
-        key: b64(blob.key),
-        mimetype: prepared.mimetype,
-        filename: prepared.filename,
-        size: blob.size,
-        sha256: b64(blob.sha256),
-        caption: prepared.caption,
-      });
-      const sent = await buildAndSend(peerId, plaintext, opts);
-      if (!sent) return;
-
-      // Render our own copy from the in-memory bytes we just encrypted — same
-      // memory-only storage policy as message plaintext (nothing persisted).
+      // Render our own copy immediately from the in-memory bytes (same
+      // memory-only policy as message plaintext — nothing persisted), as
+      // SENDING, then run the upload+send. On failure the bubble goes to FAILED
+      // and retry re-encrypts and re-uploads from these retained bytes.
+      const id = crypto.randomUUID();
       appendMessage(peerId, {
-        id: sent.id,
+        id,
         peerId,
         direction: "sent",
         text: "",
-        timestamp: sent.timestamp,
+        timestamp: new Date().toISOString(),
         ttlSeconds: opts.ttlSeconds,
         burnOnRead: opts.burnOnRead,
-        deliveredAt: Date.now(),
+        status: "sending",
+        deliveredAt: null,
         burning: false,
         opened: true,
         attachment: {
           kind: prepared.kind,
           mimetype: prepared.mimetype,
           filename: prepared.filename,
-          size: blob.size,
+          size: prepared.bytes.length,
           caption: prepared.caption,
           status: "ready",
           blob: bytesToBlob(prepared.bytes, prepared.mimetype),
         },
       });
-      await persist();
+
+      const attempt = async (): Promise<void> => {
+        try {
+          // Encrypt under a fresh random key and upload the blob FIRST. Only
+          // once the relay holds it do we send the envelope that references it.
+          const blob = await encryptAttachmentBlob(prepared.bytes);
+          const token = await freshToken();
+          await api.depositBlob(
+            { blob_id: b64(blob.blobId), ciphertext: await toBase64(blob.box) },
+            token,
+          );
+          // The envelope plaintext is the control payload — routed through the
+          // ordinary send path (padding + ratchet + media_type "text").
+          const plaintext = serializeAttachment({
+            kind: prepared.kind,
+            blobToken: b64(blob.token),
+            key: b64(blob.key),
+            mimetype: prepared.mimetype,
+            filename: prepared.filename,
+            size: blob.size,
+            sha256: b64(blob.sha256),
+            caption: prepared.caption,
+          });
+          const sent = await buildAndSend(peerId, plaintext, opts, id);
+          if (!sent) markFailed(id);
+          else await persist();
+        } catch {
+          // Blob upload (or any step) threw — mark FAILED; retry stays available.
+          markFailed(id);
+        }
+      };
+      retries.set(id, attempt);
+      await attempt();
     },
 
     async sendDeadDrop(peerId, text) {
@@ -808,7 +929,10 @@ export const useApp = create<AppState>((set, get) => {
         timestamp: envelope.timestamp,
         ttlSeconds: null,
         burnOnRead: false,
-        deliveredAt: Date.now(),
+        // Deposited to the relay — the honest state for a dead drop. We can't
+        // learn when (or if) it's redeemed out of band, so this stays SENT.
+        status: "sent",
+        deliveredAt: null,
         burning: false,
         opened: true,
       });
@@ -829,6 +953,15 @@ export const useApp = create<AppState>((set, get) => {
       // Reuse the normal inbound path to establish/advance the session and
       // surface the message.
       handleServerEvent({ type: "message.deliver", envelope });
+    },
+
+    async retryMessage(peerId, messageId) {
+      const message = (get().messages[peerId] ?? []).find((m) => m.id === messageId);
+      const attempt = retries.get(messageId);
+      // Only a FAILED message with a retained send is retryable.
+      if (!message || message.status !== "failed" || !attempt) return;
+      patchOutgoing(messageId, (m) => ({ ...m, status: "sending" }));
+      await attempt();
     },
 
     openMessage(peerId, messageId) {

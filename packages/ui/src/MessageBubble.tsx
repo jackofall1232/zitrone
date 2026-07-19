@@ -8,6 +8,9 @@ import { BurnParticles } from "./BurnParticles.js";
 import { BurnTimer } from "./BurnTimer.js";
 import { color, motion, radius, typography } from "./tokens.js";
 
+/** Honest send-state for an outgoing bubble — drives the delivery ticks. */
+export type SendStatus = "sending" | "sent" | "delivered" | "read" | "failed";
+
 export interface MessageBubbleProps {
   children: ReactNode;
   direction: "sent" | "received";
@@ -16,6 +19,10 @@ export interface MessageBubbleProps {
   /** TTL countdown: renders a mini lemon-slice burn timer in the corner */
   ttlSeconds?: number;
   deliveredAt?: number;
+  /** Outgoing send-state — renders delivery ticks (only for direction "sent"). */
+  status?: SendStatus;
+  /** Fired when a FAILED bubble's retry affordance is tapped. */
+  onRetry?: () => void;
   /** Set true to play the 600ms particle-dissolve destruction animation */
   burning?: boolean;
   /** Fired when the burn animation finishes — remove the message from state */
@@ -31,6 +38,8 @@ export function MessageBubble({
   burnOnRead = false,
   ttlSeconds,
   deliveredAt,
+  status,
+  onRetry,
   burning = false,
   onBurned,
   onExpired,
@@ -77,7 +86,7 @@ export function MessageBubble({
         {children}
         <BurnParticles active={burning} />
 
-        {(burnOnRead || ttlSeconds || timestamp) && (
+        {(burnOnRead || ttlSeconds || timestamp || (sent && status)) && (
           <span
             style={{
               display: "flex",
@@ -102,10 +111,67 @@ export function MessageBubble({
                 }}
               />
             )}
+            {sent && status && <StatusTick status={status} onRetry={onRetry} />}
           </span>
         )}
       </div>
     </div>
+  );
+}
+
+// Delivery ticks for an outgoing bubble. The default (muted) colour is
+// inherited from the metadata row; READ lifts to full-opacity ink so the
+// double tick reads as an accent against the lemon bubble, and FAILED turns the
+// row into a tappable "! retry" affordance.
+const TICK: Record<Exclude<SendStatus, "failed">, string> = {
+  sending: "…",
+  sent: "✓",
+  delivered: "✓✓",
+  read: "✓✓",
+};
+
+function StatusTick({ status, onRetry }: { status: SendStatus; onRetry?: () => void }) {
+  if (status === "failed") {
+    return (
+      <button
+        type="button"
+        onClick={onRetry}
+        title="Not sent — tap to retry"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 3,
+          padding: 0,
+          border: "none",
+          background: "none",
+          cursor: "pointer",
+          font: "inherit",
+          color: color.semantic.error,
+        }}
+      >
+        <span aria-hidden style={{ fontWeight: 700 }}>
+          !
+        </span>
+        <span style={{ textDecoration: "underline" }}>retry</span>
+      </button>
+    );
+  }
+  const label =
+    status === "sending"
+      ? "Sending"
+      : status === "sent"
+        ? "Sent"
+        : status === "delivered"
+          ? "Delivered"
+          : "Read";
+  return (
+    <span
+      aria-label={label}
+      title={label}
+      style={{ color: status === "read" ? color.semantic.textOnLemon : "inherit" }}
+    >
+      {TICK[status]}
+    </span>
   );
 }
 

@@ -98,6 +98,8 @@ fun ChatScreen(
     onMessagesSeen: (messageIds: List<String>) -> Unit,
     modifier: Modifier = Modifier,
     onTyping: (Boolean) -> Unit = {},
+    /** Re-send a FAILED message (tap-to-retry on its bubble). */
+    onRetry: (messageId: String) -> Unit = {},
 ) {
     var draft by rememberSaveable { mutableStateOf("") }
     // Per-message overrides for the compose-bar burn controls. null = no
@@ -275,7 +277,7 @@ fun ChatScreen(
                     }
                 }
                 item(key = message.id) {
-                    MessageBubble(message = message)
+                    MessageBubble(message = message, onRetry = { onRetry(message.id) })
                 }
             }
         }
