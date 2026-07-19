@@ -50,14 +50,33 @@ object AttachmentLoader {
      * long edge, and re-encodes it as JPEG (~85). The re-encode strips EXIF by
      * construction — deliberate metadata minimization. kind = image, no
      * filename (an image's filename is metadata the recipient has no need for).
+     *
+     * GOTCHA — do NOT collapse the stream-open null-check into the bounds decode.
+     * [BitmapFactory.decodeStream] with `inJustDecodeBounds = true` returns `null`
+     * on SUCCESS by API contract — it only populates `outWidth`/`outHeight` and
+     * never allocates a bitmap. So `openInputStream(uri)?.use { decodeStream(...) }`
+     * evaluates to `null` on the *happy* path, and a trailing `?: throw` then
+     * fires on EVERY valid image (this once made the photo-picker path fail with
+     * "Couldn't attach that" 100% of the time). Validate the OPEN separately (a
+     * null InputStream is the only "cannot open" signal) and validate the DECODE
+     * via the [BitmapFactory.Options.outWidth]/[BitmapFactory.Options.outHeight]
+     * the bounds pass fills in.
+     *
+     * The stream is read on [Dispatchers.IO] from inside the PickVisualMedia
+     * result callback, within the URI read grant. Photo-picker grants live for
+     * the process lifetime, so no persistable permission is taken (and must not
+     * be — takePersistableUriPermission would throw on a PickVisualMedia URI).
      */
     suspend fun prepareImage(context: Context, uri: Uri): Prepared = withContext(Dispatchers.IO) {
         val resolver = context.contentResolver
         // First pass: bounds only, so a huge source never fully decodes into
-        // memory before we know its dimensions.
+        // memory before we know its dimensions. A null InputStream is the only
+        // "cannot open" signal here — the bounds decode itself returns null on
+        // success (see the GOTCHA above), so its return value is intentionally
+        // ignored; dimensions are validated from `bounds` instead.
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-            ?: throw IllegalStateException("cannot open image")
+        (resolver.openInputStream(uri) ?: throw IllegalStateException("cannot open image"))
+            .use { BitmapFactory.decodeStream(it, null, bounds) }
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw IllegalStateException("undecodable image")
         val longEdge = maxOf(bounds.outWidth, bounds.outHeight)
         // Power-of-two subsample to get near the target cheaply, then an exact
@@ -73,11 +92,15 @@ object AttachmentLoader {
         scaled.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
         if (scaled !== decoded) scaled.recycle()
         decoded.recycle()
+        val bytes = out.toByteArray()
+        // A zero-length re-encode means the decode produced nothing usable —
+        // fail loudly rather than depositing an empty blob the recipient can't open.
+        if (bytes.isEmpty()) throw IllegalStateException("empty image encode")
         Prepared(
             kind = AttachmentControlPayload.KIND_IMAGE,
             mimetype = "image/jpeg",
             filename = null,
-            bytes = out.toByteArray(),
+            bytes = bytes,
         )
     }
 
