@@ -51,3 +51,6 @@ apps/desktop/gen/
 .vscode/
 coverage/
 .l00prite/
+
+# Claude Code agent worktrees/scratch
+.claude/
