@@ -127,10 +127,13 @@ type blobRedeemRequest struct {
 	Token string `json:"token"`
 }
 
-// RedeemBlob returns an attachment and destroys the blob. No auth: possession of
-// the one-time token is the entire capability — the relay derives the blob ID
-// from the token preimage, so it cannot link this fetch to any account. Single
-// use: a second attempt with the same token returns 404.
+// RedeemBlob returns an attachment and DESTROYS the blob in the same statement
+// (fetch-and-burn). No auth: possession of the one-time token is the entire
+// capability — the relay derives the blob ID from the token preimage, so it
+// cannot link this fetch to any account. Single use: a second attempt with the
+// same token returns 404. Unfetched blobs are purged by the janitor at the
+// configured BlobTTLHours fallback (default 1 week) — the server never held the
+// AEAD key, so deletion is the shred.
 func (h *Handlers) RedeemBlob(c *fiber.Ctx) error {
 	if !h.blobLimit.Allow(c.IP()) {
 		return errJSON(c, fiber.StatusTooManyRequests, "rate_limited")

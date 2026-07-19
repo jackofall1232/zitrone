@@ -44,7 +44,10 @@ type Config struct {
 	// attachment size; the server enforces a slightly larger ciphertext cap that
 	// accounts for bucket padding + AEAD overhead (see api.BlobEffectiveCap).
 	BlobMaxBytes    int      // max attachment plaintext bytes (ciphertext cap adds slack)
-	BlobTTLHours    int      // blob lifetime, redeemed or not
+	// BlobTTLHours is the unfetched-blob fallback TTL. Successful redemption
+	// deletes the blob immediately (fetch-and-burn); this only bounds the max
+	// lifetime of ciphertext that is never redeemed. Default 1 week (168h).
+	BlobTTLHours    int
 	RelayPrivateKey string   // base64 Curve25519 private key; enables /relay/forward when set
 	RelayPublicKey  string   // base64 Curve25519 public key advertised in the relay registry
 	RelayPeers      []string // allowlist of next-hop forward URLs; forwarding fails closed otherwise
@@ -72,7 +75,9 @@ func Load() (*Config, error) {
 		DropTTLHours:               envInt("DROP_TTL_HOURS", 72),
 		DropPoWDifficulty:          envInt("DROP_POW_DIFFICULTY", 20),
 		BlobMaxBytes:               envInt("BLOB_MAX_BYTES", 8*1024*1024),
-		BlobTTLHours:               envInt("BLOB_TTL_HOURS", 72),
+		// 1-week fallback for unfetched attachment blobs (fetch-and-burn deletes
+		// on successful redeem; this only bounds never-collected ciphertext).
+		BlobTTLHours:               envInt("BLOB_TTL_HOURS", 168),
 		RelayPrivateKey:            os.Getenv("RELAY_PRIVATE_KEY"),
 		RelayPublicKey:             os.Getenv("RELAY_PUBLIC_KEY"),
 		RelayPeers:                 splitCSV(os.Getenv("RELAY_PEERS")),
@@ -91,9 +96,9 @@ func Load() (*Config, error) {
 	// A <=0 BLOB_TTL_HOURS makes every deposit store an already-expired row: the
 	// upload returns 201 but every recipient fetch then deterministically 404s
 	// (RedeemBlob's `expires_at > now()` guard matches nothing) — a silent,
-	// trust-breaking attachment failure. Clamp to the secure default.
+	// trust-breaking attachment failure. Clamp to the secure default (1 week).
 	if cfg.BlobTTLHours <= 0 {
-		cfg.BlobTTLHours = 72
+		cfg.BlobTTLHours = 168
 	}
 	// A <=0 BLOB_MAX_BYTES would cap every attachment at zero bytes (or worse,
 	// underflow downstream size math) — never trust it; fall back to the default.

@@ -9,8 +9,8 @@
  * attachment bytes themselves NEVER ride in the envelope: they are encrypted
  * under a fresh random key, padded to 64 KiB buckets, and sideloaded through
  * the relay's blind blob store (blob stored under SHA-256(token), redeemed
- * once by token, destroyed on redemption or at its 72-hour TTL — the same
- * construction as dead drops). The control payload below carries the token and
+ * once by token — fetch-and-burn — or purged at its 1-week unfetched fallback
+ * TTL — the same construction as dead drops). The control payload below carries the token and
  * key, so everything the server holds is an opaque bucket-sized blob it can
  * neither decrypt nor associate with any envelope or account.
  *
@@ -39,8 +39,12 @@ export const ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024;
  *  size reveals only a 64 KiB bucket count, not the true attachment length. */
 export const BLOB_BUCKET_BYTES = 64 * 1024;
 
-/** A blob lives this long whether collected or not, then is destroyed. */
-export const BLOB_TTL_HOURS = 72;
+/**
+ * Unfetched-blob fallback TTL (hours). Successful redemption destroys the blob
+ * immediately (fetch-and-burn); this is only the max lifetime for ciphertext
+ * that is never collected. Matches server BLOB_TTL_HOURS default (1 week).
+ */
+export const BLOB_TTL_HOURS = 168;
 
 export type AttachmentKind = "image" | "file";
 

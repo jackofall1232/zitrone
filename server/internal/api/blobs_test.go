@@ -63,7 +63,7 @@ func blobTestIssuer(t *testing.T) *auth.Issuer {
 func blobTestConfig() *config.Config {
 	return &config.Config{
 		BlobMaxBytes:     8 * 1024 * 1024,
-		BlobTTLHours:     72,
+		BlobTTLHours:     168, // 1-week unfetched fallback
 		RateLimitEnabled: false,
 	}
 }

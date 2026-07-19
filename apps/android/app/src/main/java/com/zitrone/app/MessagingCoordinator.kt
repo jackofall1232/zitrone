@@ -474,7 +474,8 @@ class MessagingCoordinator(
      * Failure handling mirrors [sendText]: a key-substitution refusal aborts
      * before anything is uploaded; a blob-upload throw or a dead socket flips
      * the local copy to FAILED (bubble shows "!" + retry) and the orphaned blob,
-     * if any, TTLs out in 72h. The sender's own copy renders immediately from
+     * if any, TTLs out in 1 week (or is fetch-and-burned on redeem). The sender's
+     * own copy renders immediately from
      * the prepared bytes, which stay in memory so [retry] can re-upload them.
      */
     fun sendAttachment(

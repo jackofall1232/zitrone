@@ -20,7 +20,8 @@ import javax.crypto.spec.SecretKeySpec
  * confidentiality is inherited from the session while the relay stores only an
  * opaque bucket-sized blob it can neither read nor tie to an envelope. Forward
  * secrecy of the standalone key is a non-issue by construction: the blob is
- * destroyed at first redemption or at its 72-hour TTL, so there is nothing left
+ * destroyed at first redemption (fetch-and-burn) or at its 1-week unfetched
+ * fallback TTL, so there is nothing left
  * to decrypt when a key would leak.
  *
  * The plaintext is padded to 64 KiB buckets BEFORE encryption (reusing the

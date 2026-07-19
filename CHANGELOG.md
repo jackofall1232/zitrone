@@ -7,6 +7,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.5-beta] - 2026-07-19
+
+### Changed
+
+- **Attachment blob fetch-and-burn + 1-week unfetched fallback TTL.** Successful
+  blob redemption already deleted the ciphertext in the same SQL statement
+  (`DELETE … RETURNING`); this is now documented as the hard contract
+  (fetch-and-burn). The fallback TTL for ciphertext that is *never* collected
+  moves from 72 hours to **1 week** (`BLOB_TTL_HOURS=168`, matching the protocol
+  constant), purged via the same janitor path as expired undelivered envelopes.
+  The `<= 0` clamp default follows to 168h. No wire-format or schema change; the
+  relay's blind-blob construction is unchanged.
+
 ## [0.7.4-beta] - 2026-07-19
 
 ### Fixed

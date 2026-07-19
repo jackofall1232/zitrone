@@ -34,7 +34,8 @@ docker-compose.tor.yml` / `-f docker-compose.i2p.yml` overlays if Tor/I2P are on
    ```
 
 ## Config to verify at redeploy (closes the silent-404 / 413 classes)
-- `BLOB_MAX_BYTES` (default 8 MiB) and `BLOB_TTL_HOURS` (default 72) — leave unset
+- `BLOB_MAX_BYTES` (default 8 MiB) and `BLOB_TTL_HOURS` (default 168 / 1 week
+  unfetched fallback; successful redeem is fetch-and-burn) — leave unset
   to take the defaults, or set deliberately. As of the hardening fix these are
   clamped to positive defaults if misconfigured `≤0` (a `≤0` TTL would make every
   blob fetch 404 while uploads still return 201 — a silent, trust-breaking failure).

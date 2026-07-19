@@ -384,8 +384,8 @@ type — inside its ordinary ratchet-encrypted plaintext.
   `SHA-256(token)` with no sender, recipient, or account column; upload is
   JWT-authenticated purely as spam control, while **redemption is unauthenticated** — the
   token is the capability, so the relay cannot link a fetch to an account. Redemption
-  atomically returns and destroys the blob (single-use; a replay returns 404), and
-  unredeemed blobs are purged at a 72-hour TTL.
+  atomically returns and destroys the blob (fetch-and-burn; single-use; a replay
+  returns 404), and unredeemed blobs are purged at a 1-week fallback TTL.
 - **Integrity is sender-bound.** The control payload carries the plaintext's SHA-256 and
   length; the recipient verifies both after decryption and rejects any mismatch, so
   neither the relay nor a blob-ID guesser can substitute content.

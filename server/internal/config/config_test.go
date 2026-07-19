@@ -27,8 +27,8 @@ func TestLoadClampsNonPositiveBlobValues(t *testing.T) {
 		wantTTL     int
 		wantMaxByte int
 	}{
-		{"zero", "0", "0", 72, 8 * 1024 * 1024},
-		{"negative", "-5", "-1", 72, 8 * 1024 * 1024},
+		{"zero", "0", "0", 168, 8 * 1024 * 1024},
+		{"negative", "-5", "-1", 168, 8 * 1024 * 1024},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
