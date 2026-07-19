@@ -7,6 +7,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.6-beta] - 2026-07-19
+
+### Added
+
+- **Image reveal-and-burn.** Received photos now render **covered** — the
+  decrypted bytes are never drawn to the screen — until the recipient taps to
+  reveal. The tap starts a **hard 10-second window**, after which the image
+  re-covers and the message **burns on both ends**, reusing the existing
+  `message.burn` signal (no new wire messages, no server logic — the relay
+  already fetch-and-burns the blob at receive-time redeem). Unconditional for
+  every received image. Screenshot resistance is documented **honestly
+  per-platform** in `docs/SECURITY_MODEL.md`: Android hard-blocks capture via
+  `FLAG_SECURE` (the image renders in-tree, inheriting the flag); Linux desktop
+  and web browsers cannot prevent OS-level screen capture — reveal-and-burn is a
+  memory-lifetime guarantee there, not a capture control.
+
 ## [0.7.5-beta] - 2026-07-19
 
 ### Changed
