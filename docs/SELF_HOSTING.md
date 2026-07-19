@@ -73,6 +73,17 @@ Leave `TLS_CERT_PATH`/`TLS_KEY_PATH` empty in `.env` — the Go server then runs
 (expect a response, not a connection error) and confirm a real cert: `curl` should succeed
 without `-k`.
 
+### Request body size (attachments)
+
+The relay accepts blob (attachment) uploads up to ~11.3 MB, so any proxy in front of it must
+allow a request body of **at least 12 MB** — a lower cap silently 413s every attachment.
+
+- **Caddy** imposes no body-size cap by default, so the `Caddyfile` above needs no change. If you
+  add a `request_body` directive for other routes, set `request_body { max_size 12MB }` on the
+  relay's block so uploads still pass.
+- **nginx** defaults `client_max_body_size` to **1 MB** and *will* 413 any attachment over 1 MB.
+  Set `client_max_body_size 12m;` in the relevant `server`/`location` block.
+
 > **Use a strong `POSTGRES_PASSWORD`.** `docker-compose.yml` defaults it to `sub`; set it in `.env`.
 
 ## Certificate pinning

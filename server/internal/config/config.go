@@ -88,6 +88,18 @@ func Load() (*Config, error) {
 	if cfg.DropPoWDifficulty < 0 {
 		cfg.DropPoWDifficulty = 20
 	}
+	// A <=0 BLOB_TTL_HOURS makes every deposit store an already-expired row: the
+	// upload returns 201 but every recipient fetch then deterministically 404s
+	// (RedeemBlob's `expires_at > now()` guard matches nothing) — a silent,
+	// trust-breaking attachment failure. Clamp to the secure default.
+	if cfg.BlobTTLHours <= 0 {
+		cfg.BlobTTLHours = 72
+	}
+	// A <=0 BLOB_MAX_BYTES would cap every attachment at zero bytes (or worse,
+	// underflow downstream size math) — never trust it; fall back to the default.
+	if cfg.BlobMaxBytes <= 0 {
+		cfg.BlobMaxBytes = 8 * 1024 * 1024
+	}
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
