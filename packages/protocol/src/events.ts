@@ -26,6 +26,20 @@ export interface MessageBurnEvent {
 }
 
 /**
+ * Delivery receipt (DELIVERED tick). Sent by the RECIPIENT once it has
+ * decrypted and stored an inbound message — right where it acks. `peer_id` is
+ * the ORIGINAL sender's account id (read from the decrypted envelope), so the
+ * relay can route the receipt back to them without ever having stored who the
+ * sender was: it is peer-routed exactly like `message.burn`, preserving the
+ * server's zero-knowledge of the sender.
+ */
+export interface MessageReceivedEvent {
+  type: "message.received";
+  message_id: string;
+  peer_id: string;
+}
+
+/**
  * Typing and presence signals carry an encrypted payload, not plaintext state —
  * the server relays them without learning what they say.
  */
@@ -63,6 +77,7 @@ export type ClientEvent =
   | MessageSendEvent
   | MessageAckEvent
   | MessageBurnEvent
+  | MessageReceivedEvent
   | TypingStartEvent
   | TypingStopEvent
   | PresenceUpdateEvent
@@ -73,6 +88,27 @@ export type ClientEvent =
 export interface MessageDeliverEvent {
   type: "message.deliver";
   envelope: MessageEnvelope;
+}
+
+/**
+ * The relay stored a sent envelope (SENT tick). Emitted on the sending
+ * connection after the envelope is persisted; `message_id` is the envelope's
+ * own id, so this reveals nothing the sender didn't already know.
+ */
+export interface MessageStoredEvent {
+  type: "message.stored";
+  message_id: string;
+}
+
+/**
+ * The recipient received a message (DELIVERED tick). The relay's peer-routed
+ * relay of the recipient's `message.received`; `peer_id` is the recipient's
+ * account id. Best-effort — dropped if the sender is offline.
+ */
+export interface MessageDeliveredEvent {
+  type: "message.delivered";
+  message_id: string;
+  peer_id: string;
 }
 
 /** The recipient destroyed a message (burn-on-read or manual burn). */
@@ -101,6 +137,8 @@ export interface ErrorEvent {
 
 export type ServerEvent =
   | MessageDeliverEvent
+  | MessageStoredEvent
+  | MessageDeliveredEvent
   | MessageBurnedEvent
   | PrekeyLowEvent
   | SessionRevokedEvent
@@ -115,6 +153,7 @@ export const CLIENT_EVENT_TYPES = [
   "message.send",
   "message.ack",
   "message.burn",
+  "message.received",
   "typing.start",
   "typing.stop",
   "presence.update",
@@ -123,6 +162,8 @@ export const CLIENT_EVENT_TYPES = [
 
 export const SERVER_EVENT_TYPES = [
   "message.deliver",
+  "message.stored",
+  "message.delivered",
   "message.burned",
   "prekey.low",
   "session.revoked",

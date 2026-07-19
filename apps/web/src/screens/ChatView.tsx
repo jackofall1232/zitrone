@@ -40,6 +40,7 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
   const openMessage = useApp((s) => s.openMessage);
   const finishBurn = useApp((s) => s.finishBurn);
   const expireMessage = useApp((s) => s.expireMessage);
+  const retryMessage = useApp((s) => s.retryMessage);
 
   const connectionMode = useSettings((s) => s.connectionMode);
   const transport = useSettings((s) => s.transport);
@@ -178,7 +179,9 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
               direction={m.direction}
               burnOnRead={m.burnOnRead}
               ttlSeconds={m.ttlSeconds ?? undefined}
-              deliveredAt={m.deliveredAt}
+              deliveredAt={m.deliveredAt ?? undefined}
+              status={m.status}
+              onRetry={() => void retryMessage(peerId, m.id)}
               burning={m.burning}
               onBurned={() => finishBurn(peerId, m.id)}
               onExpired={() => expireMessage(peerId, m.id)}
