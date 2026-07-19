@@ -118,11 +118,11 @@ export default function AndroidBetaPage() {
                     className="text-lemon underline decoration-lemon/40 underline-offset-4 transition duration-base hover:decoration-lemon"
                   >
                     Tor Browser
-                  </a>
-                  :
+                  </a>{" "}
+                  to reach the mirror page and download the APK:
                 </p>
                 <pre className="mt-3 overflow-x-auto rounded-md border border-line bg-bg-secondary p-3 font-mono text-sm text-pulp">
-                  <code>{`http://${PUBLIC_MIRROR_ONION}/zitrone-${ANDROID_BETA_VERSION}.apk`}</code>
+                  <code>{`http://${PUBLIC_MIRROR_ONION}`}</code>
                 </pre>
                 <p className="mt-2 text-sm leading-relaxed text-ink-muted">
                   The APK served there is identical to the direct download — verify with the same
