@@ -7,6 +7,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1-beta] - 2026-07-19
+
+### Fixed
+
+- **Android transport clarity + concurrency.** The Network settings toggle
+  "Route through I2P" is renamed **"Use I2P when available"**, and its
+  on-but-no-router state now says plainly that the normal connection is used —
+  the old default-on "Route through I2P" label read as "routing is active" and
+  produced a false "app defaults to I2P on fresh installs" report. (The
+  transport resolver already defaulted a router-less fresh install to clearnet;
+  this is a labeling fix, not a behavior change.)
+- **Atomic transport swap.** `ApiClient` and `WsClient` held the OkHttp client
+  and endpoint URL as two independently-updated fields; a transport
+  promotion/demotion (I2P <-> clearnet) mid-request could pair a mismatched
+  client and URL and fail spuriously. Both now hold the pair in a single
+  immutable value swapped atomically.
+
+### Note
+
+- No functional change to registration or the I2P/Tor/clearnet resolver chain.
+  A separately-observed relay `store_failed` during testing was root-caused to
+  a full disk crashing the relay's Postgres (environmental), not a code defect.
+
 ## [0.7.0-beta] - 2026-07-18
 
 ### Added
