@@ -7,7 +7,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.7.3-beta] - Unreleased
+## [0.7.4-beta] - 2026-07-19
+
+### Fixed
+
+- **Contacts no longer lost on app update (P0).** The contact roster was held only
+  in memory and was silently wiped on every full process restart — an in-place APK
+  update always triggers one, so contacts vanished on update. The roster now
+  persists in EncryptedSharedPreferences (with the pinned identity key and verified
+  state, so the anti-key-substitution guard survives), reseeds at boot, and never
+  overwrites a stored roster it failed to read. Installs updating from an earlier
+  build have their past contacts reconstructed from existing session/identity keys
+  (as "Unnamed contact", re-nameable), then persist normally from here on.
+- **Photo-picker attachments.** Attaching via the photo/camera-roll picker failed
+  with "Couldn't attach that" for every image (a bounds-only image decode returns
+  null on success, which the code treated as a failure). The file picker was
+  unaffected. Both paths now work.
+- **Relay robustness.** The server clamps a non-positive `BLOB_TTL_HOURS` /
+  `BLOB_MAX_BYTES` to safe defaults (a `<= 0` TTL silently 404'd every attachment
+  fetch), and `docs/SELF_HOSTING.md` now documents the reverse-proxy body-size limit
+  (>= 12 MB) attachments require. Attachment delivery also requires the relay to run
+  a build that includes the blob store — see `docs/RELEASING_RELAY.md`.
+
+### Changed
+
+- **Honest message send-state.** A sent message no longer shows a delivered tick the
+  instant it is handed to the socket. Messages now progress SENDING -> SENT (the
+  relay has stored it) -> DELIVERED (the recipient's device received it) -> READ, and
+  a failed send shows a FAILED state with tap-to-retry instead of an indefinite
+  spinner. The delivery receipt is recipient-originated and peer-routed, so the relay
+  still never learns who sent a message (zero-knowledge preserved). Applies across
+  server, Android, and web/desktop.
+
+## [0.7.3-beta] - 2026-07-19
 
 ### Changed
 
