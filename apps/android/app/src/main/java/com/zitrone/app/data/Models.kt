@@ -66,6 +66,15 @@ data class MessageAttachment(
     val loadState: AttachmentLoadState,
     /** Decrypted bytes — non-null only when [loadState] is LOADED. */
     val bytes: ByteArray? = null,
+    /**
+     * Reveal-and-burn state for a RECEIVED image. Received images render covered
+     * (no pixels on screen) until the recipient taps to reveal; the reveal arms a
+     * hard 10s timer ([MessageRepository.IMAGE_REVEAL_MS]) after which the image
+     * re-covers and the message burns on BOTH ends (reusing the ordinary
+     * `message.burn` path). False = covered (default); true = revealed and
+     * counting down. Meaningless for sent images and files.
+     */
+    val revealed: Boolean = false,
 )
 
 enum class MessageState {

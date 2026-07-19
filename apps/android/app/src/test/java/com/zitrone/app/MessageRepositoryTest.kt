@@ -5,7 +5,10 @@
 
 package com.zitrone.app
 
+import com.zitrone.app.data.AttachmentControlPayload
+import com.zitrone.app.data.AttachmentLoadState
 import com.zitrone.app.data.Message
+import com.zitrone.app.data.MessageAttachment
 import com.zitrone.app.data.MessageRepository
 import com.zitrone.app.data.MessageState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -44,6 +47,100 @@ class MessageRepositoryTest {
         ttlSeconds = ttlSeconds,
         burnOnRead = burnOnRead,
     )
+
+    private fun imageMessage(
+        id: String,
+        isMine: Boolean = false,
+        revealed: Boolean = false,
+    ) = Message(
+        id = id,
+        conversationId = "c1",
+        text = "",
+        isMine = isMine,
+        timestampMs = 0L,
+        ttlSeconds = null,
+        burnOnRead = false,
+        attachment = MessageAttachment(
+            kind = AttachmentControlPayload.KIND_IMAGE,
+            mimetype = "image/jpeg",
+            filename = null,
+            size = 3,
+            caption = null,
+            loadState = AttachmentLoadState.LOADED,
+            bytes = byteArrayOf(1, 2, 3),
+            revealed = revealed,
+        ),
+    )
+
+    @Test
+    fun `revealing a received image re-covers then burns on both ends after the hard 10s window`() =
+        runTest {
+            val repo = repository()
+            var burned: Message? = null
+            repo.onMessageBurned = { burned = it }
+            repo.addIncoming(imageMessage("img1"))
+
+            // Covered by default — no pixels on screen until an explicit tap.
+            assertFalse(repo.conversationMessages("c1").single().attachment!!.revealed)
+
+            repo.revealAttachment("img1")
+            runCurrent()
+            // Revealed and counting down; state unchanged, not yet burning.
+            assertTrue(repo.conversationMessages("c1").single().attachment!!.revealed)
+            advanceTimeBy(MessageRepository.IMAGE_REVEAL_MS - 1)
+            assertEquals(MessageState.DELIVERED, repo.conversationMessages("c1").single().state)
+            assertNull(burned)
+
+            // Hard window elapses: re-covered BEFORE the dissolve, burns, peer
+            // notified via the ordinary burn signal.
+            advanceTimeBy(2)
+            val msg = repo.conversationMessages("c1").single()
+            assertEquals(MessageState.BURNING, msg.state)
+            assertFalse(msg.attachment!!.revealed)
+            assertEquals("img1", burned?.id)
+
+            // Particle dissolve ends: the message (and its bytes) cease to exist.
+            advanceTimeBy(MessageRepository.BURN_ANIMATION_MS + 1)
+            assertTrue(repo.conversationMessages("c1").isEmpty())
+        }
+
+    @Test
+    fun `repeated reveal taps do not shorten or duplicate the reveal-burn`() = runTest {
+        val repo = repository()
+        val burnedIds = mutableListOf<String>()
+        repo.onMessageBurned = { burnedIds.add(it.id) }
+        repo.addIncoming(imageMessage("img1"))
+
+        repo.revealAttachment("img1")
+        runCurrent()
+        advanceTimeBy(MessageRepository.IMAGE_REVEAL_MS / 2)
+        repo.revealAttachment("img1") // tapped again / recomposed mid-window
+        advanceTimeBy(MessageRepository.IMAGE_REVEAL_MS) // past the ORIGINAL deadline
+        advanceTimeBy(MessageRepository.BURN_ANIMATION_MS + 1)
+
+        assertEquals(listOf("img1"), burnedIds)
+        assertTrue(repo.conversationMessages("c1").isEmpty())
+    }
+
+    @Test
+    fun `sent images and non-image content never reveal-burn`() = runTest {
+        val repo = repository()
+        var burned: Message? = null
+        repo.onMessageBurned = { burned = it }
+        repo.addOutgoing(imageMessage("mine", isMine = true))
+        repo.addIncoming(message("text")) // a received text message
+
+        repo.revealAttachment("mine") // our own sent copy — never reveal-burns
+        repo.revealAttachment("text") // no image attachment — no-op
+        advanceTimeBy(
+            MessageRepository.IMAGE_REVEAL_MS + MessageRepository.BURN_ANIMATION_MS + 10,
+        )
+
+        assertNull(burned)
+        assertEquals(2, repo.conversationMessages("c1").size)
+        val mine = repo.conversationMessages("c1").first { it.id == "mine" }
+        assertFalse(mine.attachment!!.revealed)
+    }
 
     @Test
     fun `burn-on-read stays readable for the grace window then burns and notifies the peer`() =

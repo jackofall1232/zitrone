@@ -53,6 +53,7 @@ import { api } from "./lib/api.js";
 import { classifyIncoming } from "./lib/incoming.js";
 import { bytesToBlob, type PreparedAttachment } from "./lib/attachments.js";
 import { b64, unb64 } from "./lib/bytes.js";
+import { IMAGE_REVEAL_MS, isRevealableImage } from "./lib/reveal.js";
 import {
   deserializeIdentity,
   deserializeOneTimePrekey,
@@ -103,6 +104,14 @@ export interface AttachmentView {
   status: "loading" | "ready" | "expired";
   /** Decrypted bytes, present only when status is "ready". */
   blob?: Blob;
+  /**
+   * Reveal-and-burn state for a RECEIVED image. Received images render covered
+   * (the bytes are never drawn) until the recipient taps to reveal; the reveal
+   * arms a hard 10s timer after which the image re-covers and the message burns
+   * on both ends (reusing the ordinary `message.burn` signal). Undefined/false =
+   * covered. Meaningless for sent images and files.
+   */
+  revealed?: boolean;
 }
 
 /**
@@ -176,6 +185,8 @@ interface AppState {
   retryMessage: (peerId: string, messageId: string) => Promise<void>;
   openMessage: (peerId: string, messageId: string) => void;
   finishBurn: (peerId: string, messageId: string) => void;
+  /** Reveal a received image and arm its hard 10s reveal-and-burn timer. */
+  revealAttachment: (peerId: string, messageId: string) => void;
   /** Encrypt a message to a contact and deposit it as a dead drop; returns the
    *  base64 one-time token to share out of band (QR / separate channel). */
   sendDeadDrop: (peerId: string, text: string) => Promise<string>;
@@ -996,6 +1007,26 @@ export const useApp = create<AppState>((set, get) => {
 
     expireMessage(peerId, messageId) {
       setBurning(peerId, messageId);
+    },
+
+    revealAttachment(peerId, messageId) {
+      const message = (get().messages[peerId] ?? []).find((m) => m.id === messageId);
+      if (!message || message.burning) return;
+      if (!isRevealableImage(message.attachment, message.direction)) return;
+      // Uncover the image and arm a HARD 10s window. The timer is a store-level
+      // timeout, not a React effect, so it survives recomposition; a backgrounded
+      // tab may fire it late (timer throttling) but the in-memory bytes are lost
+      // if the tab is discarded anyway — at least as safe as the burn it defers.
+      updateAttachment(peerId, messageId, { revealed: true });
+      setTimeout(() => {
+        const current = (get().messages[peerId] ?? []).find((m) => m.id === messageId);
+        if (!current || current.burning) return;
+        // Re-cover, then burn on both ends via the SAME message.burn signal used
+        // by every other burn — no new wire message, no server logic.
+        updateAttachment(peerId, messageId, { revealed: false });
+        setBurning(peerId, messageId);
+        get().ws?.send({ type: "message.burn", message_id: messageId, peer_id: peerId });
+      }, IMAGE_REVEAL_MS);
     },
 
     setActivePeer(peerId) {

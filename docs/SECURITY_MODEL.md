@@ -179,6 +179,32 @@ came from — worth that exposure. Users for whom any embedded identifier, or an
 that two accounts converse, is unacceptable should weigh this before relying on the web client for
 content they may be compelled to defend.
 
+### Image reveal-and-burn (received photos)
+
+Received images render **covered** — the decrypted bytes are never drawn to the screen — until the
+recipient taps to reveal. The tap uncovers the image and starts a **hard 10-second timer**
+(wall-clock, not idle-reset: backgrounding the app does not pause it). When it elapses the image
+re-covers and the message **burns on both ends** via the ordinary `message.burn` signal — the same
+mechanism as burn-on-read text, with no new wire message and no server involvement (the relay
+already destroyed the blob at first redemption — see [Attachments](#attachments-encrypted-sideloaded-blobs--070-beta)).
+
+The 10-second window is a per-image lifetime, **not** a screenshot control. What actually resists
+capture is platform-specific, and we do **not** imply parity across platforms:
+
+| Platform | What reveal-and-burn actually gets you |
+| --- | --- |
+| Android | The image renders **inside** the `FLAG_SECURE` activity window — it inherits the app-wide flag because it is drawn in the existing Compose tree, NOT in a Dialog or a separate window (which would not inherit it). So the OS hard-blocks screenshots and screen recording of the revealed image, and the bytes leave memory ~10 s after reveal. **This is the only platform with real capture prevention.** |
+| Linux desktop (Tauri) | **No OS-level screenshot prevention.** The desktop app renders the web frontend in a WebView; on X11 any client can read another window's pixels, and on Wayland captures are compositor-mediated but the app cannot set a "secure surface" flag. Reveal-and-burn bounds how long the image is on screen and wipes it from memory — it does **not** stop a screenshot taken during the 10 s window. |
+| Web (browser) | **No screenshot prevention at all** — browsers expose no API to block capture. Reveal-and-burn is a time-bound deterrent plus a genuine memory-lifetime guarantee (bytes are unrendered until tap, dropped on burn), not a capture control. The browser screenshot caveats above (best-effort focus-blur, watermark) still apply. |
+
+The guarantee reveal-and-burn makes **uniformly**, on every platform, is a **memory-lifetime** one: an
+un-revealed image is never drawn, and a revealed one is destroyed on both devices within ~10 s of the
+tap **while both apps are running**. Two honest caveats: (a) if the recipient's app or tab dies
+mid-window, its copy dies with the process but **no `message.burn` is sent**, so the sender's copy
+persists until its own TTL (or a manual burn); (b) browsers throttle background-tab timers, so a
+backgrounded web tab may fire the burn late. Capture resistance *during* the reveal window exists
+only where the OS provides it (Android).
+
 ## Metadata minimization
 
 - No phone number, email, or name required — discovery is by QR code or direct link

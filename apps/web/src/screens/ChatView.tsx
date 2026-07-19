@@ -40,6 +40,7 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
   const openMessage = useApp((s) => s.openMessage);
   const finishBurn = useApp((s) => s.finishBurn);
   const expireMessage = useApp((s) => s.expireMessage);
+  const revealAttachment = useApp((s) => s.revealAttachment);
   const retryMessage = useApp((s) => s.retryMessage);
 
   const connectionMode = useSettings((s) => s.connectionMode);
@@ -192,7 +193,11 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
             >
               {m.attachment ? (
                 <div className="flex flex-col gap-1.5">
-                  <Attachment view={m.attachment} />
+                  <Attachment
+                    view={m.attachment}
+                    direction={m.direction}
+                    onReveal={() => revealAttachment(peerId, m.id)}
+                  />
                   {m.attachment.caption && <span>{m.attachment.caption}</span>}
                 </div>
               ) : m.unsupported ? (

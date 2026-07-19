@@ -49,6 +49,7 @@ class MessageRepository(
 
     private val ttlJobs = ConcurrentHashMap<String, Job>()
     private val readBurnJobs = ConcurrentHashMap<String, Job>()
+    private val revealJobs = ConcurrentHashMap<String, Job>()
 
     /** Invoked when a message burns (read or TTL) so the WS layer can signal it. */
     var onMessageBurned: ((Message) -> Unit)? = null
@@ -213,6 +214,48 @@ class MessageRepository(
         )
     }
 
+    /**
+     * Reveal-and-burn for a RECEIVED image. Uncovers the image (pixels reach the
+     * screen for the first time) and arms a HARD [IMAGE_REVEAL_MS] timer —
+     * wall-clock, not idle-based. The timer runs on the repository scope, so it
+     * survives Compose recomposition AND the app going to background; when it
+     * fires the image re-covers and the message burns on BOTH ends via the
+     * ordinary [burn] path (peer-notified with the same `message.burn` signal as
+     * every other burn). Guarded so only a LOADED received image reveals and a
+     * repeat tap inside the window is a no-op. If the process is killed while
+     * backgrounded mid-reveal, the in-memory image dies with it (no disk) — at
+     * least as safe as the burn it would have triggered.
+     */
+    fun revealAttachment(messageId: String) {
+        if (revealJobs.containsKey(messageId)) return
+        update(
+            messageId,
+            precondition = {
+                !it.isMine &&
+                    it.state != MessageState.BURNING &&
+                    it.attachment != null &&
+                    it.attachment.loadState == AttachmentLoadState.LOADED &&
+                    it.attachment.kind == AttachmentControlPayload.KIND_IMAGE &&
+                    !it.attachment.revealed
+            },
+            transform = { it.copy(attachment = it.attachment!!.copy(revealed = true)) },
+        ) ?: return
+        revealJobs[messageId] = scope.launch {
+            delay(IMAGE_REVEAL_MS)
+            // Drop our handle before burning so burn()'s reveal-job cancel can
+            // never cancel the coroutine executing it.
+            revealJobs.remove(messageId)
+            // Re-cover first: the pixels are gone the instant the timer elapses,
+            // even during the 600ms burn dissolve.
+            update(
+                messageId,
+                precondition = { it.attachment != null },
+                transform = { it.copy(attachment = it.attachment!!.copy(revealed = false)) },
+            )
+            burn(messageId, notifyPeer = true)
+        }
+    }
+
     /** The peer's read receipt arrived — flip our outgoing copy to READ. */
     fun onPeerRead(messageId: String) {
         update(
@@ -233,6 +276,9 @@ class MessageRepository(
         // A pending read-burn racing this burn (burn-all, remote burn, TTL)
         // must not fire a second burn after its grace window.
         readBurnJobs.remove(messageId)?.cancel()
+        // A remote burn / TTL / burn-all racing an image reveal cancels the
+        // pending reveal timer so it can't burn a second time after this one.
+        revealJobs.remove(messageId)?.cancel()
         // Guard inside the CAS: racing burns (remote + local) win the flip
         // to BURNING exactly once, so the peer is never notified twice.
         val burning = update(
@@ -267,6 +313,8 @@ class MessageRepository(
         ttlJobs.clear()
         readBurnJobs.values.forEach(Job::cancel)
         readBurnJobs.clear()
+        revealJobs.values.forEach(Job::cancel)
+        revealJobs.clear()
         _messages.value = emptyMap()
     }
 
@@ -363,6 +411,7 @@ class MessageRepository(
 
     private fun remove(messageId: String) {
         ttlJobs.remove(messageId)?.cancel()
+        revealJobs.remove(messageId)?.cancel()
         _messages.update { current ->
             current.mapValues { (_, list) -> list.filterNot { it.id == messageId } }
         }
@@ -378,5 +427,12 @@ class MessageRepository(
          * the recipient zero time to read anything.
          */
         const val BURN_ON_READ_DELAY_MS = 5_000L
+
+        /**
+         * How long a RECEIVED image stays revealed after the recipient taps it,
+         * before it re-covers and burns on both ends. A HARD wall-clock window
+         * (not idle-reset): backgrounding the app does not pause it.
+         */
+        const val IMAGE_REVEAL_MS = 10_000L
     }
 }

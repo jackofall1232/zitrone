@@ -938,6 +938,16 @@ class MessagingCoordinator(
         messages.onRemoteBurn(messageId)
     }
 
+    /**
+     * Recipient tapped a received image to reveal it: uncover it and arm the
+     * hard reveal-and-burn timer. Pure delegation to the repository — no new
+     * wire traffic here; the eventual burn reuses the existing `message.burn`
+     * signal (see [MessageRepository.revealAttachment]).
+     */
+    fun revealAttachment(messageId: String) {
+        messages.revealAttachment(messageId)
+    }
+
     /** Relay stored our envelope → SENT tick (one tick, "the relay has it"). */
     override fun onMessageStored(messageId: String) {
         messages.markSent(messageId)

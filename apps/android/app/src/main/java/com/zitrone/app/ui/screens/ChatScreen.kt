@@ -100,6 +100,8 @@ fun ChatScreen(
     onTyping: (Boolean) -> Unit = {},
     /** Re-send a FAILED message (tap-to-retry on its bubble). */
     onRetry: (messageId: String) -> Unit = {},
+    /** Tap a received image to reveal it and arm its 10s reveal-and-burn timer. */
+    onRevealImage: (messageId: String) -> Unit = {},
 ) {
     var draft by rememberSaveable { mutableStateOf("") }
     // Per-message overrides for the compose-bar burn controls. null = no
@@ -277,7 +279,11 @@ fun ChatScreen(
                     }
                 }
                 item(key = message.id) {
-                    MessageBubble(message = message, onRetry = { onRetry(message.id) })
+                    MessageBubble(
+                        message = message,
+                        onRetry = { onRetry(message.id) },
+                        onRevealImage = { onRevealImage(message.id) },
+                    )
                 }
             }
         }

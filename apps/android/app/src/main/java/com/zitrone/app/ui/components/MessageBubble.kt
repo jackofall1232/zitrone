@@ -81,6 +81,7 @@ fun MessageBubble(
     message: Message,
     modifier: Modifier = Modifier,
     onRetry: () -> Unit = {},
+    onRevealImage: () -> Unit = {},
 ) {
     val isMine = message.isMine
     val burning = message.state == MessageState.BURNING
@@ -126,7 +127,11 @@ fun MessageBubble(
                         // painted (it may carry key material) — see the coordinator.
                         val attachment = message.attachment
                         when {
-                            attachment != null -> AttachmentContent(attachment, isMine)
+                            attachment != null -> AttachmentContent(
+                                attachment = attachment,
+                                isMine = isMine,
+                                onRevealImage = onRevealImage,
+                            )
                             message.unsupported -> Text(
                                 text = "Unsupported message — update Zitrone",
                                 style = MaterialTheme.typography.bodyMedium,
@@ -250,7 +255,11 @@ fun MessageBubble(
  * decrypted plaintext and are held only in memory (see MessageRepository).
  */
 @Composable
-private fun AttachmentContent(attachment: MessageAttachment, isMine: Boolean) {
+private fun AttachmentContent(
+    attachment: MessageAttachment,
+    isMine: Boolean,
+    onRevealImage: () -> Unit = {},
+) {
     val onColor = if (isMine) TextOnLemon else TextPrimary
     val mutedColor = if (isMine) TextOnLemon.copy(alpha = 0.6f) else TextMuted
 
@@ -270,28 +279,47 @@ private fun AttachmentContent(attachment: MessageAttachment, isMine: Boolean) {
         AttachmentLoadState.LOADED -> {
             val bytes = attachment.bytes
             if (attachment.kind == AttachmentControlPayload.KIND_IMAGE && bytes != null) {
-                // decodeByteArray → ImageBitmap, kept across recompositions so a
-                // large image isn't re-decoded on every frame of the burn timer.
-                val imageBitmap = remember(bytes) {
-                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
-                }
-                if (imageBitmap != null) {
-                    Image(
-                        bitmap = imageBitmap,
-                        contentDescription = "Photo",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 320.dp)
-                            .clip(RoundedCornerShape(12.dp)),
-                    )
+                // A RECEIVED image stays COVERED until the recipient taps to
+                // reveal it: the bytes are never decoded to the screen before
+                // that (stronger than a blur — nothing to un-blur), and the
+                // reveal arms a hard 10s reveal-and-burn timer. Our OWN sent copy
+                // is always shown.
+                if (!isMine && !attachment.revealed) {
+                    CoveredImagePlaceholder(onReveal = onRevealImage)
                 } else {
-                    Text(
-                        text = "Couldn't display image",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontSize = TypeScale.Message,
-                        color = mutedColor,
-                    )
+                    // decodeByteArray → ImageBitmap, kept across recompositions
+                    // so a large image isn't re-decoded on every frame of the
+                    // burn timer.
+                    val imageBitmap = remember(bytes) {
+                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                    }
+                    if (imageBitmap != null) {
+                        Image(
+                            bitmap = imageBitmap,
+                            contentDescription = "Photo",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 320.dp)
+                                .clip(RoundedCornerShape(12.dp)),
+                        )
+                        if (!isMine && attachment.revealed) {
+                            Text(
+                                text = "🔥 Revealed — burns in 10s",
+                                fontFamily = MonoFamily,
+                                fontSize = TypeScale.Xs,
+                                color = BurnOrange,
+                                modifier = Modifier.padding(top = 4.dp),
+                            )
+                        }
+                    } else {
+                        Text(
+                            text = "Couldn't display image",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontSize = TypeScale.Message,
+                            color = mutedColor,
+                        )
+                    }
                 }
             } else if (bytes != null) {
                 FileAttachmentRow(attachment, bytes, onColor, mutedColor)
@@ -307,6 +335,44 @@ private fun AttachmentContent(attachment: MessageAttachment, isMine: Boolean) {
             fontSize = TypeScale.Message,
             color = onColor,
             modifier = Modifier.padding(top = 6.dp),
+        )
+    }
+}
+
+/**
+ * The covered state of a RECEIVED image before the recipient reveals it. No
+ * pixels of the photo are decoded or drawn here — the placeholder is all that is
+ * on screen — so there is nothing to screenshot until an explicit tap. Tapping
+ * calls [onReveal], which uncovers the image and starts its 10s reveal-and-burn
+ * timer (see MessageRepository.revealAttachment).
+ */
+@Composable
+private fun CoveredImagePlaceholder(onReveal: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 116.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(BackgroundMessageReceived)
+            .border(1.dp, BorderColor, RoundedCornerShape(12.dp))
+            .clickable(onClick = onReveal)
+            .padding(vertical = 28.dp, horizontal = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            text = "🖼 Tap to reveal photo",
+            style = MaterialTheme.typography.bodyMedium,
+            fontSize = TypeScale.Message,
+            color = TextPrimary,
+            textAlign = TextAlign.Center,
+        )
+        Text(
+            text = "🔥 Burns 10s after you reveal it",
+            fontFamily = MonoFamily,
+            fontSize = TypeScale.Xs,
+            color = BurnOrange,
+            textAlign = TextAlign.Center,
         )
     }
 }

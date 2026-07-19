@@ -309,6 +309,9 @@ private fun ZitroneRoot(
                         onRetry = { messageId ->
                             container.coordinator.retry(messageId)
                         },
+                        onRevealImage = { messageId ->
+                            container.coordinator.revealAttachment(messageId)
+                        },
                     )
                 }
             }
