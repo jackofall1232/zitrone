@@ -25,14 +25,26 @@ import (
 
 const prekeyLowWatermark = 20
 
+// Store is the subset of the storage layer the hub depends on. Kept as an
+// interface so the hub can be unit-tested with an in-memory fake — *db.Store
+// satisfies it. Note there is deliberately no method to look up a message's
+// sender: the server never learns who sent an envelope (zero-knowledge).
+type Store interface {
+	PendingEnvelopes(ctx context.Context, recipientID uuid.UUID) ([]db.PendingEnvelope, error)
+	CountOneTimePrekeys(ctx context.Context, accountID uuid.UUID) (int, error)
+	StoreEnvelope(ctx context.Context, id, recipientID uuid.UUID, payload []byte) error
+	DeleteEnvelope(ctx context.Context, id, recipientID uuid.UUID) error
+	RecordDeliveryReceipt(ctx context.Context, messageIDHash []byte) error
+}
+
 type Hub struct {
 	mu        sync.RWMutex
 	clients   map[uuid.UUID]*Client
-	store     *db.Store
+	store     Store
 	sendLimit *ratelimit.Limiter
 }
 
-func NewHub(store *db.Store, sendLimit *ratelimit.Limiter) *Hub {
+func NewHub(store Store, sendLimit *ratelimit.Limiter) *Hub {
 	return &Hub{
 		clients:   make(map[uuid.UUID]*Client),
 		store:     store,
@@ -131,6 +143,11 @@ func (h *Hub) handleEvent(c *Client, raw []byte) {
 		h.handleAck(c, ev)
 	case "message.burn":
 		h.relayToPeer(c, ev, "message.burned")
+	case "message.received":
+		// Recipient-originated delivery receipt: relayed to the sender by the
+		// peer_id the recipient supplied. The server never learns the sender —
+		// it only routes to the account the recipient addressed.
+		h.relayToPeer(c, ev, "message.delivered")
 	case "typing.start", "typing.stop", "presence.update", "contact.info":
 		h.relaySignal(c, ev)
 	default:
@@ -161,6 +178,10 @@ func (h *Hub) handleSend(c *Client, ev clientEvent) {
 		c.send(serverEvent{Type: "error", Code: "store_failed"})
 		return
 	}
+	// SENT tick: acknowledge to the sending connection that the relay has the
+	// envelope. Reveals nothing new (the sender already knows its own message
+	// id) and persists nothing. Sent whether or not the recipient is online.
+	c.send(serverEvent{Type: "message.stored", MessageID: header.ID})
 	if peer := h.online(recipient); peer != nil {
 		peer.send(serverEvent{Type: "message.deliver", Envelope: ev.Envelope})
 	}
