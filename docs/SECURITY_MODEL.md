@@ -443,6 +443,17 @@ itself.
   addressed *to*, not who wrote it. The payload's claimed sender identity key is cross-checked
   before anything renders: against the stored key when the sender is already a contact, or
   against a freshly fetched prekey bundle when not — any mismatch and the message is refused.
+- **Open limits under maintainer decision (V1 as-shipped, stated plainly).** Two findings from
+  review are real and unfixed pending a design choice, and we document rather than soften them.
+  *Sticker re-arming:* after a drop is burned or expires, its `qr_id` is deleted — so anyone who
+  knows the id (in practice the sticker's creator) can deposit a NEW drop under the same id,
+  making a dead sticker deliver again; true permanence needs the relay to remember every issued
+  id forever (a retention tradeoff on a shred-everything store), which is under consideration.
+  *Replies to a drop-created contact:* if the recipient did not already have the sender as a
+  contact, the contact created at redemption starts a second, independent session — the
+  sender's client currently decrypts replies only against its original session, so a first
+  reply can be silently undeliverable until session-reset handling lands. Treat V1 lemon drops
+  from unknown senders as one-way delivery.
 - **Platform status, honestly.** Web and Linux desktop have the full flow (create and redeem).
   Android V1 intercepts the link, performs one fetch (so a scan is network-indistinguishable
   from a redemption attempt), and always shows the advocacy screen **without attempting
