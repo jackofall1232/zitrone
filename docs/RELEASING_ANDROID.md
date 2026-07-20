@@ -130,12 +130,19 @@ browser, it verifies domain ownership against a Digital Asset Links file the ope
 `zitrone.app`. **This declaration is inert until that file is deployed** — see the status note at the
 end of this section.
 
-> **Status: deployed.** `website/public/.well-known/assetlinks.json` is in the repo and ships with
-> every Vercel deploy of the marketing site, carrying the release signing cert's fingerprint (read
-> from the shipped signed APK via `apksigner verify --print-certs`, matching the published
-> continuity anchor). The website also serves the ordinary marketing page at `/d/{id}` — the
-> designed no-app fallback — so an unverified or app-less scan lands on the homepage, never a 404.
-> Remember Android 15+ re-verification can take up to ~7 days after any change to the file.
+> **Status: deployed, verification blocked on a domain setting.** `website/public/.well-known/
+> assetlinks.json` ships with every Vercel deploy, carrying the release signing cert's fingerprint
+> (read from the shipped signed APK via `apksigner verify --print-certs`, matching the published
+> continuity anchor), and `/d/{id}` serves the ordinary marketing page — verified live 2026-07-20.
+> **One blocker remains, outside the repo:** the Vercel project's production domain is
+> `www.zitrone.app`, so the apex `zitrone.app` — the host in the QR URLs, the manifest, and the
+> verifier's fetch — answers every request with a `308` to `www`. Browsers follow it (the no-app
+> fallback works today), but Android's Digital Asset Links fetcher does not follow redirects, so
+> App Links verification for `zitrone.app` silently fails until the **operator flips the Vercel
+> dashboard domain config: make `zitrone.app` the primary production domain and redirect `www` to
+> it** (Project → Settings → Domains). After the flip, re-check
+> `curl -sI https://zitrone.app/.well-known/assetlinks.json` → must be `HTTP 200`, no `location:`
+> header. Android 15+ re-verification can then take up to ~7 days.
 
 ### What to host
 
