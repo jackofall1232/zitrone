@@ -130,11 +130,12 @@ browser, it verifies domain ownership against a Digital Asset Links file the ope
 `zitrone.app`. **This declaration is inert until that file is deployed** — see the status note at the
 end of this section.
 
-> **Status: deferred on purpose.** `assetlinks.json` is NOT deployed yet. Per the standing
-> "deliver then claim" rule, hosting it waits until the dead-drop feature is verified end-to-end.
-> Until then the manifest intent-filter is declared but unverified, and Android 12+ opens
-> `https://zitrone.app/d/…` links in the default browser — the designed no-app fallback (they land on
-> the marketing site). This section is the runbook for when that deployment happens.
+> **Status: deployed.** `website/public/.well-known/assetlinks.json` is in the repo and ships with
+> every Vercel deploy of the marketing site, carrying the release signing cert's fingerprint (read
+> from the shipped signed APK via `apksigner verify --print-certs`, matching the published
+> continuity anchor). The website also serves the ordinary marketing page at `/d/{id}` — the
+> designed no-app fallback — so an unverified or app-less scan lands on the homepage, never a 404.
+> Remember Android 15+ re-verification can take up to ~7 days after any change to the file.
 
 ### What to host
 

@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.zitrone.app",
+      "sha256_cert_fingerprints": [
+        "6C:7F:92:A7:B8:17:F8:AB:97:5D:0A:C9:CA:8F:F1:D4:26:41:31:1A:07:AA:BD:2A:41:42:C2:17:22:89:27:53"
+      ]
+    }
+  }
+]

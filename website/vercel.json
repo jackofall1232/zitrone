@@ -5,6 +5,14 @@
     {
       "source": "/download/beta",
       "headers": [{ "key": "X-Robots-Tag", "value": "noindex, nofollow" }]
+    },
+    {
+      "source": "/d/:id",
+      "headers": [{ "key": "X-Robots-Tag", "value": "noindex, nofollow" }]
+    },
+    {
+      "source": "/.well-known/assetlinks.json",
+      "headers": [{ "key": "Content-Type", "value": "application/json" }]
     }
   ]
 }
