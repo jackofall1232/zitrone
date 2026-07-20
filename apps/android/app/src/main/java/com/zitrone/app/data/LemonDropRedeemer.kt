@@ -10,6 +10,7 @@ import com.zitrone.app.crypto.LemonDropOneShot
 import com.zitrone.app.crypto.SafetyNumber
 import com.zitrone.app.net.ApiClient
 import java.util.Base64
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Orchestrates a lemon-drop scan end to end: one fetch, one isolated decrypt
@@ -62,7 +63,10 @@ class LemonDropRedeemer(
      *    live drop exists and this device cannot honestly render it).
      */
     suspend fun probe(qrId: String): ProbeResult {
-        val fetched = runCatching { api.fetchQrDrop(qrId) }
+        // runCatching would swallow the coroutine's own CancellationException and
+        // let a cancelled probe keep running / overwrite veil state — rethrow it,
+        // treating only genuine failures as a fetch outcome.
+        val fetched = runCatchingCancellable { api.fetchQrDrop(qrId) }
         val ciphertextBase64 = fetched.getOrNull()
             ?: return ProbeResult.Advocacy(classifyLemonDropFetch(fetched))
 
@@ -77,9 +81,18 @@ class LemonDropRedeemer(
             Base64.getDecoder().decode(ciphertextBase64)
         }.getOrNull() ?: return ProbeResult.Advocacy(LemonDropScanOutcome.SEALED)
 
+        // Reading our own key material touches the Android Keystore + encrypted
+        // store, which can throw (locked keystore, corrupt entry). We cannot
+        // honestly attempt an open then, so fall back to the neutral advocacy
+        // screen rather than letting the probe coroutine crash and strand the
+        // veil at UNKNOWN.
+        val keys = try {
+            recipientKeys()
+        } catch (e: Exception) {
+            return ProbeResult.Advocacy(LemonDropScanOutcome.SEALED)
+        }
         // The per-call key copies are zeroed the moment the open attempt
         // returns, whatever its outcome (single-use contract on RecipientKeys).
-        val keys = recipientKeys()
         val result = try {
             LemonDropOneShot.open(sodium, ciphertext, keys)
         } finally {
@@ -149,10 +162,30 @@ class LemonDropRedeemer(
         }
     }
 
+    /** Like [runCatching] but never swallows a coroutine [CancellationException]
+     *  — cancellation must propagate so a cancelled probe stops rather than
+     *  being recorded as an ordinary fetch failure. */
+    private inline fun <T> runCatchingCancellable(block: () -> T): Result<T> =
+        try {
+            Result.success(block())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
+
     /** Burn is network I/O — separated from [deliver] so the caller can fire
-     *  it on an IO dispatcher. Swallowed on failure: TTL is the backstop. */
+     *  it on an IO dispatcher. A genuine failure is swallowed (TTL is the
+     *  backstop), but a coroutine CancellationException is rethrown so
+     *  cancellation propagates correctly. */
     suspend fun burn(pending: PendingLemonDrop) {
-        runCatching { api.burnQrDrop(pending.qrId, pending.burnTokenBase64) }
+        try {
+            api.burnQrDrop(pending.qrId, pending.burnTokenBase64)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Best-effort — the drop's TTL guarantees eventual destruction.
+        }
     }
 
     // ── the private-scalar bridge (see class doc — do not widen) ─────────────

@@ -34,7 +34,6 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.lifecycleScope
 import com.zitrone.app.data.Conversation
 import com.zitrone.app.data.LemonDropScanOutcome
 import com.zitrone.app.data.LemonDropVeil
@@ -196,10 +195,18 @@ class MainActivity : FragmentActivity() {
     }
 
     // A plaintext-bearing Delivered veil must not survive to a later Activity
-    // recreation without a fresh biometric unlock — the container drops it here.
+    // recreation without a fresh biometric unlock. But a CONFIGURATION change
+    // (rotation) recreates the Activity within the same authenticated session,
+    // and clearing then would destroy the user's one-shot message on a mere
+    // rotation. So clear only on a real stop — background, exit, reclaim, or
+    // "don't keep activities" — where a later launch would otherwise re-render
+    // plaintext unauthenticated (the drop is already burned, so a cleared copy
+    // is simply gone, never re-shown).
     override fun onStop() {
         super.onStop()
-        (application as ZitroneApp).container.clearDeliveredLemonDropVeil()
+        if (!isChangingConfigurations) {
+            (application as ZitroneApp).container.clearDeliveredLemonDropVeil()
+        }
     }
 
     /**
@@ -215,10 +222,12 @@ class MainActivity : FragmentActivity() {
         // burn) run off the main thread. Prekey consumption goes first: once
         // the message has rendered, the drop must not be openable again even
         // if the burn never lands (single-use by design; the TTL then reaps
-        // the undecryptable relay copy).
+        // the undecryptable relay copy). Run on the PROCESS scope, not the
+        // Activity's — a rotation or exit right after unlock must not cancel
+        // the prekey deletion, which would leave the drop re-openable.
         lemonDropVeil.value =
             LemonDropVeil.Delivered(pending.text, pending.senderLabel, pending.senderVerified)
-        lifecycleScope.launch(Dispatchers.IO) {
+        container.scope.launch(Dispatchers.IO) {
             container.lemonDropRedeemer.deliver(pending)
             container.lemonDropRedeemer.burn(pending)
         }
