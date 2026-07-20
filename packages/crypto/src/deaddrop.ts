@@ -62,11 +62,20 @@ export async function solveProofOfWork(
 ): Promise<Uint8Array> {
   await ready();
   const nonce = new Uint8Array(8);
-  for (;;) {
+  // Yield to the event loop between bounded chunks. Difficulty 20 averages ~1M
+  // hashes (seconds of work, unboundedly more on an unlucky search), and an
+  // unyielding loop would freeze the UI thread — no spinner frames, no input —
+  // for that whole stretch. 8192 hashes ≈ one animation frame of work; the
+  // deterministic counter walk (and thus the winning nonce) is unchanged.
+  const YIELD_EVERY = 8192;
+  for (let i = 0; ; i++) {
     if (hasLeadingZeroBits(sodium.crypto_hash_sha256(concatBytes(challenge, nonce)), difficulty)) {
       return nonce.slice();
     }
     incrementCounter(nonce);
+    if (i % YIELD_EVERY === YIELD_EVERY - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
   }
 }
 
