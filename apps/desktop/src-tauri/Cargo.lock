@@ -6091,7 +6091,7 @@ dependencies = [
 
 [[package]]
 name = "zitrone-desktop"
-version = "0.8.0"
+version = "0.8.0-beta"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
