@@ -17,8 +17,37 @@
 import { useEffect, useState } from "react";
 import QRCode from "qrcode";
 import { LemonSlice } from "@zitrone/ui";
+import { composeDropPrintPng, dropPrintFilename } from "../lib/dropPrint.js";
+import { isTauri } from "../lib/nativeTransport.js";
 
 const QR_SIZE = 240;
+
+// Save a Blob to disk in a plain browser: click a temporary download anchor.
+function saveViaBrowser(blob: Blob, filename: string): void {
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = objectUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
+// Save a Blob to disk under Tauri. The native `save_drop_image` command owns
+// the whole flow — dialog and write — so this side never sees or supplies a
+// filesystem path (a renderer-supplied path would be an arbitrary-file-write
+// primitive if the WebView were ever compromised). The PNG travels as the raw
+// IPC body, not a JSON number array; the filename is only a dialog suggestion.
+// Resolves false if the user cancels the dialog.
+async function saveViaTauri(blob: Blob, filename: string): Promise<boolean> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  return await invoke<boolean>(
+    "save_drop_image",
+    new Uint8Array(await blob.arrayBuffer()),
+    { headers: { "x-suggested-filename": filename } },
+  );
+}
 
 export function QrDropModal({
   url,
@@ -33,6 +62,27 @@ export function QrDropModal({
 }) {
   const [dataUrl, setDataUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+
+  const onSaveImage = () => {
+    setSaveState("saving");
+    void (async () => {
+      try {
+        const blob = await composeDropPrintPng(url, expiresAt);
+        const filename = dropPrintFilename(url);
+        if (isTauri()) {
+          const saved = await saveViaTauri(blob, filename);
+          // A canceled save dialog is not an error — return to idle silently.
+          setSaveState(saved ? "saved" : "idle");
+        } else {
+          saveViaBrowser(blob, filename);
+          setSaveState("saved");
+        }
+      } catch {
+        setSaveState("error");
+      }
+    })();
+  };
 
   useEffect(() => {
     let live = true;
@@ -130,12 +180,29 @@ export function QrDropModal({
             {copied ? "Copied" : "Copy link"}
           </button>
           <button
+            onClick={onSaveImage}
+            disabled={saveState === "saving"}
+            className="rounded-full bg-lemon px-4 py-1.5 text-sm font-medium text-ink-on-lemon disabled:opacity-60"
+          >
+            {saveState === "saving"
+              ? "Saving…"
+              : saveState === "saved"
+                ? "Saved"
+                : saveState === "error"
+                  ? "Try again"
+                  : "Save image"}
+          </button>
+          <button
             onClick={onClose}
             className="rounded-full px-4 py-1.5 text-sm text-ink-secondary hover:text-ink-primary"
           >
             Done
           </button>
         </div>
+
+        <p className="text-[12px] text-ink-muted">
+          The saved image contains the drop link — treat it like the printed sticker itself.
+        </p>
       </div>
     </div>
   );

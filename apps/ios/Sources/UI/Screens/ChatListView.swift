@@ -10,6 +10,9 @@ import SwiftUI
 /// lemon compose FAB bottom-right with a lemon-glow shadow.
 public struct ChatListView: View {
     @ObservedObject var conversations: ConversationStore
+    /// This device's own identity fingerprint for the security-paper watermark
+    /// (computed once at the composition root and threaded down).
+    public let localFingerprint: String?
     public var onOpenConversation: (Conversation) -> Void
     public var onOpenSettings: () -> Void
     public var onCompose: () -> Void
@@ -17,10 +20,12 @@ public struct ChatListView: View {
     @State private var searchText = ""
 
     public init(conversations: ConversationStore,
+                localFingerprint: String? = nil,
                 onOpenConversation: @escaping (Conversation) -> Void,
                 onOpenSettings: @escaping () -> Void,
                 onCompose: @escaping () -> Void) {
         self.conversations = conversations
+        self.localFingerprint = localFingerprint
         self.onOpenConversation = onOpenConversation
         self.onOpenSettings = onOpenSettings
         self.onCompose = onCompose
@@ -36,7 +41,12 @@ public struct ChatListView: View {
 
     public var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            Color.backgroundPrimary.ignoresSafeArea()
+            // Ground + security-paper watermark behind the conversation list.
+            ZStack {
+                Color.backgroundPrimary
+                FingerprintWatermark(fingerprint: localFingerprint)
+            }
+            .ignoresSafeArea()
 
             VStack(spacing: 0) {
                 header

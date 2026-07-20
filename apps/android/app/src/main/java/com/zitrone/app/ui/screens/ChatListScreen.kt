@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.em
 import com.zitrone.app.data.Conversation
 import com.zitrone.app.ui.components.ConversationList
 import com.zitrone.app.ui.components.LemonSliceLogo
+import com.zitrone.app.ui.components.fingerprintWatermark
 import com.zitrone.app.ui.theme.BackgroundElevated
 import com.zitrone.app.ui.theme.BackgroundPrimary
 import com.zitrone.app.ui.theme.BorderColor
@@ -68,6 +69,8 @@ fun ChatListScreen(
     onOpenSettings: () -> Unit,
     onNewChat: () -> Unit,
     modifier: Modifier = Modifier,
+    /** This device's own identity fingerprint for the security-paper watermark. */
+    identityFingerprint: String? = null,
 ) {
     var query by remember { mutableStateOf("") }
     val filtered = if (query.isBlank()) {
@@ -79,7 +82,9 @@ fun ChatListScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(BackgroundPrimary),
+            .background(BackgroundPrimary)
+            // Security paper behind the conversation list.
+            .fingerprintWatermark(identityFingerprint),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             // Header — wordmark left, settings right.

@@ -59,6 +59,28 @@ export const zitroneCss = `
   user-select: none;
   -webkit-user-select: none;
 }
+
+/* One-time attention pulse for the lemon-drop (QR) compose action while its
+   coachmark is showing. A single soft glow toward lemon, then back to rest —
+   one iteration, no infinite loop. The glow uses drop-shadow rather than
+   text-shadow because the button's mark is an SVG stroke (text-shadow does not
+   render on SVG). Gated on prefers-reduced-motion so it never fires for users
+   who have asked for stillness. */
+@media (prefers-reduced-motion: no-preference) {
+  .sub-lemon-drop-intro {
+    animation: sub-lemon-drop-intro 1.2s cubic-bezier(0.16, 1, 0.3, 1) 1;
+  }
+  @keyframes sub-lemon-drop-intro {
+    0%, 100% {
+      color: #a8a070;
+      filter: none;
+    }
+    45% {
+      color: #f5e642;
+      filter: drop-shadow(0 0 6px rgba(245, 230, 66, 0.4));
+    }
+  }
+}
 `;
 
 /** Injects the shared keyframes/rules. Render exactly once, near the app root. */

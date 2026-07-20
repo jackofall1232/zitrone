@@ -324,6 +324,37 @@ private fun ZitroneRoot(
     var unlocked by remember { mutableStateOf(false) }
     var lockError by remember { mutableStateOf<String?>(null) }
 
+    // This device's OWN identity self-fingerprint, tiled as the always-on
+    // "security paper" watermark behind every chat surface (Settings also shows
+    // it verbatim). Hoisted here — the one place the signal manager is live and
+    // the identity exists — so every surface shares a single off-main-thread
+    // computation instead of each recomputing it. Null until it lands; a
+    // compute failure also leaves it null and simply paints no watermark (never
+    // blocks the UI). Keystore + fingerprint work would drop frames / ANR on the
+    // main thread, so it runs on Dispatchers.Default.
+    // Keyed on the veil too, not just the app gate: a lemon drop is opened via
+    // its OWN biometric while the app may still be locked, and Delivered — the
+    // see-once plaintext, the single highest-value surface for the deterrent —
+    // must not render unmarked. The identity necessarily exists whenever a drop
+    // is deliverable (delivery decrypts with it), so the computation succeeds
+    // on that path as well.
+    var identityFingerprint by remember { mutableStateOf<String?>(null) }
+    val lemonDropVeilUp = lemonDropVeilState != null
+    LaunchedEffect(unlocked, lemonDropVeilUp) {
+        if ((unlocked || lemonDropVeilUp) && identityFingerprint == null) {
+            identityFingerprint = withContext(Dispatchers.Default) {
+                runCatching {
+                    // ensureIdentity only behind the real app gate: the veil
+                    // path must never mint identity keys on a not-yet-onboarded
+                    // install — there localFingerprint() throws on the empty
+                    // store and the veil simply stays unmarked.
+                    if (unlocked) container.signalManager.ensureIdentity()
+                    container.signalManager.localFingerprint()
+                }.getOrNull()
+            }
+        }
+    }
+
     // Root detection: warn once per process, never block.
     var rootWarningVisible by remember {
         mutableStateOf(RootDetection.check(context).likelyRooted)
@@ -377,9 +408,14 @@ private fun ZitroneRoot(
                         }
                     },
                     onDismiss = onLemonDropDismissed,
+                    identityFingerprint = identityFingerprint,
                 )
             is LemonDropVeil.Delivered ->
-                LemonDropDeliveredScreen(veil = veil, onDismiss = onLemonDropDismissed)
+                LemonDropDeliveredScreen(
+                    veil = veil,
+                    onDismiss = onLemonDropDismissed,
+                    identityFingerprint = identityFingerprint,
+                )
         }
         return
     }
@@ -435,6 +471,7 @@ private fun ZitroneRoot(
                 onOpenConversation = { route = Route.Chat(it.id) },
                 onOpenSettings = { route = Route.Settings },
                 onNewChat = { route = Route.AddContact },
+                identityFingerprint = identityFingerprint,
             )
 
             is Route.Chat -> {
@@ -486,6 +523,7 @@ private fun ZitroneRoot(
                         onRevealImage = { messageId ->
                             container.coordinator.revealAttachment(messageId)
                         },
+                        identityFingerprint = identityFingerprint,
                     )
                 }
             }
@@ -522,21 +560,12 @@ private fun ZitroneRoot(
                     lifecycleOwner.lifecycle.addObserver(observer)
                     onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
                 }
-                // Keystore + fingerprint work is off the main thread — doing it
-                // in composition can drop frames / ANR.
-                var identityFingerprint by remember { mutableStateOf("") }
-                LaunchedEffect(Unit) {
-                    identityFingerprint = withContext(Dispatchers.Default) {
-                        runCatching {
-                            container.signalManager.ensureIdentity()
-                            container.signalManager.localFingerprint()
-                        }.getOrDefault("")
-                    }
-                }
                 SettingsScreen(
                     settingsRepository = container.settingsRepository,
                     accountId = accountId,
-                    identityFingerprint = identityFingerprint,
+                    // Hoisted to setContent scope; "" until it lands, exactly as
+                    // the old local default behaved.
+                    identityFingerprint = identityFingerprint ?: "",
                     connectivity = connectivity,
                     transportState = transportState,
                     torAvailable = torAvailable,
@@ -546,6 +575,12 @@ private fun ZitroneRoot(
                     onDeleteAccount = {
                         container.coordinator.deleteAccountAndWipe {
                             container.signalStore.wipe()
+                            // The activity is not recreated on wipe, so the
+                            // hoisted fingerprint must be dropped here or the
+                            // DELETED account's mark would keep watermarking
+                            // (and be shown in Settings for) the next identity
+                            // until process death (PR #8 review).
+                            identityFingerprint = null
                             unlocked = false
                             route = Route.Splash
                         }

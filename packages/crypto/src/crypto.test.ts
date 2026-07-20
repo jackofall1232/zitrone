@@ -8,6 +8,7 @@ import { aeadDecrypt, aeadEncrypt } from "./aead.js";
 import { utf8Decode, utf8Encode } from "./encoding.js";
 import { deriveKeyFromPassword, generateSalt } from "./kdf.js";
 import {
+  fingerprintOf,
   generateIdentityKeyPair,
   generateOneTimePrekeys,
   generateSignedPrekey,
@@ -16,7 +17,12 @@ import {
 } from "./keys.js";
 import { decryptKeyStore, encryptKeyStore, type KeyStore } from "./keystore.js";
 import { ratchetDecrypt, ratchetEncrypt } from "./ratchet.js";
-import { decodeWatermarkPayload, embedWatermarkBits, extractWatermarkBits } from "./watermark.js";
+import {
+  decodeWatermarkPayload,
+  embedWatermarkBits,
+  embedWatermarkInPixels,
+  extractWatermarkBits,
+} from "./watermark.js";
 import { x3dhInitiate, x3dhRespond } from "./x3dh.js";
 
 async function establishedSessions() {
@@ -91,6 +97,31 @@ describe("prekeys", () => {
     const expected = "005C 0F07 1A4A BF49 3872 21C2 7A0C 8F44 A791 A7A6 DCD2 535C 7815 0963 79A4";
     expect(await safetyNumber(keyA, keyB)).toBe(expected);
     expect(await safetyNumber(keyB, keyA)).toBe(expected);
+  });
+
+  it("self-fingerprint is formatted in 15 groups of 4 and differs from a safety number", async () => {
+    const a = await generateIdentityKeyPair();
+    const b = await generateIdentityKeyPair();
+    const fp = await fingerprintOf(a.publicKey);
+    expect(fp).toMatch(/^([0-9A-F]{4} ){14}[0-9A-F]{4}$/);
+    // Distinct domain constants → a single-key fingerprint can never coincide
+    // with a two-key safety number, even were both keys the same.
+    expect(fp).not.toBe(await safetyNumber(a.publicKey, b.publicKey));
+  });
+
+  // Canonical cross-platform vector — pinned identically in the Android
+  // (SafetyNumberTest.kt `single-key fingerprint matches the canonical vector`)
+  // and iOS suites. Key is the raw bytes 0x01..0x20.
+  it("self-fingerprint matches the canonical cross-platform vector", async () => {
+    const key = new Uint8Array(Array.from({ length: 32 }, (_, i) => i + 1)); // 0x01..0x20
+    expect(await fingerprintOf(key)).toBe(
+      "B7BA C2F0 B9B6 550A 5383 387F 4252 561F BDD2 B4C7 D750 9D3D 7ADC 5AA2 B92E",
+    );
+  });
+
+  it("self-fingerprint rejects a key that isn't 32 bytes", async () => {
+    await expect(fingerprintOf(new Uint8Array(31))).rejects.toThrow(/32 bytes/);
+    await expect(fingerprintOf(new Uint8Array(33))).rejects.toThrow(/32 bytes/);
   });
 });
 
@@ -191,5 +222,36 @@ describe("watermark", () => {
   it("returns null on pixel buffers too small to hold a header", () => {
     expect(extractWatermarkBits(new Uint8ClampedArray(0))).toBeNull();
     expect(extractWatermarkBits(new Uint8ClampedArray(31))).toBeNull();
+  });
+
+  it("round-trips a payload embedded over NON-UNIFORM pre-drawn pixels", () => {
+    // Simulate a canvas that already carries drawn content (the visible
+    // fingerprint tile) rather than a flat fill: a pseudo-random RGBA buffer.
+    // The stego layer must still extract cleanly from the composed pixels.
+    const width = 512;
+    const height = 512;
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let i = 0; i < data.length; i++) data[i] = (i * 2654435761) & 0xff;
+    const payload = utf8Encode(
+      JSON.stringify({
+        userId: "acct-9",
+        messageId: "chat-list",
+        timestamp: "2026-07-20T00:00:00Z",
+      }),
+    );
+    embedWatermarkInPixels(data, width, height, payload);
+    const extracted = extractWatermarkBits(data);
+    expect(extracted).not.toBeNull();
+    expect(decodeWatermarkPayload(extracted!)).toEqual({
+      userId: "acct-9",
+      messageId: "chat-list",
+      timestamp: "2026-07-20T00:00:00Z",
+    });
+  });
+
+  it("rejects a pixel buffer whose length disagrees with its dimensions", () => {
+    expect(() =>
+      embedWatermarkInPixels(new Uint8ClampedArray(4 * 10), 3, 3, utf8Encode("x")),
+    ).toThrow(/width × height/);
   });
 });

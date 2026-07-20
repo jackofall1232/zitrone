@@ -12,6 +12,7 @@ import {
   createLemonDrop,
   decryptAttachmentBlob,
   encryptAttachmentBlob,
+  fingerprintOf,
   fromBase64,
   generateDropToken,
   generateIdentityKeyPair,
@@ -160,6 +161,13 @@ interface AppState {
   phase: Phase;
   unlockError?: string;
   accountId: string | null;
+  /**
+   * This device's OWN identity-key self-fingerprint (fingerprintOf), used as
+   * the always-on "security paper" watermark tiled behind the chat surfaces.
+   * Null until an identity is unlocked/created; a compute failure also leaves
+   * it null (never blocks unlock).
+   */
+  localFingerprint: string | null;
   keyStore: KeyStore | null;
   vault: VaultSession | null;
   accessToken: string | null;
@@ -244,6 +252,17 @@ export const useApp = create<AppState>((set, get) => {
     if (!keyStore || !vault) return;
     keyStore.sessions = contacts as unknown as Record<string, unknown>;
     await persistVault(vault, keyStore);
+  };
+
+  // Derive this device's own identity self-fingerprint for the security-paper
+  // watermark, from the SAME 32-byte Ed25519 public key peers pin and the
+  // safety number uses. Fire-and-forget with an internal guard: it must never
+  // block or break the unlock/create path, so a failure just leaves the
+  // fingerprint null (the watermark falls back to invisible-only).
+  const refreshLocalFingerprint = (publicKey: Uint8Array): void => {
+    void fingerprintOf(publicKey)
+      .then((fp) => set({ localFingerprint: fp }))
+      .catch(() => set({ localFingerprint: null }));
   };
 
   const login = async (): Promise<void> => {
@@ -752,6 +771,7 @@ export const useApp = create<AppState>((set, get) => {
   return {
     phase: "loading",
     accountId: null,
+    localFingerprint: null,
     keyStore: null,
     vault: null,
     accessToken: null,
@@ -797,6 +817,7 @@ export const useApp = create<AppState>((set, get) => {
       // Seals the keystore into its slot and persists the image in one step.
       const vault = await createVault(passphrase, keyStore);
       set({ keyStore, vault, accountId: account_id, contacts: {} });
+      refreshLocalFingerprint(identity.publicKey);
       await login();
       connect();
       set({ phase: "ready" });
@@ -824,6 +845,10 @@ export const useApp = create<AppState>((set, get) => {
           contacts: keyStore.sessions as unknown as Record<string, ContactRecord>,
           unlockError: undefined,
         });
+        // Same 32-byte identity public key the safety number / peer pinning use.
+        refreshLocalFingerprint(
+          unb64((keyStore.identityKey as unknown as SerializedIdentity).publicKey),
+        );
         await login();
         connect();
         set({ phase: "ready" });
@@ -836,6 +861,7 @@ export const useApp = create<AppState>((set, get) => {
           keyStore: null,
           vault: null,
           accountId: null,
+          localFingerprint: null,
           contacts: {},
           unlockError: "Unlocked, but the server is unreachable — try again",
         });
@@ -1408,6 +1434,7 @@ export const useApp = create<AppState>((set, get) => {
           keyStore: null,
           vault: null,
           accountId: null,
+          localFingerprint: null,
           accessToken: null,
           refreshToken: null,
           contacts: {},
@@ -1432,6 +1459,7 @@ export const useApp = create<AppState>((set, get) => {
         keyStore: null,
         vault: null,
         accountId: null,
+        localFingerprint: null,
         accessToken: null,
         refreshToken: null,
         ws: null,
@@ -1454,6 +1482,7 @@ export const useApp = create<AppState>((set, get) => {
         phase: "unlock",
         keyStore: null,
         vault: null,
+        localFingerprint: null,
         accessToken: null,
         refreshToken: null,
         messages: {},

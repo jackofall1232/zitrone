@@ -17,6 +17,8 @@ export {
   identityKeyToX25519,
   signWithIdentity,
   safetyNumber,
+  fingerprintOf,
+  FINGERPRINT_DOMAIN,
   type IdentityKeyFamily,
   type IdentityKeyPair,
   type SignedPrekey,
@@ -49,6 +51,8 @@ export {
 export { encryptKeyStore, decryptKeyStore, type KeyStore } from "./keystore.js";
 export {
   generateInvisibleWatermark,
+  embedWatermarkInCanvas,
+  embedWatermarkInPixels,
   embedWatermarkBits,
   extractWatermarkBits,
   decodeWatermarkPayload,

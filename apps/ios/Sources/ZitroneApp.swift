@@ -272,9 +272,15 @@ struct RootView: View {
 
     @ViewBuilder
     private var mainStack: some View {
+        // Compute this device's own identity fingerprint ONCE for every surface
+        // that paints the security-paper watermark (chat list, chat) and for the
+        // Settings account display. try? → nil, so an unlocked-but-keyless state
+        // simply leaves the paper unpainted rather than erroring.
+        let localFingerprint = try? environment.signal.localFingerprint()
         ZStack {
             ChatListView(
                 conversations: environment.conversations,
+                localFingerprint: localFingerprint,
                 onOpenConversation: { conversation in
                     environment.conversations.clearUnread(contactID: conversation.id)
                     environment.activeConversation = conversation
@@ -288,6 +294,7 @@ struct RootView: View {
                 ChatView(
                     conversation: live,
                     messageStore: environment.messages,
+                    localFingerprint: localFingerprint,
                     onBack: { environment.activeConversation = nil },
                     onVerifyKeys: { environment.verifyingContact = live.contact }
                 )
@@ -299,7 +306,7 @@ struct RootView: View {
             SettingsView(
                 orbot: environment.orbot,
                 diagnostics: environment.diagnostics,
-                localFingerprint: (try? environment.signal.localFingerprint()) ?? "—",
+                localFingerprint: localFingerprint ?? "—",
                 connectionState: environment.connectionState,
                 onDeleteAccount: { environment.deleteAccount() },
                 onDismiss: { environment.showSettings = false }

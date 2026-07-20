@@ -42,6 +42,15 @@ public extension Color {
     static let backgroundElevated = Color(hex: 0x242100)
     static let backgroundMessageSent = Color(hex: 0xF5E642)
     static let backgroundMessageReceived = Color(hex: 0x242100)
+    // Translucent bubble fills for the 0.8.1 always-on "security paper"
+    // watermark (see FingerprintWatermark): the fingerprint tile is painted
+    // behind the chat, and the bubbles let a whisper of it bleed through so the
+    // paper reads as one continuous surface rather than a gap around each
+    // message. Sent 0.92α over lemon, received 0.85α over #242100 — alpha tuned
+    // with treatment G2 so the mark stays legible-as-texture without hurting
+    // message contrast. Matches Android's BackgroundMessage*Translucent.
+    static let backgroundMessageSentTranslucent = Color(hex: 0xF5E642).opacity(0.92)
+    static let backgroundMessageReceivedTranslucent = Color(hex: 0x242100).opacity(0.85)
     static let textPrimary = Color(hex: 0xFAFAF2)
     static let textSecondary = Color(hex: 0xA8A070)
     static let textOnLemon = Color(hex: 0x0D0C00)

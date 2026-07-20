@@ -45,3 +45,11 @@ export {
 export { PlatformWarningBadge, type PlatformWarningBadgeProps } from "./PlatformWarningBadge.js";
 export { ClearnetWarningBanner, type ClearnetWarningBannerProps } from "./ClearnetWarningBanner.js";
 export { PrivacyView, type PrivacyViewProps, type RevealMode } from "./PrivacyView.js";
+
+// 0.8.1 always-on "security paper" fingerprint watermark.
+export {
+  drawFingerprintTile,
+  fingerprintTileAnchors,
+  WATERMARK_TILE_DEFAULTS,
+  type FingerprintTileOptions,
+} from "./fingerprintTile.js";

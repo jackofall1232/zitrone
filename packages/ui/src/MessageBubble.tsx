@@ -69,9 +69,11 @@ export function MessageBubble({
           fontSize: "0.9375rem",
           fontFamily: typography.body.family,
           lineHeight: 1.45,
+          // Translucent so the security-paper fingerprint watermark tiled behind
+          // the chat surface shows faintly through the bubble (see tokens.ts).
           background: sent
-            ? color.semantic.backgroundMessageSent
-            : color.semantic.backgroundMessageReceived,
+            ? color.semantic.backgroundMessageSentTranslucent
+            : color.semantic.backgroundMessageReceivedTranslucent,
           color: sent ? color.semantic.textOnLemon : color.semantic.textPrimary,
           border: sent ? "none" : `1px solid ${color.semantic.border}`,
           borderRadius: sent ? radius.bubbleSent : radius.bubbleReceived,
