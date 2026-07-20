@@ -267,10 +267,12 @@ class ApiClient(
      * The response ciphertext is deliberately NOT returned: the Android V1 caller
      * fires this ONLY so that a scan is network-indistinguishable from a real
      * redemption attempt and exercises the real route — it never opens the box
-     * (see MainActivity). A 404 (missing/expired/burned, all indistinguishable)
-     * or any other non-2xx surfaces as an [ApiException]; consistent with the
-     * rest of this client, the CALLER decides what to do — and here it swallows
-     * every failure.
+     * (see MainActivity). The only information the caller takes is the OUTCOME:
+     * success means a live drop's blob was served; a 404 (missing/expired/burned,
+     * all indistinguishable) or any other non-2xx surfaces as an [ApiException];
+     * consistent with the rest of this client, the CALLER decides what to do —
+     * here it maps the result to the advocacy screen's honest copy variants
+     * (see classifyLemonDropFetch) and surfaces nothing as an error.
      */
     suspend fun fetchQrDrop(qrId: String) {
         val body = JSONObject().put("qr_id", qrId)

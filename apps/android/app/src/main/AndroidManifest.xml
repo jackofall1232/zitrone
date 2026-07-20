@@ -72,12 +72,14 @@
                  <data> elements in one filter cross-product into unintended matches.
                  https ONLY (no http): a security-focused messenger, and extra schemes
                  block App Links verification. autoVerify checks
-                 https://zitrone.app/.well-known/assetlinks.json, which the OPERATOR
-                 deploys AFTER the feature ships end-to-end (see docs/RELEASING_ANDROID.md).
-                 Until that file is live and verified, Android 12+ silently opens these
-                 links in the browser — that is the DESIGNED fallback (no-app-installed →
-                 marketing site), not a bug. Link handling itself lands in a later phase;
-                 this declaration is inert until then. -->
+                 https://zitrone.app/.well-known/assetlinks.json, which ships with the
+                 marketing site (website/public/.well-known/ — see
+                 docs/RELEASING_ANDROID.md for the runbook and re-verification lag).
+                 Wherever verification hasn't (yet) succeeded, Android 12+ silently
+                 opens these links in the browser and the site serves the ordinary
+                 marketing page at /d/{id} — the DESIGNED no-app fallback, not a bug.
+                 In-app handling: MainActivity.handleDeepLink raises the advocacy
+                 veil and classifies the drop's state with one blind fetch. -->
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />

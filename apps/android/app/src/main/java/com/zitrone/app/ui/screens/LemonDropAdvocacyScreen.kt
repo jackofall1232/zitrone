@@ -24,6 +24,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.zitrone.app.data.LemonDropScanOutcome
 import com.zitrone.app.ui.components.LemonSliceLogo
 import com.zitrone.app.ui.theme.BackgroundPrimary
 import com.zitrone.app.ui.theme.Lemon
@@ -38,18 +39,40 @@ import com.zitrone.app.ui.theme.TextSecondary
  * This is a MARKETING moment, not an error — a scan that isn't for us is turned
  * into "you're part of the network, keep spreading it." So it is styled warm and
  * lemon-bright: the signature slice glowing on the dark ground, NO error red, NO
- * warning iconography. The copy is deliberately honest — it does not claim a
- * decryption was attempted (V1 attempts none), does not say the drop was meant
- * for a specific person we know, and does not call this scan "anonymous". It
- * states only the plain, true fact: a drop can be opened solely by the device it
- * was sealed for. See MainActivity for WHY an Android scan is never that device
- * in V1.
+ * warning iconography, whatever the [outcome]. The copy is deliberately honest —
+ * it does not claim a decryption was attempted (V1 attempts none), does not say
+ * the drop was meant for a specific person we know, and does not call this scan
+ * "anonymous". Each variant states only what the single fetch actually
+ * established (mirroring the web client's LemonDropOutcome copy):
+ * [LemonDropScanOutcome.SEALED] — a live drop exists and this device cannot open
+ * it; [LemonDropScanOutcome.UNAVAILABLE] — nothing is left to open (claimed or
+ * expired-and-shredded, indistinguishable by design);
+ * [LemonDropScanOutcome.UNKNOWN] — the fetch never completed, so no claim about
+ * this drop's state is made at all. See MainActivity for WHY an Android scan is
+ * never the intended device in V1.
  */
 @Composable
 fun LemonDropAdvocacyScreen(
+    outcome: LemonDropScanOutcome,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val headline = when (outcome) {
+        LemonDropScanOutcome.SEALED -> "Sealed for someone else's device"
+        LemonDropScanOutcome.UNAVAILABLE -> "Nothing left to open here"
+        LemonDropScanOutcome.UNKNOWN -> "Made for exactly one device"
+    }
+    val body = when (outcome) {
+        LemonDropScanOutcome.SEALED ->
+            "Only the device a lemon drop was made for can open it. " +
+                "The relay can't read it — and neither can this phone."
+        LemonDropScanOutcome.UNAVAILABLE ->
+            "This drop can't be opened here — it may already have been claimed, " +
+                "or it expired and the relay shredded it."
+        LemonDropScanOutcome.UNKNOWN ->
+            "Only the device a lemon drop was made for can open it. " +
+                "The relay can't read one — and neither can anyone who just scans it."
+    }
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -75,15 +98,14 @@ fun LemonDropAdvocacyScreen(
         }
 
         Text(
-            text = "Sealed for someone else's device",
+            text = headline,
             style = MaterialTheme.typography.headlineMedium,
             color = TextPrimary,
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(top = 40.dp),
         )
         Text(
-            text = "Only the device a lemon drop was made for can open it. " +
-                "The relay can't read it — and neither can this phone.",
+            text = body,
             style = MaterialTheme.typography.bodyLarge,
             color = TextSecondary,
             textAlign = TextAlign.Center,

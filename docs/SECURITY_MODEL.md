@@ -466,15 +466,18 @@ itself.
   the conversation until either side re-establishes. That is a denial-of-service corner for a
   relay-level adversary, not a confidentiality loss.
 - **Platform status, honestly.** Web and Linux desktop have the full flow (create and redeem).
-  Android V1 intercepts the link, performs one fetch (so a scan is network-indistinguishable
-  from a redemption attempt), and always shows the advocacy screen **without attempting
+  Android intercepts the link, performs one fetch (so a scan is network-indistinguishable
+  from a redemption attempt), and shows the advocacy screen **without attempting
   decryption**: accounts are per-device, and the clients able to create lemon drops today
   (web/desktop) cannot address one to an Android-family account across the current
-  wire-format split — so an Android device is genuinely never the intended recipient. The real
-  Android open attempt is planned, gated on crypto review. iOS has none of this yet. App-Link
-  interception stays inert until the operator deploys `assetlinks.json`
-  (see `docs/RELEASING_ANDROID.md`); until then those links open in the browser, which is the
-  designed no-app fallback.
+  wire-format split — so an Android device is genuinely never the intended recipient. The
+  advocacy copy does reflect what that one fetch established — a live sealed drop, nothing
+  left to open, or (when the fetch never completed) no claim at all — but a message can never
+  render there until the cross-family bridge lands; that open attempt remains gated on crypto
+  review. iOS has none of this yet. `assetlinks.json` ships with the marketing site and the
+  site serves the ordinary marketing page at `/d/{id}`, so an unverified or app-less scan
+  lands on the homepage (see `docs/RELEASING_ANDROID.md` for verification propagation, which
+  can take days).
 
 ### Attachments (encrypted sideloaded blobs — 0.7.0-beta)
 
