@@ -180,6 +180,18 @@ dependencies {
     implementation(libs.libsignal.android)
     implementation(libs.libsignal.client)
 
+    // libsodium binding for the lemon-drop one-shot responder ONLY (sealed
+    // box, raw X25519, Ed25519→Curve25519) — see crypto/LemonDropSodiumOps.kt.
+    // Prebuilt .so per ABI via JNA; no NDK build step. The JNA dependency must
+    // be the @aar (the jar variant lazysodium-android declares transitively
+    // has no Android natives).
+    implementation(libs.lazysodium.android) {
+        // lazysodium's POM pulls the JAR variant of JNA (desktop natives only);
+        // the @aar below replaces it — both at once is a duplicate-class error.
+        exclude(group = "net.java.dev.jna", module = "jna")
+    }
+    implementation("${libs.jna.get()}@aar")
+
     // Networking — WebSocket + certificate pinning
     implementation(libs.okhttp)
 
@@ -201,4 +213,8 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.org.json)
     testImplementation(libs.kotlinx.coroutines.test)
+    // Same libsodium C functions as lazysodium-android, bound for the host
+    // JVM — lets the cross-stack lemon-drop round-trip run as a plain unit
+    // test through the production LemonDropSodiumOps adapter.
+    testImplementation(libs.lazysodium.java)
 }

@@ -24,8 +24,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   session-reset crypto tests (recovery, convergence, forger rejection).
 - **Lemon-drop scans on Android are outcome-honest.** The advocacy screen now distinguishes a
   live sealed drop, a claimed-or-expired one, and a fetch that never completed — still exactly
-  one blind fetch per scan and still no decrypt attempt (no drop can currently be addressed to
-  an Android-family account; the cross-family open remains crypto-review-gated).
+  one blind fetch per scan. (When this first landed no decrypt was attempted; superseded in
+  this same release by the Android bridge under *Added*, which opens drops for their true
+  recipient and keeps these advocacy outcomes for everyone else.)
 - **The sticker's no-app fallback is real.** `zitrone.app/d/{id}` now serves the ordinary
   marketing page (it previously 404'd), and `.well-known/assetlinks.json` ships with the site
   carrying the release signer's fingerprint, so installed apps intercept `/d/*` links once
@@ -33,6 +34,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Lemon drops now open on Android.** A web/desktop-created drop can be addressed to an
+  Android account and read there: the creator side verifies Android-family (XEdDSA-signed)
+  prekey bundles with the same try-both logic the relay has always applied — ported to
+  TypeScript and tested against the identical real-libsignal signature vectors — and uses the
+  verified family to drive the DH and sealed-box key handling; the Android side gains a
+  self-contained one-shot X3DH responder (isolated from ordinary libsignal messaging) that
+  mirrors the web stack's bytes exactly, proven by a committed cross-stack fixture a JVM test
+  decrypts end to end. A decrypted drop renders only after an explicit biometric unlock, and
+  delivery consumes the one-time prekey and burns the relay's copy; every other outcome still
+  lands on the advocacy screen. Lemon drops remain **one-way by design** — no reply path, no
+  conversation; delivery or expiry are the only two exits, both destroying the drop. New
+  dependency, pinned: `lazysodium` (libsodium binding) for the sealed-box open. iOS still has
+  none of this.
 - **QR dead drops — "lemon drops."** Seal a message to one chosen contact as a printable QR
   sticker: the code carries only a `zitrone.app/d/{id}` pointer at a sealed blob on the relay,
   encrypted once at creation via one-shot X3DH (no live session touched). The relay is a blind,

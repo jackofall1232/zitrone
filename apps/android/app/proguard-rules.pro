@@ -59,3 +59,11 @@
     public static int i(...);
     public static int wtf(...);
 }
+
+# lazysodium + JNA (lemon-drop one-shot responder): JNA resolves native
+# functions by REFLECTED method name — renaming or stripping Sodium's native
+# method declarations silently breaks every libsodium call in release builds.
+-keep class com.goterl.lazysodium.** { *; }
+-keep class com.sun.jna.** { *; }
+-keepclassmembers class * extends com.sun.jna.Structure { public *; }
+-dontwarn java.awt.**

@@ -7,11 +7,15 @@ package com.zitrone.app
 
 import android.app.Application
 import android.util.Log
+import com.goterl.lazysodium.SodiumAndroid
 import com.zitrone.app.crypto.EncryptedSignalProtocolStore
 import com.zitrone.app.crypto.KeyStoreManager
+import com.zitrone.app.crypto.LemonDropSodiumOps
 import com.zitrone.app.crypto.SignalProtocolManager
 import com.zitrone.app.data.ConversationRepository
 import com.zitrone.app.data.EncryptedRosterStore
+import com.zitrone.app.data.LemonDropRedeemer
+import com.zitrone.app.data.LemonDropVeil
 import com.zitrone.app.data.MessageRepository
 import com.zitrone.app.data.SettingsRepository
 import com.zitrone.app.data.TransportState
@@ -27,6 +31,7 @@ import com.zitrone.app.tor.TorIntegration
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
@@ -112,6 +117,23 @@ class AppContainer(private val app: Application) {
     // was wiped on every process restart/update, losing pinned keys + verified flags.
     val conversationRepository =
         ConversationRepository(EncryptedRosterStore(keyStoreManager, signalStore))
+
+    /**
+     * Lemon-drop bridge: the veil state a `/d/{id}` scan renders, and the
+     * redeemer that probes/delivers a drop. The veil lives HERE (process
+     * lifetime, not Activity) so a configuration change keeps a decrypted-but-
+     * unrendered drop in memory without plaintext ever touching saved state —
+     * see LemonDropVeil's security invariant. The redeemer's sodium adapter is
+     * lazysodium-android's prebuilt libsodium (no NDK build; JVM unit tests
+     * run the same adapter over lazysodium-java).
+     */
+    val lemonDropVeil = MutableStateFlow<LemonDropVeil?>(null)
+    val lemonDropRedeemer = LemonDropRedeemer(
+        api = apiClient,
+        signalStore = signalStore,
+        conversations = conversationRepository,
+        sodium = LemonDropSodiumOps(SodiumAndroid()),
+    )
 
     val coordinator = MessagingCoordinator(
         appContext = app,

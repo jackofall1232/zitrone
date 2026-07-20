@@ -8,15 +8,16 @@ package com.zitrone.app.data
 import com.zitrone.app.net.ApiClient
 
 /**
- * What the single lemon-drop fetch honestly established about a scanned
- * sticker. Android V1 still never attempts decryption — the wire-format split
- * means no current drop can be addressed to an Android-family account (see
- * MainActivity) — but the fetch's outcome is real information the advocacy
- * screen may honestly reflect, mirroring the web client's distinct
- * "not-for-us" vs "unavailable" copy:
+ * What a lemon-drop scan honestly established when it did NOT end in a
+ * rendered message. Since the Android bridge (LemonDropRedeemer +
+ * LemonDropOneShot) a scan DOES attempt to open the drop; these outcomes
+ * cover every path where that attempt cannot honestly render one, mirroring
+ * the web client's distinct "not-for-us" vs "unavailable" copy:
  *
- *  - [SEALED]      the relay returned the blob: a live drop exists and this
- *                  device cannot open it — true of every Android scan today.
+ *  - [SEALED]      the relay returned a blob but this device cannot render it:
+ *                  the seal didn't open (not ours), the payload was broken, the
+ *                  device has no identity yet, or the sender cross-check
+ *                  failed — all deliberately collapsed to one warm screen.
  *  - [UNAVAILABLE] the relay answered 404: claimed, expired, or never existed
  *                  (deliberately indistinguishable server-side).
  *  - [UNKNOWN]     the fetch never completed (transport failure, rate limit,
@@ -35,7 +36,7 @@ enum class LemonDropScanOutcome {
  * is [LemonDropScanOutcome.UNAVAILABLE], and every other failure — transport
  * errors, rate limiting, server errors — is [LemonDropScanOutcome.UNKNOWN].
  */
-fun classifyLemonDropFetch(result: Result<Unit>): LemonDropScanOutcome =
+fun classifyLemonDropFetch(result: Result<*>): LemonDropScanOutcome =
     result.fold(
         onSuccess = { LemonDropScanOutcome.SEALED },
         onFailure = { error ->

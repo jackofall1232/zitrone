@@ -22,7 +22,7 @@ class LemonDropScanOutcomeTest {
     fun `served blob means a live sealed drop`() {
         assertEquals(
             LemonDropScanOutcome.SEALED,
-            classifyLemonDropFetch(Result.success(Unit)),
+            classifyLemonDropFetch(Result.success("ciphertext")),
         )
     }
 
@@ -30,7 +30,7 @@ class LemonDropScanOutcomeTest {
     fun `404 means claimed, expired, or never existed`() {
         assertEquals(
             LemonDropScanOutcome.UNAVAILABLE,
-            classifyLemonDropFetch(Result.failure(ApiClient.ApiException(404, "not_found"))),
+            classifyLemonDropFetch(Result.failure<String>(ApiClient.ApiException(404, "not_found"))),
         )
     }
 
@@ -38,7 +38,7 @@ class LemonDropScanOutcomeTest {
     fun `server errors claim nothing about the drop`() {
         assertEquals(
             LemonDropScanOutcome.UNKNOWN,
-            classifyLemonDropFetch(Result.failure(ApiClient.ApiException(500, "store_failed"))),
+            classifyLemonDropFetch(Result.failure<String>(ApiClient.ApiException(500, "store_failed"))),
         )
     }
 
@@ -46,7 +46,7 @@ class LemonDropScanOutcomeTest {
     fun `rate limiting claims nothing about the drop`() {
         assertEquals(
             LemonDropScanOutcome.UNKNOWN,
-            classifyLemonDropFetch(Result.failure(ApiClient.ApiException(429, "rate_limited"))),
+            classifyLemonDropFetch(Result.failure<String>(ApiClient.ApiException(429, "rate_limited"))),
         )
     }
 
@@ -54,7 +54,7 @@ class LemonDropScanOutcomeTest {
     fun `transport failure claims nothing about the drop`() {
         assertEquals(
             LemonDropScanOutcome.UNKNOWN,
-            classifyLemonDropFetch(Result.failure(IOException("relay unreachable"))),
+            classifyLemonDropFetch(Result.failure<String>(IOException("relay unreachable"))),
         )
     }
 }
