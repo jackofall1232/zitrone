@@ -72,9 +72,13 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
   const [warningDismissed, setWarningDismissed] = useState(false);
   const [dropToken, setDropToken] = useState<string | null>(null);
   // QR-drop flow: qrDraft holds the composed text awaiting a TTL choice (its
-  // presence opens the picker); qrResult holds the sealed drop's url + expiry
-  // for the result modal.
-  const [qrDraft, setQrDraft] = useState<string | null>(null);
+  // presence opens the picker) plus the ComposeBar's clearDraft callback — the
+  // box is only cleared after a successful deposit, so cancel/failure never
+  // discards the user's only copy; qrResult holds the sealed drop's url +
+  // expiry for the result modal.
+  const [qrDraft, setQrDraft] = useState<{ text: string; clearDraft: () => void } | null>(
+    null,
+  );
   const [qrSealing, setQrSealing] = useState(false);
   const [qrError, setQrError] = useState<string | null>(null);
   const [qrResult, setQrResult] = useState<{ url: string; expiresAt: string } | null>(null);
@@ -123,18 +127,22 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
   // only once a lifetime is chosen do we seal (PoW ~1.5s) and deposit. This runs
   // in every mode — Ghost included — because it is a distinct, recipient-targeted
   // mechanism, not the per-message dead drop Ghost routes ordinary sends through.
-  const onSendQrDrop = (text: string) => {
+  const onSendQrDrop = (text: string, clearDraft: () => void) => {
     setQrError(null);
-    setQrDraft(text);
+    setQrDraft({ text, clearDraft });
   };
   const chooseQrTtl = (ttlHours: QrDropTTLHours) => {
-    const text = qrDraft;
-    if (text === null || qrSealing) return;
+    const draft = qrDraft;
+    if (draft === null || qrSealing) return;
     setQrSealing(true);
     setQrError(null);
-    void sendQrDrop(peerId, text, ttlHours)
+    void sendQrDrop(peerId, draft.text, ttlHours)
       .then((res) => {
         setQrResult(res);
+        // Only NOW is the compose box cleared: the deposit was accepted, so the
+        // draft has somewhere safer to live than the textarea. A cancel or a
+        // failed seal leaves the user's only copy untouched in the box.
+        draft.clearDraft();
         setQrDraft(null);
       })
       .catch(() => setQrError("Couldn't seal the drop — try again."))

@@ -21,7 +21,10 @@ export interface ComposeBarProps {
    * button's long-press, which is already taken by the dead-drop affordance.
    * Available in every mode, Ghost included — it is a distinct mechanism.
    */
-  onSendAsQrDrop?: (text: string) => void;
+  /** QR dead-drop action. The draft is handed up UNCLEARED — sealing has a
+   *  TTL-picker step the user may cancel, and clearing here would discard the
+   *  only copy. The parent calls `clearDraft` after a successful deposit. */
+  onSendAsQrDrop?: (text: string, clearDraft: () => void) => void;
 }
 
 export function ComposeBar({
@@ -53,9 +56,10 @@ export function ComposeBar({
   const sendAsQrDrop = () => {
     const trimmed = text.trim();
     if (!trimmed || disabled || !onSendAsQrDrop) return;
-    // Hand the text up for the TTL choice + sealing; clear the box like a send.
-    onSendAsQrDrop(trimmed);
-    setText("");
+    // Hand the text up for the TTL choice + sealing. Deliberately NOT cleared
+    // here: the picker may be canceled (or sealing may fail), and the box holds
+    // the only copy of the draft — the parent clears it on successful deposit.
+    onSendAsQrDrop(trimmed, () => setText(""));
   };
 
   return (

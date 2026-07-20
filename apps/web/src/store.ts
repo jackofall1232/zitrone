@@ -1222,6 +1222,16 @@ export const useApp = create<AppState>((set, get) => {
         ) as unknown as KeyStore["oneTimePrekeys"];
       }
 
+      set({ activePeer: senderAccountId });
+      // Persist BEFORE burning, and let a persist failure propagate: the burn
+      // irreversibly deletes the relay's only copy, so firing it while the
+      // received message / new contact / consumed prekey are still unsaved
+      // would make a subsequent reload lose the message with no drop left to
+      // redeem again. If persist throws here, nothing has been burned — the
+      // drop is still on the shelf and a fresh scan (or reload + retry, which
+      // restores the unconsumed prekey from disk) can redeem it again.
+      await persist();
+
       // Best-effort burn: present the token preimage so the blind relay shreds
       // the blob now. Swallowed on failure — burn-on-claim is a COURTESY shred,
       // not a correctness requirement; the drop's TTL is the real backstop, and a
@@ -1232,8 +1242,6 @@ export const useApp = create<AppState>((set, get) => {
         // Intentionally ignored — TTL guarantees eventual destruction.
       }
 
-      set({ activePeer: senderAccountId });
-      await persist();
       return "message";
     },
 
