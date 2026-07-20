@@ -406,12 +406,23 @@ itself.
 
 - **The relay is a blind, non-destructive shelf.** It stores an opaque sealed box under a
   16-byte creator-random `qr_id` with no sender or recipient column; deposit is unauthenticated
-  (hashcash proof-of-work is the only admission, so the relay does not even learn the
-  depositor's account); it serves the **same blob to anyone** who presents the id, with no
-  identity check and no key-matching — all recipient-matching happens on the scanning device, by
-  whether the sealed box opens. Fetch deliberately does **not** destroy the drop: the relay
-  cannot know whether a decrypt succeeded, so destroying on first fetch would let a
-  wrong-recipient scan burn the message out from under the intended recipient.
+  (hashcash proof-of-work is the only admission, so the deposit request itself carries no
+  account); it serves the **same blob to anyone** who presents the id, with no identity check
+  and no key-matching — all recipient-matching happens on the scanning device, by whether the
+  sealed box opens. Fetch deliberately does **not** destroy the drop: the relay cannot know
+  whether a decrypt succeeded, so destroying on first fetch would let a wrong-recipient scan
+  burn the message out from under the intended recipient.
+- **Honest limit — deposit adjacency.** Creating a drop requires fetching the recipient's
+  prekey bundle, and that fetch is authenticated. A relay watching its own traffic can
+  therefore correlate the authenticated bundle request with the anonymous deposit that follows
+  moments later on the same connection, and infer **who likely created a drop for whom** —
+  the same class of metadata the ordinary send path already exposes, but worth stating because
+  the deposit alone would otherwise look unlinkable. The sealed content, the wrong-scanner
+  blindness, and the burn capability are unaffected. Fetching prekeys on an unlinkable
+  schedule (decoupled in time and transport from deposits) is tracked follow-up work, not a
+  property of the current implementation. The same adjacency exists on redemption when the
+  sender is not yet a contact (an authenticated bundle fetch follows the anonymous blob
+  fetch).
 - **Honest disclosure — read this one plainly:** because the relay serves the blob to any
   scanner, **non-recipient devices transiently receive ciphertext that was meant for someone
   else.** They cannot decrypt it — the seal is to the recipient's identity key, and opening it
