@@ -57,6 +57,11 @@ func New(store *db.Store, issuer *auth.Issuer, cfg *config.Config) *Handlers {
 		// QR dead drops (lemon drops) are unauthenticated like plain drops:
 		// proof-of-work gates deposit, but fetch and burn carry no PoW, so a per-IP
 		// cap is their only brake against a single source probing or scraping.
+		// KNOWN LIMIT (shared with dropLimit/blobLimit, not new here): behind the
+		// Tor/I2P sidecars every anonymous client presents the sidecar's address,
+		// so "per-IP" degrades to one global bucket for all overlay users of these
+		// endpoints. Admission control that prices anonymous overlay traffic
+		// per-request (PoW on fetch/burn, or similar) is a tracked follow-up.
 		qrDropLimit: ratelimit.New(60, time.Minute, cfg.RateLimitEnabled),
 		relayKey:    loadRelayKey(cfg),
 		forwarder:   DefaultForwarder(),
