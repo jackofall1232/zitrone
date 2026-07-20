@@ -5,7 +5,7 @@
 
 [package]
 name = "zitrone-desktop"
-version = "0.8.0-beta"
+version = "0.8.1-beta"
 edition = "2021"
 description = "Zitrone desktop app — Linux"
 license = "AGPL-3.0-only"

@@ -123,7 +123,10 @@ export function embedWatermarkInCanvas(
     throw new Error("embedWatermarkInCanvas requires a DOM environment");
   }
   const { width, height } = canvas;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+  // Null context (memory pressure, disabled 2D) → return the canvas without
+  // the stego layer rather than crash: the watermark is best-effort by design.
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return canvas;
   const imageData = ctx.getImageData(0, 0, width, height);
   embedWatermarkInPixels(
     imageData.data,
@@ -153,7 +156,8 @@ export function generateInvisibleWatermark(
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return canvas;
   ctx.fillStyle = backgroundColor;
   ctx.fillRect(0, 0, width, height);
   return embedWatermarkInCanvas(canvas, userId, messageId);

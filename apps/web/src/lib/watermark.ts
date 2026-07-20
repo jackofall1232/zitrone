@@ -28,11 +28,26 @@ export function composeChatWatermark(
 ): { url: string; sizePx: number } | null {
   try {
     if (localFingerprint) {
+      // Render the carrier at DEVICE-pixel resolution while tiling it at CSS
+      // size: on a DPR-2 display a 512-CSS-px tile paints 1024 device pixels,
+      // and if the source were only 512px the browser's resampling would
+      // duplicate/interpolate the RGB LSBs and destroy the stego layer in a
+      // native-resolution screenshot (PR #8 round 2). With the source at
+      // tileSize·dpr the mapping is 1 source pixel : 1 device pixel and the
+      // LSBs survive intact. Integer DPRs map exactly; fractional DPRs are
+      // best-effort (the visible deterrent is unaffected either way). The
+      // geometry scales with the same density treatment Android uses, so the
+      // VISUAL period stays one tileSize in CSS px on every display.
       const sizePx = WATERMARK_TILE_DEFAULTS.tileSize;
+      const dpr = Math.min(Math.max(Math.round(window.devicePixelRatio || 1), 1), 2);
       const canvas = document.createElement("canvas");
-      canvas.width = sizePx;
-      canvas.height = sizePx;
-      drawFingerprintTile(canvas, localFingerprint);
+      canvas.width = sizePx * dpr;
+      canvas.height = sizePx * dpr;
+      drawFingerprintTile(canvas, localFingerprint, {
+        tileSize: WATERMARK_TILE_DEFAULTS.tileSize * dpr,
+        fontPx: WATERMARK_TILE_DEFAULTS.fontPx * dpr,
+        rowGapPx: WATERMARK_TILE_DEFAULTS.rowGapPx * dpr,
+      });
       embedWatermarkInCanvas(canvas, accountId, conversationId);
       return { url: canvas.toDataURL(), sizePx };
     }

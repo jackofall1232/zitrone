@@ -113,12 +113,14 @@ export async function composeDropPrintPng(url: string, expiresAt: string): Promi
   ctx.fillStyle = PAPER;
   ctx.fillRect(0, 0, CARD_W, CARD_H);
 
-  // QR at print resolution — same options as the modal so the scan behavior is
-  // identical, just larger. margin 1 keeps the mandatory quiet zone.
+  // QR at print resolution. margin 4 = the full four-module quiet zone the QR
+  // spec expects: on screen a tight margin scans fine, but a PRINTED sticker
+  // gets cut close, curls, and meets worse cameras — the on-screen modal keeps
+  // margin 1, the print path must not (PR #8 round 2).
   const qrCanvas = document.createElement("canvas");
   await QRCode.toCanvas(qrCanvas, url, {
     errorCorrectionLevel: "H",
-    margin: 1,
+    margin: 4,
     width: QR_PX,
     color: { dark: INK, light: PAPER },
   });

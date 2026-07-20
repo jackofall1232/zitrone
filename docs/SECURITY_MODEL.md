@@ -601,6 +601,42 @@ Two UI-only defenses that never touch the crypto or the envelope:
 - **Platform warning** honestly tells a user when a participant is on a browser, where OS-level
   screenshot protection is unavailable — a dismissible lemon-yellow note, never a modal.
 
+### Fingerprint watermark — "security paper" (0.8.1)
+
+Every chat surface (chat, conversation list, and Android's lemon-drop reveal veil) renders over a
+faint, tiled, diagonal pattern of the **viewer's own** identity-key fingerprint — the same 60-hex
+value shown in Settings — with message bubbles slightly translucent so the pattern reads through
+the conversation at any scroll position. **It identifies whoever's screen a photographed
+conversation came from, not the sender.**
+
+- **This is a deterrence layer, not a forensic-grade anti-leak guarantee.** The goal is that a
+  person pointing a camera at the screen consciously registers "this capture is marked as mine"
+  and hesitates. The mark is faint by design, does not survive deliberate removal, cropping to a
+  blank region, or heavy re-editing, and we make no stronger claim.
+- **Always-on by design — there is no setting to turn it off.** A deterrent that anyone can
+  disable in Settings is a checkbox, not a deterrent; its value is precisely that it is never
+  negotiable. This is the one UI-layer defense that is not user-configurable, and we state that
+  plainly rather than hide the absence of a toggle.
+- **Local-only.** The fingerprint is already known to the device (it is the identity key's
+  display form); rendering it touches no network, no crypto path, and no key material beyond the
+  public key's existing display derivation.
+- **On web/desktop the visible pattern and the invisible leak-attribution watermark are one
+  image.** The pre-existing steganographic layer (viewer id + timestamp in pixel LSBs) is embedded
+  into the visible tile's own pixels — composed, not layered — so a screenshot carries both. The
+  carrier renders at device-pixel resolution so the hidden layer survives high-DPI displays on
+  integer scale factors; on fractional scales it is best-effort. **Honest limit —** the invisible
+  layer does not survive lossy re-encoding or scaling of the captured image; the visible layer is
+  the deterrent, the invisible one is corroboration when a capture is shared pristine.
+
+### Saving a lemon-drop sticker for printing (0.8.1, web/desktop)
+
+The QR-drop modal can save a print-grade PNG of the sticker (full quiet zone, burn-by caption) so
+a drop can be physically placed — the intended dead-drop workflow. **Honest cost, stated in the
+modal itself:** the saved file contains the drop link, persisted to disk by the user's own choice.
+The app treats it exactly like the printed sticker — it does not track, manage, or delete it. On
+desktop the file write happens natively behind the OS save dialog; the WebView never supplies a
+filesystem path.
+
 ## Audit history
 
 See [AUDIT.md](../AUDIT.md). No third-party audits have been completed yet — treat the
