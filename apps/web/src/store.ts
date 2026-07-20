@@ -539,28 +539,26 @@ export const useApp = create<AppState>((set, get) => {
     }
   };
 
-  // Establish a responder session from an X3DH initial message. Returns the
-  // decrypted plaintext; the caller runs the shared post-decryption dispatch so
-  // a first message that is a receipt/attachment/control payload is handled the
-  // same way as any subsequent one.
-  const respondToInitialMessage = async (
+  // X3DH responder handshake for an initial-message envelope, given the
+  // sender's identity key. Tries our signed prekeys newest-first (the initiator
+  // used whichever was current when they fetched our bundle), probes each
+  // candidate session by decrypting the envelope, and consumes the one-time
+  // prekey only on success. The sender's identity key participates in the X3DH
+  // DH mix, so a successful decrypt PROVES the envelope was built by whoever
+  // holds that key's private half — callers choose how the key is trusted
+  // (pinned contact key vs freshly fetched bundle).
+  const respondToX3DH = async (
     envelope: MessageEnvelope,
-  ): Promise<{ contact: ContactRecord; text: string }> => {
+    senderIdentityKey: Uint8Array,
+  ): Promise<{ session: ReturnType<typeof deserializeSession>; text: string }> => {
     const { keyStore } = get();
     if (!keyStore || !envelope.ephemeral_key) throw new Error("bad initial message");
     const identity = deserializeIdentity(keyStore.identityKey as unknown as SerializedIdentity);
-
-    // The envelope doesn't carry the sender's identity key — fetch it.
-    const token = await freshToken();
-    const senderBundle = await api.fetchPrekeyBundle(envelope.sender_id, token);
-    const senderIdentityKey = unb64(senderBundle.identity_key);
 
     const otps = keyStore.oneTimePrekeys as unknown as SerializedOneTimePrekey[];
     const usedOtp =
       envelope.prekey_id == null ? null : (otps.find((p) => p.id === envelope.prekey_id) ?? null);
 
-    // Try our signed prekeys, newest first — the initiator used whichever was
-    // current when they fetched our bundle.
     const spks = [...(keyStore.signedPrekeys as unknown as SerializedSignedPrekey[])].sort(
       (a, c) => c.createdAt - a.createdAt,
     );
@@ -585,20 +583,35 @@ export const useApp = create<AppState>((set, get) => {
             (p) => p.id !== usedOtp.id,
           ) as unknown as KeyStore["oneTimePrekeys"];
         }
-        const contact: ContactRecord = {
-          displayName: `Contact ${envelope.sender_id.slice(0, 8)}`,
-          identityKey: senderBundle.identity_key,
-          session: serializeSession(session),
-          pendingEphemeralKey: null,
-          pendingPrekeyId: null,
-        };
-        set((s) => ({ contacts: { ...s.contacts, [envelope.sender_id]: contact } }));
-        return { contact, text: utf8Decode(unpad(plaintextProbe)) };
+        return { session, text: utf8Decode(unpad(plaintextProbe)) };
       } catch (e) {
         lastError = e;
       }
     }
     throw lastError;
+  };
+
+  // Establish a responder session from an X3DH initial message sent by an
+  // UNKNOWN sender. Returns the decrypted plaintext; the caller runs the shared
+  // post-decryption dispatch so a first message that is a receipt/attachment/
+  // control payload is handled the same way as any subsequent one.
+  const respondToInitialMessage = async (
+    envelope: MessageEnvelope,
+  ): Promise<{ contact: ContactRecord; text: string }> => {
+    // The envelope doesn't carry the sender's identity key — fetch it.
+    const token = await freshToken();
+    const senderBundle = await api.fetchPrekeyBundle(envelope.sender_id, token);
+
+    const { session, text } = await respondToX3DH(envelope, unb64(senderBundle.identity_key));
+    const contact: ContactRecord = {
+      displayName: `Contact ${envelope.sender_id.slice(0, 8)}`,
+      identityKey: senderBundle.identity_key,
+      session: serializeSession(session),
+      pendingEphemeralKey: null,
+      pendingPrekeyId: null,
+    };
+    set((s) => ({ contacts: { ...s.contacts, [envelope.sender_id]: contact } }));
+    return { contact, text };
   };
 
   const handleServerEvent = (event: ServerEvent): void => {
@@ -613,18 +626,56 @@ export const useApp = create<AppState>((set, get) => {
             if (!contact) {
               ({ text } = await respondToInitialMessage(envelope));
             } else {
-              const session = deserializeSession(contact.session);
-              const plaintext = await ratchetDecrypt(session, {
-                blob: unb64(envelope.ciphertext),
-                messageNumber: envelope.message_number,
-                previousChainLength: envelope.previous_chain_length,
-              });
-              contact.session = serializeSession(session);
-              // First message from them: our X3DH header is no longer needed.
-              contact.pendingEphemeralKey = null;
-              contact.pendingPrekeyId = null;
-              set((s) => ({ contacts: { ...s.contacts, [envelope.sender_id]: { ...contact } } }));
-              text = utf8Decode(unpad(plaintext));
+              try {
+                const session = deserializeSession(contact.session);
+                const plaintext = await ratchetDecrypt(session, {
+                  blob: unb64(envelope.ciphertext),
+                  messageNumber: envelope.message_number,
+                  previousChainLength: envelope.previous_chain_length,
+                });
+                contact.session = serializeSession(session);
+                // First message from them: our X3DH header is no longer needed.
+                contact.pendingEphemeralKey = null;
+                contact.pendingPrekeyId = null;
+                set((s) => ({ contacts: { ...s.contacts, [envelope.sender_id]: { ...contact } } }));
+                text = utf8Decode(unpad(plaintext));
+              } catch (err) {
+                // GUARDED SESSION RESET (maintainer decision 2a). Two independent
+                // initiators deadlock: each side holds its own outbound session
+                // and neither can decrypt the other's first message. Lemon drops
+                // manufacture this systematically (the recipient's redeem creates
+                // a fresh outbound session while we still hold our original one);
+                // mutual addContact can hit it too. The guard is deliberately
+                // narrow — ALL of the following must hold, else the envelope is
+                // dropped exactly as before:
+                //   1. the stored session failed to decrypt, AND
+                //   2. the envelope carries an X3DH initial-message header
+                //      (ephemeral_key) — ordinary ratchet traffic never does, AND
+                //   3. the X3DH responder handshake keyed on the PINNED contact
+                //      identity key yields a session that decrypts this envelope.
+                // (3) is the authentication: the sender's identity key is mixed
+                // into the X3DH secret, so only the holder of the pinned key's
+                // private half can produce an envelope this reset accepts. The
+                // pinned key — never a freshly fetched bundle — is what we mix,
+                // so a relay swapping bundles cannot steer the reset. Replaying
+                // the contact's ORIGINAL initial message is inert whenever it
+                // consumed a one-time prekey (deleted on first use, so the
+                // re-derivation fails); the no-OTP corner is accepted V1 surface,
+                // documented in SECURITY_MODEL.md.
+                if (!envelope.ephemeral_key) throw err;
+                const { session, text: freshText } = await respondToX3DH(
+                  envelope,
+                  unb64(contact.identityKey),
+                );
+                const reset: ContactRecord = {
+                  ...contact,
+                  session: serializeSession(session),
+                  pendingEphemeralKey: null,
+                  pendingPrekeyId: null,
+                };
+                set((s) => ({ contacts: { ...s.contacts, [envelope.sender_id]: reset } }));
+                text = freshText;
+              }
             }
             // Shared post-decryption dispatch: receipts swallowed, attachments
             // redeemed, unknown control payloads shown as a generic notice,

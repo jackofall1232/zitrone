@@ -451,11 +451,20 @@ itself.
   addressed *to*, not who wrote it. The payload's claimed sender identity key is cross-checked
   before anything renders: against the stored key when the sender is already a contact, or
   against a freshly fetched prekey bundle when not — any mismatch and the message is refused.
-- **Replies to a drop-created contact.** If the recipient did not already have the sender as a
-  contact, the contact created at redemption starts a second, independent session — the
-  sender's client currently decrypts replies only against its original session, so a first
-  reply can be silently undeliverable until session-reset handling lands. Treat V1 lemon drops
-  from unknown senders as one-way delivery.
+- **Replies to a drop-created contact — the guarded session reset.** A contact created at
+  redemption starts a second, independent session, and the drop's creator previously decrypted
+  replies only against its original one — so a first reply was silently undeliverable. The
+  receive path now performs a deliberately narrow recovery: when the stored session fails to
+  decrypt AND the envelope carries an X3DH initial-message header, the client responds to that
+  handshake keyed on the **pinned** contact identity key (never a freshly fetched bundle) and
+  replaces the stored session only if the envelope then decrypts. The pinned key is mixed into
+  the X3DH secret, so only the holder of that key's private half can produce an envelope the
+  reset accepts; ordinary decrypt failures carry no handshake header and are dropped exactly as
+  before. Known residual corner, stated plainly: replaying a contact's original initial message
+  is inert whenever it consumed a one-time prekey (deleted on first use), but if it was built
+  without one — the recipient's stock had run out — a replay can wind the session back and wedge
+  the conversation until either side re-establishes. That is a denial-of-service corner for a
+  relay-level adversary, not a confidentiality loss.
 - **Platform status, honestly.** Web and Linux desktop have the full flow (create and redeem).
   Android V1 intercepts the link, performs one fetch (so a scan is network-indistinguishable
   from a redemption attempt), and always shows the advocacy screen **without attempting
