@@ -50,7 +50,8 @@ import com.zitrone.app.ui.theme.BorderColor
 import com.zitrone.app.ui.theme.BubbleReceivedShape
 import com.zitrone.app.ui.theme.BubbleSentShape
 import com.zitrone.app.ui.theme.BackgroundMessageReceived
-import com.zitrone.app.ui.theme.BackgroundMessageSent
+import com.zitrone.app.ui.theme.BackgroundMessageReceivedTranslucent
+import com.zitrone.app.ui.theme.BackgroundMessageSentTranslucent
 import com.zitrone.app.ui.theme.BurnOrange
 import com.zitrone.app.ui.theme.ErrorRed
 import com.zitrone.app.ui.theme.MonoFamily
@@ -112,10 +113,12 @@ fun MessageBubble(
                         }
                         .then(
                             if (isMine) {
-                                Modifier.background(BackgroundMessageSent, BubbleSentShape)
+                                // Translucent fills let the security-paper
+                                // watermark bleed faintly through the bubbles.
+                                Modifier.background(BackgroundMessageSentTranslucent, BubbleSentShape)
                             } else {
                                 Modifier
-                                    .background(BackgroundMessageReceived, BubbleReceivedShape)
+                                    .background(BackgroundMessageReceivedTranslucent, BubbleReceivedShape)
                                     .border(1.dp, BorderColor, BubbleReceivedShape)
                             },
                         )

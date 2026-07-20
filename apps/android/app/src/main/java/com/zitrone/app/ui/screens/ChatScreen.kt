@@ -48,6 +48,7 @@ import com.zitrone.app.ui.AttachmentLoader
 import com.zitrone.app.ui.components.ComposeBar
 import com.zitrone.app.ui.components.LemonAvatar
 import com.zitrone.app.ui.components.MessageBubble
+import com.zitrone.app.ui.components.fingerprintWatermark
 import com.zitrone.app.ui.components.SecurityBadge
 import com.zitrone.app.ui.components.SecurityState
 import com.zitrone.app.ui.theme.BackgroundPrimary
@@ -102,6 +103,8 @@ fun ChatScreen(
     onRetry: (messageId: String) -> Unit = {},
     /** Tap a received image to reveal it and arm its 10s reveal-and-burn timer. */
     onRevealImage: (messageId: String) -> Unit = {},
+    /** This device's own identity fingerprint for the security-paper watermark. */
+    identityFingerprint: String? = null,
 ) {
     var draft by rememberSaveable { mutableStateOf("") }
     // Per-message overrides for the compose-bar burn controls. null = no
@@ -186,6 +189,8 @@ fun ChatScreen(
         modifier = modifier
             .fillMaxSize()
             .background(BackgroundPrimary)
+            // Security paper sits above the ground, below the content.
+            .fingerprintWatermark(identityFingerprint)
             .imePadding(),
     ) {
         // Header

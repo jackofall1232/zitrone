@@ -33,6 +33,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.zitrone.app.data.LemonDropVeil
 import com.zitrone.app.ui.components.LemonSliceLogo
+import com.zitrone.app.ui.components.fingerprintWatermark
 import com.zitrone.app.ui.theme.BackgroundPrimary
 import com.zitrone.app.ui.theme.Lemon
 import com.zitrone.app.ui.theme.LemonGlow30
@@ -52,11 +53,14 @@ fun LemonDropUnlockScreen(
     onUnlock: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
+    /** This device's own identity fingerprint for the security-paper watermark. */
+    identityFingerprint: String? = null,
 ) {
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(BackgroundPrimary)
+            .fingerprintWatermark(identityFingerprint)
             .padding(horizontal = 32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
@@ -105,11 +109,16 @@ fun LemonDropDeliveredScreen(
     veil: LemonDropVeil.Delivered,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
+    /** This device's own identity fingerprint for the security-paper watermark. */
+    identityFingerprint: String? = null,
 ) {
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(BackgroundPrimary)
+            // The reveal shows see-once plaintext — the highest-value surface for
+            // the deterrent, so the paper is applied here above all.
+            .fingerprintWatermark(identityFingerprint)
             .padding(horizontal = 32.dp)
             .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally,

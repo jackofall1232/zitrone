@@ -30,6 +30,14 @@ val BackgroundSecondary = Color(0xFF1A1800)
 val BackgroundElevated = Color(0xFF242100)
 val BackgroundMessageSent = Color(0xFFF5E642)
 val BackgroundMessageReceived = Color(0xFF242100)
+// Translucent bubble fills for the 0.8.1 always-on "security paper" watermark:
+// the fingerprint tile is painted behind the chat, and the bubbles let a whisper
+// of it bleed through so the paper reads as one continuous surface rather than a
+// gap around each message. Sent 0.92α over lemon, received 0.85α over #242100 —
+// alpha tuned with treatment G2 so the mark stays legible-as-texture without
+// hurting message contrast.
+val BackgroundMessageSentTranslucent = Color(0xEBF5E642)
+val BackgroundMessageReceivedTranslucent = Color(0xD9242100)
 val TextPrimary = Color(0xFFFAFAF2)
 val TextSecondary = Color(0xFFA8A070)
 val TextOnLemon = Color(0xFF0D0C00)
