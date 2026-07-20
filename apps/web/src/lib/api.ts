@@ -15,6 +15,8 @@ import type {
   BlobRedeemResponse,
   QrDropDepositRequest,
   QrDropDepositResponse,
+  QrDropFetchResponse,
+  QrDropBurnRequest,
 } from "@zitrone/protocol";
 import { isTauri, nativeRequest } from "./nativeTransport.js";
 import { getServerUrl, SERVER_URL } from "../config.js";
@@ -158,5 +160,23 @@ export const api = {
   // stores an opaque sealed blob under the qr_id and hands back only its expiry.
   depositQrDrop(body: QrDropDepositRequest): Promise<QrDropDepositResponse> {
     return request("/api/v1/qr-drops", { method: "POST", body: JSON.stringify(body) });
+  },
+
+  // Fetch + burn a lemon drop — BOTH UNAUTHENTICATED, and deliberately so: an
+  // unauthenticated fetch/burn keeps the blind relay from linking either action
+  // to an account (the qr_id is the only capability on fetch; the burn token
+  // preimage, recovered only by a successful decryptor, is the only capability
+  // on burn). Fetch is non-destructive and repeatable by design — the relay
+  // can't see the decrypt outcome, so a wrong-recipient scan must not be able to
+  // burn the drop out from under the real recipient.
+  fetchQrDrop(qrId: string): Promise<QrDropFetchResponse> {
+    return request("/api/v1/qr-drops/fetch", {
+      method: "POST",
+      body: JSON.stringify({ qr_id: qrId }),
+    });
+  },
+
+  burnQrDrop(body: QrDropBurnRequest): Promise<void> {
+    return request("/api/v1/qr-drops/burn", { method: "POST", body: JSON.stringify(body) });
   },
 };
