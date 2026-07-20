@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/zitrone/server/internal/config"
 	"github.com/zitrone/server/internal/db"
@@ -328,5 +329,89 @@ func TestQrDropStore_RoundTrip(t *testing.T) {
 	// ── second burn with the same token → 404 (already destroyed) ────────────
 	if status, _ := burn(qrID, burnToken); status != fiber.StatusNotFound {
 		t.Fatalf("second burn: got %d, want 404", status)
+	}
+
+	// ── a burned qr_id is tombstoned: re-depositing under it → 409 forever ───
+	rearmBody, _ := validDeposit(t, qrID, plaintext, 24)
+	if status, _ := postJSON(t, app, "/api/v1/qr-drops", rearmBody, ""); status != fiber.StatusConflict {
+		t.Fatalf("re-deposit under burned qr_id: got %d, want 409 (sticker re-arming must be rejected)", status)
+	}
+	assertQrTombstone(t, ctx, dsn, qrID)
+}
+
+// A burned or expired drop must leave a tombstone: the row survives with its
+// ciphertext and burn_hash shredded to zero bytes. Checked over a direct SQL
+// connection because the Store API deliberately has no way to read tombstones.
+func assertQrTombstone(t *testing.T, ctx context.Context, dsn string, qrID []byte) {
+	t.Helper()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect for tombstone check: %v", err)
+	}
+	defer conn.Close(ctx)
+	var ciphertextLen, burnHashLen int
+	var dead bool
+	err = conn.QueryRow(ctx, `
+		SELECT octet_length(ciphertext), octet_length(burn_hash), expires_at <= now()
+		FROM qr_drops WHERE qr_id = $1`, qrID).Scan(&ciphertextLen, &burnHashLen, &dead)
+	if err != nil {
+		t.Fatalf("tombstone row must still exist (got %v) — deletion would free the qr_id for re-arming", err)
+	}
+	if ciphertextLen != 0 || burnHashLen != 0 {
+		t.Fatalf("tombstone must be shredded: ciphertext %d bytes, burn_hash %d bytes (want 0/0)", ciphertextLen, burnHashLen)
+	}
+	if !dead {
+		t.Fatal("tombstone must read as expired so fetch/burn treat it as absent")
+	}
+}
+
+// Expiry must tombstone exactly like burn does: the janitor's shred pass keeps
+// the qr_id reserved forever, and a second pass does not recount shredded rows.
+func TestQrDropStore_ExpiryTombstone(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set; skipping QR-drop store integration test")
+	}
+	ctx := context.Background()
+	store, err := db.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	h := newQrHandlers(store)
+	app := qrTestApp(h)
+
+	// Seed a drop that is already past its TTL but not yet shredded.
+	qrID := randBytes(t, qrIDBytes)
+	burnHash := sha256.Sum256(randBytes(t, qrBurnTokenBytes))
+	if err := store.DepositQrDrop(ctx, qrID, []byte("expired-but-live"), burnHash[:], time.Now().Add(-time.Minute)); err != nil {
+		t.Fatalf("seed expired drop: %v", err)
+	}
+
+	// The janitor pass shreds it (count covers at least this row; other tests
+	// may have left expired rows of their own).
+	shredded, err := store.PurgeExpiredQrDrops(ctx, time.Now())
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if shredded < 1 {
+		t.Fatalf("purge shredded %d rows, want >= 1", shredded)
+	}
+	assertQrTombstone(t, ctx, dsn, qrID)
+
+	// Re-depositing under the expired id is rejected forever.
+	rearmBody, _ := validDeposit(t, qrID, []byte("second life"), 24)
+	if status, _ := postJSON(t, app, "/api/v1/qr-drops", rearmBody, ""); status != fiber.StatusConflict {
+		t.Fatalf("re-deposit under expired qr_id: got %d, want 409 (sticker re-arming must be rejected)", status)
+	}
+
+	// The shred pass is idempotent: an immediate second pass finds nothing new.
+	again, err := store.PurgeExpiredQrDrops(ctx, time.Now())
+	if err != nil {
+		t.Fatalf("second purge: %v", err)
+	}
+	if again != 0 {
+		t.Fatalf("second purge recounted %d rows, want 0 (tombstones must not be re-shredded)", again)
 	}
 }

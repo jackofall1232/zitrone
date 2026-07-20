@@ -29,6 +29,11 @@ import (
 // proof-of-work bound to the qr_id at cfg.DropPoWDifficulty, exactly as /drops
 // gates deposit; fetch and burn carry no PoW and lean on the per-IP rate limit.
 //
+// A qr_id is single-use FOREVER: burn and expiry crypto-shred the ciphertext but
+// keep the id as a permanent tombstone, so depositing under a dead sticker's id
+// is rejected (409) for all time — a burned or expired sticker can never be
+// re-armed by anyone, including its creator (maintainer decision 1a).
+//
 // Wire note: qr_id is UNPADDED BASE64URL — the one canonical form shared with
 // the QR sticker URL's path segment (packages/protocol lemondrop.ts), so clients
 // never juggle two encodings of the same 16 bytes. Every other byte field
@@ -165,7 +170,8 @@ type qrDropBurnRequest struct {
 }
 
 // BurnQrDrop destroys a drop on claim. The server hashes the presented burn token
-// and deletes the row only where qr_id AND SHA-256(burn_token) both match, in a
+// and tombstones the row (shreds ciphertext + burn_hash, keeps the id — see
+// store.BurnQrDrop) only where qr_id AND SHA-256(burn_token) both match, in a
 // single statement — the same hash-match-consume precedent ConsumeRefreshToken
 // uses (comparing hashes of a high-entropy secret in SQL is the established
 // pattern here). Only a client that successfully decrypted the payload can know

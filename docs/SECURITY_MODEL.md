@@ -439,17 +439,19 @@ itself.
   all the same 404 — a prober learns nothing — and after expiry or claim the physical sticker
   permanently degrades into a harmless pointer: scans fall through to the marketing site or the
   in-app "not for this device" screen, with no lingering security exposure.
+- **A dead sticker stays dead — the tombstone tradeoff.** Burn and expiry do not delete the
+  drop's row; they crypto-shred its ciphertext and burn hash and keep the `qr_id` forever as a
+  tombstone, so no one — including the sticker's creator — can ever deposit a new drop under a
+  used id. This closes the "sticker re-arming" hole (a dead sticker silently delivering again).
+  The honest cost: the relay permanently retains one 16-byte random identifier plus its expiry
+  timestamp per drop ever minted. A tombstone links to no account, names no sender or recipient,
+  and holds no content — but it is retention on an otherwise shred-everything store, and we state
+  that plainly rather than hide it.
 - **Sender identity is claimed, then verified.** Opening the seal proves who a drop was
   addressed *to*, not who wrote it. The payload's claimed sender identity key is cross-checked
   before anything renders: against the stored key when the sender is already a contact, or
   against a freshly fetched prekey bundle when not — any mismatch and the message is refused.
-- **Open limits under maintainer decision (V1 as-shipped, stated plainly).** Two findings from
-  review are real and unfixed pending a design choice, and we document rather than soften them.
-  *Sticker re-arming:* after a drop is burned or expires, its `qr_id` is deleted — so anyone who
-  knows the id (in practice the sticker's creator) can deposit a NEW drop under the same id,
-  making a dead sticker deliver again; true permanence needs the relay to remember every issued
-  id forever (a retention tradeoff on a shred-everything store), which is under consideration.
-  *Replies to a drop-created contact:* if the recipient did not already have the sender as a
+- **Replies to a drop-created contact.** If the recipient did not already have the sender as a
   contact, the contact created at redemption starts a second, independent session — the
   sender's client currently decrypts replies only against its original session, so a first
   reply can be silently undeliverable until session-reset handling lands. Treat V1 lemon drops

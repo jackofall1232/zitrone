@@ -291,7 +291,10 @@ func (s *Store) PurgeExpiredBlobs(ctx context.Context, now time.Time) (int64, er
 // DepositQrDrop stores a ciphertext under a creator-random qr_id alongside the
 // hash of a burn token. No sender/recipient is recorded — the table has no
 // column for it. A duplicate qr_id is rejected so a drop cannot be silently
-// overwritten (mirrors DepositDrop/StoreBlob).
+// overwritten (mirrors DepositDrop/StoreBlob). Because burn and expiry tombstone
+// the row instead of deleting it, this same conflict check is what makes a
+// qr_id permanently single-use: once a sticker has died, re-depositing under
+// its id is rejected forever ("sticker re-arming" fix, maintainer decision 1a).
 func (s *Store) DepositQrDrop(ctx context.Context, qrID, ciphertext, burnHash []byte, expiresAt time.Time) error {
 	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO qr_drops (qr_id, ciphertext, burn_hash, expires_at)
@@ -327,17 +330,34 @@ func (s *Store) FetchQrDrop(ctx context.Context, qrID []byte) ([]byte, error) {
 // can fetch but never burn. Expired rows are treated as absent so an expired drop
 // burns to the same 404 as a missing one. Returns pgx.ErrNoRows when nothing
 // matched — missing, expired, and wrong-preimage are all indistinguishable.
+//
+// Burning TOMBSTONES the row rather than deleting it: ciphertext and burn_hash
+// are overwritten with empty bytes (the crypto-shred) and expires_at is forced
+// into the past, but the qr_id row itself is kept forever. A tombstone reads as
+// dead everywhere — fetch and burn both require `expires_at > now()` — and
+// DepositQrDrop's conflict check rejects the id for any future deposit, which is
+// what makes a dead sticker permanently dead (maintainer decision 1a). The
+// tombstone predicate is `octet_length(ciphertext) = 0`, unambiguous because
+// deposits reject empty ciphertext at the API boundary.
 func (s *Store) BurnQrDrop(ctx context.Context, qrID, burnHash []byte) error {
 	var burned []byte
 	return s.pool.QueryRow(ctx, `
-		DELETE FROM qr_drops WHERE qr_id = $1 AND burn_hash = $2 AND expires_at > now()
+		UPDATE qr_drops
+		SET ciphertext = ''::bytea, burn_hash = ''::bytea, expires_at = now()
+		WHERE qr_id = $1 AND burn_hash = $2 AND expires_at > now()
 		RETURNING qr_id`, qrID, burnHash).Scan(&burned)
 }
 
-// PurgeExpiredQrDrops deletes QR drops past their TTL whether claimed or not —
-// the crypto-shred for unclaimed drops, since the relay never held the key.
+// PurgeExpiredQrDrops crypto-shreds QR drops past their TTL whether claimed or
+// not: ciphertext and burn_hash are overwritten with empty bytes, but the row is
+// kept as a permanent tombstone so the qr_id can never be re-deposited (see
+// BurnQrDrop). The octet_length guard makes the pass idempotent — rows already
+// shredded (by burn or a previous pass) are not rewritten or recounted.
 func (s *Store) PurgeExpiredQrDrops(ctx context.Context, now time.Time) (int64, error) {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM qr_drops WHERE expires_at <= $1`, now)
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE qr_drops
+		SET ciphertext = ''::bytea, burn_hash = ''::bytea
+		WHERE expires_at <= $1 AND octet_length(ciphertext) > 0`, now)
 	return tag.RowsAffected(), err
 }
 

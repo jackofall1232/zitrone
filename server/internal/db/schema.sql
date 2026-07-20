@@ -104,10 +104,22 @@ CREATE INDEX IF NOT EXISTS blobs_expires_idx ON blobs (expires_at);
 -- which crypto-shreds unclaimed drops (the relay never held the key). As with
 -- drops/blobs there is intentionally NO sender/recipient column: the store is
 -- blind by construction.
+-- Burn and expiry TOMBSTONE a row instead of deleting it: ciphertext and
+-- burn_hash are shredded to empty bytes and the row is kept forever, so the
+-- primary-key conflict on deposit permanently reserves every qr_id ever used —
+-- a dead sticker can never deliver again (maintainer decision 1a). The
+-- tombstone is a random 16-byte id plus its expiry timestamp; it links to no
+-- identity and stores no content. Tombstones are recognized by
+-- octet_length(ciphertext) = 0, which live rows can never have (deposits
+-- reject empty ciphertext at the API boundary).
 CREATE TABLE IF NOT EXISTS qr_drops (
     qr_id      BYTEA PRIMARY KEY,   -- 16 creator-random bytes; no sender/recipient columns, by design
-    ciphertext BYTEA NOT NULL,
-    burn_hash  BYTEA NOT NULL,      -- SHA-256(burn token); the preimage rides inside the ciphertext
+    ciphertext BYTEA NOT NULL,      -- ''::bytea once tombstoned
+    burn_hash  BYTEA NOT NULL,      -- SHA-256(burn token); ''::bytea once tombstoned
     expires_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS qr_drops_expires_idx ON qr_drops (expires_at);
+-- Partial index for the janitor's shred pass: only not-yet-shredded rows are
+-- candidates, so the ever-growing tombstone population costs the pass nothing.
+CREATE INDEX IF NOT EXISTS qr_drops_live_expires_idx
+    ON qr_drops (expires_at) WHERE octet_length(ciphertext) > 0;
