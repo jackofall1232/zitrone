@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"os"
@@ -75,6 +76,10 @@ func solveQrPoW(t *testing.T, qrID []byte) []byte {
 	}
 }
 
+// b64url encodes the way clients put a qr_id on the wire: unpadded base64url,
+// the same canonical form the QR sticker URL's path segment carries.
+func b64url(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+
 // randBytes returns n cryptographically random bytes.
 func randBytes(t *testing.T, n int) []byte {
 	t.Helper()
@@ -94,7 +99,7 @@ func validDeposit(t *testing.T, qrID, ciphertext []byte, ttlHours int) (fiber.Ma
 	burnHash := sha256.Sum256(burnToken)
 	nonce := solveQrPoW(t, qrID)
 	return fiber.Map{
-		"qr_id":      b64(qrID),
+		"qr_id":      b64url(qrID),
 		"ciphertext": b64(ciphertext),
 		"ttl_hours":  ttlHours,
 		"pow_nonce":  b64(nonce),
@@ -132,7 +137,7 @@ func TestQrDeposit_BadPoW(t *testing.T) {
 		nonce = randBytes(t, pow.NonceBytes)
 	}
 	status, _ := postJSON(t, app, "/api/v1/qr-drops", fiber.Map{
-		"qr_id":      b64(qrID),
+		"qr_id":      b64url(qrID),
 		"ciphertext": b64([]byte("ciphertext")),
 		"ttl_hours":  24,
 		"pow_nonce":  b64(nonce),
@@ -149,7 +154,7 @@ func TestQrDeposit_BadQrIDLength(t *testing.T) {
 	app := qrTestApp(h)
 	burnHash := sha256.Sum256(randBytes(t, qrBurnTokenBytes))
 	status, _ := postJSON(t, app, "/api/v1/qr-drops", fiber.Map{
-		"qr_id":      b64([]byte("too-short")),
+		"qr_id":      b64url([]byte("too-short")),
 		"ciphertext": b64([]byte("ciphertext")),
 		"ttl_hours":  24,
 		"pow_nonce":  b64(make([]byte, pow.NonceBytes)),
@@ -166,7 +171,7 @@ func TestQrDeposit_BadBurnHashLength(t *testing.T) {
 	app := qrTestApp(h)
 	qrID := randBytes(t, qrIDBytes)
 	status, _ := postJSON(t, app, "/api/v1/qr-drops", fiber.Map{
-		"qr_id":      b64(qrID),
+		"qr_id":      b64url(qrID),
 		"ciphertext": b64([]byte("ciphertext")),
 		"ttl_hours":  24,
 		"pow_nonce":  b64(make([]byte, pow.NonceBytes)),
@@ -196,7 +201,7 @@ func TestQrFetchBurn_NoAuthRequired(t *testing.T) {
 	h := newQrHandlers(nil)
 	app := qrTestApp(h)
 	for _, path := range []string{"/api/v1/qr-drops/fetch", "/api/v1/qr-drops/burn"} {
-		status, _ := postJSON(t, app, path, fiber.Map{"qr_id": b64([]byte("short"))}, "")
+		status, _ := postJSON(t, app, path, fiber.Map{"qr_id": b64url([]byte("short"))}, "")
 		if status == fiber.StatusUnauthorized {
 			t.Fatalf("%s must not require authentication", path)
 		}
@@ -226,7 +231,7 @@ func TestQrDropStore_RoundTrip(t *testing.T) {
 	app := qrTestApp(h)
 
 	fetch := func(qrID []byte) (int, []byte) {
-		return postJSON(t, app, "/api/v1/qr-drops/fetch", fiber.Map{"qr_id": b64(qrID)}, "")
+		return postJSON(t, app, "/api/v1/qr-drops/fetch", fiber.Map{"qr_id": b64url(qrID)}, "")
 	}
 	ciphertextOf := func(t *testing.T, body []byte) []byte {
 		var out struct {
@@ -303,7 +308,7 @@ func TestQrDropStore_RoundTrip(t *testing.T) {
 
 	// ── burn with the WRONG preimage → 404, and the drop stays fetchable ─────
 	burn := func(qrID, token []byte) (int, []byte) {
-		return postJSON(t, app, "/api/v1/qr-drops/burn", fiber.Map{"qr_id": b64(qrID), "burn_token": b64(token)}, "")
+		return postJSON(t, app, "/api/v1/qr-drops/burn", fiber.Map{"qr_id": b64url(qrID), "burn_token": b64(token)}, "")
 	}
 	if status, _ := burn(qrID, randBytes(t, qrBurnTokenBytes)); status != fiber.StatusNotFound {
 		t.Fatalf("burn wrong preimage: got %d, want 404", status)

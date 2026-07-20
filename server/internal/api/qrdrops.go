@@ -28,6 +28,12 @@ import (
 // defeat the anonymity that is the entire point. Deposit admission is a hashcash
 // proof-of-work bound to the qr_id at cfg.DropPoWDifficulty, exactly as /drops
 // gates deposit; fetch and burn carry no PoW and lean on the per-IP rate limit.
+//
+// Wire note: qr_id is UNPADDED BASE64URL — the one canonical form shared with
+// the QR sticker URL's path segment (packages/protocol lemondrop.ts), so clients
+// never juggle two encodings of the same 16 bytes. Every other byte field
+// (ciphertext, pow_nonce, burn_hash, burn_token) is standard base64 like the
+// sibling drop/blob endpoints.
 
 const (
 	qrIDBytes        = 16          // creator-random drop id; NOT a hash of anything
@@ -72,7 +78,7 @@ func (h *Handlers) DepositQrDrop(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return errJSON(c, fiber.StatusBadRequest, "bad_request")
 	}
-	qrID, err := base64.StdEncoding.DecodeString(req.QrID)
+	qrID, err := base64.RawURLEncoding.DecodeString(req.QrID)
 	if err != nil || len(qrID) != qrIDBytes {
 		return errJSON(c, fiber.StatusBadRequest, "bad_qr_id")
 	}
@@ -134,7 +140,7 @@ func (h *Handlers) FetchQrDrop(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return errJSON(c, fiber.StatusBadRequest, "bad_request")
 	}
-	qrID, err := base64.StdEncoding.DecodeString(req.QrID)
+	qrID, err := base64.RawURLEncoding.DecodeString(req.QrID)
 	if err != nil || len(qrID) != qrIDBytes {
 		return errJSON(c, fiber.StatusBadRequest, "bad_qr_id")
 	}
@@ -175,7 +181,7 @@ func (h *Handlers) BurnQrDrop(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return errJSON(c, fiber.StatusBadRequest, "bad_request")
 	}
-	qrID, err := base64.StdEncoding.DecodeString(req.QrID)
+	qrID, err := base64.RawURLEncoding.DecodeString(req.QrID)
 	if err != nil || len(qrID) != qrIDBytes {
 		return errJSON(c, fiber.StatusBadRequest, "bad_qr_id")
 	}
