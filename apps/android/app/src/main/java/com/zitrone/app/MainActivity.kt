@@ -70,6 +70,9 @@ import kotlinx.coroutines.withContext
  * content must do exactly this; in this app, that's the only Activity there
  * is.
  */
+/** Saved-instance-state key for the lemon-drop advocacy veil's visibility. */
+private const val STATE_LEMON_DROP_SCAN = "lemon_drop_scan"
+
 class MainActivity : FragmentActivity() {
 
     private val requestNotificationPermission =
@@ -102,9 +105,13 @@ class MainActivity : FragmentActivity() {
         // recreation (savedInstanceState != null): re-running it on every rotation
         // would fire a second fetch and break the "exactly ONE fetch per scan"
         // rule. A genuinely new scan while we're already running arrives via
-        // onNewIntent instead.
+        // onNewIntent instead. On recreation the veil's VISIBILITY is restored
+        // from the saved state (no re-fetch) so rotating the phone doesn't
+        // silently swap the advocacy screen for the lock/splash underneath.
         if (savedInstanceState == null) {
             handleDeepLink(intent)
+        } else {
+            lemonDropScan.value = savedInstanceState.getBoolean(STATE_LEMON_DROP_SCAN, false)
         }
 
         setContent {
@@ -126,6 +133,14 @@ class MainActivity : FragmentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleDeepLink(intent)
+    }
+
+    // The advocacy veil must survive a configuration change: only its visibility
+    // is saved — the fetch already fired exactly once when the link arrived and
+    // is never replayed on restore.
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(STATE_LEMON_DROP_SCAN, lemonDropScan.value)
     }
 
     /**
