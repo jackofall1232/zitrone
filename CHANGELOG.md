@@ -7,6 +7,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A dead lemon-drop sticker can never be re-armed.** Burn and TTL expiry now crypto-shred the
+  drop's ciphertext and burn hash in place and keep the `qr_id` as a permanent tombstone, so
+  re-depositing under a used id is rejected forever — closing the review finding where a
+  sticker's creator could make a "dead" sticker silently deliver again. The honest cost (the
+  relay retains one 16-byte random id + expiry timestamp per drop ever minted, linking to no
+  identity) is documented in `docs/SECURITY_MODEL.md`.
+- **First replies from drop-created contacts now arrive.** The two-independent-initiators
+  deadlock — the drop's creator held one session, the redeeming recipient created another, and
+  the first reply silently failed to decrypt — is fixed by a guarded session reset in the web
+  receive path: only on decrypt failure, only for envelopes carrying an X3DH initial-message
+  header, and keyed strictly on the *pinned* contact identity key, so only that key's holder
+  can get a reset accepted. Also repairs the pre-existing mutual-add collision. Covered by new
+  session-reset crypto tests (recovery, convergence, forger rejection).
+- **Lemon-drop scans on Android are outcome-honest.** The advocacy screen now distinguishes a
+  live sealed drop, a claimed-or-expired one, and a fetch that never completed — still exactly
+  one blind fetch per scan and still no decrypt attempt (no drop can currently be addressed to
+  an Android-family account; the cross-family open remains crypto-review-gated).
+- **The sticker's no-app fallback is real.** `zitrone.app/d/{id}` now serves the ordinary
+  marketing page (it previously 404'd), and `.well-known/assetlinks.json` ships with the site
+  carrying the release signer's fingerprint, so installed apps intercept `/d/*` links once
+  Android's verification propagates.
+
 ### Added
 
 - **QR dead drops — "lemon drops."** Seal a message to one chosen contact as a printable QR
@@ -22,8 +46,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   redemption is the follow-up, crypto-review-gated). **Unlike `/drops` this variant is
   recipient-targeted, not anonymous — and non-recipient scanners transiently receive ciphertext
   they cannot decrypt**; both properties are disclosed in `docs/SECURITY_MODEL.md`. App-Link
-  verification (`assetlinks.json`) and `/d/*` website hosting are operator steps deferred until
-  end-to-end verification, per the deliver-then-claim rule.
+  verification (`assetlinks.json`) and the `/d/*` website fallback page shipped once the flow
+  was verified end-to-end — see the Fixed entries above.
 
 ## [0.7.6-beta] - 2026-07-19
 
