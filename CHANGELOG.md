@@ -7,6 +7,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **QR dead drops — "lemon drops."** Seal a message to one chosen contact as a printable QR
+  sticker: the code carries only a `zitrone.app/d/{id}` pointer at a sealed blob on the relay,
+  encrypted once at creation via one-shot X3DH (no live session touched). The relay is a blind,
+  **non-destructive** shelf — it serves the same opaque blob to any scanner, and only the true
+  recipient's device can open it; a recovered burn token then shreds the drop on claim, and a
+  creator-chosen TTL (24 h / 48 h / 72 h / 1 week / 2 weeks) shreds the unclaimed. Web/desktop
+  ship the full create + redeem flows (lemon-slice-branded QR at error-correction H, paste-link
+  redeem, warm "part of the network" screens for not-for-this-device and expired scans); Android
+  ships link interception + the advocacy screen only — honestly, with no decrypt attempt, since
+  no current drop can be addressed to an Android-family account (documented; real Android
+  redemption is the follow-up, crypto-review-gated). **Unlike `/drops` this variant is
+  recipient-targeted, not anonymous — and non-recipient scanners transiently receive ciphertext
+  they cannot decrypt**; both properties are disclosed in `docs/SECURITY_MODEL.md`. App-Link
+  verification (`assetlinks.json`) and `/d/*` website hosting are operator steps deferred until
+  end-to-end verification, per the deliver-then-claim rule.
+
 ## [0.7.6-beta] - 2026-07-19
 
 ### Added
