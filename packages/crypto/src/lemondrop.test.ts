@@ -53,7 +53,11 @@ async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes.slice().buffer));
 }
 
-describe("lemon drops", () => {
+// Every test here runs a REAL difficulty-20 hashcash solve (~1M SHA-256 on
+// average, with a long unlucky tail) inside createLemonDrop — honest work that
+// a shared CI runner can stretch well past vitest's 5 s default. The budget
+// covers the tail instead of gambling on runner load.
+describe("lemon drops", { timeout: 30_000 }, () => {
   it("round-trips a message to the intended recipient", async () => {
     const sender = await makeSender();
     const recipient = await makeRecipient();

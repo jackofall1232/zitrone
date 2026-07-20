@@ -74,9 +74,33 @@ export async function solveProofOfWork(
     }
     incrementCounter(nonce);
     if (i % YIELD_EVERY === YIELD_EVERY - 1) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await yieldToEventLoop();
     }
   }
+}
+
+/**
+ * One un-clamped macrotask hop. setTimeout(0) is the wrong primitive here:
+ * browsers clamp nested timeouts to ≥4 ms and loaded runners stretch them
+ * further — ~120 yields per difficulty-20 solve turned into whole seconds of
+ * added wall clock (a CI-observed test timeout). A MessageChannel message is a
+ * macrotask with microsecond dispatch that still lets the host paint and
+ * process input between chunks; ports are closed per hop so no handle keeps a
+ * Node event loop (vitest) alive.
+ */
+function yieldToEventLoop(): Promise<void> {
+  if (typeof MessageChannel === "undefined") {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  return new Promise((resolve) => {
+    const { port1, port2 } = new MessageChannel();
+    port1.onmessage = () => {
+      port1.close();
+      port2.close();
+      resolve();
+    };
+    port2.postMessage(null);
+  });
 }
 
 /** Verify a hashcash solution. */
