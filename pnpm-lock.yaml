@@ -23,6 +23,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@tauri-apps/api':
+        specifier: ^2
+        version: 2.11.1
       '@zitrone/crypto':
         specifier: workspace:*
         version: link:../../packages/crypto
@@ -35,9 +38,6 @@ importers:
       '@zitrone/ui':
         specifier: workspace:*
         version: link:../../packages/ui
-      '@tauri-apps/api':
-        specifier: ^2
-        version: 2.11.1
       idb:
         specifier: ^8.0.0
         version: 8.0.3
@@ -81,6 +81,9 @@ importers:
 
   packages/crypto:
     dependencies:
+      '@zitrone/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       libsodium-wrappers-sumo:
         specifier: ^0.8.4
         version: 0.8.4
