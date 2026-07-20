@@ -14,6 +14,10 @@ import SwiftUI
 public struct ChatView: View {
     public let conversation: Conversation
     @ObservedObject var messageStore: MessageStore
+    /// This device's own identity fingerprint for the security-paper watermark
+    /// (computed once at the composition root and threaded down). Nil until the
+    /// identity is unlocked, in which case the paper simply stays unpainted.
+    public let localFingerprint: String?
     public var onBack: () -> Void
     public var onVerifyKeys: () -> Void
 
@@ -24,10 +28,12 @@ public struct ChatView: View {
 
     public init(conversation: Conversation,
                 messageStore: MessageStore,
+                localFingerprint: String? = nil,
                 onBack: @escaping () -> Void,
                 onVerifyKeys: @escaping () -> Void) {
         self.conversation = conversation
         self.messageStore = messageStore
+        self.localFingerprint = localFingerprint
         self.onBack = onBack
         self.onVerifyKeys = onVerifyKeys
     }
@@ -47,7 +53,15 @@ public struct ChatView: View {
                        ttlSeconds: $ttlSeconds,
                        onSend: sendDraft)
         }
-        .background(Color.backgroundPrimary.ignoresSafeArea())
+        .background {
+            // Ground, then the security-paper watermark above it and below the
+            // chat content — the paper reads through the translucent bubbles.
+            ZStack {
+                Color.backgroundPrimary
+                FingerprintWatermark(fingerprint: localFingerprint)
+            }
+            .ignoresSafeArea()
+        }
         .confirmationDialog("Burn every message in this chat?",
                             isPresented: $confirmBurnAll,
                             titleVisibility: .visible) {

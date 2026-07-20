@@ -147,9 +147,11 @@ public struct MessageBubble: View {
     }
 
     private var bubbleBackground: some View {
+        // Translucent fills let the security-paper watermark bleed a whisper
+        // through the bubbles so the paper reads as one continuous surface.
         bubbleShape.fill(message.isOutgoing
-                         ? Color.backgroundMessageSent
-                         : Color.backgroundMessageReceived)
+                         ? Color.backgroundMessageSentTranslucent
+                         : Color.backgroundMessageReceivedTranslucent)
     }
 
     @ViewBuilder
