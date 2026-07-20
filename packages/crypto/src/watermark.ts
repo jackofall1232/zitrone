@@ -74,8 +74,71 @@ export function decodeWatermarkPayload(bytes: Uint8Array): WatermarkPayload {
 }
 
 /**
+ * Pixel-level core of the canvas embed, factored out so it is testable outside
+ * the DOM (node has no canvas): LSB-embed `payload` into a raw RGBA buffer of
+ * the given dimensions. The buffer's existing content is preserved except for
+ * the R/G/B LSBs — so this works over already-drawn pixels (e.g. a rendered
+ * watermark tile), not just a flat fill.
+ */
+export function embedWatermarkInPixels(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  payload: Uint8Array,
+): void {
+  if (data.length !== width * height * 4) {
+    throw new Error("pixel buffer length does not match width × height");
+  }
+  embedWatermarkBits(data, payload);
+}
+
+/**
+ * Build the leak-attribution payload (recipient/account id + conversation id +
+ * capture timestamp) — kept identical to what [generateInvisibleWatermark]
+ * historically embedded so the extractor and any existing captures still round
+ * trip. `conversationId` occupies the payload's `messageId` slot.
+ */
+function watermarkPayloadBytes(userId: string, conversationId: string): Uint8Array {
+  const payload: WatermarkPayload = {
+    userId,
+    messageId: conversationId,
+    timestamp: new Date().toISOString(),
+  };
+  return utf8Encode(JSON.stringify(payload));
+}
+
+/**
+ * Embed the invisible LSB watermark over a canvas's CURRENT pixels (whatever is
+ * already drawn — a fingerprint tile, an image, a flat fill), returning the
+ * same canvas. Browser only (requires a DOM canvas). This is what lets the
+ * visible "security paper" tile also carry the stego layer in its own pixels,
+ * so a screenshot of the tile is self-attributing.
+ */
+export function embedWatermarkInCanvas(
+  canvas: HTMLCanvasElement,
+  userId: string,
+  conversationId: string,
+): HTMLCanvasElement {
+  if (typeof document === "undefined") {
+    throw new Error("embedWatermarkInCanvas requires a DOM environment");
+  }
+  const { width, height } = canvas;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+  const imageData = ctx.getImageData(0, 0, width, height);
+  embedWatermarkInPixels(
+    imageData.data,
+    width,
+    height,
+    watermarkPayloadBytes(userId, conversationId),
+  );
+  ctx.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
+/**
  * Render a message-bubble background canvas carrying the invisible watermark.
- * Browser only (requires a DOM canvas).
+ * Thin wrapper: fill a flat background, then embed over it. Browser only
+ * (requires a DOM canvas).
  */
 export function generateInvisibleWatermark(
   userId: string,
@@ -93,14 +156,5 @@ export function generateInvisibleWatermark(
   const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
   ctx.fillStyle = backgroundColor;
   ctx.fillRect(0, 0, width, height);
-
-  const imageData = ctx.getImageData(0, 0, width, height);
-  const payload: WatermarkPayload = {
-    userId,
-    messageId,
-    timestamp: new Date().toISOString(),
-  };
-  embedWatermarkBits(imageData.data, utf8Encode(JSON.stringify(payload)));
-  ctx.putImageData(imageData, 0, 0);
-  return canvas;
+  return embedWatermarkInCanvas(canvas, userId, messageId);
 }

@@ -3,10 +3,11 @@
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { ConversationList, LemonSlice } from "@zitrone/ui";
 import { isUuid } from "@zitrone/protocol";
 import { useApp } from "../store.js";
+import { composeChatWatermark } from "../lib/watermark.js";
 
 export function ChatList({ onOpenSettings }: { onOpenSettings: () => void }) {
   const contacts = useApp((s) => s.contacts);
@@ -16,6 +17,7 @@ export function ChatList({ onOpenSettings }: { onOpenSettings: () => void }) {
   const setActivePeer = useApp((s) => s.setActivePeer);
   const addContact = useApp((s) => s.addContact);
   const accountId = useApp((s) => s.accountId);
+  const localFingerprint = useApp((s) => s.localFingerprint);
   const [adding, setAdding] = useState(false);
   const [peerId, setPeerId] = useState("");
   const [name, setName] = useState("");
@@ -27,6 +29,14 @@ export function ChatList({ onOpenSettings }: { onOpenSettings: () => void }) {
     verified: keyStore?.verifiedContacts[id] === c.identityKey,
     unreadCount: (messages[id] ?? []).filter((m) => m.direction === "received" && !m.opened).length,
   }));
+
+  // Same security-paper watermark as ChatView, behind the conversation list. A
+  // fixed conversation id ("chat-list") stands in for the per-peer id in the
+  // stego payload.
+  const watermark = useMemo(
+    () => (accountId ? composeChatWatermark(accountId, "chat-list", localFingerprint) : null),
+    [accountId, localFingerprint],
+  );
 
   return (
     <aside className="flex h-full w-80 flex-col border-r border-line bg-bg-primary">
@@ -44,8 +54,25 @@ export function ChatList({ onOpenSettings }: { onOpenSettings: () => void }) {
         </button>
       </header>
 
-      <div className="flex-1 overflow-y-auto">
-        <ConversationList conversations={conversations} activeId={activePeer ?? undefined} onSelect={setActivePeer} />
+      {/* One background image at 1:1 scale — the visible tile carries the LSB
+          stego watermark in its pixels; overlaying or rescaling would corrupt a
+          screenshot's stego layer (see composeChatWatermark). */}
+      <div
+        className="flex-1 overflow-y-auto"
+        style={
+          watermark
+            ? {
+                backgroundImage: `url(${watermark.url})`,
+                backgroundSize: `${watermark.sizePx}px ${watermark.sizePx}px`,
+              }
+            : undefined
+        }
+      >
+        <ConversationList
+          conversations={conversations}
+          activeId={activePeer ?? undefined}
+          onSelect={setActivePeer}
+        />
         {conversations.length === 0 && (
           <p className="px-4 py-8 text-center text-sm text-ink-muted">
             No conversations. Add a contact to start.
@@ -86,10 +113,17 @@ export function ChatList({ onOpenSettings }: { onOpenSettings: () => void }) {
           />
           {addError && <span className="text-xs text-burn-red">{addError}</span>}
           <div className="flex gap-2">
-            <button type="submit" className="flex-1 rounded-full bg-lemon py-2 text-sm font-medium text-ink-on-lemon hover:bg-lemon-bright">
+            <button
+              type="submit"
+              className="flex-1 rounded-full bg-lemon py-2 text-sm font-medium text-ink-on-lemon hover:bg-lemon-bright"
+            >
               Add
             </button>
-            <button type="button" onClick={() => setAdding(false)} className="rounded-full px-4 text-sm text-ink-secondary hover:text-ink-primary">
+            <button
+              type="button"
+              onClick={() => setAdding(false)}
+              className="rounded-full px-4 text-sm text-ink-secondary hover:text-ink-primary"
+            >
               Cancel
             </button>
           </div>

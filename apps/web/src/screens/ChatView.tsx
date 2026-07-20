@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { generateInvisibleWatermark } from "@zitrone/crypto";
+import { composeChatWatermark } from "../lib/watermark.js";
 import {
   platformWarning,
   QR_DROP_TTL_HOURS,
@@ -51,6 +51,7 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
   const keyStore = useApp((s) => s.keyStore);
   const messages = useApp((s) => s.messages[peerId] ?? []);
   const accountId = useApp((s) => s.accountId);
+  const localFingerprint = useApp((s) => s.localFingerprint);
   const sendMessage = useApp((s) => s.sendMessage);
   const sendAttachment = useApp((s) => s.sendAttachment);
   const sendDeadDrop = useApp((s) => s.sendDeadDrop);
@@ -78,9 +79,7 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
   // box is only cleared after a successful deposit, so cancel/failure never
   // discards the user's only copy; qrResult holds the sealed drop's url +
   // expiry for the result modal.
-  const [qrDraft, setQrDraft] = useState<{ text: string; clearDraft: () => void } | null>(
-    null,
-  );
+  const [qrDraft, setQrDraft] = useState<{ text: string; clearDraft: () => void } | null>(null);
   const [qrSealing, setQrSealing] = useState(false);
   const [qrError, setQrError] = useState<string | null>(null);
   const [qrResult, setQrResult] = useState<{ url: string; expiresAt: string } | null>(null);
@@ -101,16 +100,15 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
     }
   }, [messages, peerId, openMessage, privacyActive]);
 
-  // Invisible watermark: encodes our account ID + timestamp into the chat
-  // background for leak attribution if a capture is ever shared.
-  const watermarkUrl = useMemo(() => {
-    if (!accountId) return null;
-    try {
-      return generateInvisibleWatermark(accountId, peerId, 256, 256, "#0D0C00").toDataURL();
-    } catch {
-      return null;
-    }
-  }, [accountId, peerId]);
+  // Security-paper watermark: the visible tile of OUR own key fingerprint (a
+  // deterrence layer) that ALSO carries the invisible LSB leak-attribution
+  // watermark in its own pixels. Until our fingerprint is available it falls
+  // back to the prior invisible-only background. Keyed on account/peer/
+  // fingerprint so it recomputes when the identity unlocks.
+  const watermark = useMemo(
+    () => (accountId ? composeChatWatermark(accountId, peerId, localFingerprint) : null),
+    [accountId, peerId, localFingerprint],
+  );
 
   if (!contact) return null;
   const verified = keyStore?.verifiedContacts[peerId] === contact.identityKey;
@@ -224,10 +222,22 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
         onDismiss={() => setWarningDismissed(true)}
       />
 
+      {/* EXACTLY ONE background image, at 1:1 pixel scale: the visible fingerprint
+          tile carries the LSB stego watermark in its own pixels, so layering
+          anything else over it in CSS — or letting it be rescaled — would corrupt
+          a captured screenshot's stego layer. backgroundSize is pinned to the
+          source tile size to keep the extractor's pixel-scale assumption intact. */}
       <div
         id={MESSAGES_CONTAINER_ID}
         className="relative flex-1 overflow-y-auto px-4 py-4"
-        style={watermarkUrl ? { backgroundImage: `url(${watermarkUrl})` } : undefined}
+        style={
+          watermark
+            ? {
+                backgroundImage: `url(${watermark.url})`,
+                backgroundSize: `${watermark.sizePx}px ${watermark.sizePx}px`,
+              }
+            : undefined
+        }
         onContextMenu={(e) => e.preventDefault()}
       >
         {messages.map((m) => (

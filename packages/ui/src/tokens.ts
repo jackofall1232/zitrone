@@ -29,6 +29,12 @@ export const color = {
     backgroundElevated: "#242100",
     backgroundMessageSent: "#F5E642",
     backgroundMessageReceived: "#242100",
+    // Translucent bubble fills for the 0.8.1 security-paper watermark: message
+    // bubbles let the faint fingerprint tile show through behind them (signed-off
+    // "G2" values). Same hues as the opaque fills above (#F5E642 / #242100) at
+    // reduced alpha — keep them paired so the two never drift apart.
+    backgroundMessageSentTranslucent: "rgba(245, 230, 66, 0.92)",
+    backgroundMessageReceivedTranslucent: "rgba(36, 33, 0, 0.85)",
     textPrimary: "#FAFAF2",
     textSecondary: "#A8A070",
     textOnLemon: "#0D0C00",

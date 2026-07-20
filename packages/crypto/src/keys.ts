@@ -167,8 +167,51 @@ export async function safetyNumber(identityA: Uint8Array, identityB: Uint8Array)
   joined.set(prefix, 0);
   joined.set(first, prefix.length);
   joined.set(second, prefix.length + first.length);
-  const digest = sodium.crypto_hash_sha512(joined);
-  // 60 hex chars (30 bytes) of entropy shown, uppercase, groups of 4.
+  return formatFingerprint(sodium.crypto_hash_sha512(joined));
+}
+
+/**
+ * Domain-separation constant for the SINGLE-key self-fingerprint. Like
+ * SAFETY_NUMBER_DOMAIN this is a CLIENT-SIDE display value only (never sent to
+ * or verified by the relay), so it is NOT server-cutover gated. It MUST stay
+ * byte-identical across Web/iOS/Android (`SafetyNumber.swift` `fingerprint`,
+ * `SafetyNumber.kt` `fingerprintOf`) or the same key renders a different
+ * fingerprint per platform. A DISTINCT constant from SAFETY_NUMBER_DOMAIN so a
+ * single-key fingerprint can never collide with a two-key safety number. The
+ * `-v1` suffix is the migration lever.
+ */
+export const FINGERPRINT_DOMAIN = "zitrone-key-fingerprint-v1";
+
+/**
+ * SHA-512 self-fingerprint of a single identity public key — the value tiled
+ * behind the chat surface as a "security paper" watermark and shown in
+ * Settings. Exact port of the shipped native derivation (SafetyNumber.kt
+ * `fingerprintOf` / SafetyNumber.swift `fingerprint`): SHA-512 over the domain
+ * bytes concatenated with the 32-byte key, truncated to the first 30 digest
+ * bytes, rendered as 60 uppercase hex chars in 15 groups of 4.
+ *
+ * Web identity keys are always 32-byte Ed25519 public keys, so a wrong length
+ * is a programming error rather than a distinct fingerprint — reject it loudly
+ * instead of silently hashing garbage into a security display.
+ */
+export async function fingerprintOf(identityKey: Uint8Array): Promise<string> {
+  await ready();
+  if (identityKey.length !== 32) {
+    throw new Error(`identity key must be 32 bytes, got ${identityKey.length}`);
+  }
+  const prefix = sodium.from_string(FINGERPRINT_DOMAIN);
+  const joined = new Uint8Array(prefix.length + identityKey.length);
+  joined.set(prefix, 0);
+  joined.set(identityKey, prefix.length);
+  return formatFingerprint(sodium.crypto_hash_sha512(joined));
+}
+
+/**
+ * Shared display tail for both the two-key safety number and the single-key
+ * fingerprint: the first 30 digest bytes (60 hex chars) of entropy shown,
+ * uppercase, in 15 groups of 4 separated by single spaces.
+ */
+function formatFingerprint(digest: Uint8Array): string {
   const hex = sodium.to_hex(digest).slice(0, 60).toUpperCase();
   return hex.match(/.{1,4}/g)!.join(" ");
 }
