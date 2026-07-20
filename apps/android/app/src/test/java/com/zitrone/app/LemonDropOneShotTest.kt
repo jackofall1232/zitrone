@@ -127,6 +127,114 @@ class LemonDropOneShotTest {
         assertEquals(LemonDropOneShot.Result.Invalid, result)
     }
 
+    // ── sub-phase 5a: sender_key_family parsing (mirror of the TS parser) ────
+    //
+    // Positive curve25519-sender round-trip coverage lives with a REGENERATED
+    // Montgomery-sender cross-stack fixture in sub-phase 5b (Android creation) —
+    // see resources/lemondrop/README.md. Reachable here through the public
+    // open() API: the absent→ed25519 default path is already exercised by
+    // `web-created drop opens ...` (the committed fixture carries no family
+    // field); these add the fail-closed rejection of a bad value.
+
+    /** Seal a structurally-valid lemon-drop payload to the fixture recipient,
+     *  choosing the `sender_key_family` field: null omits it entirely. */
+    private fun sealPayloadWithFamily(family: String?): ByteArray {
+        val envelope = JSONObject()
+            .put("id", "0b9f8c1e-4f2a-4d8b-9c3e-7a6b5d4c3b2a")
+            .put("sender_id", "11111111-2222-4333-8444-555555555555")
+            .put("recipient_id", "66666666-7777-4888-8999-aaaaaaaaaaaa")
+            // A 44-byte body (32 ratchet key + a few) — passes the size floor but
+            // will not decrypt; the point is the PARSE, not the crypto.
+            .put("ciphertext", Base64.getEncoder().encodeToString(ByteArray(60)))
+            .put("ephemeral_key", fixture.getString("sender_identity_pub"))
+            .put("prekey_id", JSONObject.NULL)
+            .put("message_number", 0)
+            .put("previous_chain_length", 0)
+        val payload = JSONObject()
+            .put("v", 1)
+            .put("control", "lemondrop.v1")
+            .put("envelope", envelope)
+            .put("sender_identity_key", fixture.getString("sender_identity_pub"))
+            .put("burn_token", fixture.getString("sender_identity_pub"))
+        if (family != null) payload.put("sender_key_family", family)
+        val plaintext = payload.toString().toByteArray(Charsets.UTF_8)
+        val sealed = ByteArray(plaintext.size + 48)
+        SodiumJava().crypto_box_seal(
+            sealed, plaintext, plaintext.size.toLong(),
+            b64.decode(keys.getString("identity_pub")),
+        )
+        return MessagePadding.pad(sealed)
+    }
+
+    @Test
+    fun `an unknown sender_key_family fails closed to Invalid, never a crash`() {
+        // The seal opens (addressed to us), so the honest outcome is Invalid —
+        // a malformed drop of ours — and the strict parse must never throw.
+        for (bad in listOf("x25519", "Ed25519", "", "curve25519 ")) {
+            assertEquals(
+                "family=$bad",
+                LemonDropOneShot.Result.Invalid,
+                LemonDropOneShot.open(sodium, sealPayloadWithFamily(bad), recipientKeys()),
+            )
+        }
+    }
+
+    @Test
+    fun `a known sender_key_family parses without throwing (curve25519 branch)`() {
+        // Both known values (and the absent default) reach the decrypt attempt
+        // and fail there on this dummy envelope → Invalid, no throw. This walks
+        // the new curve25519 branch (identity key used verbatim, no Edwards map).
+        for (family in listOf(null, "ed25519", "curve25519")) {
+            assertEquals(
+                "family=$family",
+                LemonDropOneShot.Result.Invalid,
+                LemonDropOneShot.open(sodium, sealPayloadWithFamily(family), recipientKeys()),
+            )
+        }
+    }
+
+    /** The raw payload JSON from [sealPayloadWithFamily], pre-seal, with the
+     *  family field controlled per-case (SKIP omits it; JSONObject.NULL is an
+     *  explicit JSON null — a distinct wire state the parser must reject). */
+    private fun payloadJsonWithFamily(family: Any?): ByteArray {
+        val envelope = JSONObject()
+            .put("id", "0b9f8c1e-4f2a-4d8b-9c3e-7a6b5d4c3b2a")
+            .put("sender_id", "11111111-2222-4333-8444-555555555555")
+            .put("recipient_id", "66666666-7777-4888-8999-aaaaaaaaaaaa")
+            .put("ciphertext", Base64.getEncoder().encodeToString(ByteArray(60)))
+            .put("ephemeral_key", fixture.getString("sender_identity_pub"))
+            .put("prekey_id", JSONObject.NULL)
+            .put("message_number", 0)
+            .put("previous_chain_length", 0)
+        val payload = JSONObject()
+            .put("v", 1)
+            .put("control", "lemondrop.v1")
+            .put("envelope", envelope)
+            .put("sender_identity_key", fixture.getString("sender_identity_pub"))
+            .put("burn_token", fixture.getString("sender_identity_pub"))
+        if (family != null) payload.put("sender_key_family", family)
+        return payload.toString().toByteArray(Charsets.UTF_8)
+    }
+
+    @Test
+    fun `parser distinguishes absent from explicit-null sender_key_family`() {
+        // Lockstep with packages/protocol parseLemonDrop: a truly missing key
+        // defaults to ed25519; an explicit JSON null is a present, wrong-typed
+        // value and must fail the parse. open() collapses both worlds into
+        // Invalid, so this pins the parser decision directly.
+        assertEquals(
+            "ed25519",
+            LemonDropOneShot.parsePayload(payloadJsonWithFamily(null))!!.senderKeyFamily,
+        )
+        assertEquals(
+            "curve25519",
+            LemonDropOneShot.parsePayload(payloadJsonWithFamily("curve25519"))!!.senderKeyFamily,
+        )
+        org.junit.Assert.assertNull(
+            LemonDropOneShot.parsePayload(payloadJsonWithFamily(JSONObject.NULL)),
+        )
+    }
+
     @Test
     fun `consumed one-time prekey no longer held means ours-but-invalid`() {
         // The creator named OTP id 42 but we no longer hold it (e.g. already

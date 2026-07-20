@@ -215,6 +215,27 @@ export interface QrDropBurnRequest {
 export const LEMON_DROP_CONTROL = "lemondrop.v1" as const;
 
 /**
+ * Which crypto family the payload's `sender_identity_key` belongs to — the two
+ * (identity-key, DH-handling) pairs shipped across clients, matching
+ * `IdentityKeyFamily` in packages/crypto keys.ts:
+ *
+ *  - `"ed25519"`   — web/desktop: an Ed25519 identity key; the recipient's
+ *    open path converts it to X25519 via the birational map before the
+ *    responder DH.
+ *  - `"curve25519"` — Android/iOS (libsignal): a Curve25519 (Montgomery)
+ *    identity key that ALREADY IS the X25519 point; the recipient DHs against
+ *    it verbatim and must NOT run the Edwards→Montgomery map (that derives
+ *    garbage). This is the family an Android CREATOR stamps on its drops.
+ *
+ * The field is OPTIONAL on the wire; ABSENT ⇒ `"ed25519"`. That default is
+ * load-bearing: every drop created before 0.8.1 (web/desktop only) omits the
+ * field, so the absent default keeps those bytes and the PR #4 cross-stack
+ * fixtures parsing byte-identically. See [serializeLemonDrop] (which emits the
+ * field ONLY for `"curve25519"`, never for the default).
+ */
+export type SenderKeyFamily = "ed25519" | "curve25519";
+
+/**
  * The payload sealed INSIDE the box, so ONLY the true recipient ever parses it.
  * It carries the full message envelope (decrypted with a one-shot X3DH
  * responder session), the sender's CLAIMED identity key — the caller must
@@ -231,31 +252,50 @@ export interface LemonDropPayload {
   v: typeof CONTROL_VERSION;
   control: typeof LEMON_DROP_CONTROL;
   envelope: MessageEnvelope;
-  /** Base64 32-byte Ed25519 sender identity public key (CLAIMED — cross-check it). */
+  /** Base64 32-byte sender identity public key (CLAIMED — cross-check it).
+   *  Ed25519 when `sender_key_family` is `"ed25519"`/absent; Curve25519
+   *  (Montgomery) when `"curve25519"`. */
   sender_identity_key: string;
   /** Base64 32-byte burn token — SHA-256 preimage the relay stores as burn_hash. */
   burn_token: string;
+  /** The `sender_identity_key`'s crypto family. Parse normalizes ABSENT to
+   *  `"ed25519"`, so this is always populated after [parseLemonDrop]; the wire
+   *  form omits it for the `"ed25519"` default (see [SenderKeyFamily]). */
+  sender_key_family: SenderKeyFamily;
 }
 
 const BASE64_32_BYTES = /^[A-Za-z0-9+/]{43}=$/;
 
 export interface SerializeLemonDropInput {
   envelope: MessageEnvelope;
-  /** Base64 32-byte Ed25519 sender identity public key. */
+  /** Base64 32-byte sender identity public key (Ed25519 or Curve25519 per
+   *  `senderKeyFamily`). */
   senderIdentityKey: string;
   /** Base64 32-byte burn token. */
   burnToken: string;
+  /** The sender identity key's family. Defaults to `"ed25519"` (and is then
+   *  omitted from the wire — see below). Only Android/iOS creation sets
+   *  `"curve25519"`. */
+  senderKeyFamily?: SenderKeyFamily;
 }
 
 /** Serializes a lemon drop payload for sealing. */
 export function serializeLemonDrop(input: SerializeLemonDropInput): string {
-  return JSON.stringify({
+  const family: SenderKeyFamily = input.senderKeyFamily ?? "ed25519";
+  // Build the field order deterministically; the `sender_key_family` key is
+  // appended ONLY for a Curve25519 (mobile) sender. Omitting it for the
+  // "ed25519" default is what makes the compat guarantee STRUCTURAL: a
+  // web/desktop drop serializes to the exact bytes it did before 0.8.1, so
+  // committed fixtures and the PR #4 bridge round-trip unchanged.
+  const payload: Record<string, unknown> = {
     v: CONTROL_VERSION,
     control: LEMON_DROP_CONTROL,
     envelope: input.envelope,
     sender_identity_key: input.senderIdentityKey,
     burn_token: input.burnToken,
-  } satisfies LemonDropPayload);
+  };
+  if (family === "curve25519") payload.sender_key_family = "curve25519";
+  return JSON.stringify(payload);
 }
 
 /**
@@ -279,6 +319,20 @@ export function parseLemonDrop(plaintext: string): LemonDropPayload | null {
   if (typeof v.sender_identity_key !== "string" || !BASE64_32_BYTES.test(v.sender_identity_key))
     return null;
   if (typeof v.burn_token !== "string" || !BASE64_32_BYTES.test(v.burn_token)) return null;
+  // Optional sender_key_family, validated FAIL-CLOSED: absent normalizes to
+  // "ed25519" (the pre-0.8.1 default that keeps existing drops parsing
+  // identically); present must be EXACTLY one of the two known strings — any
+  // other value (or a non-string like a number) is a malformed drop, not text,
+  // exactly like a wrong-length key. This gates the recipient's DH branch, so a
+  // lenient parse here would be a crypto footgun.
+  let senderKeyFamily: SenderKeyFamily;
+  if (v.sender_key_family === undefined) {
+    senderKeyFamily = "ed25519";
+  } else if (v.sender_key_family === "ed25519" || v.sender_key_family === "curve25519") {
+    senderKeyFamily = v.sender_key_family;
+  } else {
+    return null;
+  }
   let envelope: MessageEnvelope;
   try {
     envelope = parseEnvelope(v.envelope);
@@ -291,5 +345,6 @@ export function parseLemonDrop(plaintext: string): LemonDropPayload | null {
     envelope,
     sender_identity_key: v.sender_identity_key,
     burn_token: v.burn_token,
+    sender_key_family: senderKeyFamily,
   };
 }

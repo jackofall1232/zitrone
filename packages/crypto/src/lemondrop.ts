@@ -173,10 +173,14 @@ export type LemonDropOpenResult =
       /** The envelope's claimed sender account UUID. */
       senderAccountId: string;
       /**
-       * The sender's CLAIMED Ed25519 identity key from inside the sealed
-       * payload. TRUST BOUNDARY: opening the seal proves the box was addressed
-       * to us, NOT who wrote it. The caller MUST cross-check this against any
-       * existing contact record for senderAccountId before trusting the sender.
+       * The sender's CLAIMED identity key from inside the sealed payload —
+       * Ed25519 for a web/desktop creator, Curve25519 (Montgomery) for an
+       * Android/iOS creator (see the payload's sender_key_family). TRUST
+       * BOUNDARY: opening the seal proves the box was addressed to us, NOT who
+       * wrote it. The caller MUST cross-check this against any existing contact
+       * record for senderAccountId before trusting the sender. The pinned
+       * contact key is the same wire form (a mobile contact's key is stored as
+       * its raw 32-byte Curve25519 wire key), so the base64 compare is direct.
        */
       senderIdentityKey: Uint8Array;
       /** The recovered 32-byte burn token — present it to burn the drop. */
@@ -250,12 +254,19 @@ export async function openLemonDrop(input: OpenLemonDropInput): Promise<LemonDro
   // Try our signed prekeys newest-first — the initiator used whichever was
   // current when they fetched our bundle, which may since have rotated. Same
   // retry shape as apps/web respondToInitialMessage.
+  // Sender-family awareness: a "curve25519" drop (an Android/iOS creator) carries
+  // an identity key that ALREADY IS the Montgomery point the responder DH needs,
+  // so the responder must skip the Ed25519→Curve25519 conversion. Absent/"ed25519"
+  // (every web/desktop-created drop) keeps the existing convert-then-DH path.
+  const senderIdentityIsMontgomery = payload.sender_key_family === "curve25519";
   const spks = [...mySignedPrekeys].sort((a, b) => b.createdAt - a.createdAt);
   for (const spk of spks) {
     try {
       // One-off responder session for exactly this drop — never persisted,
       // never reused, discarded the moment we hold the plaintext.
-      const session = await x3dhRespond(myIdentity, spk, usedOtp, senderIdentityKey, ephemeralKey);
+      const session = await x3dhRespond(myIdentity, spk, usedOtp, senderIdentityKey, ephemeralKey, {
+        senderIdentityIsMontgomery,
+      });
       const padded = await ratchetDecrypt(session, {
         blob: envelopeCiphertext,
         messageNumber: envelope.message_number,
