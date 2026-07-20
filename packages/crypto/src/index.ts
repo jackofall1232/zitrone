@@ -13,13 +13,16 @@ export {
   generateSignedPrekey,
   generateOneTimePrekeys,
   verifySignedPrekey,
+  classifyBundleIdentity,
   identityKeyToX25519,
   signWithIdentity,
   safetyNumber,
+  type IdentityKeyFamily,
   type IdentityKeyPair,
   type SignedPrekey,
   type OneTimePrekey,
 } from "./keys.js";
+export { verifyXEdDSA, signedPrekeyMessage, DJB_TYPE } from "./xeddsa.js";
 export {
   deriveKeyFromPassword,
   generateSalt,

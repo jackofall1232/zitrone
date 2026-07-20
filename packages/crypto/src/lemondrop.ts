@@ -129,7 +129,14 @@ export async function createLemonDrop(input: CreateLemonDropInput): Promise<Crea
   // Seal the whole payload (envelope + sender identity + burn token) to the
   // recipient's identity key, then pad to a fixed block: the relay and any
   // wrong-recipient scanner see only opaque, length-uninformative bytes.
-  const recipientX25519 = await identityKeyToX25519(recipientBundle.identityKey);
+  // Family-aware, using the SAME discrimination x3dhInitiate just made from
+  // signature verification: an Android/iOS identity key is already the X25519
+  // point the seal targets; an Ed25519 (web/desktop) key converts via the
+  // birational map. Mixing these up would seal to a key nobody holds.
+  const recipientX25519 =
+    init.identityKeyFamily === "curve25519"
+      ? recipientBundle.identityKey
+      : await identityKeyToX25519(recipientBundle.identityKey);
   const ciphertext = await pad(await sealTo(recipientX25519, payloadBytes));
 
   // Admission control identical to dead drops: hashcash over the qr_id, so the

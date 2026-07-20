@@ -7,8 +7,9 @@ import { sodium, ready } from "./sodium.js";
 import { concat } from "./encoding.js";
 import { hkdf } from "./kdf.js";
 import {
+  classifyBundleIdentity,
   identityKeyToX25519,
-  verifySignedPrekey,
+  type IdentityKeyFamily,
   type IdentityKeyPair,
   type OneTimePrekey,
   type SignedPrekey,
@@ -19,7 +20,9 @@ const X3DH_INFO = "Zitrone-X3DH-v1";
 
 /** Peer's prekey bundle, decoded to raw bytes (fetched from the server). */
 export interface DecodedPreKeyBundle {
-  /** Ed25519 public identity key */
+  /** Public identity key — Ed25519 (web/desktop) or Curve25519 Montgomery
+   *  (Android/iOS); which one is decided by signature verification, never
+   *  assumed (see [classifyBundleIdentity]). */
   identityKey: Uint8Array;
   signedPrekey: { id: number; publicKey: Uint8Array; signature: Uint8Array };
   oneTimePrekey: { id: number; publicKey: Uint8Array } | null;
@@ -31,6 +34,10 @@ export interface X3DHInitiationResult {
   ephemeralPublicKey: Uint8Array;
   /** Send in the envelope's prekey_id field, null if no OPK was available */
   usedPrekeyId: number | null;
+  /** Which family the bundle's identity key verified under — callers that
+   *  encrypt TO the identity key (sealed boxes) need the same discrimination
+   *  this function used for the DH step. */
+  identityKeyFamily: IdentityKeyFamily;
 }
 
 /**
@@ -50,14 +57,23 @@ export async function x3dhInitiate(
   await ready();
   const { identityKey, signedPrekey, oneTimePrekey } = theirPreKeyBundle;
 
-  const valid = await verifySignedPrekey(
+  // Try-both verification, the client-side mirror of the relay's dual-scheme
+  // verifySignedPrekey (handlers.go): plain Ed25519 over the raw prekey
+  // (web/desktop bundles) or XEdDSA over the 33-byte tagged form (Android/iOS
+  // bundles). FAIL CLOSED — a bundle that verifies under neither scheme is
+  // rejected outright, exactly as before this became family-aware.
+  const family = await classifyBundleIdentity(
     signedPrekey.publicKey,
     signedPrekey.signature,
     identityKey,
   );
-  if (!valid) throw new Error("prekey bundle signature verification failed");
+  if (family === null) throw new Error("prekey bundle signature verification failed");
 
-  const theirIdentityX = await identityKeyToX25519(identityKey);
+  // An Ed25519 identity key participates in DH via the birational map; a
+  // Curve25519 (Android/iOS) identity key already IS the X25519 point and is
+  // used verbatim — converting it as-if-Edwards would derive garbage.
+  const theirIdentityX =
+    family === "curve25519" ? identityKey : await identityKeyToX25519(identityKey);
   const ephemeral = sodium.crypto_box_keypair();
 
   const dh1 = sodium.crypto_scalarmult(myIdentityKey.x25519PrivateKey, signedPrekey.publicKey);
@@ -76,6 +92,7 @@ export async function x3dhInitiate(
     session,
     ephemeralPublicKey: ephemeral.publicKey,
     usedPrekeyId: oneTimePrekey?.id ?? null,
+    identityKeyFamily: family,
   };
 }
 

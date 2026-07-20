@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { sodium, ready } from "./sodium.js";
+import { signedPrekeyMessage, verifyXEdDSA } from "./xeddsa.js";
 
 /**
  * The identity key is an Ed25519 keypair (so it can sign prekeys); its X25519
@@ -74,6 +75,53 @@ export async function verifySignedPrekey(
 ): Promise<boolean> {
   await ready();
   return sodium.crypto_sign_verify_detached(signature, prekeyPublic, identityPublicKey);
+}
+
+/**
+ * Which crypto family a published identity key belongs to — the two (scheme,
+ * message-framing) pairs actually in use across shipped clients, coupled per
+ * platform exactly as the relay's `verifySignedPrekey` (handlers.go) accepts
+ * them:
+ *
+ *  - `"ed25519"`   — web/desktop (this package): a genuine Ed25519 identity
+ *    key, plain-Ed25519-signing the raw 32-byte prekey directly.
+ *  - `"curve25519"` — Android/iOS (libsignal-client): a Curve25519 (Montgomery)
+ *    identity key, XEdDSA-signing the 33-byte type-tagged serialize() form.
+ *
+ * The family decides the identity key's DH handling downstream: an Ed25519 key
+ * must be converted via the birational map ([identityKeyToX25519]) while a
+ * Curve25519 key already IS the X25519 point and must be used verbatim —
+ * running it through the Edwards conversion would silently derive garbage.
+ */
+export type IdentityKeyFamily = "ed25519" | "curve25519";
+
+/**
+ * Classify a fetched bundle's identity key by which signature convention its
+ * signed prekey actually verifies under — the client-side port of the relay's
+ * try-both `verifySignedPrekey` (handlers.go, ledger Run 12–14). FAILS CLOSED:
+ * a bundle that verifies under neither real scheme returns null and must be
+ * rejected outright, never guessed at.
+ */
+export async function classifyBundleIdentity(
+  prekeyPublic: Uint8Array,
+  signature: Uint8Array,
+  identityPublicKey: Uint8Array,
+): Promise<IdentityKeyFamily | null> {
+  await ready();
+  // Guard the plain-Ed25519 branch: libsodium THROWS on malformed key or
+  // signature lengths where the Go server returns false; either way the
+  // XEdDSA branch must still be tried.
+  try {
+    if (sodium.crypto_sign_verify_detached(signature, prekeyPublic, identityPublicKey)) {
+      return "ed25519";
+    }
+  } catch {
+    // fall through to the XEdDSA branch
+  }
+  if (await verifyXEdDSA(identityPublicKey, signedPrekeyMessage(prekeyPublic), signature)) {
+    return "curve25519";
+  }
+  return null;
 }
 
 /** One-time prekeys are single-use by design — the private half is deleted after consumption. */
