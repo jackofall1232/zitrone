@@ -98,14 +98,31 @@ object LemonDropOneShot {
      * This device's key material for one open attempt. The identity key is the
      * libsignal Curve25519 (Montgomery) pair — it already IS the X25519 key the
      * creator sealed to (family-aware sealTo in packages/crypto lemondrop.ts).
+     *
+     * SINGLE-USE: the arrays here are per-call copies of store material. The
+     * owner MUST call [zero] (in a finally) once the open attempt returns —
+     * one-time prekeys resolved through [oneTimePrekey] are memoized precisely
+     * so [zero] can reach them (review: Gemini on PR #4).
      */
     class RecipientKeys(
         val identityPublicKey: ByteArray,
         val identityPrivateScalar: ByteArray,
         val signedPrekeys: List<SignedPrekey>,
+        private val oneTimePrekeyLoader: (Int) -> OneTimePrekey?,
+    ) {
+        private val loadedOneTimePrekeys = mutableListOf<OneTimePrekey>()
+
         /** Resolve a one-time prekey by id; null when no longer held. */
-        val oneTimePrekey: (Int) -> OneTimePrekey?,
-    )
+        fun oneTimePrekey(id: Int): OneTimePrekey? =
+            oneTimePrekeyLoader(id)?.also { loadedOneTimePrekeys += it }
+
+        /** Best-effort zero of every private scalar this object holds. */
+        fun zero() {
+            identityPrivateScalar.fill(0)
+            signedPrekeys.forEach { it.privateScalar.fill(0) }
+            loadedOneTimePrekeys.forEach { it.privateScalar.fill(0) }
+        }
+    }
 
     /**
      * Mirror of the web crypto layer's three honestly-distinct outcomes
@@ -158,8 +175,10 @@ object LemonDropOneShot {
 
         // From here the box WAS ours — parse failures are "invalid", never
         // "not-recipient": the crypto layer must not claim a box it opened
-        // belongs to someone else.
-        val payload = parsePayload(payloadBytes) ?: return Result.Invalid
+        // belongs to someone else. The raw payload bytes (they contain the
+        // burn token) are zeroed as soon as the parse has copied what it needs.
+        val payload = parsePayload(payloadBytes).also { payloadBytes.fill(0) }
+            ?: return Result.Invalid
 
         val senderIdentityCurve = sodium.ed25519PublicKeyToCurve25519(payload.senderIdentityKey)
             ?: return Result.Invalid
@@ -167,7 +186,7 @@ object LemonDropOneShot {
         // The one-time prekey the initiator consumed. If they named an id we no
         // longer hold, the responder DH simply won't reconstruct and every
         // decrypt below fails → Invalid, mirroring openLemonDrop.
-        val otp = payload.prekeyId?.let(keys.oneTimePrekey)
+        val otp = payload.prekeyId?.let(keys::oneTimePrekey)
 
         val blob = payload.envelopeCiphertext
         if (blob.size < 32 + NONCE_BYTES + TAG_BYTES) return Result.Invalid
@@ -181,8 +200,10 @@ object LemonDropOneShot {
             val plaintext =
                 tryDecrypt(sodium, keys, spk, otp, senderIdentityCurve, payload, theirRatchetKey, box)
             if (plaintext != null) {
-                val text = MessagePadding.unpadOrNull(plaintext)?.toString(Charsets.UTF_8)
+                val unpadded = MessagePadding.unpadOrNull(plaintext)
                 plaintext.fill(0)
+                val text = unpadded?.toString(Charsets.UTF_8)
+                unpadded?.fill(0)
                 if (text == null) continue
                 return Result.Message(
                     text = text,

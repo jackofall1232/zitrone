@@ -56,7 +56,7 @@ class LemonDropOneShotTest {
                 timestampMs = 1L,
             ),
         ),
-        oneTimePrekey = { id -> otp.takeIf { id == keys.getInt("otp_id") } },
+        oneTimePrekeyLoader = { id -> otp.takeIf { id == keys.getInt("otp_id") } },
     )
 
     private fun ciphertext(): ByteArray = b64.decode(fixture.getString("ciphertext"))

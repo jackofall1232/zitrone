@@ -77,7 +77,14 @@ class LemonDropRedeemer(
             Base64.getDecoder().decode(ciphertextBase64)
         }.getOrNull() ?: return ProbeResult.Advocacy(LemonDropScanOutcome.SEALED)
 
-        val result = LemonDropOneShot.open(sodium, ciphertext, recipientKeys())
+        // The per-call key copies are zeroed the moment the open attempt
+        // returns, whatever its outcome (single-use contract on RecipientKeys).
+        val keys = recipientKeys()
+        val result = try {
+            LemonDropOneShot.open(sodium, ciphertext, keys)
+        } finally {
+            keys.zero()
+        }
         if (result !is LemonDropOneShot.Result.Message) {
             // NotRecipient and Invalid stay distinct at the crypto layer but
             // collapse to the same warm screen here, exactly like the web UI.
@@ -172,7 +179,7 @@ class LemonDropRedeemer(
                     timestampMs = record.timestamp,
                 )
             },
-            oneTimePrekey = { id ->
+            oneTimePrekeyLoader = { id ->
                 if (signalStore.containsPreKey(id)) {
                     val keyPair = signalStore.loadPreKey(id).keyPair
                     LemonDropOneShot.OneTimePrekey(
