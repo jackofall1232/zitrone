@@ -1,6 +1,6 @@
 {
   "name": "@zitrone/relay-client",
-  "version": "0.8.0-beta",
+  "version": "0.8.1-beta",
   "description": "Zitrone relay client — decoy traffic, circuit construction, and onion path selection",
   "license": "AGPL-3.0-only",
   "type": "module",

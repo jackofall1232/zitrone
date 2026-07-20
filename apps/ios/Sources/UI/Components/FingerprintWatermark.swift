@@ -192,6 +192,11 @@ enum FingerprintWatermarkRenderer {
 struct FingerprintWatermark: View {
     let fingerprint: String?
 
+    /// The active display's scale via the SwiftUI environment — correct per
+    /// window on iPad/Catalyst where windows can sit on differently-scaled
+    /// screens, unlike the deprecated `UIScreen.main.scale` (PR #8 round 2).
+    @Environment(\.displayScale) private var displayScale
+
     // One cached image per (fingerprint, scale). NSCache evicts under memory
     // pressure on its own, which is exactly the eviction policy we want for a
     // regenerable texture.
@@ -199,7 +204,7 @@ struct FingerprintWatermark: View {
 
     var body: some View {
         if let fingerprint, !fingerprint.isEmpty {
-            Image(uiImage: Self.tile(for: fingerprint))
+            Image(uiImage: Self.tile(for: fingerprint, scale: displayScale))
                 .resizable(resizingMode: .tile)
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
@@ -208,16 +213,14 @@ struct FingerprintWatermark: View {
         }
     }
 
-    private static func tile(for fingerprint: String) -> UIImage {
-        // Scale comes from UIScreen.main (as MessageBubble already reads
-        // UIScreen.main for width): the tile is a DPI-fidelity texture, not a
-        // laid-out view, so it needs the display's pixel density rather than a
-        // trait-collection-plumbed scale. Capped at 2 to bound the texture size.
-        let scale = min(UIScreen.main.scale, 2)
-        let key = "\(fingerprint)|\(scale)" as NSString
+    private static func tile(for fingerprint: String, scale: CGFloat) -> UIImage {
+        // Capped at 2 to bound the texture size; floored at 1 so a degenerate
+        // environment value can never produce a zero-sized render.
+        let capped = min(max(scale, 1), 2)
+        let key = "\(fingerprint)|\(capped)" as NSString
         if let cached = cache.object(forKey: key) { return cached }
         let image = FingerprintWatermarkRenderer.renderTile(
-            fingerprint: fingerprint, scale: scale)
+            fingerprint: fingerprint, scale: capped)
         cache.setObject(image, forKey: key)
         return image
     }

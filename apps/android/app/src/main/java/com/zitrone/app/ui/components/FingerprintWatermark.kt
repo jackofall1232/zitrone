@@ -127,7 +127,9 @@ object FingerprintTileGeometry {
  * no shared state — so it is trivially cacheable by the modifier's `remember`.
  */
 fun renderFingerprintTile(fingerprint: String, density: Float): Bitmap {
-    val d = density.coerceAtMost(2f)
+    // Floor at 0.1: a zero/negative density (exotic display configs, previews)
+    // would make Bitmap.createBitmap throw. Cap at 2 for the 4 MB bound.
+    val d = density.coerceIn(0.1f, 2f)
     // The bitmap edge is the integral tile size; the geometry and the nine-
     // offset wrap use this SAME value so the repeat is seamless (any mismatch
     // between the tile domain and the texture edge would show as a seam).
@@ -185,18 +187,44 @@ fun renderFingerprintTile(fingerprint: String, density: Float): Bitmap {
  * unlocked) is a no-op. The tile is pre-rendered once per (fingerprint,
  * density) and GPU-repeated — see the class doc for the perf contract.
  */
+/**
+ * Process-wide brush cache. `remember` alone is scoped to ONE modifier
+ * instance, so every navigation (list → chat → veil) would re-render a
+ * fresh ≤4 MB bitmap during composition and Crossfade would briefly hold two —
+ * navigation jank on low-end devices (PR #8 round 2). One account has one
+ * fingerprint and one density in practice, so a single-entry cache is a full
+ * fix; the key still carries both so a density change (display move) or
+ * account switch simply replaces the entry, and the old bitmap is GC'd once
+ * no composition references it.
+ */
+private object FingerprintBrushCache {
+    private var key: String? = null
+    private var brush: ShaderBrush? = null
+
+    @Synchronized
+    fun get(fingerprint: String, density: Float): ShaderBrush {
+        val k = "$fingerprint|$density"
+        val cached = brush
+        if (cached != null && key == k) return cached
+        val fresh = ShaderBrush(
+            ImageShader(
+                renderFingerprintTile(fingerprint, density).asImageBitmap(),
+                TileMode.Repeated,
+                TileMode.Repeated,
+            ),
+        )
+        key = k
+        brush = fresh
+        return fresh
+    }
+}
+
 fun Modifier.fingerprintWatermark(fingerprint: String?): Modifier {
     if (fingerprint.isNullOrBlank()) return this
     return this.composed {
         val density = LocalDensity.current.density.coerceAtMost(2f)
         val brush = remember(fingerprint, density) {
-            ShaderBrush(
-                ImageShader(
-                    renderFingerprintTile(fingerprint, density).asImageBitmap(),
-                    TileMode.Repeated,
-                    TileMode.Repeated,
-                ),
-            )
+            FingerprintBrushCache.get(fingerprint, density)
         }
         drawBehind { drawRect(brush) }
     }

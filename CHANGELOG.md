@@ -7,6 +7,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1-beta] - 2026-07-20
+
+### Added
+
+- **The chat surface is now security paper.** A faint, always-on, tiled pattern of the viewer's
+  own identity fingerprint renders behind every chat surface on web, desktop, Android, and iOS —
+  including Android's lemon-drop reveal screen — with message bubbles slightly translucent so the
+  mark reads through the conversation. It identifies whose screen a photographed conversation
+  came from. Deterrence, not a guarantee, and deliberately without an off switch — see
+  `docs/SECURITY_MODEL.md` ("Fingerprint watermark").
+- **The lemon-drop button is discoverable.** The compose bar's QR-drop action has its own droplet
+  identity, distinct from the send button, plus a one-time explainer the first time you meet it.
+- **Lemon drops can be printed.** The QR-drop modal saves a print-grade PNG (full quiet zone,
+  burn-by caption) on web and desktop, so a sticker can be physically placed — set it and forget
+  it. The saved file contains the drop link; the modal says to treat it like the printed sticker.
+
+### Fixed
+
+- Desktop saves write natively behind the OS save dialog — the WebView never supplies a
+  filesystem path — and the print mark renders under the packaged app's content-security policy.
+- The watermark's invisible leak-attribution layer now survives high-DPI displays (device-pixel
+  carrier), and a deleted account's fingerprint can no longer outlive the account on screen.
+
 ## [0.8.0-beta] - 2026-07-20
 
 ### Fixed

@@ -91,7 +91,10 @@ export function drawFingerprintTile(
 ): void {
   const o: FingerprintTileOptions = { ...WATERMARK_TILE_DEFAULTS, ...opts };
   const S = o.tileSize;
-  const ctx = canvas.getContext("2d")!;
+  // 2D context can be null under memory pressure or headless environments —
+  // a missing watermark is the honest degenerate outcome, never a throw.
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
   ctx.fillStyle = o.background;
   ctx.fillRect(0, 0, S, S);
 

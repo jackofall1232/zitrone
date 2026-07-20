@@ -116,14 +116,36 @@ fn save_drop_image(
         return Ok(false);
     };
     let mut path = picked.into_path().map_err(|e| e.to_string())?;
-    if path
-        .extension()
-        .map(|e| e.eq_ignore_ascii_case("png"))
-        != Some(true)
-    {
-        path.set_extension("png");
+    // The dialog's replace-warning covered exactly the path the user confirmed.
+    // Writing to any OTHER path would silently truncate a file the user was
+    // never warned about (PR #8 round 2) — so: a confirmed *.png writes as-is;
+    // a name with no extension gains .png but then must NOT clobber an existing
+    // file (create_new); any other extension is refused outright.
+    match path.extension() {
+        Some(ext) if ext.eq_ignore_ascii_case("png") => {
+            std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+        }
+        Some(_) => {
+            return Err("choose a .png filename".to_string());
+        }
+        None => {
+            path.set_extension("png");
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|e| match e.kind() {
+                    std::io::ErrorKind::AlreadyExists => format!(
+                        "{} already exists — pick the name with its .png extension \
+                         so the save dialog can confirm replacing it",
+                        path.display()
+                    ),
+                    _ => e.to_string(),
+                })?;
+            file.write_all(bytes).map_err(|e| e.to_string())?;
+        }
     }
-    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(true)
 }
 

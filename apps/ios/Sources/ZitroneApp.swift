@@ -254,6 +254,18 @@ final class AppEnvironment: ObservableObject {
 struct RootView: View {
     @EnvironmentObject var environment: AppEnvironment
 
+    /// This device's own identity fingerprint, for every surface that paints
+    /// the security-paper watermark (chat list, chat) and for the Settings
+    /// account display. CACHED STATE, not a per-body computation:
+    /// `localFingerprint()` synchronously unwraps the biometric-protected
+    /// identity key, so deriving it inline in `mainStack` would hit the
+    /// keychain on every navigation/sheet/connection-state body evaluation and
+    /// could even re-prompt for auth (PR #8 round 2). Computed once when the
+    /// app becomes ready, cleared whenever it leaves ready (lock/wipe) so a
+    /// deleted identity's mark can never outlive it. try? → nil leaves the
+    /// paper unpainted rather than erroring.
+    @State private var localFingerprint: String?
+
     var body: some View {
         ZStack {
             Color.backgroundPrimary.ignoresSafeArea()
@@ -268,15 +280,26 @@ struct RootView: View {
                 mainStack
             }
         }
+        .onChange(of: environment.phase) { phase in
+            if phase == .ready {
+                if localFingerprint == nil {
+                    localFingerprint = try? environment.signal.localFingerprint()
+                }
+            } else {
+                localFingerprint = nil
+            }
+        }
+        .onAppear {
+            // Covers a cold start that lands directly in .ready (no phase
+            // transition for onChange to observe).
+            if environment.phase == .ready, localFingerprint == nil {
+                localFingerprint = try? environment.signal.localFingerprint()
+            }
+        }
     }
 
     @ViewBuilder
     private var mainStack: some View {
-        // Compute this device's own identity fingerprint ONCE for every surface
-        // that paints the security-paper watermark (chat list, chat) and for the
-        // Settings account display. try? → nil, so an unlocked-but-keyless state
-        // simply leaves the paper unpainted rather than erroring.
-        let localFingerprint = try? environment.signal.localFingerprint()
         ZStack {
             ChatListView(
                 conversations: environment.conversations,
