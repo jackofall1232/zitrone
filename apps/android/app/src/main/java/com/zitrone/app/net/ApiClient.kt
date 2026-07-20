@@ -255,6 +255,37 @@ class ApiClient(
     }
 
     /**
+     * POST /api/v1/qr-drops — deposit a sealed lemon drop this device created.
+     * UNAUTHENTICATED: the hashcash proof-of-work solved over [qrIdB64Url]
+     * (difficulty = server cfg.DropPoWDifficulty) is the SOLE admission control,
+     * so the request carries no account and the relay cannot know who deposited
+     * — the same blindness as the fetch/burn routes. Field names mirror
+     * apps/web api.ts `depositQrDrop` / protocol QrDropDepositRequest exactly:
+     * `qr_id` is UNPADDED BASE64URL (the relay decodes it with RawURLEncoding —
+     * qrdrops.go), while `ciphertext`, `pow_nonce`, and `burn_hash` are STANDARD
+     * base64. Returns `expires_at` (ISO 8601 UTC) — when the drop self-destructs
+     * if never burned. A non-2xx (e.g. 400 bad_pow / rejected TTL) surfaces as
+     * an [ApiException] so the caller keeps the user's draft and offers retry.
+     */
+    suspend fun depositQrDrop(
+        qrIdB64Url: String,
+        ciphertextB64: String,
+        ttlHours: Int,
+        powNonceB64: String,
+        burnHashB64: String,
+    ): String {
+        val body = JSONObject().apply {
+            put("qr_id", qrIdB64Url)
+            put("ciphertext", ciphertextB64)
+            put("ttl_hours", ttlHours)
+            put("pow_nonce", powNonceB64)
+            put("burn_hash", burnHashB64)
+        }
+        val json = execute(post("/api/v1/qr-drops", body, authenticated = false))
+        return json.getString("expires_at")
+    }
+
+    /**
      * POST /api/v1/qr-drops/fetch — fetch a QR dead-drop ("lemon drop") sealed
      * blob by its qr_id. NO authentication: exactly like [redeemBlob], an
      * unauthenticated fetch means the relay cannot link the fetch to any account

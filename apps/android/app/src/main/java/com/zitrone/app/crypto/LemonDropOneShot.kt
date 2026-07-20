@@ -70,7 +70,14 @@ object LemonDropOneShot {
     /** libsodium crypto_box_seal overhead: ephemeral pk (32) + MAC (16). */
     private const val SEAL_OVERHEAD_BYTES = 48
 
-    /** The three libsodium calls this module needs, and nothing more. */
+    /**
+     * The libsodium calls the lemon-drop crypto needs, and nothing more. The
+     * first three are the OPEN half (this file); the last four are the CREATE
+     * half (crypto/LemonDropCreate.kt, sub-phase 5b) — kept on ONE interface,
+     * behind ONE adapter ([LemonDropSodiumOps]), so both halves bind the exact
+     * same libsodium C functions (lazysodium-android on device, lazysodium-java
+     * in the JVM suite) and the cross-stack round trip is a real byte test.
+     */
     interface SodiumOps {
         /** crypto_box_seal_open; null when the seal does not open for this key. */
         fun sealOpen(sealed: ByteArray, publicKey: ByteArray, privateKey: ByteArray): ByteArray?
@@ -80,6 +87,27 @@ object LemonDropOneShot {
 
         /** crypto_sign_ed25519_pk_to_curve25519; null when not a valid Edwards point. */
         fun ed25519PublicKeyToCurve25519(ed25519PublicKey: ByteArray): ByteArray?
+
+        /** crypto_box_seal — anonymous sealed box to a recipient X25519 key; null
+         *  on failure. The CREATE-side counterpart of [sealOpen]. */
+        fun sealTo(recipientPublicKey: ByteArray, message: ByteArray): ByteArray?
+
+        /** crypto_sign_verify_detached — plain Ed25519 verify (web/desktop family
+         *  bundle classification). False on any failure OR malformed length, so
+         *  the caller falls through to the XEdDSA branch exactly as the web's
+         *  classifyBundleIdentity does. */
+        fun ed25519Verify(signature: ByteArray, message: ByteArray, publicKey: ByteArray): Boolean
+
+        /** crypto_box_keypair — a fresh X25519 keypair (the X3DH ephemeral and the
+         *  Double-Ratchet sending key on the create side); null on failure. */
+        fun generateX25519KeyPair(): X25519KeyPair?
+
+        /** randombytes_buf — cryptographically secure random bytes (qr_id, burn
+         *  token, AEAD nonce). */
+        fun randomBytes(length: Int): ByteArray
+
+        /** A fresh X25519 keypair. [privateKey] is secret — the caller zeroes it. */
+        class X25519KeyPair(val publicKey: ByteArray, val privateKey: ByteArray)
     }
 
     /** A signed prekey's raw key material (public point, private scalar). */

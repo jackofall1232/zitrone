@@ -83,3 +83,41 @@ fun parseQrDropLink(input: String): String? {
     val id = rest.substring(QR_DROP_PATH_PREFIX.length)
     return if (isValidQrDropId(id)) id else null
 }
+
+/** The URL-safe base64 alphabet, no padding — the SAME canonical form as
+ *  packages/protocol lemondrop.ts `toBase64Url` and the relay's RawURLEncoding.
+ *  Framework-free (no android.util.Base64) so the encoder stays JVM-testable
+ *  alongside [parseQrDropLink]. */
+private const val B64URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+/**
+ * Encode a raw qr_id (16 bytes) as unpadded base64url — the one canonical wire
+ * form for BOTH the JSON `qr_id` field and the sticker URL path segment (mirror
+ * of packages/protocol `encodeQrDropId`; the relay decodes exactly this with
+ * base64.RawURLEncoding). Byte math, not android.util.Base64, so [buildQrDropUrl]
+ * and the deposit share one order-independent implementation.
+ */
+fun encodeQrDropId(qrId: ByteArray): String {
+    val out = StringBuilder()
+    var i = 0
+    while (i < qrId.size) {
+        val b0 = qrId[i].toInt() and 0xFF
+        val hasB1 = i + 1 < qrId.size
+        val hasB2 = i + 2 < qrId.size
+        val b1 = if (hasB1) qrId[i + 1].toInt() and 0xFF else 0
+        val b2 = if (hasB2) qrId[i + 2].toInt() and 0xFF else 0
+        out.append(B64URL_ALPHABET[b0 ushr 2])
+        out.append(B64URL_ALPHABET[((b0 and 0x03) shl 4) or (b1 ushr 4)])
+        if (!hasB1) break
+        out.append(B64URL_ALPHABET[((b1 and 0x0F) shl 2) or (b2 ushr 6)])
+        if (!hasB2) break
+        out.append(B64URL_ALPHABET[b2 and 0x3F])
+        i += 3
+    }
+    return out.toString()
+}
+
+/** Build the sticker URL for a raw qr_id: `https://zitrone.app/d/{base64url}`
+ *  (mirror of packages/protocol `buildQrDropUrl`). */
+fun buildQrDropUrl(qrId: ByteArray): String =
+    QR_DROP_ORIGIN + QR_DROP_PATH_PREFIX + encodeQrDropId(qrId)

@@ -99,5 +99,19 @@
             android:screenOrientation="fullSensor"
             android:stateNotNeeded="true"
             android:theme="@style/Theme.Zitrone" />
+
+        <!-- Share a saved QR-drop sticker (a public drop link, never message
+             content) to a printer/gallery app via a read-only, per-share content
+             URI. grantUriPermissions + no exported access: only the explicit
+             ACTION_SEND grant reaches the cached PNG. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

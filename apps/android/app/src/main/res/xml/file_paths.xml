@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Zitrone — Copyright (C) 2026 Zitrone contributors
+  Licensed under the GNU Affero General Public License v3.0 or later.
+  See the LICENSE file in the repository root for full license text.
+  SPDX-License-Identifier: AGPL-3.0-only
+-->
+<!-- The ONLY path the FileProvider exposes: the cache subdir where a QR-drop
+     sticker PNG is written for a share. Nothing else in the app's storage is
+     reachable through a content URI. -->
+<paths>
+    <cache-path name="dropshare" path="dropshare/" />
+</paths>

@@ -524,6 +524,11 @@ private fun ZitroneRoot(
                             container.coordinator.revealAttachment(messageId)
                         },
                         identityFingerprint = identityFingerprint,
+                        // Seal the draft into a lemon drop for this contact — the
+                        // one-shot creator (never touches the persistent session).
+                        onSendAsQrDrop = { text, ttlHours ->
+                            container.lemonDropCreator.create(conversation, text, ttlHours)
+                        },
                     )
                 }
             }

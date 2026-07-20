@@ -5,6 +5,7 @@
 
 package com.zitrone.app.ui.components
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
@@ -38,7 +40,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.vector.PathParser
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.zitrone.app.ui.theme.BackgroundElevated
 import com.zitrone.app.ui.theme.BackgroundSecondary
@@ -51,6 +60,11 @@ import com.zitrone.app.ui.theme.TextMuted
 import com.zitrone.app.ui.theme.TextPrimary
 import com.zitrone.app.ui.theme.TextSecondary
 import com.zitrone.app.ui.theme.TypeScale
+
+/** The lemon-drop droplet outline, in a 24×24 viewBox — identical to the web
+ *  ComposeBar / the mock (packages/ui ComposeBar.tsx). */
+private const val DROPLET_PATH =
+    "M12 3C8.2 8 5.8 11.4 5.8 14.6a6.2 6.2 0 0 0 12.4 0C18.2 11.4 15.8 8 12 3z"
 
 /** Human label for a TTL option (features.messaging.disappearing_messages). */
 fun ttlLabel(seconds: Int?): String = when (seconds) {
@@ -82,6 +96,9 @@ fun ComposeBar(
     onAttachImage: () -> Unit,
     onAttachFile: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Seal the current draft into a lemon drop (QR dead-drop) for this contact.
+     *  Null hides the droplet affordance entirely (e.g. no contact to address). */
+    onSendAsQrDrop: (() -> Unit)? = null,
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
         HorizontalDivider(thickness = 1.dp, color = BorderColor)
@@ -162,6 +179,34 @@ fun ComposeBar(
                             fontSize = TypeScale.Xs,
                             color = Lemon,
                         )
+                    }
+                }
+            }
+
+            // Seal-into-a-lemon-drop — the droplet outline mark, enabled only
+            // when there is a non-blank draft to seal. Hidden when no handler is
+            // wired (no recipient to address a drop to).
+            if (onSendAsQrDrop != null) {
+                val dropEnabled = value.isNotBlank()
+                IconButton(onClick = onSendAsQrDrop, enabled = dropEnabled) {
+                    val droplet = remember { PathParser().parsePathString(DROPLET_PATH).toPath() }
+                    val tint = if (dropEnabled) Lemon else TextSecondary
+                    Canvas(
+                        modifier = Modifier
+                            .size(20.dp)
+                            .semantics { contentDescription = "Seal into a lemon drop" },
+                    ) {
+                        // The droplet path is authored in a 24-unit viewBox; scale
+                        // it to the icon and stroke at the SVG's own 1.8 width (the
+                        // same outline the web/mock renders).
+                        val s = size.minDimension / 24f
+                        withTransform({ scale(s, s, pivot = Offset.Zero) }) {
+                            drawPath(
+                                path = droplet,
+                                color = tint,
+                                style = Stroke(width = 1.8f, join = StrokeJoin.Round),
+                            )
+                        }
                     }
                 }
             }

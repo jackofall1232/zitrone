@@ -14,6 +14,7 @@ import com.zitrone.app.crypto.LemonDropSodiumOps
 import com.zitrone.app.crypto.SignalProtocolManager
 import com.zitrone.app.data.ConversationRepository
 import com.zitrone.app.data.EncryptedRosterStore
+import com.zitrone.app.data.LemonDropCreator
 import com.zitrone.app.data.LemonDropRedeemer
 import com.zitrone.app.data.LemonDropScanOutcome
 import com.zitrone.app.data.LemonDropVeil
@@ -133,6 +134,21 @@ class AppContainer(private val app: Application) {
         api = apiClient,
         signalStore = signalStore,
         conversations = conversationRepository,
+        sodium = LemonDropSodiumOps(SodiumAndroid()),
+    )
+
+    /**
+     * Lemon-drop CREATOR (sub-phase 5b): the send-side counterpart of
+     * [lemonDropRedeemer]. Same one-shot, session-less isolation contract — it
+     * never advances the persistent ratchet or writes contact/session records —
+     * and the same lazysodium-android adapter (the JVM suite exercises the byte
+     * path over lazysodium-java).
+     */
+    val lemonDropCreator = LemonDropCreator(
+        api = apiClient,
+        signalStore = signalStore,
+        conversations = conversationRepository,
+        messages = messageRepository,
         sodium = LemonDropSodiumOps(SodiumAndroid()),
     )
 
