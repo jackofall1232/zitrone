@@ -31,6 +31,7 @@ type Handlers struct {
 	prekeyLimit   *ratelimit.Limiter
 	dropLimit     *ratelimit.Limiter
 	blobLimit     *ratelimit.Limiter
+	qrDropLimit   *ratelimit.Limiter
 	// relayKey is non-nil only when this deployment is configured as a relay node.
 	relayKey  *relay.KeyPair
 	forwarder Forwarder
@@ -52,10 +53,14 @@ func New(store *db.Store, issuer *auth.Issuer, cfg *config.Config) *Handlers {
 		// Blob upload/redeem are per-IP capped like drops. Uploads are also
 		// JWT-gated, but a per-IP cap still blunts a single source spraying large
 		// ciphertexts; redemption is unauthenticated, so the cap is its only brake.
-		blobLimit:  ratelimit.New(60, time.Minute, cfg.RateLimitEnabled),
-		relayKey:   loadRelayKey(cfg),
-		forwarder:  DefaultForwarder(),
-		relayPeers: relayPeerSet(cfg.RelayPeers),
+		blobLimit: ratelimit.New(60, time.Minute, cfg.RateLimitEnabled),
+		// QR dead drops (lemon drops) are unauthenticated like plain drops:
+		// proof-of-work gates deposit, but fetch and burn carry no PoW, so a per-IP
+		// cap is their only brake against a single source probing or scraping.
+		qrDropLimit: ratelimit.New(60, time.Minute, cfg.RateLimitEnabled),
+		relayKey:    loadRelayKey(cfg),
+		forwarder:   DefaultForwarder(),
+		relayPeers:  relayPeerSet(cfg.RelayPeers),
 	}
 }
 

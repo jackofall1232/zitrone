@@ -97,3 +97,24 @@ RETURNING ciphertext;
 
 -- name: PurgeExpiredBlobs :execrows
 DELETE FROM blobs WHERE expires_at <= $1;
+
+-- QR dead drops ("lemon drops"). Non-destructive fetch + burn-by-preimage. No
+-- sender/recipient column exists, by design — mirrors drops/blobs.
+
+-- name: DepositQrDrop :execrows
+INSERT INTO qr_drops (qr_id, ciphertext, burn_hash, expires_at)
+VALUES ($1, $2, $3, $4) ON CONFLICT (qr_id) DO NOTHING;
+
+-- FetchQrDrop is NON-destructive by design (see qrdrops.go): the same ciphertext
+-- is returned to anyone who presents the qr_id. Expired rows are not served.
+-- name: FetchQrDrop :one
+SELECT ciphertext FROM qr_drops WHERE qr_id = $1 AND expires_at > now();
+
+-- BurnQrDrop deletes the drop only when BOTH the qr_id and the burn_hash match,
+-- in one statement — the ConsumeRefreshToken hash-match-consume precedent.
+-- name: BurnQrDrop :one
+DELETE FROM qr_drops WHERE qr_id = $1 AND burn_hash = $2 AND expires_at > now()
+RETURNING qr_id;
+
+-- name: PurgeExpiredQrDrops :execrows
+DELETE FROM qr_drops WHERE expires_at <= $1;

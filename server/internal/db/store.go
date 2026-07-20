@@ -26,6 +26,10 @@ var ErrDropExists = errors.New("drop already exists")
 // ErrBlobExists is returned when a blob upload collides with an existing blob ID.
 var ErrBlobExists = errors.New("blob already exists")
 
+// ErrQrDropExists is returned when a QR-drop deposit collides with an existing
+// qr_id.
+var ErrQrDropExists = errors.New("qr drop already exists")
+
 //go:embed schema.sql
 var schemaSQL string
 
@@ -279,6 +283,61 @@ func (s *Store) RedeemBlob(ctx context.Context, blobID []byte) ([]byte, error) {
 // PurgeExpiredBlobs deletes blobs past their TTL whether collected or not.
 func (s *Store) PurgeExpiredBlobs(ctx context.Context, now time.Time) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM blobs WHERE expires_at <= $1`, now)
+	return tag.RowsAffected(), err
+}
+
+// ── QR dead drops ("lemon drops"): non-destructive fetch + burn-by-preimage ───
+
+// DepositQrDrop stores a ciphertext under a creator-random qr_id alongside the
+// hash of a burn token. No sender/recipient is recorded — the table has no
+// column for it. A duplicate qr_id is rejected so a drop cannot be silently
+// overwritten (mirrors DepositDrop/StoreBlob).
+func (s *Store) DepositQrDrop(ctx context.Context, qrID, ciphertext, burnHash []byte, expiresAt time.Time) error {
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO qr_drops (qr_id, ciphertext, burn_hash, expires_at)
+		VALUES ($1, $2, $3, $4) ON CONFLICT (qr_id) DO NOTHING`,
+		qrID, ciphertext, burnHash, expiresAt)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrQrDropExists
+	}
+	return nil
+}
+
+// FetchQrDrop returns the ciphertext WITHOUT destroying the row — fetch is
+// deliberately non-destructive and repeatable (see qrdrops.go): the blind relay
+// cannot know whether a scanner is the intended recipient, so a wrong scan must
+// not burn the drop for the real one. Expired rows are not returned (the
+// `expires_at > now()` guard, exactly like RedeemDrop/RedeemBlob). Returns
+// pgx.ErrNoRows when the drop is missing, expired, or already burned.
+func (s *Store) FetchQrDrop(ctx context.Context, qrID []byte) ([]byte, error) {
+	var ciphertext []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT ciphertext FROM qr_drops WHERE qr_id = $1 AND expires_at > now()`, qrID).
+		Scan(&ciphertext)
+	return ciphertext, err
+}
+
+// BurnQrDrop destroys a drop only when BOTH the qr_id and the burn_hash match, in
+// a single statement — the same hash-match-consume pattern ConsumeRefreshToken
+// uses (comparing hashes of a high-entropy secret in SQL). Only a client that
+// decrypted the payload can know the burn-token preimage, so a wrong recipient
+// can fetch but never burn. Expired rows are treated as absent so an expired drop
+// burns to the same 404 as a missing one. Returns pgx.ErrNoRows when nothing
+// matched — missing, expired, and wrong-preimage are all indistinguishable.
+func (s *Store) BurnQrDrop(ctx context.Context, qrID, burnHash []byte) error {
+	var burned []byte
+	return s.pool.QueryRow(ctx, `
+		DELETE FROM qr_drops WHERE qr_id = $1 AND burn_hash = $2 AND expires_at > now()
+		RETURNING qr_id`, qrID, burnHash).Scan(&burned)
+}
+
+// PurgeExpiredQrDrops deletes QR drops past their TTL whether claimed or not —
+// the crypto-shred for unclaimed drops, since the relay never held the key.
+func (s *Store) PurgeExpiredQrDrops(ctx context.Context, now time.Time) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM qr_drops WHERE expires_at <= $1`, now)
 	return tag.RowsAffected(), err
 }
 
