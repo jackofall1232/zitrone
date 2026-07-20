@@ -29,6 +29,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [redeemStatus, setRedeemStatus] = useState<string | null>(null);
   const [dropLink, setDropLink] = useState("");
   const [dropLinkError, setDropLinkError] = useState<string | null>(null);
+  // In-flight guard: fetch is deliberately non-destructive on the relay, so two
+  // concurrent redemptions of the same link would BOTH decrypt and append the
+  // message (the burn only lands after the append). One at a time.
+  const [dropBusy, setDropBusy] = useState(false);
   // Non-message outcomes ("not-for-us" / "unavailable") open the warm advocacy
   // screen; a "message" outcome closes Settings so the opened chat is visible.
   const [dropOutcome, setDropOutcome] = useState<LemonDropOutcomeVariant | null>(null);
@@ -55,6 +59,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
   };
 
   const onOpenLemonDrop = () => {
+    if (dropBusy) return;
+    setDropBusy(true);
     setDropLinkError(null);
     void redeemQrDrop(dropLink)
       .then((outcome) => {
@@ -78,7 +84,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
             ? "That doesn't look like a lemon drop link."
             : "Couldn't reach the relay — check your connection and try again.",
         );
-      });
+      })
+      .finally(() => setDropBusy(false));
   };
 
   return (
@@ -241,10 +248,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
               />
               <button
                 onClick={onOpenLemonDrop}
-                disabled={!dropLink.trim()}
+                disabled={!dropLink.trim() || dropBusy}
                 className="rounded-full bg-lemon px-4 py-1.5 text-sm font-medium text-ink-on-lemon disabled:opacity-50"
               >
-                Open
+                {dropBusy ? "Opening…" : "Open"}
               </button>
             </div>
             {dropLinkError && <p className="text-xs text-ink-secondary">{dropLinkError}</p>}

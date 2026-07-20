@@ -155,9 +155,12 @@ export const api = {
   },
 
   // QR dead drops / "lemon drops" (v1.7) — no auth: the hashcash proof-of-work
-  // carried in the body IS the admission control, so a deposit reveals nothing
-  // about the depositor (no token, no account, nothing to link). The relay
-  // stores an opaque sealed blob under the qr_id and hands back only its expiry.
+  // carried in the body IS the admission control, so the REQUEST carries no
+  // account (no token, nothing in the payload to link). Honest limit: a relay
+  // can still correlate a deposit with the authenticated prekey fetch that
+  // typically precedes it on the same transport (see store.sendQrDrop and the
+  // SECURITY_MODEL.md disclosure). The relay stores an opaque sealed blob under
+  // the qr_id and hands back only its expiry.
   depositQrDrop(body: QrDropDepositRequest): Promise<QrDropDepositResponse> {
     return request("/api/v1/qr-drops", { method: "POST", body: JSON.stringify(body) });
   },

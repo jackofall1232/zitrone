@@ -1001,6 +1001,17 @@ export const useApp = create<AppState>((set, get) => {
       const token = await freshToken();
       const bundle = await api.fetchPrekeyBundle(peerId, token);
 
+      // TRUST BOUNDARY (the creation-side mirror of redeemQrDrop's check): the
+      // drop must seal to the identity key we PINNED for this contact, not to
+      // whatever bundle the relay serves today. A substituted bundle — malicious
+      // relay, account re-registration, corruption — would otherwise be silently
+      // readable by someone other than the person this UI names as the
+      // recipient. x3dhInitiate verifies the bundle's internal prekey signature,
+      // but only this comparison ties the bundle to the identity we trust.
+      if (bundle.identity_key !== contact.identityKey) {
+        throw new Error("identity changed");
+      }
+
       // CRITICAL: this is one-shot encrypt-and-forget. The ephemeral X3DH session
       // that createLemonDrop spins up encrypts EXACTLY ONE message and is then
       // discarded — it never touches, advances, or is confused with
@@ -1026,9 +1037,15 @@ export const useApp = create<AppState>((set, get) => {
       });
 
       // Deposit is unauthenticated — the hashcash PoW solved inside
-      // createLemonDrop is the only admission, so nothing here links the deposit
-      // to us. qr_id rides as unpadded base64url (the same form the sticker URL
-      // encodes); the sealed box, nonce, and burn hash as plain base64.
+      // createLemonDrop is the only admission, so the request itself carries no
+      // account. HONEST LIMIT: the authenticated prekey fetch just above rides
+      // the same transport moments earlier, so a relay watching traffic can
+      // correlate the two by connection/timing and infer who created a drop for
+      // whom. That metadata correlation is disclosed in SECURITY_MODEL.md;
+      // fetching prekeys on an unlinkable schedule is tracked follow-up work,
+      // not something this request shape can fix. qr_id rides as unpadded
+      // base64url (the same form the sticker URL encodes); the sealed box,
+      // nonce, and burn hash as plain base64.
       const { expires_at } = await api.depositQrDrop({
         qr_id: encodeQrDropId(drop.qrId),
         ciphertext: b64(drop.ciphertext),
@@ -1053,7 +1070,17 @@ export const useApp = create<AppState>((set, get) => {
         burning: false,
         opened: true,
       });
-      await persist();
+      // Local-record persistence must not gate the URL: the relay has already
+      // accepted the deposit, so failing here would strand a live drop the
+      // creator never sees — and a retry would mint a SECOND drop and consume
+      // another of the recipient's prekeys. Nothing above wrote to the contact
+      // record, so there is no session state at risk; the bubble simply catches
+      // up on the next successful persist.
+      try {
+        await persist();
+      } catch {
+        /* deposit accepted — the sticker URL still goes back to the creator */
+      }
 
       return { url: drop.url, expiresAt: expires_at };
     },
