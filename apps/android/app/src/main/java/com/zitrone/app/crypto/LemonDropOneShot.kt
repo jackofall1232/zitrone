@@ -368,21 +368,33 @@ object LemonDropOneShot {
         val prk = hmacSha256(salt, ikm)
         val infoBytes = info.toByteArray(Charsets.UTF_8)
         val out = ByteArray(length)
+        // Feed each T(i) = HMAC(prk, T(i-1) || info || i) into the Mac with
+        // incremental update() calls rather than building a `previous + info +
+        // counter` concatenation: the `+` form would allocate temporary arrays
+        // holding key-stream bytes that can't be reliably zeroed (review:
+        // Gemini on PR #4). doFinal() resets the Mac to its keyed state for the
+        // next block. Output stays byte-identical to kdf.ts `hkdf`.
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(prk, "HmacSHA256"))
+        val counterBuf = ByteArray(1)
         var previous = ByteArray(0)
         var filled = 0
         var counter = 1
         while (filled < length) {
-            previous = hmacSha256(prk, previous + infoBytes + byteArrayOf(counter.toByte()))
-            val take = minOf(previous.size, length - filled)
-            previous.copyInto(out, filled, 0, take)
+            if (previous.isNotEmpty()) mac.update(previous)
+            mac.update(infoBytes)
+            counterBuf[0] = counter.toByte()
+            mac.update(counterBuf)
+            val block = mac.doFinal()
+            val take = minOf(block.size, length - filled)
+            block.copyInto(out, filled, 0, take)
             filled += take
             counter += 1
+            previous.fill(0)
+            previous = block
         }
-        prk.fill(0)
-        // `previous` holds the last expanded key-stream block — wipe it too so no
-        // derived key material lingers (the returned `out` is the caller's to
-        // zero once consumed).
         previous.fill(0)
+        prk.fill(0)
         return out
     }
 
