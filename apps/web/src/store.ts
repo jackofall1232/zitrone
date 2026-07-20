@@ -9,6 +9,7 @@
 // constant payload size and AES-256-GCM-encrypted under this vault's key.
 
 import {
+  createLemonDrop,
   decryptAttachmentBlob,
   encryptAttachmentBlob,
   fromBase64,
@@ -17,6 +18,7 @@ import {
   generateOneTimePrekeys,
   generateSignedPrekey,
   identityKeyToX25519,
+  openLemonDrop,
   openSealed,
   pad,
   ratchetDecrypt,
@@ -36,20 +38,23 @@ import {
 } from "@zitrone/crypto";
 import {
   DROP_POW_DIFFICULTY,
+  encodeQrDropId,
   ONE_TIME_PREKEY_BATCH,
   parseEnvelope,
+  parseQrDropUrl,
   parseReadReceipt,
   PROTOCOL_VERSION,
   serializeAttachment,
   type AttachmentKind,
   type AttachmentPayload,
   type MessageEnvelope,
+  type QrDropTTLHours,
   type ServerEvent,
 } from "@zitrone/protocol";
 import { DecoyScheduler } from "@zitrone/relay-client";
 import { create } from "zustand";
 import { useSettings } from "./settings.js";
-import { api } from "./lib/api.js";
+import { api, ApiError } from "./lib/api.js";
 import { classifyIncoming } from "./lib/incoming.js";
 import { bytesToBlob, type PreparedAttachment } from "./lib/attachments.js";
 import { b64, unb64 } from "./lib/bytes.js";
@@ -190,8 +195,35 @@ interface AppState {
   /** Encrypt a message to a contact and deposit it as a dead drop; returns the
    *  base64 one-time token to share out of band (QR / separate channel). */
   sendDeadDrop: (peerId: string, text: string) => Promise<string>;
+  /**
+   * Encrypt a one-shot "lemon drop" addressed to a contact and deposit it under
+   * a random qr_id. Returns the sticker URL to print/share and the drop's expiry
+   * for display. Unlike sendDeadDrop this never advances the contact's session —
+   * a lemon drop is encrypt-and-forget (a fresh ephemeral X3DH inside
+   * createLemonDrop), so it must never write to the contact record.
+   */
+  sendQrDrop: (
+    peerId: string,
+    text: string,
+    ttlHours: QrDropTTLHours,
+  ) => Promise<{ url: string; expiresAt: string }>;
   /** Redeem a dead drop by token: fetch, decrypt, and surface the message. */
   redeemDeadDrop: (tokenB64: string) => Promise<void>;
+  /**
+   * Redeem a "lemon drop" from a scanned or pasted link. Three honest outcomes:
+   *   "message"     — the drop was for us: decrypted, appended to the sender's
+   *                   conversation (as a received message), the sender set as
+   *                   the active peer, and the drop burned best-effort.
+   *   "not-for-us"  — the seal was not ours, OR it opened but the payload would
+   *                   not decrypt, OR the claimed sender failed the identity
+   *                   cross-check. V1 shows the same warm advocacy screen for all
+   *                   three; the crypto-layer distinction is preserved in code.
+   *   "unavailable" — the relay returned 404: already claimed, expired, or never
+   *                   existed. The blind relay keeps these indistinguishable.
+   * A MALFORMED link is not a drop outcome — it throws Error("bad link") for the
+   * caller to surface as inline input validation, never as an advocacy screen.
+   */
+  redeemQrDrop: (input: string) => Promise<"message" | "not-for-us" | "unavailable">;
   expireMessage: (peerId: string, messageId: string) => void;
   setActivePeer: (peerId: string | null) => void;
   markVerified: (peerId: string) => Promise<void>;
@@ -952,6 +984,107 @@ export const useApp = create<AppState>((set, get) => {
       return await toBase64(token);
     },
 
+    async sendQrDrop(peerId, text, ttlHours) {
+      const { keyStore, contacts, accountId } = get();
+      const contact = contacts[peerId];
+      // Same admission as sendDeadDrop: our keys, our account, and an existing
+      // contact to address the drop to. A lemon drop is recipient-targeted by
+      // design — never anonymous — so a known contact is required.
+      if (!keyStore || !accountId || !contact) throw new Error("unknown contact");
+
+      const identity = deserializeIdentity(keyStore.identityKey as unknown as SerializedIdentity);
+
+      // Fetch a FRESH prekey bundle: a lemon drop runs a brand-new one-shot X3DH
+      // against whatever the recipient publishes right now, independent of any
+      // live session we may already hold with this peer. Decode it exactly as
+      // addContact does (base64 → bytes) for x3dhInitiate inside createLemonDrop.
+      const token = await freshToken();
+      const bundle = await api.fetchPrekeyBundle(peerId, token);
+
+      // TRUST BOUNDARY (the creation-side mirror of redeemQrDrop's check): the
+      // drop must seal to the identity key we PINNED for this contact, not to
+      // whatever bundle the relay serves today. A substituted bundle — malicious
+      // relay, account re-registration, corruption — would otherwise be silently
+      // readable by someone other than the person this UI names as the
+      // recipient. x3dhInitiate verifies the bundle's internal prekey signature,
+      // but only this comparison ties the bundle to the identity we trust.
+      if (bundle.identity_key !== contact.identityKey) {
+        throw new Error("identity changed");
+      }
+
+      // CRITICAL: this is one-shot encrypt-and-forget. The ephemeral X3DH session
+      // that createLemonDrop spins up encrypts EXACTLY ONE message and is then
+      // discarded — it never touches, advances, or is confused with
+      // contact.session. This action therefore MUST NOT write back to the contact
+      // record (contrast sendDeadDrop, which deliberately advances the persistent
+      // ratchet). Reusing the live session here would fork ratchet state.
+      const drop = await createLemonDrop({
+        senderAccountId: accountId,
+        senderIdentity: identity,
+        recipientAccountId: peerId,
+        recipientBundle: {
+          identityKey: unb64(bundle.identity_key),
+          signedPrekey: {
+            id: bundle.signed_prekey.id,
+            publicKey: unb64(bundle.signed_prekey.public_key),
+            signature: unb64(bundle.signed_prekey.signature),
+          },
+          oneTimePrekey: bundle.one_time_prekey
+            ? { id: bundle.one_time_prekey.id, publicKey: unb64(bundle.one_time_prekey.public_key) }
+            : null,
+        },
+        text,
+      });
+
+      // Deposit is unauthenticated — the hashcash PoW solved inside
+      // createLemonDrop is the only admission, so the request itself carries no
+      // account. HONEST LIMIT: the authenticated prekey fetch just above rides
+      // the same transport moments earlier, so a relay watching traffic can
+      // correlate the two by connection/timing and infer who created a drop for
+      // whom. That metadata correlation is disclosed in SECURITY_MODEL.md;
+      // fetching prekeys on an unlinkable schedule is tracked follow-up work,
+      // not something this request shape can fix. qr_id rides as unpadded
+      // base64url (the same form the sticker URL encodes); the sealed box,
+      // nonce, and burn hash as plain base64.
+      const { expires_at } = await api.depositQrDrop({
+        qr_id: encodeQrDropId(drop.qrId),
+        ciphertext: b64(drop.ciphertext),
+        ttl_hours: ttlHours,
+        pow_nonce: b64(drop.powNonce),
+        burn_hash: b64(drop.burnHash),
+      });
+
+      // Local sent bubble, exactly like sendDeadDrop: status stays SENT because a
+      // drop's redemption is unknowable — the blind relay can't tell us whether
+      // (or when) anyone scanned and read it.
+      appendMessage(peerId, {
+        id: crypto.randomUUID(),
+        peerId,
+        direction: "sent",
+        text,
+        timestamp: new Date().toISOString(),
+        ttlSeconds: null,
+        burnOnRead: false,
+        status: "sent",
+        deliveredAt: null,
+        burning: false,
+        opened: true,
+      });
+      // Local-record persistence must not gate the URL: the relay has already
+      // accepted the deposit, so failing here would strand a live drop the
+      // creator never sees — and a retry would mint a SECOND drop and consume
+      // another of the recipient's prekeys. Nothing above wrote to the contact
+      // record, so there is no session state at risk; the bubble simply catches
+      // up on the next successful persist.
+      try {
+        await persist();
+      } catch {
+        /* deposit accepted — the sticker URL still goes back to the creator */
+      }
+
+      return { url: drop.url, expiresAt: expires_at };
+    },
+
     async redeemDeadDrop(tokenB64) {
       const { keyStore } = get();
       if (!keyStore) throw new Error("locked");
@@ -964,6 +1097,160 @@ export const useApp = create<AppState>((set, get) => {
       // Reuse the normal inbound path to establish/advance the session and
       // surface the message.
       handleServerEvent({ type: "message.deliver", envelope });
+    },
+
+    async redeemQrDrop(input) {
+      const { keyStore, contacts } = get();
+      if (!keyStore) throw new Error("locked");
+
+      // A malformed link is a UI validation error, not a drop outcome — the
+      // caller surfaces it inline; it never reaches the advocacy screen.
+      const qrId = parseQrDropUrl(input);
+      if (!qrId) throw new Error("bad link");
+
+      // Fetch is unauthenticated and non-destructive. A 404 means claimed,
+      // expired, or never-existed — the blind relay keeps these three
+      // indistinguishable on purpose, so we collapse them into one honest
+      // "unavailable". Any other failure (transport, etc.) propagates.
+      const fetched = await api.fetchQrDrop(encodeQrDropId(qrId)).catch((e: unknown) => {
+        if (e instanceof ApiError && e.status === 404) return null;
+        throw e;
+      });
+      if (fetched === null) return "unavailable";
+
+      const identity = deserializeIdentity(keyStore.identityKey as unknown as SerializedIdentity);
+      const mySignedPrekeys = (keyStore.signedPrekeys as unknown as SerializedSignedPrekey[]).map(
+        deserializeSignedPrekey,
+      );
+      const myOneTimePrekeys = (
+        keyStore.oneTimePrekeys as unknown as SerializedOneTimePrekey[]
+      ).map(deserializeOneTimePrekey);
+
+      // Decode the sealed blob (deposited as plain base64, the mirror of
+      // sendQrDrop's b64(drop.ciphertext)) and try to open it as the recipient.
+      const result = await openLemonDrop({
+        myIdentity: identity,
+        mySignedPrekeys,
+        myOneTimePrekeys,
+        ciphertext: unb64(fetched.ciphertext),
+      });
+
+      // "not-recipient" (the seal never opened — not ours, or garbage) and
+      // "invalid" (the seal opened but the payload was malformed/undecryptable)
+      // are KEPT DISTINCT at the crypto layer, but V1 shows the same warm
+      // advocacy screen for both: from the reader's seat neither is a message
+      // they can open, and we will not dress either up as an error.
+      if (result.outcome !== "message") return "not-for-us";
+
+      const { text, senderAccountId, senderIdentityKey, burnToken, usedOneTimePrekeyId } = result;
+      // The sender's identity key is CLAIMED (opening the seal proves who the box
+      // was addressed TO, never who wrote it). Compare against the base64 form we
+      // store on contacts / receive in bundles.
+      const claimedIdentityB64 = b64(senderIdentityKey);
+
+      // TRUST BOUNDARY — openLemonDrop's JSDoc demands this cross-check before we
+      // trust the sender or render anything.
+      const known = contacts[senderAccountId];
+      if (known) {
+        // A drop that claims to come from a contact we already hold, but under a
+        // DIFFERENT identity key, must not render — treat it exactly as "not for
+        // us". Rendering it would let an impersonator borrow a trusted name and
+        // put words in a known contact's mouth.
+        if (known.identityKey !== claimedIdentityB64) return "not-for-us";
+      } else {
+        // Unknown sender: establish the contact the way addContact does, but ONLY
+        // after verifying the freshly fetched bundle's identity key equals the
+        // claimed one. If the relay-served bundle disagrees with the sealed
+        // claim, neither can be trusted, so we refuse to render (same surface).
+        // A 404 — the claimed sender deleted their account, or never existed —
+        // is a FAILED cross-check (the claim is unverifiable), not a transport
+        // error: it maps to "not-for-us" like any other identity mismatch.
+        // Genuine transport failures still propagate.
+        const token = await freshToken();
+        const bundle = await api.fetchPrekeyBundle(senderAccountId, token).catch((e: unknown) => {
+          if (e instanceof ApiError && e.status === 404) return null;
+          throw e;
+        });
+        if (bundle === null) return "not-for-us";
+        if (bundle.identity_key !== claimedIdentityB64) return "not-for-us";
+        // The ephemeral responder session openLemonDrop used to decrypt is gone
+        // by design (encrypt-and-forget). Spin up a normal OUTBOUND session
+        // against their current bundle so any reply rides an ordinary ratchet —
+        // exactly the shape addContact stores.
+        const init = await x3dhInitiate(identity, {
+          identityKey: unb64(bundle.identity_key),
+          signedPrekey: {
+            id: bundle.signed_prekey.id,
+            publicKey: unb64(bundle.signed_prekey.public_key),
+            signature: unb64(bundle.signed_prekey.signature),
+          },
+          oneTimePrekey: bundle.one_time_prekey
+            ? {
+                id: bundle.one_time_prekey.id,
+                publicKey: unb64(bundle.one_time_prekey.public_key),
+              }
+            : null,
+        });
+        const contact: ContactRecord = {
+          displayName: `Contact ${senderAccountId.slice(0, 8)}`,
+          identityKey: bundle.identity_key,
+          session: serializeSession(init.session),
+          pendingEphemeralKey: b64(init.ephemeralPublicKey),
+          pendingPrekeyId: init.usedPrekeyId,
+        };
+        set((s) => ({ contacts: { ...s.contacts, [senderAccountId]: contact } }));
+      }
+
+      // Surface the drop as a received message — mirrors deliverIncoming's
+      // `base`: delivered, TTL timer armed now, unopened, no TTL/burn-on-read (a
+      // lemon drop's envelope carries neither). openLemonDrop returns no envelope
+      // id/timestamp, so we mint a local id and stamp arrival now.
+      const now = Date.now();
+      appendMessage(senderAccountId, {
+        id: crypto.randomUUID(),
+        peerId: senderAccountId,
+        direction: "received",
+        text,
+        timestamp: new Date(now).toISOString(),
+        ttlSeconds: null,
+        burnOnRead: false,
+        status: "delivered",
+        deliveredAt: now,
+        burning: false,
+        opened: false,
+      });
+
+      // Consume the one-time prekey the sender used (single-use by design — the
+      // same consumption respondToInitialMessage does). Null means they addressed
+      // us on the signed prekey alone, so there is nothing to delete.
+      if (usedOneTimePrekeyId != null) {
+        const otps = keyStore.oneTimePrekeys as unknown as SerializedOneTimePrekey[];
+        keyStore.oneTimePrekeys = otps.filter(
+          (p) => p.id !== usedOneTimePrekeyId,
+        ) as unknown as KeyStore["oneTimePrekeys"];
+      }
+
+      set({ activePeer: senderAccountId });
+      // Persist BEFORE burning, and let a persist failure propagate: the burn
+      // irreversibly deletes the relay's only copy, so firing it while the
+      // received message / new contact / consumed prekey are still unsaved
+      // would make a subsequent reload lose the message with no drop left to
+      // redeem again. If persist throws here, nothing has been burned — the
+      // drop is still on the shelf and a fresh scan (or reload + retry, which
+      // restores the unconsumed prekey from disk) can redeem it again.
+      await persist();
+
+      // Best-effort burn: present the token preimage so the blind relay shreds
+      // the blob now. Swallowed on failure — burn-on-claim is a COURTESY shred,
+      // not a correctness requirement; the drop's TTL is the real backstop, and a
+      // failed burn just means it lingers until then.
+      try {
+        await api.burnQrDrop({ qr_id: encodeQrDropId(qrId), burn_token: b64(burnToken) });
+      } catch {
+        // Intentionally ignored — TTL guarantees eventual destruction.
+      }
+
+      return "message";
     },
 
     async retryMessage(peerId, messageId) {

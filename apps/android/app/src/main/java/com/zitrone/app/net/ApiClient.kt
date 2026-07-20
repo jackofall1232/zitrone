@@ -254,6 +254,29 @@ class ApiClient(
         return json.getString("ciphertext")
     }
 
+    /**
+     * POST /api/v1/qr-drops/fetch — fetch a QR dead-drop ("lemon drop") sealed
+     * blob by its qr_id. NO authentication: exactly like [redeemBlob], an
+     * unauthenticated fetch means the relay cannot link the fetch to any account
+     * — indistinguishable from any other anonymous scanner. [qrId] is the
+     * UNPADDED BASE64URL id verbatim from the sticker URL's `/d/{id}` segment
+     * (the relay decodes it with RawURLEncoding — see qrdrops.go); it is the sole
+     * body field. Fetch is non-destructive on the server, so a wrong-recipient
+     * scan can never burn a drop out from under its real recipient.
+     *
+     * The response ciphertext is deliberately NOT returned: the Android V1 caller
+     * fires this ONLY so that a scan is network-indistinguishable from a real
+     * redemption attempt and exercises the real route — it never opens the box
+     * (see MainActivity). A 404 (missing/expired/burned, all indistinguishable)
+     * or any other non-2xx surfaces as an [ApiException]; consistent with the
+     * rest of this client, the CALLER decides what to do — and here it swallows
+     * every failure.
+     */
+    suspend fun fetchQrDrop(qrId: String) {
+        val body = JSONObject().put("qr_id", qrId)
+        execute(post("/api/v1/qr-drops/fetch", body, authenticated = false))
+    }
+
     /** DELETE /api/v1/account — full, irreversible purge of all server data. */
     suspend fun deleteAccount() {
         try {

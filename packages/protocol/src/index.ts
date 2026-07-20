@@ -13,3 +13,4 @@ export * from "./relay.js";
 export * from "./privacy.js";
 export * from "./receipts.js";
 export * from "./attachments.js";
+export * from "./lemondrop.js";

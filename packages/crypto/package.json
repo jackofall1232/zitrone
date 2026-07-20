@@ -27,6 +27,7 @@
     "vitest": "^2.0.5"
   },
   "dependencies": {
+    "@zitrone/protocol": "workspace:*",
     "libsodium-wrappers-sumo": "^0.8.4"
   }
 }

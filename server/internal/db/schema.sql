@@ -91,3 +91,23 @@ CREATE TABLE IF NOT EXISTS blobs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS blobs_expires_idx ON blobs (expires_at);
+
+-- QR dead drops ("lemon drops"): a creator deposits an encrypted message under a
+-- random qr_id (shared out-of-band as a QR code) and anyone who scans it may
+-- FETCH the ciphertext. Unlike drops/blobs, fetch is deliberately NON-destructive
+-- and repeatable: the relay is blind and cannot tell whether a scanner is the
+-- intended recipient (that is decided client-side by whether the ciphertext
+-- decrypts), so destroying on fetch would let a wrong-recipient scan burn the drop
+-- for the real recipient. A drop is destroyed only by an explicit burn — which
+-- requires the burn-token preimage that rides encrypted inside the ciphertext, so
+-- only a client that decrypted the payload can burn it — or by the TTL janitor,
+-- which crypto-shreds unclaimed drops (the relay never held the key). As with
+-- drops/blobs there is intentionally NO sender/recipient column: the store is
+-- blind by construction.
+CREATE TABLE IF NOT EXISTS qr_drops (
+    qr_id      BYTEA PRIMARY KEY,   -- 16 creator-random bytes; no sender/recipient columns, by design
+    ciphertext BYTEA NOT NULL,
+    burn_hash  BYTEA NOT NULL,      -- SHA-256(burn token); the preimage rides inside the ciphertext
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS qr_drops_expires_idx ON qr_drops (expires_at);

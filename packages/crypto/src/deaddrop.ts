@@ -62,12 +62,45 @@ export async function solveProofOfWork(
 ): Promise<Uint8Array> {
   await ready();
   const nonce = new Uint8Array(8);
-  for (;;) {
+  // Yield to the event loop between bounded chunks. Difficulty 20 averages ~1M
+  // hashes (seconds of work, unboundedly more on an unlucky search), and an
+  // unyielding loop would freeze the UI thread — no spinner frames, no input —
+  // for that whole stretch. 8192 hashes ≈ one animation frame of work; the
+  // deterministic counter walk (and thus the winning nonce) is unchanged.
+  const YIELD_EVERY = 8192;
+  for (let i = 0; ; i++) {
     if (hasLeadingZeroBits(sodium.crypto_hash_sha256(concatBytes(challenge, nonce)), difficulty)) {
       return nonce.slice();
     }
     incrementCounter(nonce);
+    if (i % YIELD_EVERY === YIELD_EVERY - 1) {
+      await yieldToEventLoop();
+    }
   }
+}
+
+/**
+ * One un-clamped macrotask hop. setTimeout(0) is the wrong primitive here:
+ * browsers clamp nested timeouts to ≥4 ms and loaded runners stretch them
+ * further — ~120 yields per difficulty-20 solve turned into whole seconds of
+ * added wall clock (a CI-observed test timeout). A MessageChannel message is a
+ * macrotask with microsecond dispatch that still lets the host paint and
+ * process input between chunks; ports are closed per hop so no handle keeps a
+ * Node event loop (vitest) alive.
+ */
+function yieldToEventLoop(): Promise<void> {
+  if (typeof MessageChannel === "undefined") {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  return new Promise((resolve) => {
+    const { port1, port2 } = new MessageChannel();
+    port1.onmessage = () => {
+      port1.close();
+      port2.close();
+      resolve();
+    };
+    port2.postMessage(null);
+  });
 }
 
 /** Verify a hashcash solution. */

@@ -44,6 +44,14 @@ func Run(ctx context.Context, store *db.Store, ttl time.Duration) {
 			} else if blobs > 0 {
 				log.Printf("janitor: purged %d expired attachment blobs", blobs)
 			}
+			// QR dead drops (lemon drops) are crypto-shredded at their TTL whether
+			// claimed or not.
+			qrDrops, err := store.PurgeExpiredQrDrops(ctx, time.Now())
+			if err != nil {
+				log.Printf("janitor: qr-drop purge failed: %v", err)
+			} else if qrDrops > 0 {
+				log.Printf("janitor: purged %d expired QR dead drops", qrDrops)
+			}
 		}
 	}
 }

@@ -7,6 +7,7 @@ import { useState } from "react";
 import { CONNECTION_MODES, type ConnectionMode, type RevealMode } from "@zitrone/protocol";
 import { useApp } from "../store.js";
 import { useSettings } from "../settings.js";
+import { LemonDropOutcome, type LemonDropOutcomeVariant } from "../components/LemonDropOutcome.js";
 
 const MODES: ConnectionMode[] = ["standard", "stealth", "ghost"];
 const COVER: Array<"off" | "low" | "medium" | "high"> = ["off", "low", "medium", "high"];
@@ -22,9 +23,19 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const lock = useApp((s) => s.lock);
   const deleteAccount = useApp((s) => s.deleteAccount);
   const redeemDeadDrop = useApp((s) => s.redeemDeadDrop);
+  const redeemQrDrop = useApp((s) => s.redeemQrDrop);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [redeemToken, setRedeemToken] = useState("");
   const [redeemStatus, setRedeemStatus] = useState<string | null>(null);
+  const [dropLink, setDropLink] = useState("");
+  const [dropLinkError, setDropLinkError] = useState<string | null>(null);
+  // In-flight guard: fetch is deliberately non-destructive on the relay, so two
+  // concurrent redemptions of the same link would BOTH decrypt and append the
+  // message (the burn only lands after the append). One at a time.
+  const [dropBusy, setDropBusy] = useState(false);
+  // Non-message outcomes ("not-for-us" / "unavailable") open the warm advocacy
+  // screen; a "message" outcome closes Settings so the opened chat is visible.
+  const [dropOutcome, setDropOutcome] = useState<LemonDropOutcomeVariant | null>(null);
 
   const connectionMode = useSettings((s) => s.connectionMode);
   const coverTraffic = useSettings((s) => s.coverTraffic);
@@ -47,192 +58,253 @@ export function Settings({ onClose }: { onClose: () => void }) {
       .catch(() => setRedeemStatus("No drop found — token may be used, expired, or wrong."));
   };
 
+  const onOpenLemonDrop = () => {
+    if (dropBusy) return;
+    setDropBusy(true);
+    setDropLinkError(null);
+    void redeemQrDrop(dropLink)
+      .then((outcome) => {
+        setDropLink("");
+        if (outcome === "message") {
+          // The chat opened (activePeer is set) — close Settings so it shows.
+          onClose();
+        } else {
+          setDropOutcome(outcome);
+        }
+      })
+      // Two honestly different inline notes: a malformed link is the user's
+      // input (the store throws Error("bad link") before any network I/O), while
+      // anything else here is a fetch/transport failure — telling someone their
+      // perfectly valid link "doesn't look right" over a connection blip would
+      // just be wrong. (A 404 is neither: it resolves to the "unavailable"
+      // outcome above.)
+      .catch((err: unknown) => {
+        setDropLinkError(
+          err instanceof Error && err.message === "bad link"
+            ? "That doesn't look like a lemon drop link."
+            : "Couldn't reach the relay — check your connection and try again.",
+        );
+      })
+      .finally(() => setDropBusy(false));
+  };
+
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/70"
-      role="dialog"
-      aria-modal
-    >
-      <div className="flex w-full max-w-md flex-col gap-6 rounded-xl border border-line bg-bg-secondary p-8">
-        <h2 className="font-display text-xl font-semibold text-ink-primary">Settings</h2>
+    <>
+      <div
+        className="fixed inset-0 z-40 flex items-center justify-center bg-black/70"
+        role="dialog"
+        aria-modal
+      >
+        <div className="flex w-full max-w-md flex-col gap-6 rounded-xl border border-line bg-bg-secondary p-8">
+          <h2 className="font-display text-xl font-semibold text-ink-primary">Settings</h2>
 
-        <Section title="Security">
-          <Row label="Passphrase" value="Set — required on every unlock" />
-          <button
-            onClick={lock}
-            className="self-start rounded-full bg-bg-elevated px-4 py-1.5 text-sm text-lemon hover:bg-rind"
-          >
-            Lock now
-          </button>
-        </Section>
-
-        <Section title="Account">
-          <Row label="Your ID" value={accountId ?? "—"} mono />
-          <Row label="Identity key" value="Generated on this device. It never leaves it." />
-        </Section>
-
-        <Section title="Network">
-          <Row label="Connection" value={wsStatus === "open" ? "Connected (WSS)" : wsStatus} />
-          <Row
-            label="Transport"
-            value={
-              transport === "i2p"
-                ? "I2P active"
-                : transport === "tor"
-                  ? "Tor active (.onion) — I2P unavailable"
-                  : transport === "clearnet_fallback"
-                    ? "Clearnet fallback — open in Tor Browser via .onion for Tor"
-                    : allowClearnetFallback
-                      ? "Offline"
-                      : "I2P and Tor unavailable — connection refused (clearnet fallback disabled)"
-            }
-          />
-          <div className="flex flex-col gap-1">
-            <span className="text-sm text-ink-secondary">Connection mode</span>
-            <div className="flex gap-2">
-              {MODES.map((m) => (
-                <button
-                  key={m}
-                  onClick={() => setConnectionMode(m)}
-                  className={`rounded-full px-3 py-1 text-xs capitalize ${connectionMode === m ? "bg-lemon text-ink-on-lemon" : "border border-line text-ink-secondary hover:text-lemon"}`}
-                >
-                  {m}
-                </button>
-              ))}
-            </div>
-            <p className="text-xs text-ink-muted">{CONNECTION_MODES[connectionMode].description}</p>
-          </div>
-          <div className="flex flex-col gap-1">
-            <span className="text-sm text-ink-secondary">Cover traffic</span>
-            <div className="flex gap-2">
-              {COVER.map((c) => (
-                <button
-                  key={c}
-                  onClick={() => setCoverTraffic(c)}
-                  className={`rounded-full px-3 py-1 text-xs capitalize ${coverTraffic === c ? "bg-lemon text-ink-on-lemon" : "border border-line text-ink-secondary hover:text-lemon"}`}
-                >
-                  {c}
-                </button>
-              ))}
-            </div>
-            <p className="text-xs text-ink-muted">
-              Continuous decoy traffic makes a real send indistinguishable from idle. Higher levels
-              use more battery.
-            </p>
-          </div>
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center justify-between gap-4">
-              <span className="text-sm text-ink-secondary">
-                Fallback to clearnet if anonymous transport fails
-              </span>
-              <button
-                onClick={() => setAllowClearnetFallback(!allowClearnetFallback)}
-                aria-pressed={allowClearnetFallback}
-                className={`rounded-full px-3 py-1 text-xs ${allowClearnetFallback ? "bg-lemon text-ink-on-lemon" : "border border-line text-ink-secondary"}`}
-              >
-                {allowClearnetFallback ? "On" : "Off"}
-              </button>
-            </div>
-            <p className="text-xs text-ink-muted">
-              {allowClearnetFallback
-                ? "When Tor and I2P are both unavailable, the app connects over clearnet and shows a warning."
-                : "Disabling clearnet fallback may make the app unusable if Tor is blocked or slow. Only disable this if you are certain Tor is reliable on your network."}
-            </p>
-          </div>
-        </Section>
-
-        <Section title="Privacy">
-          <div className="flex items-center justify-between gap-4">
-            <span className="text-sm text-ink-secondary">Privacy view (blur until revealed)</span>
+          <Section title="Security">
+            <Row label="Passphrase" value="Set — required on every unlock" />
             <button
-              onClick={() => setGlobalPrivacyView(!privacyView.globalEnabled)}
-              aria-pressed={privacyView.globalEnabled}
-              className={`rounded-full px-3 py-1 text-xs ${privacyView.globalEnabled ? "bg-lemon text-ink-on-lemon" : "border border-line text-ink-secondary"}`}
+              onClick={lock}
+              className="self-start rounded-full bg-bg-elevated px-4 py-1.5 text-sm text-lemon hover:bg-rind"
             >
-              {privacyView.globalEnabled ? "On" : "Off"}
+              Lock now
             </button>
-          </div>
-          <div className="flex flex-col gap-1">
-            <span className="text-sm text-ink-secondary">Reveal mode</span>
-            <div className="flex gap-2">
-              {REVEAL.map((r) => (
-                <button
-                  key={r.id}
-                  onClick={() => setRevealMode(r.id)}
-                  className={`rounded-full px-3 py-1 text-xs ${privacyView.revealMode === r.id ? "bg-lemon text-ink-on-lemon" : "border border-line text-ink-secondary hover:text-lemon"}`}
-                >
-                  {r.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        </Section>
+          </Section>
 
-        <Section title="Dead drop">
-          <p className="text-xs text-ink-muted">
-            Redeem a one-time dead-drop token shared with you out of band. It works once.
-          </p>
-          <div className="flex gap-2">
-            <input
-              value={redeemToken}
-              onChange={(e) => setRedeemToken(e.target.value)}
-              placeholder="Paste drop token"
-              className="flex-1 rounded-md border border-line bg-bg-primary px-3 py-1.5 font-mono text-xs text-ink-primary outline-none focus:border-lemon"
+          <Section title="Account">
+            <Row label="Your ID" value={accountId ?? "—"} mono />
+            <Row label="Identity key" value="Generated on this device. It never leaves it." />
+          </Section>
+
+          <Section title="Network">
+            <Row label="Connection" value={wsStatus === "open" ? "Connected (WSS)" : wsStatus} />
+            <Row
+              label="Transport"
+              value={
+                transport === "i2p"
+                  ? "I2P active"
+                  : transport === "tor"
+                    ? "Tor active (.onion) — I2P unavailable"
+                    : transport === "clearnet_fallback"
+                      ? "Clearnet fallback — open in Tor Browser via .onion for Tor"
+                      : allowClearnetFallback
+                        ? "Offline"
+                        : "I2P and Tor unavailable — connection refused (clearnet fallback disabled)"
+              }
             />
-            <button
-              onClick={onRedeem}
-              disabled={!redeemToken.trim()}
-              className="rounded-full bg-lemon px-4 py-1.5 text-sm font-medium text-ink-on-lemon disabled:opacity-50"
-            >
-              Redeem
-            </button>
-          </div>
-          {redeemStatus && <p className="text-xs text-ink-secondary">{redeemStatus}</p>}
-        </Section>
-
-        <Section title="Appearance">
-          <Row label="Theme" value="Dark (only option — you're welcome)" />
-        </Section>
-
-        <Section title="Danger">
-          {confirmDelete ? (
-            <div className="flex flex-col gap-2">
-              <p className="text-sm text-burn-red">
-                This purges everything — keys, pending messages, the account record. Irreversible.
-              </p>
+            <div className="flex flex-col gap-1">
+              <span className="text-sm text-ink-secondary">Connection mode</span>
               <div className="flex gap-2">
+                {MODES.map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setConnectionMode(m)}
+                    className={`rounded-full px-3 py-1 text-xs capitalize ${connectionMode === m ? "bg-lemon text-ink-on-lemon" : "border border-line text-ink-secondary hover:text-lemon"}`}
+                  >
+                    {m}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-ink-muted">
+                {CONNECTION_MODES[connectionMode].description}
+              </p>
+            </div>
+            <div className="flex flex-col gap-1">
+              <span className="text-sm text-ink-secondary">Cover traffic</span>
+              <div className="flex gap-2">
+                {COVER.map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => setCoverTraffic(c)}
+                    className={`rounded-full px-3 py-1 text-xs capitalize ${coverTraffic === c ? "bg-lemon text-ink-on-lemon" : "border border-line text-ink-secondary hover:text-lemon"}`}
+                  >
+                    {c}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-ink-muted">
+                Continuous decoy traffic makes a real send indistinguishable from idle. Higher
+                levels use more battery.
+              </p>
+            </div>
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-sm text-ink-secondary">
+                  Fallback to clearnet if anonymous transport fails
+                </span>
                 <button
-                  onClick={() => void deleteAccount()}
-                  className="rounded-full bg-burn-red px-4 py-1.5 text-sm font-medium text-bg-primary"
+                  onClick={() => setAllowClearnetFallback(!allowClearnetFallback)}
+                  aria-pressed={allowClearnetFallback}
+                  className={`rounded-full px-3 py-1 text-xs ${allowClearnetFallback ? "bg-lemon text-ink-on-lemon" : "border border-line text-ink-secondary"}`}
                 >
-                  Delete forever
-                </button>
-                <button
-                  onClick={() => setConfirmDelete(false)}
-                  className="rounded-full px-3 text-sm text-ink-secondary"
-                >
-                  Cancel
+                  {allowClearnetFallback ? "On" : "Off"}
                 </button>
               </div>
+              <p className="text-xs text-ink-muted">
+                {allowClearnetFallback
+                  ? "When Tor and I2P are both unavailable, the app connects over clearnet and shows a warning."
+                  : "Disabling clearnet fallback may make the app unusable if Tor is blocked or slow. Only disable this if you are certain Tor is reliable on your network."}
+              </p>
             </div>
-          ) : (
-            <button
-              onClick={() => setConfirmDelete(true)}
-              className="self-start rounded-full border border-burn-red px-4 py-1.5 text-sm text-burn-red hover:bg-burn-red hover:text-bg-primary"
-            >
-              Delete account
-            </button>
-          )}
-        </Section>
+          </Section>
 
-        <button
-          onClick={onClose}
-          className="self-end rounded-full px-4 py-2 text-sm text-ink-secondary hover:text-ink-primary"
-        >
-          Close
-        </button>
+          <Section title="Privacy">
+            <div className="flex items-center justify-between gap-4">
+              <span className="text-sm text-ink-secondary">Privacy view (blur until revealed)</span>
+              <button
+                onClick={() => setGlobalPrivacyView(!privacyView.globalEnabled)}
+                aria-pressed={privacyView.globalEnabled}
+                className={`rounded-full px-3 py-1 text-xs ${privacyView.globalEnabled ? "bg-lemon text-ink-on-lemon" : "border border-line text-ink-secondary"}`}
+              >
+                {privacyView.globalEnabled ? "On" : "Off"}
+              </button>
+            </div>
+            <div className="flex flex-col gap-1">
+              <span className="text-sm text-ink-secondary">Reveal mode</span>
+              <div className="flex gap-2">
+                {REVEAL.map((r) => (
+                  <button
+                    key={r.id}
+                    onClick={() => setRevealMode(r.id)}
+                    className={`rounded-full px-3 py-1 text-xs ${privacyView.revealMode === r.id ? "bg-lemon text-ink-on-lemon" : "border border-line text-ink-secondary hover:text-lemon"}`}
+                  >
+                    {r.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </Section>
+
+          <Section title="Dead drop">
+            <p className="text-xs text-ink-muted">
+              Redeem a one-time dead-drop token shared with you out of band. It works once.
+            </p>
+            <div className="flex gap-2">
+              <input
+                value={redeemToken}
+                onChange={(e) => setRedeemToken(e.target.value)}
+                placeholder="Paste drop token"
+                className="flex-1 rounded-md border border-line bg-bg-primary px-3 py-1.5 font-mono text-xs text-ink-primary outline-none focus:border-lemon"
+              />
+              <button
+                onClick={onRedeem}
+                disabled={!redeemToken.trim()}
+                className="rounded-full bg-lemon px-4 py-1.5 text-sm font-medium text-ink-on-lemon disabled:opacity-50"
+              >
+                Redeem
+              </button>
+            </div>
+            {redeemStatus && <p className="text-xs text-ink-secondary">{redeemStatus}</p>}
+          </Section>
+
+          <Section title="Lemon drop">
+            <p className="text-xs text-ink-muted">
+              Open a lemon drop from its link (paste the zitrone.app/d/… address). Only the device
+              it was sealed for can read it.
+            </p>
+            <div className="flex gap-2">
+              <input
+                value={dropLink}
+                onChange={(e) => setDropLink(e.target.value)}
+                placeholder="Paste lemon drop link"
+                className="flex-1 rounded-md border border-line bg-bg-primary px-3 py-1.5 font-mono text-xs text-ink-primary outline-none focus:border-lemon"
+              />
+              <button
+                onClick={onOpenLemonDrop}
+                disabled={!dropLink.trim() || dropBusy}
+                className="rounded-full bg-lemon px-4 py-1.5 text-sm font-medium text-ink-on-lemon disabled:opacity-50"
+              >
+                {dropBusy ? "Opening…" : "Open"}
+              </button>
+            </div>
+            {dropLinkError && <p className="text-xs text-ink-secondary">{dropLinkError}</p>}
+          </Section>
+
+          <Section title="Appearance">
+            <Row label="Theme" value="Dark (only option — you're welcome)" />
+          </Section>
+
+          <Section title="Danger">
+            {confirmDelete ? (
+              <div className="flex flex-col gap-2">
+                <p className="text-sm text-burn-red">
+                  This purges everything — keys, pending messages, the account record. Irreversible.
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => void deleteAccount()}
+                    className="rounded-full bg-burn-red px-4 py-1.5 text-sm font-medium text-bg-primary"
+                  >
+                    Delete forever
+                  </button>
+                  <button
+                    onClick={() => setConfirmDelete(false)}
+                    className="rounded-full px-3 text-sm text-ink-secondary"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => setConfirmDelete(true)}
+                className="self-start rounded-full border border-burn-red px-4 py-1.5 text-sm text-burn-red hover:bg-burn-red hover:text-bg-primary"
+              >
+                Delete account
+              </button>
+            )}
+          </Section>
+
+          <button
+            onClick={onClose}
+            className="self-end rounded-full px-4 py-2 text-sm text-ink-secondary hover:text-ink-primary"
+          >
+            Close
+          </button>
+        </div>
       </div>
-    </div>
+
+      {dropOutcome && (
+        <LemonDropOutcome variant={dropOutcome} onClose={() => setDropOutcome(null)} />
+      )}
+    </>
   );
 }
 

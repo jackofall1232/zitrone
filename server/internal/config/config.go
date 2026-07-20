@@ -43,7 +43,7 @@ type Config struct {
 	// Blind blob store (attachments). BlobMaxBytes caps the *plaintext-equivalent*
 	// attachment size; the server enforces a slightly larger ciphertext cap that
 	// accounts for bucket padding + AEAD overhead (see api.BlobEffectiveCap).
-	BlobMaxBytes    int      // max attachment plaintext bytes (ciphertext cap adds slack)
+	BlobMaxBytes int // max attachment plaintext bytes (ciphertext cap adds slack)
 	// BlobTTLHours is the unfetched-blob fallback TTL. Successful redemption
 	// deletes the blob immediately (fetch-and-burn); this only bounds the max
 	// lifetime of ciphertext that is never redeemed. Default 1 week (168h).
@@ -77,10 +77,10 @@ func Load() (*Config, error) {
 		BlobMaxBytes:               envInt("BLOB_MAX_BYTES", 8*1024*1024),
 		// 1-week fallback for unfetched attachment blobs (fetch-and-burn deletes
 		// on successful redeem; this only bounds never-collected ciphertext).
-		BlobTTLHours:               envInt("BLOB_TTL_HOURS", 168),
-		RelayPrivateKey:            os.Getenv("RELAY_PRIVATE_KEY"),
-		RelayPublicKey:             os.Getenv("RELAY_PUBLIC_KEY"),
-		RelayPeers:                 splitCSV(os.Getenv("RELAY_PEERS")),
+		BlobTTLHours:    envInt("BLOB_TTL_HOURS", 168),
+		RelayPrivateKey: os.Getenv("RELAY_PRIVATE_KEY"),
+		RelayPublicKey:  os.Getenv("RELAY_PUBLIC_KEY"),
+		RelayPeers:      splitCSV(os.Getenv("RELAY_PEERS")),
 	}
 	// Backward compatibility: a pre-v1.5 deployment set only ONION_ADDRESS. Treat
 	// it as the public mirror address so single-onion deployments keep serving the

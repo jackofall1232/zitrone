@@ -6,6 +6,7 @@
 package com.zitrone.app
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -33,7 +34,9 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.lifecycleScope
 import com.zitrone.app.data.Conversation
+import com.zitrone.app.data.parseQrDropLink
 import com.zitrone.app.i2p.I2pIntegration
 import com.zitrone.app.security.RootDetection
 import com.zitrone.app.tor.TorIntegration
@@ -43,6 +46,7 @@ import com.zitrone.app.ui.screens.ChatListScreen
 import com.zitrone.app.ui.screens.ChatScreen
 import com.zitrone.app.ui.screens.DiagnosticsScreen
 import com.zitrone.app.ui.screens.KeyVerificationScreen
+import com.zitrone.app.ui.screens.LemonDropAdvocacyScreen
 import com.zitrone.app.ui.screens.LockScreen
 import com.zitrone.app.ui.screens.OnboardingScreen
 import com.zitrone.app.ui.screens.SettingsScreen
@@ -50,6 +54,10 @@ import com.zitrone.app.ui.screens.SplashScreen
 import com.zitrone.app.ui.theme.Motion
 import com.zitrone.app.ui.theme.ZitroneTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
@@ -62,12 +70,23 @@ import kotlinx.coroutines.withContext
  * content must do exactly this; in this app, that's the only Activity there
  * is.
  */
+/** Saved-instance-state key for the lemon-drop advocacy veil's visibility. */
+private const val STATE_LEMON_DROP_SCAN = "lemon_drop_scan"
+
 class MainActivity : FragmentActivity() {
 
     private val requestNotificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {
             // Either way we proceed: notifications are content-free anyway.
         }
+
+    /**
+     * Raised when this Activity opens a lemon-drop deep link, telling the Compose
+     * tree to show the advocacy veil (see [ZitroneRoot]). Owned by the Activity
+     * because VIEW intents arrive here — in onCreate and [onNewIntent] — outside
+     * of composition.
+     */
+    private val lemonDropScan = MutableStateFlow(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -82,14 +101,85 @@ class MainActivity : FragmentActivity() {
 
         maybeRequestNotificationPermission()
 
+        // Handle the launch intent ONLY on a fresh start, not on a config-change
+        // recreation (savedInstanceState != null): re-running it on every rotation
+        // would fire a second fetch and break the "exactly ONE fetch per scan"
+        // rule. A genuinely new scan while we're already running arrives via
+        // onNewIntent instead. On recreation the veil's VISIBILITY is restored
+        // from the saved state (no re-fetch) so rotating the phone doesn't
+        // silently swap the advocacy screen for the lock/splash underneath.
+        if (savedInstanceState == null) {
+            handleDeepLink(intent)
+        } else {
+            lemonDropScan.value = savedInstanceState.getBoolean(STATE_LEMON_DROP_SCAN, false)
+        }
+
         setContent {
             ZitroneTheme {
                 ZitroneRoot(
                     container = container,
                     requestBiometric = ::showBiometricPrompt,
+                    lemonDropScan = lemonDropScan.asStateFlow(),
+                    onLemonDropDismissed = { lemonDropScan.value = false },
                 )
             }
         }
+    }
+
+    // singleTask: a new deep link that arrives while we're already running is
+    // delivered here, not through a fresh onCreate. Keep setIntent in sync so any
+    // later getIntent() reflects the current link.
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleDeepLink(intent)
+    }
+
+    // The advocacy veil must survive a configuration change: only its visibility
+    // is saved — the fetch already fired exactly once when the link arrived and
+    // is never replayed on restore.
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(STATE_LEMON_DROP_SCAN, lemonDropScan.value)
+    }
+
+    /**
+     * Lemon-drop ("QR dead drop") link handling. When this phone opens
+     * `https://zitrone.app/d/{id}`, Zitrone V1 does exactly two things and NOTHING
+     * else — no decrypt is attempted, and no crypto dependency is pulled in:
+     *
+     *  1. fires ONE unauthenticated fetch of the drop, fire-and-forget (below);
+     *  2. shows the advocacy screen — always (the veil in [ZitroneRoot]).
+     *
+     * Why no open attempt is HONEST, not a shortcut: a Zitrone account is
+     * per-device, and the only clients that can CREATE a lemon drop in V1 (web and
+     * desktop) cannot address one to an Android-family account — the two families'
+     * wire formats are not compatible — so an Android device that scans ANY lemon
+     * drop is genuinely never its intended recipient today. Attempting to open the
+     * sealed box could therefore only ever fail, and pretending otherwise in the UI
+     * would be a lie. The full sealed-box open attempt is the documented V1.1
+     * follow-up, gated on crypto review.
+     */
+    private fun handleDeepLink(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_VIEW) return
+        val qrId = intent.dataString?.let(::parseQrDropLink) ?: return
+
+        // ONE unauthenticated fetch of the real route, fire-and-forget on a
+        // background dispatcher. The response and any error are IGNORED — never
+        // logged (this repo forbids logging) and never surfaced. Its sole purpose
+        // is to make an Android scan network-indistinguishable from a real
+        // redemption attempt; we never open what comes back. runCatching swallows
+        // everything, including the ApiException that fetchQrDrop throws on a 404
+        // (missing/expired/burned) or any transport failure.
+        val container = (application as ZitroneApp).container
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching { container.apiClient.fetchQrDrop(qrId) }
+        }
+
+        // Always show advocacy. Raised as a veil that sits IN FRONT of the
+        // biometric gate — it carries zero secret content, so a scan never forces
+        // an unlock (see ZitroneRoot).
+        lemonDropScan.value = true
     }
 
     private fun maybeRequestNotificationPermission() {
@@ -164,6 +254,8 @@ private sealed interface Route {
 private fun ZitroneRoot(
     container: AppContainer,
     requestBiometric: ((Boolean, String?) -> Unit) -> Unit,
+    lemonDropScan: StateFlow<Boolean>,
+    onLemonDropDismissed: () -> Unit,
 ) {
     val context = LocalContext.current
 
@@ -174,6 +266,7 @@ private fun ZitroneRoot(
     val connectivity by container.coordinator.connectivity.collectAsState()
     val transportState by container.transportResolver.state.collectAsState()
     val accountId by container.apiClient.accountIdFlow.collectAsState()
+    val showLemonDrop by lemonDropScan.collectAsState()
 
     var route by remember { mutableStateOf<Route>(Route.Splash) }
     var unlocked by remember { mutableStateOf(false) }
@@ -208,6 +301,19 @@ private fun ZitroneRoot(
             route = Route.Locked
         }
         onDispose { container.coordinator.onForcedLogout = null }
+    }
+
+    // Lemon-drop advocacy veil. It sits IN FRONT of everything, including the
+    // biometric gate, and short-circuits the normal routing below: while it is up,
+    // Splash/Locked/ChatList are not composed, so the gate never advances behind
+    // it and no secret content renders — safe to show without an unlock because
+    // the screen holds none. Dismiss just drops the veil, revealing the app's real
+    // state underneath (still locked if it was locked), untouched. See
+    // MainActivity.handleDeepLink for why V1 shows advocacy and never decrypts.
+    if (showLemonDrop) {
+        BackHandler(enabled = true) { onLemonDropDismissed() }
+        LemonDropAdvocacyScreen(onDismiss = onLemonDropDismissed)
+        return
     }
 
     BackHandler(enabled = route !is Route.ChatList && unlocked) {

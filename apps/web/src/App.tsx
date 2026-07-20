@@ -4,15 +4,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { useEffect, useState } from "react";
-import {
-  ClearnetWarningBanner,
-  LemonSlice,
-  LemonSpinner,
-  ZitroneStyles,
-} from "@zitrone/ui";
+import { ClearnetWarningBanner, LemonSlice, LemonSpinner, ZitroneStyles } from "@zitrone/ui";
 import { isTauri } from "@zitrone/crypto";
+import { parseQrDropUrl } from "@zitrone/protocol";
 import { resolveTransport } from "./lib/transportResolver.js";
 import { ScreenshotShield, useDevToolsWarning } from "./components/ScreenshotShield.js";
+import { LemonDropOutcome, type LemonDropOutcomeVariant } from "./components/LemonDropOutcome.js";
 import { ChatList } from "./screens/ChatList.js";
 import { ChatView } from "./screens/ChatView.js";
 import { Gate } from "./screens/Gate.js";
@@ -25,9 +22,11 @@ export default function App() {
   const phase = useApp((s) => s.phase);
   const bootstrap = useApp((s) => s.bootstrap);
   const activePeer = useApp((s) => s.activePeer);
+  const redeemQrDrop = useApp((s) => s.redeemQrDrop);
   const devTools = useDevToolsWarning();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [verifyPeer, setVerifyPeer] = useState<string | null>(null);
+  const [bootDropOutcome, setBootDropOutcome] = useState<LemonDropOutcomeVariant | null>(null);
 
   const transport = useSettings((s) => s.transport);
   const allowClearnetFallback = useSettings((s) => s.allowClearnetFallback);
@@ -61,6 +60,34 @@ export default function App() {
       cancelled = true;
     };
   }, [allowClearnetFallback, setTransport, setFallbackReason]);
+
+  // Boot-time /d/{id} redeem. Once the vault is open (phase "ready"), check the
+  // address bar for a lemon-drop link and, if one is there, redeem it.
+  //
+  // NOTE: the PWA is NOT currently served on zitrone.app, so parseQrDropUrl(href)
+  // is inert in practice — this path stays dormant until the operator wires
+  // /d/* hosting (deferred by the deliver-then-claim rule). It runs anyway so the
+  // flow lights up the moment that hosting exists. Pasted-URL redeem in Settings
+  // already works everywhere today.
+  useEffect(() => {
+    if (phase !== "ready") return;
+    const href = window.location.href;
+    if (!parseQrDropUrl(href)) return;
+    // Strip the id from the URL BEFORE touching the network, so a reload or a
+    // shoulder-surfed address bar can't re-expose it. history.replaceState leaves
+    // no new entry to navigate back into.
+    window.history.replaceState(null, "", window.location.origin + "/");
+    void redeemQrDrop(href)
+      .then((outcome) => {
+        // "message" opens the chat (activePeer is set) — no overlay needed.
+        if (outcome !== "message") setBootDropOutcome(outcome);
+      })
+      .catch(() => {
+        // parseQrDropUrl already gated a well-formed link, so a throw here is a
+        // fetch/transport failure. Stay silent at boot — we surface no error UI
+        // for a URL the user didn't explicitly paste.
+      });
+  }, [phase, redeemQrDrop]);
 
   const showClearnetBanner =
     phase === "ready" && transport === "clearnet_fallback" && !warningDismissed;
@@ -114,6 +141,9 @@ export default function App() {
 
       {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
       {verifyPeer && <VerifyKeys peerId={verifyPeer} onClose={() => setVerifyPeer(null)} />}
+      {bootDropOutcome && (
+        <LemonDropOutcome variant={bootDropOutcome} onClose={() => setBootDropOutcome(null)} />
+      )}
     </div>
   );
 }

@@ -393,6 +393,78 @@ Asynchronous, anonymous deposit with no direct channel between the two parties:
   the envelope, and destroys the drop in one operation. A replayed token returns 404. Uncollected
   drops are purged at their 72-hour TTL.
 
+### QR dead drops — "lemon drops" (0.8.0)
+
+A second dead-drop variant with a deliberately **different property set** from the anonymous
+`/drops` primitive above: a lemon drop is **recipient-targeted by design, not anonymous**. The
+creator picks one existing contact, the message is encrypted **once, at creation time**, to that
+contact via a one-shot X3DH against their published prekey bundle (no live session on either
+side), and the entire envelope — sender, recipient, ratchet header, plus a fresh **burn token** —
+is sealed to the recipient's identity key. The QR sticker encodes only
+`https://zitrone.app/d/{qr_id}`: a pointer at the sealed blob on the relay, never the ciphertext
+itself.
+
+- **The relay is a blind, non-destructive shelf.** It stores an opaque sealed box under a
+  16-byte creator-random `qr_id` with no sender or recipient column; deposit is unauthenticated
+  (hashcash proof-of-work is the only admission, so the deposit request itself carries no
+  account); it serves the **same blob to anyone** who presents the id, with no identity check
+  and no key-matching — all recipient-matching happens on the scanning device, by whether the
+  sealed box opens. Fetch deliberately does **not** destroy the drop: the relay cannot know
+  whether a decrypt succeeded, so destroying on first fetch would let a wrong-recipient scan
+  burn the message out from under the intended recipient.
+- **Honest limit — deposit adjacency.** Creating a drop requires fetching the recipient's
+  prekey bundle, and that fetch is authenticated. A relay watching its own traffic can
+  therefore correlate the authenticated bundle request with the anonymous deposit that follows
+  moments later on the same connection, and infer **who likely created a drop for whom** —
+  the same class of metadata the ordinary send path already exposes, but worth stating because
+  the deposit alone would otherwise look unlinkable. The sealed content, the wrong-scanner
+  blindness, and the burn capability are unaffected. Fetching prekeys on an unlinkable
+  schedule (decoupled in time and transport from deposits) is tracked follow-up work, not a
+  property of the current implementation. The same adjacency exists on redemption when the
+  sender is not yet a contact (an authenticated bundle fetch follows the anonymous blob
+  fetch).
+- **Honest disclosure — read this one plainly:** because the relay serves the blob to any
+  scanner, **non-recipient devices transiently receive ciphertext that was meant for someone
+  else.** They cannot decrypt it — the seal is to the recipient's identity key, and opening it
+  fails on any other device — and they cannot burn it, but they do briefly hold the sealed
+  bytes. This is inherent to a publicly scannable sticker backed by a blind relay, and we state
+  it rather than soften it.
+- **Burn-on-claim.** The 32-byte burn token rides *inside* the encrypted payload; the relay
+  stores only its SHA-256. Only a device that successfully decrypted the drop learns the
+  preimage, and its client then presents it (unauthenticated) so the relay shreds the blob —
+  wrong scanners can fetch but can never burn. The burn is a courtesy shred, not a correctness
+  requirement: unclaimed drops are crypto-shredded at their creator-chosen TTL (**24 h, 48 h,
+  72 h, 1 week, or 2 weeks** — a fixed bucket allowlist; arbitrary lifetimes would fingerprint
+  a drop, and there is deliberately no 1-month option). Missing, expired, and burned drops are
+  all the same 404 — a prober learns nothing — and after expiry or claim the physical sticker
+  permanently degrades into a harmless pointer: scans fall through to the marketing site or the
+  in-app "not for this device" screen, with no lingering security exposure.
+- **Sender identity is claimed, then verified.** Opening the seal proves who a drop was
+  addressed *to*, not who wrote it. The payload's claimed sender identity key is cross-checked
+  before anything renders: against the stored key when the sender is already a contact, or
+  against a freshly fetched prekey bundle when not — any mismatch and the message is refused.
+- **Open limits under maintainer decision (V1 as-shipped, stated plainly).** Two findings from
+  review are real and unfixed pending a design choice, and we document rather than soften them.
+  *Sticker re-arming:* after a drop is burned or expires, its `qr_id` is deleted — so anyone who
+  knows the id (in practice the sticker's creator) can deposit a NEW drop under the same id,
+  making a dead sticker deliver again; true permanence needs the relay to remember every issued
+  id forever (a retention tradeoff on a shred-everything store), which is under consideration.
+  *Replies to a drop-created contact:* if the recipient did not already have the sender as a
+  contact, the contact created at redemption starts a second, independent session — the
+  sender's client currently decrypts replies only against its original session, so a first
+  reply can be silently undeliverable until session-reset handling lands. Treat V1 lemon drops
+  from unknown senders as one-way delivery.
+- **Platform status, honestly.** Web and Linux desktop have the full flow (create and redeem).
+  Android V1 intercepts the link, performs one fetch (so a scan is network-indistinguishable
+  from a redemption attempt), and always shows the advocacy screen **without attempting
+  decryption**: accounts are per-device, and the clients able to create lemon drops today
+  (web/desktop) cannot address one to an Android-family account across the current
+  wire-format split — so an Android device is genuinely never the intended recipient. The real
+  Android open attempt is planned, gated on crypto review. iOS has none of this yet. App-Link
+  interception stays inert until the operator deploys `assetlinks.json`
+  (see `docs/RELEASING_ANDROID.md`); until then those links open in the browser, which is the
+  designed no-app fallback.
+
 ### Attachments (encrypted sideloaded blobs — 0.7.0-beta)
 
 Images and files never ride inside a message envelope. The sender encrypts the attachment

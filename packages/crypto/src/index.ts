@@ -95,4 +95,12 @@ export {
   type PeeledLayer,
 } from "./onion.js";
 export { sealTo, openSealed } from "./sealedbox.js";
+export {
+  createLemonDrop,
+  openLemonDrop,
+  type CreateLemonDropInput,
+  type CreateLemonDropResult,
+  type OpenLemonDropInput,
+  type LemonDropOpenResult,
+} from "./lemondrop.js";
 export { isTauri } from "./platform.js";

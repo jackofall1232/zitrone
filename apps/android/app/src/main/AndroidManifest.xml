@@ -66,6 +66,26 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- QR dead-drop ("lemon drop") deep links: https://zitrone.app/d/…
+                 A SEPARATE intent-filter from MAIN/LAUNCHER on purpose — multiple
+                 <data> elements in one filter cross-product into unintended matches.
+                 https ONLY (no http): a security-focused messenger, and extra schemes
+                 block App Links verification. autoVerify checks
+                 https://zitrone.app/.well-known/assetlinks.json, which the OPERATOR
+                 deploys AFTER the feature ships end-to-end (see docs/RELEASING_ANDROID.md).
+                 Until that file is live and verified, Android 12+ silently opens these
+                 links in the browser — that is the DESIGNED fallback (no-app-installed →
+                 marketing site), not a bug. Link handling itself lands in a later phase;
+                 this declaration is inert until then. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:host="zitrone.app" />
+                <data android:pathPrefix="/d/" />
+            </intent-filter>
         </activity>
 
         <!-- QR scanner for contact exchange. Subclasses ZXing's CaptureActivity

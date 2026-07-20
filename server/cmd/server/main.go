@@ -107,6 +107,15 @@ func main() {
 	v1.Post("/blobs", handlers.RequireAuth, handlers.DepositBlob)
 	v1.Post("/blobs/redeem", handlers.RedeemBlob)
 
+	// QR dead drops (lemon drops) — anonymous, unauthenticated. Proof-of-work on
+	// deposit stands in for auth; fetch is blind and NON-destructive (a wrong scan
+	// must not burn the drop for the real recipient); burn destroys the row only
+	// for a client that knows the burn-token preimage carried inside the plaintext
+	// (see qrdrops.go).
+	v1.Post("/qr-drops", handlers.DepositQrDrop)
+	v1.Post("/qr-drops/fetch", handlers.FetchQrDrop)
+	v1.Post("/qr-drops/burn", handlers.BurnQrDrop)
+
 	// Multi-hop relay forwarding (v1.5). Served only when this deployment is
 	// configured as a relay node (RELAY_PRIVATE_KEY set).
 	if handlers.RelayEnabled() {

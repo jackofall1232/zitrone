@@ -13,6 +13,10 @@ import type {
   BlobDepositRequest,
   BlobDepositResponse,
   BlobRedeemResponse,
+  QrDropDepositRequest,
+  QrDropDepositResponse,
+  QrDropFetchResponse,
+  QrDropBurnRequest,
 } from "@zitrone/protocol";
 import { isTauri, nativeRequest } from "./nativeTransport.js";
 import { getServerUrl, SERVER_URL } from "../config.js";
@@ -148,5 +152,34 @@ export const api = {
 
   redeemBlob(token: string): Promise<BlobRedeemResponse> {
     return request("/api/v1/blobs/redeem", { method: "POST", body: JSON.stringify({ token }) });
+  },
+
+  // QR dead drops / "lemon drops" (v1.7) — no auth: the hashcash proof-of-work
+  // carried in the body IS the admission control, so the REQUEST carries no
+  // account (no token, nothing in the payload to link). Honest limit: a relay
+  // can still correlate a deposit with the authenticated prekey fetch that
+  // typically precedes it on the same transport (see store.sendQrDrop and the
+  // SECURITY_MODEL.md disclosure). The relay stores an opaque sealed blob under
+  // the qr_id and hands back only its expiry.
+  depositQrDrop(body: QrDropDepositRequest): Promise<QrDropDepositResponse> {
+    return request("/api/v1/qr-drops", { method: "POST", body: JSON.stringify(body) });
+  },
+
+  // Fetch + burn a lemon drop — BOTH UNAUTHENTICATED, and deliberately so: an
+  // unauthenticated fetch/burn keeps the blind relay from linking either action
+  // to an account (the qr_id is the only capability on fetch; the burn token
+  // preimage, recovered only by a successful decryptor, is the only capability
+  // on burn). Fetch is non-destructive and repeatable by design — the relay
+  // can't see the decrypt outcome, so a wrong-recipient scan must not be able to
+  // burn the drop out from under the real recipient.
+  fetchQrDrop(qrId: string): Promise<QrDropFetchResponse> {
+    return request("/api/v1/qr-drops/fetch", {
+      method: "POST",
+      body: JSON.stringify({ qr_id: qrId }),
+    });
+  },
+
+  burnQrDrop(body: QrDropBurnRequest): Promise<void> {
+    return request("/api/v1/qr-drops/burn", { method: "POST", body: JSON.stringify(body) });
   },
 };

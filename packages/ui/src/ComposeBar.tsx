@@ -15,6 +15,16 @@ export interface ComposeBarProps {
   placeholder?: string;
   /** Long-press the send button to compose a dead drop (Ghost/Stealth modes). */
   onSendAsDeadDrop?: (text: string) => void;
+  /**
+   * Seal the composed text into a QR "lemon drop" addressed to this contact.
+   * Surfaced as a dedicated leading action (a QR glyph) rather than the send
+   * button's long-press, which is already taken by the dead-drop affordance.
+   * Available in every mode, Ghost included — it is a distinct mechanism.
+   */
+  /** QR dead-drop action. The draft is handed up UNCLEARED — sealing has a
+   *  TTL-picker step the user may cancel, and clearing here would discard the
+   *  only copy. The parent calls `clearDraft` after a successful deposit. */
+  onSendAsQrDrop?: (text: string, clearDraft: () => void) => void;
 }
 
 export function ComposeBar({
@@ -24,6 +34,7 @@ export function ComposeBar({
   sending = false,
   placeholder = "Message",
   onSendAsDeadDrop,
+  onSendAsQrDrop,
 }: ComposeBarProps) {
   const [text, setText] = useState("");
   const [focused, setFocused] = useState(false);
@@ -40,6 +51,15 @@ export function ComposeBar({
     if (!trimmed || disabled || !onSendAsDeadDrop) return;
     onSendAsDeadDrop(trimmed);
     setText("");
+  };
+
+  const sendAsQrDrop = () => {
+    const trimmed = text.trim();
+    if (!trimmed || disabled || !onSendAsQrDrop) return;
+    // Hand the text up for the TTL choice + sealing. Deliberately NOT cleared
+    // here: the picker may be canceled (or sealing may fail), and the box holds
+    // the only copy of the draft — the parent clears it on successful deposit.
+    onSendAsQrDrop(trimmed, () => setText(""));
   };
 
   return (
@@ -71,6 +91,32 @@ export function ComposeBar({
           onMouseLeave={(e) => (e.currentTarget.style.color = color.semantic.textSecondary)}
         >
           +
+        </button>
+      )}
+      {onSendAsQrDrop && (
+        <button
+          type="button"
+          onClick={sendAsQrDrop}
+          aria-label="Send as QR drop"
+          title="Seal into a QR drop for this contact"
+          style={{
+            background: "none",
+            border: "none",
+            cursor: "pointer",
+            color: color.semantic.textSecondary,
+            padding: 8,
+            lineHeight: 0,
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.color = color.core.lemon)}
+          onMouseLeave={(e) => (e.currentTarget.style.color = color.semantic.textSecondary)}
+        >
+          {/* QR glyph: three finder squares + a data block, in currentColor. */}
+          <svg width={20} height={20} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+            <path d="M3 3h6v6H3V3zm2 2v2h2V5H5z" />
+            <path d="M15 3h6v6h-6V3zm2 2v2h2V5h-2z" />
+            <path d="M3 15h6v6H3v-6zm2 2v2h2v-2H5z" />
+            <path d="M13 13h3v3h-3v-3zm5 0h3v3h-3v-3zm-5 5h3v3h-3v-3zm5 0h3v3h-3v-3z" />
+          </svg>
         </button>
       )}
       <textarea

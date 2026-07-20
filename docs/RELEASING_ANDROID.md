@@ -121,3 +121,101 @@ Do this **last** — flipping the pointer before the asset is uploaded 404s test
 
 Publish the signing cert's SHA-256 digest alongside the checksum in the release notes: for a
 sideloaded privacy app, that fingerprint is how testers confirm the APK is genuinely yours.
+
+## App Links for QR dead drops (`https://zitrone.app/d/…`)
+
+`.MainActivity` declares an `autoVerify` intent-filter for `https://zitrone.app/d/*` (the QR
+dead-drop / "lemon drop" links). For Android to open those links **in the app** instead of the
+browser, it verifies domain ownership against a Digital Asset Links file the operator hosts on
+`zitrone.app`. **This declaration is inert until that file is deployed** — see the status note at the
+end of this section.
+
+> **Status: deferred on purpose.** `assetlinks.json` is NOT deployed yet. Per the standing
+> "deliver then claim" rule, hosting it waits until the dead-drop feature is verified end-to-end.
+> Until then the manifest intent-filter is declared but unverified, and Android 12+ opens
+> `https://zitrone.app/d/…` links in the default browser — the designed no-app fallback (they land on
+> the marketing site). This section is the runbook for when that deployment happens.
+
+### What to host
+
+A single file, reachable at exactly:
+
+```
+https://zitrone.app/.well-known/assetlinks.json
+```
+
+Contents (the `package_name` is the app's real `applicationId` from
+[`apps/android/app/build.gradle.kts`](../apps/android/app/build.gradle.kts) — `com.zitrone.app`):
+
+```json
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.zitrone.app",
+      "sha256_cert_fingerprints": [
+        "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89"
+      ]
+    }
+  }
+]
+```
+
+The fingerprint is **uppercase, colon-separated SHA-256** and lives in an array (you can list more
+than one — e.g. during a key rotation).
+
+### Which certificate's fingerprint
+
+This project distributes signed APKs directly (GitHub Release + Tor/onion mirror), so the fingerprint
+is the **operator's release keystore signing cert** — the same key from the pre-flight checks above.
+Read it from the keystore (which never enters the repo or an agent session):
+
+```bash
+keytool -list -v -keystore release.jks -alias zitrone   # copy the "SHA256:" fingerprint
+```
+
+> **If you ever switch to Play distribution with Play App Signing**, the fingerprint must instead be
+> the **app-signing key** shown in Play Console → **Release → Setup → App signing**, NOT your upload
+> key. Pasting the upload key's fingerprint here is the classic silent failure: the build installs,
+> verification just never succeeds and every link falls back to the browser.
+
+### Serving requirements
+
+- Served over **HTTPS**, `Content-Type: application/json`, returning **HTTP 200 with no redirects**.
+  A `30x` (even the http→https or apex↔www canonicalisation you'd never think about) makes
+  verification fail silently.
+- On the Vercel/Next.js marketing site the file goes in **`public/.well-known/assetlinks.json`** so
+  it is served verbatim. Any `middleware` matcher **must exclude `/.well-known/*`** — a
+  canonical-domain redirect from middleware would break verification while the file itself looks
+  perfectly fine.
+- Android 15+ **re-verifies periodically**; after you deploy or change the file, propagation can take
+  **up to ~7 days**. Don't conclude it's broken from one failed check.
+
+### Verify / test
+
+```bash
+# Current verification state per host (look for "verified" on zitrone.app):
+adb shell pm get-app-links com.zitrone.app
+
+# Force a re-verification pass (async — wait ~20s+, then re-run get-app-links):
+adb shell pm verify-app-links --re-verify com.zitrone.app
+```
+
+Before `assetlinks.json` is deployed you can still test in-app handling by **force-approving** the
+domain locally (state `2` = "approved without verification", for testing only):
+
+```bash
+adb shell pm set-app-links --package com.zitrone.app 2 zitrone.app
+
+# Simulate a link tap:
+adb shell am start -a android.intent.action.VIEW \
+  -c android.intent.category.BROWSABLE \
+  -d "https://zitrone.app/d/test"
+```
+
+### Fallback behavior
+
+On Android 12+ an **unverified** App Link opens the **default browser silently** — there is no
+chooser dialog. That is the intended no-app fallback for these links (the dead-drop URL resolves to
+the marketing site), so an unverified state is a graceful degradation, not an outage.
