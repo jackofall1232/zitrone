@@ -69,6 +69,18 @@ describe("QR drop URL codec", () => {
     expect(parseQrDropUrl(`https://zitrone.app/d/${bareId}/`)).toBeNull();
   });
 
+  it("rejects any query, fragment, or userinfo decoration", () => {
+    // A canonical sticker URL is the path and nothing else — and the Android
+    // parser (raw-string validation) already refuses these, so the TS parser
+    // must fail closed identically rather than letting new URL() strip them.
+    const bareId = buildQrDropUrl(qrId()).slice(QR_DROP_URL_BASE.length);
+    expect(parseQrDropUrl(`https://zitrone.app/d/${bareId}?utm_source=x`)).toBeNull();
+    expect(parseQrDropUrl(`https://zitrone.app/d/${bareId}#frag`)).toBeNull();
+    expect(parseQrDropUrl(`https://user@zitrone.app/d/${bareId}`)).toBeNull();
+    expect(parseQrDropUrl(`https://user:pw@zitrone.app/d/${bareId}`)).toBeNull();
+    expect(parseQrDropUrl(`https://zitrone.app:8443/d/${bareId}`)).toBeNull();
+  });
+
   it("rejects a wrong-length id", () => {
     // 15 and 17 bytes both fail the strict 16-byte length check.
     expect(parseQrDropUrl(buildQrDropUrl(new Uint8Array(15)))).toBeNull();

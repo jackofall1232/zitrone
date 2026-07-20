@@ -129,6 +129,14 @@ export function parseQrDropUrl(input: string): Uint8Array | null {
     }
     if (url.protocol !== "https:") return null;
     if (url.host.toLowerCase() !== QR_DROP_HOST) return null;
+    // A canonical sticker URL carries NOTHING but the path: any query, fragment,
+    // or userinfo is rejected outright. new URL() would silently strip these out
+    // of pathname, which made a decorated full URL pass while the same
+    // decoration on a bare path failed — and while Android's parser (which
+    // validates the raw string) refused it. All parsers fail closed identically.
+    if (url.search !== "" || url.hash !== "" || url.username !== "" || url.password !== "") {
+      return null;
+    }
     const match = /^\/d\/([^/]+)$/.exec(url.pathname);
     if (!match) return null;
     idPart = match[1]!;

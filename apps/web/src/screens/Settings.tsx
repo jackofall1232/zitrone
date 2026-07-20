@@ -66,9 +66,19 @@ export function Settings({ onClose }: { onClose: () => void }) {
           setDropOutcome(outcome);
         }
       })
-      // Malformed link (Error("bad link")) or a transport failure both land as
-      // an inline note, mirroring the dead-drop redeem section's error text.
-      .catch(() => setDropLinkError("That doesn't look like a lemon drop link."));
+      // Two honestly different inline notes: a malformed link is the user's
+      // input (the store throws Error("bad link") before any network I/O), while
+      // anything else here is a fetch/transport failure — telling someone their
+      // perfectly valid link "doesn't look right" over a connection blip would
+      // just be wrong. (A 404 is neither: it resolves to the "unavailable"
+      // outcome above.)
+      .catch((err: unknown) => {
+        setDropLinkError(
+          err instanceof Error && err.message === "bad link"
+            ? "That doesn't look like a lemon drop link."
+            : "Couldn't reach the relay — check your connection and try again.",
+        );
+      });
   };
 
   return (
