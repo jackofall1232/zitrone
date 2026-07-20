@@ -217,10 +217,17 @@ class MainActivity : FragmentActivity() {
      */
     private fun openLemonDrop(pending: PendingLemonDrop) {
         val container = (application as ZitroneApp).container
-        container.lemonDropRedeemer.deliver(pending)
-        lifecycleScope.launch(Dispatchers.IO) { container.lemonDropRedeemer.burn(pending) }
+        // Render immediately; the side effects (encrypted-prefs write + network
+        // burn) run off the main thread. Prekey consumption goes first: once
+        // the message has rendered, the drop must not be openable again even
+        // if the burn never lands (single-use by design; the TTL then reaps
+        // the undecryptable relay copy).
         lemonDropVeil.value =
             LemonDropVeil.Delivered(pending.text, pending.senderLabel, pending.senderVerified)
+        lifecycleScope.launch(Dispatchers.IO) {
+            container.lemonDropRedeemer.deliver(pending)
+            container.lemonDropRedeemer.burn(pending)
+        }
     }
 
     private fun maybeRequestNotificationPermission() {
