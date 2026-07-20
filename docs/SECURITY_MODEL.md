@@ -444,6 +444,16 @@ itself.
   all the same 404 — a prober learns nothing — and after expiry or claim the physical sticker
   permanently degrades into a harmless pointer: scans fall through to the marketing site or the
   in-app "not for this device" screen, with no lingering security exposure.
+  - *Read-once is enforced by the burn, not the crypto, when no one-time prekey was used.* A
+    reading device deletes the one-time prekey the drop consumed, so a re-scan of an
+    OTP-bearing drop can no longer reconstruct the responder session (it fails closed).
+    But when the creator's fetched bundle had **no** one-time prekey left (the recipient's
+    stock was exhausted), the drop is decryptable from the identity + signed prekey alone —
+    so until the best-effort burn lands or the TTL fires, the *intended recipient* can
+    re-open their own already-read message on a re-scan. This is a property of the protocol
+    (identical on web/desktop), not a confidentiality loss — the drop stays sealed to that
+    one recipient throughout — and the TTL is the hard backstop. Keeping the client's stock
+    replenished (the low-water-mark upload) makes the no-OTP case rare.
 - **A dead sticker stays dead — the tombstone tradeoff.** Burn and expiry do not delete the
   drop's row; they crypto-shred its ciphertext and burn hash and keep the `qr_id` forever as a
   tombstone, so no one — including the sticker's creator — can ever deposit a new drop under a

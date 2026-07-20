@@ -379,6 +379,10 @@ object LemonDropOneShot {
             counter += 1
         }
         prk.fill(0)
+        // `previous` holds the last expanded key-stream block — wipe it too so no
+        // derived key material lingers (the returned `out` is the caller's to
+        // zero once consumed).
+        previous.fill(0)
         return out
     }
 

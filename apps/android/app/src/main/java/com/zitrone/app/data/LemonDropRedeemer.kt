@@ -93,8 +93,13 @@ class LemonDropRedeemer(
         }
         // The per-call key copies are zeroed the moment the open attempt
         // returns, whatever its outcome (single-use contract on RecipientKeys).
+        // A defensive catch keeps any unexpected store/crypto throw from
+        // crashing the probe coroutine — it becomes the neutral advocacy screen;
+        // the finally still zeroes the key material on every path.
         val result = try {
             LemonDropOneShot.open(sodium, ciphertext, keys)
+        } catch (e: Exception) {
+            return ProbeResult.Advocacy(LemonDropScanOutcome.SEALED)
         } finally {
             keys.zero()
         }
@@ -204,13 +209,21 @@ class LemonDropRedeemer(
                 )
             },
             oneTimePrekeyLoader = { id ->
-                if (signalStore.containsPreKey(id)) {
-                    val keyPair = signalStore.loadPreKey(id).keyPair
-                    LemonDropOneShot.OneTimePrekey(
-                        publicKey = keyPair.publicKey.getPublicKeyBytes(),
-                        privateScalar = keyPair.privateKey.serialize(),
-                    )
-                } else {
+                // Called lazily DURING open(), so a Keystore/store throw here would
+                // otherwise escape open. Treat any failure — or a prekey we no
+                // longer hold — as "not available": the responder DH then can't
+                // reconstruct and the drop fails closed to Invalid, honestly.
+                try {
+                    if (signalStore.containsPreKey(id)) {
+                        val keyPair = signalStore.loadPreKey(id).keyPair
+                        LemonDropOneShot.OneTimePrekey(
+                            publicKey = keyPair.publicKey.getPublicKeyBytes(),
+                            privateScalar = keyPair.privateKey.serialize(),
+                        )
+                    } else {
+                        null
+                    }
+                } catch (e: Exception) {
                     null
                 }
             },
