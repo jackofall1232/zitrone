@@ -1,0 +1,12 @@
+{
+  "spk_pub": "Xzd8CtHihDb1uv0YTsFRtPmkHleDAeNswApZcinfo18=",
+  "otp_priv": "YGzcvbukhNa33Ku4tHpPFkrf3lLyp/2GtSYFDCuPhm4=",
+  "otp_pub": "jBXGpAhyyEnpRTK+hIMWQqC0VQ4ATThU9ftrMtydxgg=",
+  "identity_priv": "mP5cZnRr6GDkWxacxxsN8GcbFI5X2KQWqasXFukf8Xk=",
+  "spk_id": 7,
+  "spk_priv": "wIqt7/jAOAwJUBX+rLJbE4RfP1dHAjRvpkjFB5PkI1o=",
+  "comment": "Android-family lemon-drop recipient keys (libsignal-generated). TEST FIXTURE ONLY.",
+  "spk_sig": "Nc+Is9LzmLh/VPOIl50XfEuRB8RMqmU28D9vKrPD+wk8tQEgkorPxDSF4cXRhlFlHjMF2ZpNWpUe7KBHTHlTBA==",
+  "identity_pub": "ZFeduFAuckScu/ni1QgZThCYjXVRAXraJDc+kcL2P0k=",
+  "otp_id": 42
+}

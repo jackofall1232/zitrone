@@ -28,7 +28,10 @@ import java.security.SecureRandom
  *
  * All key material is held by [EncryptedSignalProtocolStore] — encrypted at
  * rest behind the Android Keystore. Nothing here logs, and nothing here ever
- * returns private key bytes to callers.
+ * returns private key bytes to callers. (One deliberate, documented exception
+ * exists OUTSIDE this class: LemonDropRedeemer's private key-bridge reads raw
+ * scalars from the store for the isolated one-shot lemon-drop responder —
+ * see its class doc. It must stay the only one.)
  */
 class SignalProtocolManager(
     private val store: EncryptedSignalProtocolStore,

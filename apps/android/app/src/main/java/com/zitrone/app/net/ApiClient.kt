@@ -264,19 +264,34 @@ class ApiClient(
      * body field. Fetch is non-destructive on the server, so a wrong-recipient
      * scan can never burn a drop out from under its real recipient.
      *
-     * The response ciphertext is deliberately NOT returned: the Android V1 caller
-     * fires this ONLY so that a scan is network-indistinguishable from a real
-     * redemption attempt and exercises the real route — it never opens the box
-     * (see MainActivity). The only information the caller takes is the OUTCOME:
-     * success means a live drop's blob was served; a 404 (missing/expired/burned,
-     * all indistinguishable) or any other non-2xx surfaces as an [ApiException];
-     * consistent with the rest of this client, the CALLER decides what to do —
-     * here it maps the result to the advocacy screen's honest copy variants
-     * (see classifyLemonDropFetch) and surfaces nothing as an error.
+     * Returns the sealed blob as STANDARD base64 for the isolated one-shot
+     * open attempt (LemonDropRedeemer → LemonDropOneShot). Whether this device
+     * is the recipient is decided purely client-side by whether the seal
+     * opens; the request is identical for every scanner, so a scan stays
+     * network-indistinguishable from a real redemption attempt. A 404
+     * (missing/expired/burned, all indistinguishable) or any other non-2xx
+     * surfaces as an [ApiException]; consistent with the rest of this client,
+     * the CALLER decides what to do — mapping failures to the advocacy
+     * screen's honest copy variants (see classifyLemonDropFetch), never to an
+     * error surface.
      */
-    suspend fun fetchQrDrop(qrId: String) {
+    suspend fun fetchQrDrop(qrId: String): String {
         val body = JSONObject().put("qr_id", qrId)
-        execute(post("/api/v1/qr-drops/fetch", body, authenticated = false))
+        val json = execute(post("/api/v1/qr-drops/fetch", body, authenticated = false))
+        return json.getString("ciphertext")
+    }
+
+    /**
+     * POST /api/v1/qr-drops/burn — present the burn-token preimage recovered
+     * from INSIDE the drop so the relay shreds its only copy now. Only a
+     * successful decryptor can hold the token, so the route needs no auth and
+     * links the burn to no account; the relay verifies SHA-256(token) against
+     * the stored burn_hash and tombstones the qr_id (qrdrops.go BurnQrDrop).
+     * Callers treat this as best-effort: the drop's TTL is the backstop.
+     */
+    suspend fun burnQrDrop(qrId: String, burnTokenBase64: String) {
+        val body = JSONObject().put("qr_id", qrId).put("burn_token", burnTokenBase64)
+        execute(post("/api/v1/qr-drops/burn", body, authenticated = false))
     }
 
     /** DELETE /api/v1/account — full, irreversible purge of all server data. */

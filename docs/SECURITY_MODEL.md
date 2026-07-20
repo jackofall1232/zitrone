@@ -77,7 +77,12 @@ libsignal's 33-byte type-tagged `serialize()` form; web/desktop signs the raw
 32-byte prekey directly). The server verifies both conventions
 (`server/internal/auth/xeddsa.go`'s `VerifyXEdDSA`, tried alongside plain
 `ed25519.Verify` in `Register`/`UploadPrekeys`/`VerifyLogin`) rather than
-picking one, so neither platform's client needs to change. This split was
+picking one, so neither platform's client needs to change. Since the lemon-drop
+Android bridge, the **web/desktop client applies the same try-both logic to
+fetched bundles** (`packages/crypto/src/xeddsa.ts` + `classifyBundleIdentity`,
+validated against the same real libsignal signature vectors as the server's
+port): which scheme verifies decides the identity key's family — and with it
+the DH/sealed-box handling — and a bundle verifying under neither is rejected. This split was
 discovered while investigating a registration bug that affected mobile only
 (web/desktop's Ed25519 path was — and still is — correct); see
 `.l00prite/ledger.md` Run 12–14 for the full investigation and the reasoning
@@ -439,6 +444,16 @@ itself.
   all the same 404 — a prober learns nothing — and after expiry or claim the physical sticker
   permanently degrades into a harmless pointer: scans fall through to the marketing site or the
   in-app "not for this device" screen, with no lingering security exposure.
+  - *Read-once is enforced by the burn, not the crypto, when no one-time prekey was used.* A
+    reading device deletes the one-time prekey the drop consumed, so a re-scan of an
+    OTP-bearing drop can no longer reconstruct the responder session (it fails closed).
+    But when the creator's fetched bundle had **no** one-time prekey left (the recipient's
+    stock was exhausted), the drop is decryptable from the identity + signed prekey alone —
+    so until the best-effort burn lands or the TTL fires, the *intended recipient* can
+    re-open their own already-read message on a re-scan. This is a property of the protocol
+    (identical on web/desktop), not a confidentiality loss — the drop stays sealed to that
+    one recipient throughout — and the TTL is the hard backstop. Keeping the client's stock
+    replenished (the low-water-mark upload) makes the no-OTP case rare.
 - **A dead sticker stays dead — the tombstone tradeoff.** Burn and expiry do not delete the
   drop's row; they crypto-shred its ciphertext and burn hash and keep the `qr_id` forever as a
   tombstone, so no one — including the sticker's creator — can ever deposit a new drop under a
@@ -465,17 +480,53 @@ itself.
   without one — the recipient's stock had run out — a replay can wind the session back and wedge
   the conversation until either side re-establishes. That is a denial-of-service corner for a
   relay-level adversary, not a confidentiality loss.
+- **One-way by design — a drop is not a conversation.** A lemon drop has exactly two exits:
+  delivered to its one true recipient, or expired unclaimed — both destroy it. There is **no
+  reply path, no session continuation, and no expectation of one**: the one-shot X3DH session
+  is discarded on both ends, and a sender learned from a drop is **not** a conversation partner
+  until a separate, ordinary contact/session establishment happens through the normal
+  add-contact flow. (On web/desktop, redeeming does additionally spin up an ordinary outbound
+  session for convenience; on Android it deliberately does not — see below — and cross-family
+  conversations remain unsupported either way, so adding an Android contact from web enables
+  addressing *drops* to them, not chatting with them.)
+- **Cross-family addressing (the Android bridge).** Web/desktop identity keys are Ed25519;
+  Android/iOS (libsignal) identity keys are Curve25519 — the same X25519 DH underneath, but
+  different published point encodings and different prekey-signature schemes. The creator side
+  is now **family-aware by verification, never by guessing**: it verifies a fetched bundle
+  under plain Ed25519 (raw prekey) *or* XEdDSA (33-byte type-tagged form) — the same try-both
+  logic the relay has always applied, ported client-side (`packages/crypto/src/xeddsa.ts`,
+  tested against the identical real-libsignal signature vectors as the server's verifier) —
+  and whichever scheme verified decides how the identity key enters the DH and the sealed box.
+  A bundle that verifies under neither scheme is rejected outright. This cross-family path is
+  **scoped to lemon-drop creation only** (`x3dhInitiate`'s `allowCrossFamily`): ordinary
+  messaging still refuses a mobile bundle, because a web↔mobile *session* would exchange
+  ciphertext neither ratchet can parse — a drop escapes that only because it is a one-shot
+  sealed payload with a matching one-shot opener, not an ongoing session.
+- **Android vs iOS is indistinguishable on the wire — the honest gap.** Both mobile platforms
+  publish the same Curve25519/XEdDSA bundle, and the zero-knowledge server stores nothing that
+  says which. So the creator cannot programmatically tell an Android recipient (has a lemon-drop
+  opener) from an iOS one (has none yet). A drop addressed to an iOS contact is still sealed to
+  their real key and deposited — **it simply expires unopened and is shredded at its TTL; no
+  content leaks** (only that recipient could ever open it, and their client has no opener).
+  Because the creator hands a physical sticker to a specific person they know, the platform is
+  human-known in practice; a wire-level capability signal that would let the software refuse an
+  iOS recipient up front is deferred follow-up work, not part of this release.
 - **Platform status, honestly.** Web and Linux desktop have the full flow (create and redeem).
-  Android intercepts the link, performs one fetch (so a scan is network-indistinguishable
-  from a redemption attempt), and shows the advocacy screen **without attempting
-  decryption**: accounts are per-device, and the clients able to create lemon drops today
-  (web/desktop) cannot address one to an Android-family account across the current
-  wire-format split — so an Android device is genuinely never the intended recipient. The
-  advocacy copy does reflect what that one fetch established — a live sealed drop, nothing
-  left to open, or (when the fetch never completed) no claim at all — but a message can never
-  render there until the cross-family bridge lands; that open attempt remains gated on crypto
-  review. iOS has none of this yet. `assetlinks.json` ships with the marketing site and the
-  site serves the ordinary marketing page at `/d/{id}`, so an unverified or app-less scan
+  Android cannot create drops, but it can now **be a true recipient**: a scan performs one
+  fetch (network-indistinguishable from any other scanner) and one open attempt in a
+  **self-contained one-shot responder** (`LemonDropOneShot`) that mirrors the web stack's
+  bytes exactly and is deliberately separate from ordinary libsignal messaging — it never
+  touches a session, and ordinary message decryption is unreachable from it. Two honest costs,
+  stated plainly: it needs raw private scalars from the encrypted key store (a narrow,
+  documented exception to the "private key bytes never leave the store" invariant, confined to
+  one private bridge), and it adds libsodium via the pinned `lazysodium` binding for the
+  sealed-box open. A decrypted drop renders only after an explicit biometric unlock — the
+  pre-unlock veil holds no plaintext — and delivery then consumes the one-time prekey and
+  burns the relay's copy; dismissing before unlock burns nothing, leaving the drop
+  re-scannable. Every non-delivery outcome (not ours, malformed, sender cross-check failed,
+  no identity on device) collapses into the same warm advocacy screen a wrong scanner has
+  always seen. iOS has none of this yet. `assetlinks.json` ships with the marketing site and
+  the site serves the ordinary marketing page at `/d/{id}`, so an unverified or app-less scan
   lands on the homepage (see `docs/RELEASING_ANDROID.md` for verification propagation, which
   can take days).
 
