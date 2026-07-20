@@ -5,10 +5,16 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { generateInvisibleWatermark } from "@zitrone/crypto";
-import { platformWarning, TTL_OPTIONS_SECONDS } from "@zitrone/protocol";
+import {
+  platformWarning,
+  QR_DROP_TTL_HOURS,
+  TTL_OPTIONS_SECONDS,
+  type QrDropTTLHours,
+} from "@zitrone/protocol";
 import {
   ComposeBar,
   ConnectionModeBadge,
+  LemonSpinner,
   MessageBubble,
   PlatformWarningBadge,
   PrivacyView,
@@ -16,6 +22,7 @@ import {
 } from "@zitrone/ui";
 import { MESSAGES_CONTAINER_ID } from "../components/ScreenshotShield.js";
 import { Attachment } from "../components/Attachment.js";
+import { QrDropModal } from "../components/QrDropModal.js";
 import { AttachmentTooLargeError, prepareAttachment } from "../lib/attachments.js";
 import { useApp } from "../store.js";
 import { useSettings } from "../settings.js";
@@ -29,6 +36,16 @@ const TTL_LABELS: Record<number, string> = {
   604800: "1w",
 };
 
+// The five allowlisted QR-drop lifetimes (hours). Deliberately capped at two
+// weeks — a sticker in the wild should not outlive that (see QR_DROP_TTL_HOURS).
+const QR_TTL_LABELS: Record<QrDropTTLHours, string> = {
+  24: "24h",
+  48: "48h",
+  72: "72h",
+  168: "1 week",
+  336: "2 weeks",
+};
+
 export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () => void }) {
   const contact = useApp((s) => s.contacts[peerId]);
   const keyStore = useApp((s) => s.keyStore);
@@ -37,6 +54,7 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
   const sendMessage = useApp((s) => s.sendMessage);
   const sendAttachment = useApp((s) => s.sendAttachment);
   const sendDeadDrop = useApp((s) => s.sendDeadDrop);
+  const sendQrDrop = useApp((s) => s.sendQrDrop);
   const openMessage = useApp((s) => s.openMessage);
   const finishBurn = useApp((s) => s.finishBurn);
   const expireMessage = useApp((s) => s.expireMessage);
@@ -53,6 +71,13 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
   const [burnOnRead, setBurnOnRead] = useState(false);
   const [warningDismissed, setWarningDismissed] = useState(false);
   const [dropToken, setDropToken] = useState<string | null>(null);
+  // QR-drop flow: qrDraft holds the composed text awaiting a TTL choice (its
+  // presence opens the picker); qrResult holds the sealed drop's url + expiry
+  // for the result modal.
+  const [qrDraft, setQrDraft] = useState<string | null>(null);
+  const [qrSealing, setQrSealing] = useState(false);
+  const [qrError, setQrError] = useState<string | null>(null);
+  const [qrResult, setQrResult] = useState<{ url: string; expiresAt: string } | null>(null);
   const [attachError, setAttachError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -92,6 +117,33 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
     void sendDeadDrop(peerId, text)
       .then(setDropToken)
       .catch(() => setDropToken(null));
+  };
+
+  // QR drop: the compose action hands us the text; we open the TTL picker, and
+  // only once a lifetime is chosen do we seal (PoW ~1.5s) and deposit. This runs
+  // in every mode — Ghost included — because it is a distinct, recipient-targeted
+  // mechanism, not the per-message dead drop Ghost routes ordinary sends through.
+  const onSendQrDrop = (text: string) => {
+    setQrError(null);
+    setQrDraft(text);
+  };
+  const chooseQrTtl = (ttlHours: QrDropTTLHours) => {
+    const text = qrDraft;
+    if (text === null || qrSealing) return;
+    setQrSealing(true);
+    setQrError(null);
+    void sendQrDrop(peerId, text, ttlHours)
+      .then((res) => {
+        setQrResult(res);
+        setQrDraft(null);
+      })
+      .catch(() => setQrError("Couldn't seal the drop — try again."))
+      .finally(() => setQrSealing(false));
+  };
+  const cancelQrDraft = () => {
+    if (qrSealing) return;
+    setQrDraft(null);
+    setQrError(null);
   };
 
   // In Ghost mode every message is a dead drop — no direct channel exists. The
@@ -257,11 +309,87 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
         onSend={onPrimarySend}
         onAttach={ghost ? undefined : onAttach}
         onSendAsDeadDrop={ghost ? undefined : onSendDeadDrop}
+        onSendAsQrDrop={onSendQrDrop}
         placeholder={ghost ? "Message (dead drop)" : "Message"}
       />
 
       {dropToken && <DeadDropTokenModal token={dropToken} onClose={() => setDropToken(null)} />}
+
+      {qrDraft !== null && (
+        <QrTtlPicker
+          sealing={qrSealing}
+          error={qrError}
+          onPick={chooseQrTtl}
+          onCancel={cancelQrDraft}
+        />
+      )}
+
+      {qrResult && (
+        <QrDropModal
+          url={qrResult.url}
+          expiresAt={qrResult.expiresAt}
+          recipientName={contact.displayName}
+          onClose={() => setQrResult(null)}
+        />
+      )}
     </section>
+  );
+}
+
+// Pick a lifetime for a QR drop, then seal. While sealing (one-shot X3DH + PoW,
+// ~1.5s) the picker shows a working state instead of freezing silently.
+function QrTtlPicker({
+  sealing,
+  error,
+  onPick,
+  onCancel,
+}: {
+  sealing: boolean;
+  error: string | null;
+  onPick: (ttlHours: QrDropTTLHours) => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/70"
+      role="dialog"
+      aria-modal
+    >
+      <div className="flex w-full max-w-md flex-col gap-4 rounded-xl border border-line bg-bg-secondary p-8">
+        <h2 className="font-display text-lg font-semibold text-ink-primary">Seal as a QR drop</h2>
+        <p className="text-sm text-ink-secondary">
+          How long should this drop live on the relay before it burns unclaimed?
+        </p>
+        {sealing ? (
+          <div className="flex items-center gap-3 py-2 text-sm text-ink-secondary">
+            <LemonSpinner size={28} label="Sealing" />
+            Sealing… (solving the deposit proof-of-work)
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {QR_DROP_TTL_HOURS.map((h) => (
+              <button
+                key={h}
+                onClick={() => onPick(h)}
+                className="rounded-full border border-line px-3 py-1 text-[13px] text-ink-secondary hover:bg-lemon hover:text-ink-on-lemon"
+              >
+                {QR_TTL_LABELS[h]}
+              </button>
+            ))}
+          </div>
+        )}
+        {error && <p className="text-[12px] text-burn-orange">{error}</p>}
+        <div className="flex justify-end">
+          <button
+            onClick={onCancel}
+            disabled={sealing}
+            className="rounded-full px-4 py-1.5 text-sm text-ink-secondary hover:text-ink-primary disabled:opacity-50"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

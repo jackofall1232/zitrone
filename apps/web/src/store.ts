@@ -9,6 +9,7 @@
 // constant payload size and AES-256-GCM-encrypted under this vault's key.
 
 import {
+  createLemonDrop,
   decryptAttachmentBlob,
   encryptAttachmentBlob,
   fromBase64,
@@ -36,6 +37,7 @@ import {
 } from "@zitrone/crypto";
 import {
   DROP_POW_DIFFICULTY,
+  encodeQrDropId,
   ONE_TIME_PREKEY_BATCH,
   parseEnvelope,
   parseReadReceipt,
@@ -44,6 +46,7 @@ import {
   type AttachmentKind,
   type AttachmentPayload,
   type MessageEnvelope,
+  type QrDropTTLHours,
   type ServerEvent,
 } from "@zitrone/protocol";
 import { DecoyScheduler } from "@zitrone/relay-client";
@@ -190,6 +193,18 @@ interface AppState {
   /** Encrypt a message to a contact and deposit it as a dead drop; returns the
    *  base64 one-time token to share out of band (QR / separate channel). */
   sendDeadDrop: (peerId: string, text: string) => Promise<string>;
+  /**
+   * Encrypt a one-shot "lemon drop" addressed to a contact and deposit it under
+   * a random qr_id. Returns the sticker URL to print/share and the drop's expiry
+   * for display. Unlike sendDeadDrop this never advances the contact's session —
+   * a lemon drop is encrypt-and-forget (a fresh ephemeral X3DH inside
+   * createLemonDrop), so it must never write to the contact record.
+   */
+  sendQrDrop: (
+    peerId: string,
+    text: string,
+    ttlHours: QrDropTTLHours,
+  ) => Promise<{ url: string; expiresAt: string }>;
   /** Redeem a dead drop by token: fetch, decrypt, and surface the message. */
   redeemDeadDrop: (tokenB64: string) => Promise<void>;
   expireMessage: (peerId: string, messageId: string) => void;
@@ -950,6 +965,80 @@ export const useApp = create<AppState>((set, get) => {
       await persist();
       // The token is the capability — shared out of band, never with the server.
       return await toBase64(token);
+    },
+
+    async sendQrDrop(peerId, text, ttlHours) {
+      const { keyStore, contacts, accountId } = get();
+      const contact = contacts[peerId];
+      // Same admission as sendDeadDrop: our keys, our account, and an existing
+      // contact to address the drop to. A lemon drop is recipient-targeted by
+      // design — never anonymous — so a known contact is required.
+      if (!keyStore || !accountId || !contact) throw new Error("unknown contact");
+
+      const identity = deserializeIdentity(keyStore.identityKey as unknown as SerializedIdentity);
+
+      // Fetch a FRESH prekey bundle: a lemon drop runs a brand-new one-shot X3DH
+      // against whatever the recipient publishes right now, independent of any
+      // live session we may already hold with this peer. Decode it exactly as
+      // addContact does (base64 → bytes) for x3dhInitiate inside createLemonDrop.
+      const token = await freshToken();
+      const bundle = await api.fetchPrekeyBundle(peerId, token);
+
+      // CRITICAL: this is one-shot encrypt-and-forget. The ephemeral X3DH session
+      // that createLemonDrop spins up encrypts EXACTLY ONE message and is then
+      // discarded — it never touches, advances, or is confused with
+      // contact.session. This action therefore MUST NOT write back to the contact
+      // record (contrast sendDeadDrop, which deliberately advances the persistent
+      // ratchet). Reusing the live session here would fork ratchet state.
+      const drop = await createLemonDrop({
+        senderAccountId: accountId,
+        senderIdentity: identity,
+        recipientAccountId: peerId,
+        recipientBundle: {
+          identityKey: unb64(bundle.identity_key),
+          signedPrekey: {
+            id: bundle.signed_prekey.id,
+            publicKey: unb64(bundle.signed_prekey.public_key),
+            signature: unb64(bundle.signed_prekey.signature),
+          },
+          oneTimePrekey: bundle.one_time_prekey
+            ? { id: bundle.one_time_prekey.id, publicKey: unb64(bundle.one_time_prekey.public_key) }
+            : null,
+        },
+        text,
+      });
+
+      // Deposit is unauthenticated — the hashcash PoW solved inside
+      // createLemonDrop is the only admission, so nothing here links the deposit
+      // to us. qr_id rides as unpadded base64url (the same form the sticker URL
+      // encodes); the sealed box, nonce, and burn hash as plain base64.
+      const { expires_at } = await api.depositQrDrop({
+        qr_id: encodeQrDropId(drop.qrId),
+        ciphertext: b64(drop.ciphertext),
+        ttl_hours: ttlHours,
+        pow_nonce: b64(drop.powNonce),
+        burn_hash: b64(drop.burnHash),
+      });
+
+      // Local sent bubble, exactly like sendDeadDrop: status stays SENT because a
+      // drop's redemption is unknowable — the blind relay can't tell us whether
+      // (or when) anyone scanned and read it.
+      appendMessage(peerId, {
+        id: crypto.randomUUID(),
+        peerId,
+        direction: "sent",
+        text,
+        timestamp: new Date().toISOString(),
+        ttlSeconds: null,
+        burnOnRead: false,
+        status: "sent",
+        deliveredAt: null,
+        burning: false,
+        opened: true,
+      });
+      await persist();
+
+      return { url: drop.url, expiresAt: expires_at };
     },
 
     async redeemDeadDrop(tokenB64) {
