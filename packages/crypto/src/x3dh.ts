@@ -50,9 +50,25 @@ export interface X3DHInitiationResult {
  *   DH4 = DH(EK_A,  OPK_B)        — when a one-time prekey is available
  *   SK  = HKDF(F || DH1..DH4)     — F = 32 bytes of 0xFF (per the X3DH spec)
  */
+export interface X3DHInitiateOptions {
+  /**
+   * Accept a Curve25519 (Android/iOS libsignal) bundle in addition to a
+   * web/desktop Ed25519 one. Defaults to FALSE, and that default is load-
+   * bearing: ordinary messaging (`addContact` → `sendMessage`) produces this
+   * package's custom ratchet blob, which a mobile client's libsignal decrypt
+   * path cannot parse — so a cross-family "contact" would send messages that
+   * never decrypt. Only **lemon-drop creation** sets this true, because a drop
+   * is a one-shot sealed payload the mobile side opens with a matching one-shot
+   * responder (apps/android LemonDropOneShot), never an ongoing session. Keep
+   * these two callers the ONLY place this is enabled.
+   */
+  allowCrossFamily?: boolean;
+}
+
 export async function x3dhInitiate(
   myIdentityKey: IdentityKeyPair,
   theirPreKeyBundle: DecodedPreKeyBundle,
+  options: X3DHInitiateOptions = {},
 ): Promise<X3DHInitiationResult> {
   await ready();
   const { identityKey, signedPrekey, oneTimePrekey } = theirPreKeyBundle;
@@ -68,6 +84,15 @@ export async function x3dhInitiate(
     identityKey,
   );
   if (family === null) throw new Error("prekey bundle signature verification failed");
+
+  // A Curve25519 (mobile-family) bundle is only usable by a caller that opted
+  // in — see X3DHInitiateOptions.allowCrossFamily. Ordinary messaging leaves
+  // it false, so this restores the pre-family-aware behavior for that path: a
+  // mobile bundle is refused here rather than seeding a session whose messages
+  // the peer could never decrypt.
+  if (family === "curve25519" && !options.allowCrossFamily) {
+    throw new Error("cross-family bundle not supported for ordinary messaging");
+  }
 
   // An Ed25519 identity key participates in DH via the birational map; a
   // Curve25519 (Android/iOS) identity key already IS the X25519 point and is

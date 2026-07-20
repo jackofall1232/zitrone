@@ -44,9 +44,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   decrypts end to end. A decrypted drop renders only after an explicit biometric unlock, and
   delivery consumes the one-time prekey and burns the relay's copy; every other outcome still
   lands on the advocacy screen. Lemon drops remain **one-way by design** — no reply path, no
-  conversation; delivery or expiry are the only two exits, both destroying the drop. New
-  dependency, pinned: `lazysodium` (libsodium binding) for the sealed-box open. iOS still has
-  none of this.
+  conversation; delivery or expiry are the only two exits, both destroying the drop. The
+  cross-family path is scoped to drop creation only — ordinary web↔mobile messaging is still
+  refused (a session would exchange undecryptable ciphertext). Android and iOS bundles are
+  wire-indistinguishable, so a drop addressed to an iOS contact deposits but simply expires
+  unopened (no leak); iOS has no opener yet. New dependency, pinned: `lazysodium` (libsodium
+  binding) for the sealed-box open.
 - **QR dead drops — "lemon drops."** Seal a message to one chosen contact as a printable QR
   sticker: the code carries only a `zitrone.app/d/{id}` pointer at a sealed blob on the relay,
   encrypted once at creation via one-shot X3DH (no live session touched). The relay is a blind,

@@ -174,19 +174,38 @@ describe("classifyBundleIdentity (client-side try-both, per-platform families)",
 });
 
 describe("x3dhInitiate against an Android-family bundle", () => {
-  it("verifies the real XEdDSA bundle and reports its family", async () => {
+  it("verifies the real XEdDSA bundle and reports its family (cross-family opt-in)", async () => {
     const me = await generateIdentityKeyPair();
-    const init = await x3dhInitiate(me, {
-      identityKey: await fromBase64(IDENTITY_RAW32_B64),
-      signedPrekey: {
-        id: 7,
-        publicKey: await fromBase64(SPK_RAW32_B64),
-        signature: await fromBase64(SPK_SIG_B64),
+    const init = await x3dhInitiate(
+      me,
+      {
+        identityKey: await fromBase64(IDENTITY_RAW32_B64),
+        signedPrekey: {
+          id: 7,
+          publicKey: await fromBase64(SPK_RAW32_B64),
+          signature: await fromBase64(SPK_SIG_B64),
+        },
+        oneTimePrekey: null,
       },
-      oneTimePrekey: null,
-    });
+      { allowCrossFamily: true },
+    );
     expect(init.identityKeyFamily).toBe("curve25519");
     expect(init.ephemeralPublicKey).toHaveLength(32);
+  });
+
+  it("refuses the same mobile bundle without the cross-family opt-in", async () => {
+    const me = await generateIdentityKeyPair();
+    await expect(
+      x3dhInitiate(me, {
+        identityKey: await fromBase64(IDENTITY_RAW32_B64),
+        signedPrekey: {
+          id: 7,
+          publicKey: await fromBase64(SPK_RAW32_B64),
+          signature: await fromBase64(SPK_SIG_B64),
+        },
+        oneTimePrekey: null,
+      }),
+    ).rejects.toThrow("cross-family bundle not supported for ordinary messaging");
   });
 
   it("still reports ed25519 for a web-family bundle", async () => {

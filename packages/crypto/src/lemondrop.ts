@@ -92,7 +92,12 @@ export async function createLemonDrop(input: CreateLemonDropInput): Promise<Crea
   // drop is deliberately encrypt-and-forget. This session must never be
   // persisted, reused, or mistaken for a live contact session the sender may
   // separately keep with this recipient — reuse would fork ratchet state.
-  const init = await x3dhInitiate(senderIdentity, recipientBundle);
+  // allowCrossFamily: a lemon drop is the ONE path that may address a mobile
+  // (Curve25519) recipient — the drop is a one-shot sealed payload the mobile
+  // side opens with a matching one-shot responder, never an ongoing session
+  // (contrast ordinary messaging, which x3dhInitiate refuses for mobile
+  // bundles by default). See X3DHInitiateOptions.
+  const init = await x3dhInitiate(senderIdentity, recipientBundle, { allowCrossFamily: true });
   const encrypted = await ratchetEncrypt(init.session, await pad(utf8Encode(text)));
   // init.session goes out of scope here, unpersisted — by design.
 

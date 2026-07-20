@@ -15,6 +15,7 @@ import com.zitrone.app.crypto.SignalProtocolManager
 import com.zitrone.app.data.ConversationRepository
 import com.zitrone.app.data.EncryptedRosterStore
 import com.zitrone.app.data.LemonDropRedeemer
+import com.zitrone.app.data.LemonDropScanOutcome
 import com.zitrone.app.data.LemonDropVeil
 import com.zitrone.app.data.MessageRepository
 import com.zitrone.app.data.SettingsRepository
@@ -134,6 +135,63 @@ class AppContainer(private val app: Application) {
         conversations = conversationRepository,
         sodium = LemonDropSodiumOps(SodiumAndroid()),
     )
+
+    private val lemonDropLock = Any()
+
+    /**
+     * Monotonic id of the most recent scan. A probe launched for an earlier
+     * scan must not overwrite a newer scan's veil once superseded — two
+     * `Advocacy(UNKNOWN)` values are structurally equal, so a compare-and-set
+     * on the value alone would let a stale probe clobber the current scan
+     * (Codex PR #4). Dismissal also bumps this so a late probe cannot resurrect
+     * a screen the user already closed.
+     */
+    private var lemonDropScanToken = 0L
+
+    /**
+     * Handle a scanned `/d/{id}`: raise the veil, then run the single fetch +
+     * isolated open in the PROCESS scope (not an Activity scope) so a
+     * configuration change mid-probe neither cancels it nor strands the veil at
+     * UNKNOWN. The refine applies only while this remains the current scan.
+     */
+    fun onLemonDropLink(qrId: String) {
+        val token = synchronized(lemonDropLock) {
+            lemonDropVeil.value = LemonDropVeil.Advocacy(LemonDropScanOutcome.UNKNOWN)
+            ++lemonDropScanToken
+        }
+        scope.launch(Dispatchers.IO) {
+            val refined = when (val probe = lemonDropRedeemer.probe(qrId)) {
+                is LemonDropRedeemer.ProbeResult.Advocacy -> LemonDropVeil.Advocacy(probe.outcome)
+                is LemonDropRedeemer.ProbeResult.ReadyToOpen -> LemonDropVeil.AwaitUnlock(probe.pending)
+            }
+            synchronized(lemonDropLock) {
+                if (lemonDropScanToken == token) lemonDropVeil.value = refined
+            }
+        }
+    }
+
+    /** Dismiss the veil and invalidate any in-flight probe for it. */
+    fun dismissLemonDropVeil() {
+        synchronized(lemonDropLock) {
+            ++lemonDropScanToken
+            lemonDropVeil.value = null
+        }
+    }
+
+    /**
+     * Drop a plaintext-bearing [LemonDropVeil.Delivered] when the Activity
+     * stops. The veil is process-scoped, so without this an opened drop would
+     * re-render on a later Activity recreation with no fresh biometric unlock
+     * (Codex PR #4). Advocacy/AwaitUnlock render no plaintext and are kept —
+     * AwaitUnlock still forces a biometric before anything is shown. A one-shot
+     * drop that's already been delivered is gone regardless, so losing the
+     * on-screen copy here costs nothing.
+     */
+    fun clearDeliveredLemonDropVeil() {
+        synchronized(lemonDropLock) {
+            if (lemonDropVeil.value is LemonDropVeil.Delivered) lemonDropVeil.value = null
+        }
+    }
 
     val coordinator = MessagingCoordinator(
         appContext = app,

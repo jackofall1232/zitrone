@@ -36,7 +36,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.lifecycleScope
 import com.zitrone.app.data.Conversation
-import com.zitrone.app.data.LemonDropRedeemer
 import com.zitrone.app.data.LemonDropScanOutcome
 import com.zitrone.app.data.LemonDropVeil
 import com.zitrone.app.data.PendingLemonDrop
@@ -137,7 +136,9 @@ class MainActivity : FragmentActivity() {
                     container = container,
                     requestBiometric = ::showBiometricPrompt,
                     lemonDropVeil = lemonDropVeil.asStateFlow(),
-                    onLemonDropDismissed = { lemonDropVeil.value = null },
+                    onLemonDropDismissed = {
+                        (application as ZitroneApp).container.dismissLemonDropVeil()
+                    },
                     onLemonDropOpened = ::openLemonDrop,
                 )
             }
@@ -184,28 +185,21 @@ class MainActivity : FragmentActivity() {
      *
      * The probe is side-effect-free beyond its single fetch: nothing is burned
      * and no prekey is consumed until delivery, so dismissing at any pre-unlock
-     * point leaves the drop on the relay for a later re-scan. The refine step
-     * uses compare-and-set so a late probe result never resurrects a veil the
-     * user already dismissed. Errors are never logged (this repo forbids
-     * logging) and never surfaced as errors.
+     * point leaves the drop on the relay for a later re-scan. The orchestration
+     * (veil, per-scan token, process-scoped probe) lives in [AppContainer] so it
+     * survives a configuration change; this method only extracts the id.
      */
     private fun handleDeepLink(intent: Intent?) {
         if (intent?.action != Intent.ACTION_VIEW) return
         val qrId = intent.dataString?.let(::parseQrDropLink) ?: return
+        (application as ZitroneApp).container.onLemonDropLink(qrId)
+    }
 
-        val initial = LemonDropVeil.Advocacy(LemonDropScanOutcome.UNKNOWN)
-        lemonDropVeil.value = initial
-
-        val container = (application as ZitroneApp).container
-        lifecycleScope.launch(Dispatchers.IO) {
-            val refined = when (val probe = container.lemonDropRedeemer.probe(qrId)) {
-                is LemonDropRedeemer.ProbeResult.Advocacy ->
-                    LemonDropVeil.Advocacy(probe.outcome)
-                is LemonDropRedeemer.ProbeResult.ReadyToOpen ->
-                    LemonDropVeil.AwaitUnlock(probe.pending)
-            }
-            container.lemonDropVeil.compareAndSet(initial, refined)
-        }
+    // A plaintext-bearing Delivered veil must not survive to a later Activity
+    // recreation without a fresh biometric unlock — the container drops it here.
+    override fun onStop() {
+        super.onStop()
+        (application as ZitroneApp).container.clearDeliveredLemonDropVeil()
     }
 
     /**

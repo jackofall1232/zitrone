@@ -91,38 +91,36 @@ class LemonDropRedeemer(
             return ProbeResult.Advocacy(LemonDropScanOutcome.SEALED)
         }
 
-        // TRUST BOUNDARY (mirror of web redeemQrDrop): the seal proves the box
-        // was addressed to us, NOT who wrote it. The claimed sender key must
-        // match what we already pin for that account — or, for an unknown
-        // sender, the relay's current bundle. Failing the cross-check renders
-        // NOTHING (advocacy), because rendering would let an impersonator put
-        // words in a trusted name's mouth.
+        // TRUST BOUNDARY. Decrypting the envelope already PROVES the sender held
+        // the private half of the claimed identity key: the responder's DH1 =
+        // DH(SPK_priv, IK_sender_pub) only matches the initiator's secret if the
+        // initiator used that identity key's private scalar. So the message is
+        // authentically from whoever owns `sender_identity_key`; what remains is
+        // binding that key to a HUMAN name. For a known contact we check the
+        // claimed key equals the one we pinned — a mismatch means someone is
+        // borrowing a trusted name, so render NOTHING. For everyone else we show
+        // the key's fingerprint and label it unverified; the user verifies it
+        // out of band. We deliberately do NOT fetch the relay's bundle to
+        // "confirm" the key: GET :id/prekey CONSUMES one of the sender's
+        // one-time prekeys, and a relay match would add nothing over the crypto
+        // proof we already hold (an impersonator would present the victim's real
+        // public key regardless). No contact and no session is ever created — a
+        // lemon drop is one-way; a conversation needs the ordinary add-contact
+        // flow.
         val claimedKeyBase64 = Base64.getEncoder().encodeToString(result.senderIdentityKey)
         val known = conversations.findByContact(result.senderAccountId)
+        val pinned = known?.let { it.pinnedIdentityKeyBase64 ?: it.contactIdentityKeyBase64 }
         val senderLabel: String
         val senderVerified: Boolean
-        if (known != null) {
-            val pinned = known.pinnedIdentityKeyBase64 ?: known.contactIdentityKeyBase64
-            if (pinned != null && pinned != claimedKeyBase64) {
+        if (known != null && pinned != null) {
+            if (pinned != claimedKeyBase64) {
                 return ProbeResult.Advocacy(LemonDropScanOutcome.SEALED)
-            }
-            if (pinned == null) {
-                // A known name with no key on record cannot vouch for the
-                // claim — fall back to the relay cross-check below.
-                if (!relayConfirms(result.senderAccountId, claimedKeyBase64)) {
-                    return ProbeResult.Advocacy(LemonDropScanOutcome.SEALED)
-                }
             }
             senderLabel = known.displayName
-            senderVerified = pinned != null
+            senderVerified = true
         } else {
-            if (!relayConfirms(result.senderAccountId, claimedKeyBase64)) {
-                return ProbeResult.Advocacy(LemonDropScanOutcome.SEALED)
-            }
-            // Unknown sender: label by key fingerprint, never by unverifiable
-            // name. Deliberately NO contact and NO session is created — a
-            // lemon drop is one-way; a conversation needs the ordinary
-            // add-contact flow.
+            // Unknown sender, or a known contact we hold no key for: label by
+            // key fingerprint, never by an unverifiable name.
             senderLabel = SafetyNumber.fingerprintOf(result.senderIdentityKey)
             senderVerified = false
         }
@@ -156,13 +154,6 @@ class LemonDropRedeemer(
     suspend fun burn(pending: PendingLemonDrop) {
         runCatching { api.burnQrDrop(pending.qrId, pending.burnTokenBase64) }
     }
-
-    /** True when the relay's current bundle for [accountId] carries exactly
-     *  the claimed identity key. Any failure — 404 (deleted account), key
-     *  mismatch, transport — is an unverifiable claim: false, fail closed. */
-    private suspend fun relayConfirms(accountId: String, claimedKeyBase64: String): Boolean =
-        runCatching { api.fetchPreKeyBundle(accountId).identityKeyBase64 }
-            .getOrNull() == claimedKeyBase64
 
     // ── the private-scalar bridge (see class doc — do not widen) ─────────────
 

@@ -37,11 +37,22 @@ async function androidFamilyBundle(): Promise<DecodedPreKeyBundle> {
 }
 
 describe("lemon drops to an Android-family recipient", () => {
+  it("refuses a mobile bundle for ordinary messaging (allowCrossFamily default false)", async () => {
+    // The regression guard: addContact/sendMessage go through x3dhInitiate with
+    // the default, and a web↔mobile ordinary session would send undecryptable
+    // messages — so a mobile bundle must be refused here, not silently accepted.
+    const sender = await generateIdentityKeyPair();
+    const bundle = await androidFamilyBundle();
+    await expect(x3dhInitiate(sender, bundle)).rejects.toThrow(
+      "cross-family bundle not supported for ordinary messaging",
+    );
+  });
+
   it("verifies the XEdDSA bundle and creates a drop (curve25519 family)", async () => {
     const sender = await generateIdentityKeyPair();
     const bundle = await androidFamilyBundle();
 
-    const init = await x3dhInitiate(sender, bundle);
+    const init = await x3dhInitiate(sender, bundle, { allowCrossFamily: true });
     expect(init.identityKeyFamily).toBe("curve25519");
 
     const drop = await createLemonDrop({

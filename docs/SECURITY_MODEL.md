@@ -487,7 +487,20 @@ itself.
   logic the relay has always applied, ported client-side (`packages/crypto/src/xeddsa.ts`,
   tested against the identical real-libsignal signature vectors as the server's verifier) —
   and whichever scheme verified decides how the identity key enters the DH and the sealed box.
-  A bundle that verifies under neither scheme is rejected outright.
+  A bundle that verifies under neither scheme is rejected outright. This cross-family path is
+  **scoped to lemon-drop creation only** (`x3dhInitiate`'s `allowCrossFamily`): ordinary
+  messaging still refuses a mobile bundle, because a web↔mobile *session* would exchange
+  ciphertext neither ratchet can parse — a drop escapes that only because it is a one-shot
+  sealed payload with a matching one-shot opener, not an ongoing session.
+- **Android vs iOS is indistinguishable on the wire — the honest gap.** Both mobile platforms
+  publish the same Curve25519/XEdDSA bundle, and the zero-knowledge server stores nothing that
+  says which. So the creator cannot programmatically tell an Android recipient (has a lemon-drop
+  opener) from an iOS one (has none yet). A drop addressed to an iOS contact is still sealed to
+  their real key and deposited — **it simply expires unopened and is shredded at its TTL; no
+  content leaks** (only that recipient could ever open it, and their client has no opener).
+  Because the creator hands a physical sticker to a specific person they know, the platform is
+  human-known in practice; a wire-level capability signal that would let the software refuse an
+  iOS recipient up front is deferred follow-up work, not part of this release.
 - **Platform status, honestly.** Web and Linux desktop have the full flow (create and redeem).
   Android cannot create drops, but it can now **be a true recipient**: a scan performs one
   fetch (network-indistinguishable from any other scanner) and one open attempt in a

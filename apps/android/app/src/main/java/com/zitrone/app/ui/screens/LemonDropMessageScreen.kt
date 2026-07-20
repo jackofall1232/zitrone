@@ -153,9 +153,15 @@ fun LemonDropDeliveredScreen(
             )
         }
         Text(
-            text = "Delivered and destroyed — the relay no longer holds a copy. " +
-                "Lemon drops are one-way: to talk with this person, add them as " +
-                "a contact the ordinary way.",
+            // Honest about the best-effort burn: if the network was reachable
+            // the relay's copy is being shredded now, but an offline open can't
+            // reach it — the drop's TTL is the guaranteed backstop either way.
+            // Never assert a destruction that may not have happened.
+            text = "You've opened your one-time copy. Zitrone is asking the relay to " +
+                "shred its copy now; if that didn't get through, the drop still " +
+                "clears itself at its expiry. Either way it won't reappear here. " +
+                "Lemon drops are one-way — to talk with this person, add them as a " +
+                "contact the ordinary way.",
             style = MaterialTheme.typography.bodyMedium,
             color = TextSecondary,
             textAlign = TextAlign.Center,
