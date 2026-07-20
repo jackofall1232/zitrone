@@ -1,6 +1,6 @@
 {
   "name": "@zitrone/website",
-  "version": "0.7.6-beta",
+  "version": "0.8.0",
   "private": true,
   "license": "AGPL-3.0-only",
   "description": "Marketing website for Zitrone — zitrone.app",

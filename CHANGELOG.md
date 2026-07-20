@@ -7,6 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-20
+
 ### Fixed
 
 - **A dead lemon-drop sticker can never be re-armed.** Burn and TTL expiry now crypto-shred the
@@ -58,13 +60,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   creator-chosen TTL (24 h / 48 h / 72 h / 1 week / 2 weeks) shreds the unclaimed. Web/desktop
   ship the full create + redeem flows (lemon-slice-branded QR at error-correction H, paste-link
   redeem, warm "part of the network" screens for not-for-this-device and expired scans); Android
-  ships link interception + the advocacy screen only — honestly, with no decrypt attempt, since
-  no current drop can be addressed to an Android-family account (documented; real Android
-  redemption is the follow-up, crypto-review-gated). **Unlike `/drops` this variant is
-  recipient-targeted, not anonymous — and non-recipient scanners transiently receive ciphertext
-  they cannot decrypt**; both properties are disclosed in `docs/SECURITY_MODEL.md`. App-Link
-  verification (`assetlinks.json`) and the `/d/*` website fallback page shipped once the flow
-  was verified end-to-end — see the Fixed entries above.
+  gains true recipient redemption in this same release (see "Lemon drops now open on Android"
+  above), plus link interception and the advocacy screen for every non-recipient scan. **Unlike
+  `/drops` this variant is recipient-targeted, not anonymous — and non-recipient scanners
+  transiently receive ciphertext they cannot decrypt**; both properties are disclosed in
+  `docs/SECURITY_MODEL.md`. App-Link verification (`assetlinks.json`) and the `/d/*` website
+  fallback page shipped once the flow was verified end-to-end — see the Fixed entries above.
+
+### Known limitations
+
+- **iOS cannot yet be a lemon-drop recipient.** Android and iOS publish wire-indistinguishable
+  libsignal (Curve25519/XEdDSA) prekey bundles and the zero-knowledge relay stores no platform
+  tag, so the creator cannot refuse an iOS recipient up front. A drop addressed to an iOS
+  contact is still sealed to that recipient's key and deposited — it simply **expires unopened
+  and is shredded at its TTL; no content leaks** (only that recipient could ever open it, and
+  iOS has no opener yet). A wire-level capability signal to refuse iOS at creation time is
+  deferred follow-up work.
+- **Read-once rests on the burn, not the crypto, when no one-time prekey was available.** A
+  reading device deletes the one-time prekey a drop consumed, so a re-scan of an OTP-bearing
+  drop fails closed. But if the creator's fetched bundle had no one-time prekey left (the
+  recipient's stock was exhausted), the drop is decryptable from the identity + signed prekey
+  alone — so until the best-effort burn lands or the TTL fires, the *intended recipient* can
+  re-open their own already-read message on a re-scan. This is a protocol property shared with
+  web/desktop, not Android-specific and not a confidentiality loss (the drop stays sealed to the
+  one recipient throughout); keeping the client's prekey stock replenished makes it rare.
 
 ## [0.7.6-beta] - 2026-07-19
 
