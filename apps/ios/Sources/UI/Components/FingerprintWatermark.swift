@@ -70,6 +70,9 @@ enum FingerprintTileGeometry {
         brickOffset: CGFloat
     ) -> [(x: CGFloat, y: CGFloat, brickRow: Bool)] {
         _ = runWidth
+        // Non-positive steps would loop forever; an empty tile is the honest
+        // degenerate output.
+        guard pitch > 0, rowGap > 0, tileSize > 0 else { return [] }
         let theta = rotationDeg * .pi / 180
         let cosT = cos(theta)
         let sinT = sin(theta)

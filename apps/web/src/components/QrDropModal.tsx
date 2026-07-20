@@ -34,25 +34,19 @@ function saveViaBrowser(blob: Blob, filename: string): void {
   URL.revokeObjectURL(objectUrl);
 }
 
-// Save a Blob to disk under Tauri: the dialog plugin (already registered, with
-// `dialog:allow-save`) picks the path; a tiny native `save_drop_image` command
-// writes the bytes (the WebView has no fs plugin). We invoke the dialog command
-// directly rather than adding the `@tauri-apps/plugin-dialog` JS dependency —
-// `@tauri-apps/api` is already a dep and lazy-imported elsewhere for the same
-// reason (keeping it out of the browser bundle graph). Returns false if the
-// user cancels the dialog.
+// Save a Blob to disk under Tauri. The native `save_drop_image` command owns
+// the whole flow — dialog and write — so this side never sees or supplies a
+// filesystem path (a renderer-supplied path would be an arbitrary-file-write
+// primitive if the WebView were ever compromised). The PNG travels as the raw
+// IPC body, not a JSON number array; the filename is only a dialog suggestion.
+// Resolves false if the user cancels the dialog.
 async function saveViaTauri(blob: Blob, filename: string): Promise<boolean> {
   const { invoke } = await import("@tauri-apps/api/core");
-  const path = await invoke<string | null>("plugin:dialog|save", {
-    options: {
-      defaultPath: filename,
-      filters: [{ name: "PNG image", extensions: ["png"] }],
-    },
-  });
-  if (!path) return false;
-  const bytes = Array.from(new Uint8Array(await blob.arrayBuffer()));
-  await invoke("save_drop_image", { path, bytes });
-  return true;
+  return await invoke<boolean>(
+    "save_drop_image",
+    new Uint8Array(await blob.arrayBuffer()),
+    { headers: { "x-suggested-filename": filename } },
+  );
 }
 
 export function QrDropModal({

@@ -30,7 +30,10 @@ public struct ConversationList: View {
                 }
             }
         }
-        .background(Color.backgroundPrimary)
+        // No opaque background of its own: the hosting screen paints the
+        // ground AND the fingerprint watermark beneath this list — an opaque
+        // fill here would hide the security paper behind every row (PR #8
+        // review).
     }
 }
 

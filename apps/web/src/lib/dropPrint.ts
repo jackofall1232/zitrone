@@ -82,20 +82,20 @@ async function drawLemonMark(ctx: CanvasRenderingContext2D): Promise<void> {
   ctx.fillStyle = PAPER;
   ctx.fillRect(cx - BACKING_PX / 2, cy - BACKING_PX / 2, BACKING_PX, BACKING_PX);
 
-  const blobUrl = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => {
-        ctx.drawImage(img, cx - MARK_PX / 2, cy - MARK_PX / 2, MARK_PX, MARK_PX);
-        resolve();
-      };
-      img.onerror = () => reject(new Error("lemon-slice mark failed to load"));
-      img.src = blobUrl;
-    });
-  } finally {
-    URL.revokeObjectURL(blobUrl);
-  }
+  // data: URL, not an object URL: the packaged desktop WebView's CSP allows
+  // `img-src 'self' data:` and would reject a blob: source outright, which
+  // made desktop saves fail before the dialog ever opened (PR #8 review).
+  // data: also works in every browser, so both platforms share one path.
+  const dataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  await new Promise<void>((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      ctx.drawImage(img, cx - MARK_PX / 2, cy - MARK_PX / 2, MARK_PX, MARK_PX);
+      resolve();
+    };
+    img.onerror = () => reject(new Error("lemon-slice mark failed to load"));
+    img.src = dataUrl;
+  });
 }
 
 /**

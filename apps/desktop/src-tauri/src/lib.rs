@@ -81,13 +81,50 @@ pub fn run() {
         .expect("error while running Zitrone desktop application");
 }
 
-/// Write a print-grade QR-drop PNG to a user-chosen path. The path always comes
-/// from the frontend's native save dialog (the `dialog:allow-save` capability),
-/// so this command does no path logic of its own — it just writes the bytes.
-/// The WebView has no filesystem plugin, which is why this thin command exists.
+/// Save a print-grade QR-drop PNG. The native side owns the WHOLE flow —
+/// save dialog AND write — so the renderer never supplies a filesystem path:
+/// a compromised WebView can at most ask the user to pick a location. (An
+/// earlier renderer-supplied-path version of this command was an
+/// arbitrary-file-overwrite primitive — PR #8 review.) The PNG rides the raw
+/// IPC body (no JSON number-array blowup); the suggested filename rides a
+/// header and only seeds the dialog. The extension is forced to `.png` no
+/// matter what the user types. Returns false when the dialog is canceled.
 #[tauri::command]
-fn save_drop_image(path: String, bytes: Vec<u8>) -> Result<(), String> {
-    std::fs::write(&path, &bytes).map_err(|e| e.to_string())
+fn save_drop_image(
+    app: tauri::AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("expected raw PNG bytes in the request body".to_string());
+    };
+    let suggested = request
+        .headers()
+        .get("x-suggested-filename")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("zitrone-drop.png")
+        .to_string();
+
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .add_filter("PNG image", &["png"])
+        .set_file_name(&suggested)
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    let mut path = picked.into_path().map_err(|e| e.to_string())?;
+    if path
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("png"))
+        != Some(true)
+    {
+        path.set_extension("png");
+    }
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 /// Structured logging only — errors and system events. Never message content,

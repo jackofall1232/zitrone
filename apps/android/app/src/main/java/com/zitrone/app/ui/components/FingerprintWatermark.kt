@@ -90,6 +90,9 @@ object FingerprintTileGeometry {
         pitch: Float,
         brickOffset: Float,
     ): List<WatermarkAnchor> {
+        // Non-positive steps would loop forever (ANR); an empty tile is the
+        // honest degenerate output.
+        if (pitch <= 0f || rowGap <= 0f || tileSize <= 0f) return emptyList()
         val theta = Math.toRadians(rotationDeg.toDouble())
         val cos = cos(theta).toFloat()
         val sin = sin(theta).toFloat()

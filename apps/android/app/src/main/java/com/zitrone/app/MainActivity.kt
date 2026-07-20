@@ -575,6 +575,12 @@ private fun ZitroneRoot(
                     onDeleteAccount = {
                         container.coordinator.deleteAccountAndWipe {
                             container.signalStore.wipe()
+                            // The activity is not recreated on wipe, so the
+                            // hoisted fingerprint must be dropped here or the
+                            // DELETED account's mark would keep watermarking
+                            // (and be shown in Settings for) the next identity
+                            // until process death (PR #8 review).
+                            identityFingerprint = null
                             unlocked = false
                             route = Route.Splash
                         }

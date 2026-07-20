@@ -56,6 +56,9 @@ export function fingerprintTileAnchors(
 ): Array<{ x: number; y: number; brickRow: boolean }> {
   const S = opts.tileSize;
   const pitch = runWidth + opts.fontPx * 4;
+  // Non-positive steps would loop forever (opts are caller-overridable) —
+  // an empty tile is the honest degenerate output.
+  if (S <= 0 || pitch <= 0 || opts.rowGapPx <= 0) return [];
   const theta = (opts.rotationDeg * Math.PI) / 180;
   const cos = Math.cos(theta);
   const sin = Math.sin(theta);
