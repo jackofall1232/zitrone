@@ -33,21 +33,45 @@ interface PersistedSettings {
    */
   allowClearnetFallback: boolean;
   privacyView: PrivacyViewSettings;
+  /**
+   * Whether the one-time lemon-drop (QR) coachmark has been dismissed. Defaults
+   * to false so it shows once for users upgrading from a build without the flag
+   * — the fallback is spread UNDER the parsed partial, so an older persisted
+   * blob that lacks this key still reads as false rather than undefined.
+   */
+  qrDropCoachmarkSeen: boolean;
 }
 
-function load(): PersistedSettings {
-  const fallback: PersistedSettings = {
+function fallbackSettings(): PersistedSettings {
+  return {
     connectionMode: DEFAULT_CONNECTION_MODE,
     coverTraffic: CONNECTION_MODES[DEFAULT_CONNECTION_MODE].decoyIntensity,
     allowClearnetFallback: true,
     privacyView: DEFAULT_PRIVACY_VIEW,
+    qrDropCoachmarkSeen: false,
   };
+}
+
+/**
+ * Merge a persisted settings blob over the defaults. Pure (no storage access)
+ * so the fallback-under-partial behavior is unit-testable: a blob missing a key
+ * inherits the default, never `undefined`.
+ */
+export function parsePersisted(raw: string | null): PersistedSettings {
+  const fallback = fallbackSettings();
+  if (!raw) return fallback;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return fallback;
     return { ...fallback, ...(JSON.parse(raw) as Partial<PersistedSettings>) };
   } catch {
     return fallback;
+  }
+}
+
+function load(): PersistedSettings {
+  try {
+    return parsePersisted(localStorage.getItem(STORAGE_KEY));
+  } catch {
+    return fallbackSettings();
   }
 }
 
@@ -77,13 +101,21 @@ interface SettingsState extends PersistedSettings {
   setTapTimedSeconds: (seconds: number) => void;
   togglePrivacyForConversation: (peerId: string) => void;
   isPrivacyActive: (peerId: string) => boolean;
+  setQrDropCoachmarkSeen: () => void;
 }
 
 export const useSettings = create<SettingsState>((set, get) => {
   const initial = load();
   const persist = () => {
-    const { connectionMode, coverTraffic, allowClearnetFallback, privacyView } = get();
-    save({ connectionMode, coverTraffic, allowClearnetFallback, privacyView });
+    const { connectionMode, coverTraffic, allowClearnetFallback, privacyView, qrDropCoachmarkSeen } =
+      get();
+    save({
+      connectionMode,
+      coverTraffic,
+      allowClearnetFallback,
+      privacyView,
+      qrDropCoachmarkSeen,
+    });
   };
 
   return {
@@ -148,6 +180,11 @@ export const useSettings = create<SettingsState>((set, get) => {
     },
     isPrivacyActive(peerId) {
       return privacyViewActive(get().privacyView, peerId);
+    },
+    setQrDropCoachmarkSeen() {
+      // One-way latch: once dismissed, the coachmark never returns.
+      set({ qrDropCoachmarkSeen: true });
+      persist();
     },
   };
 });

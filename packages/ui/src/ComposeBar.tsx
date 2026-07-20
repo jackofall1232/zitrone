@@ -25,6 +25,15 @@ export interface ComposeBarProps {
    *  TTL-picker step the user may cancel, and clearing here would discard the
    *  only copy. The parent calls `clearDraft` after a successful deposit. */
   onSendAsQrDrop?: (text: string, clearDraft: () => void) => void;
+  /**
+   * One-time coachmark that teaches the lemon-drop affordance. When true (and
+   * onSendAsQrDrop is provided) a small popover explains what sealing does, and
+   * the droplet button pulses once. The parent owns the seen-flag; this stays a
+   * pure presentational input so the persistence lives with app settings.
+   */
+  showQrDropCoachmark?: boolean;
+  /** Fired when the coachmark is dismissed — via its × or by tapping the button. */
+  onQrDropCoachmarkDismiss?: () => void;
 }
 
 export function ComposeBar({
@@ -35,6 +44,8 @@ export function ComposeBar({
   placeholder = "Message",
   onSendAsDeadDrop,
   onSendAsQrDrop,
+  showQrDropCoachmark = false,
+  onQrDropCoachmarkDismiss,
 }: ComposeBarProps) {
   const [text, setText] = useState("");
   const [focused, setFocused] = useState(false);
@@ -60,6 +71,17 @@ export function ComposeBar({
     // here: the picker may be canceled (or sealing may fail), and the box holds
     // the only copy of the draft — the parent clears it on successful deposit.
     onSendAsQrDrop(trimmed, () => setText(""));
+  };
+
+  // The coachmark only makes sense when the affordance it points at exists.
+  const coachmarkVisible = showQrDropCoachmark && !!onSendAsQrDrop;
+
+  const onQrDropClick = () => {
+    // Dismiss regardless of draft state: the user has now discovered the button,
+    // so the teaching popover has done its job even if sealAsQrDrop no-ops on an
+    // empty box. Fire dismiss BEFORE sealing so the coachmark never lingers.
+    if (coachmarkVisible) onQrDropCoachmarkDismiss?.();
+    sendAsQrDrop();
   };
 
   return (
@@ -94,30 +116,84 @@ export function ComposeBar({
         </button>
       )}
       {onSendAsQrDrop && (
-        <button
-          type="button"
-          onClick={sendAsQrDrop}
-          aria-label="Send as QR drop"
-          title="Seal into a QR drop for this contact"
-          style={{
-            background: "none",
-            border: "none",
-            cursor: "pointer",
-            color: color.semantic.textSecondary,
-            padding: 8,
-            lineHeight: 0,
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.color = color.core.lemon)}
-          onMouseLeave={(e) => (e.currentTarget.style.color = color.semantic.textSecondary)}
-        >
-          {/* QR glyph: three finder squares + a data block, in currentColor. */}
-          <svg width={20} height={20} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-            <path d="M3 3h6v6H3V3zm2 2v2h2V5H5z" />
-            <path d="M15 3h6v6h-6V3zm2 2v2h2V5h-2z" />
-            <path d="M3 15h6v6H3v-6zm2 2v2h2v-2H5z" />
-            <path d="M13 13h3v3h-3v-3zm5 0h3v3h-3v-3zm-5 5h3v3h-3v-3zm5 0h3v3h-3v-3z" />
-          </svg>
-        </button>
+        // Relative anchor so the coachmark popover can sit ABOVE the droplet
+        // button without pushing the compose row's layout. Nothing on the path
+        // up to the chat <section> clips overflow, so the popover renders freely.
+        <div style={{ position: "relative", display: "inline-flex" }}>
+          {coachmarkVisible && (
+            <div
+              role="note"
+              style={{
+                position: "absolute",
+                bottom: "calc(100% + 10px)",
+                left: 0,
+                zIndex: 50,
+                maxWidth: 240,
+                background: color.semantic.backgroundElevated,
+                border: `1px solid ${color.semantic.border}`,
+                borderRadius: 10,
+                padding: "10px 28px 10px 12px",
+                fontSize: "12.5px",
+                lineHeight: 1.4,
+                color: color.semantic.textPrimary,
+                boxShadow: "0 6px 20px rgba(0, 0, 0, 0.35)",
+              }}
+            >
+              Seal this message into a QR your contact scans later — it never travels as a live
+              message.
+              <button
+                type="button"
+                onClick={onQrDropCoachmarkDismiss}
+                aria-label="Dismiss"
+                style={{
+                  position: "absolute",
+                  top: 4,
+                  right: 4,
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  color: color.semantic.textSecondary,
+                  padding: 4,
+                  fontSize: "14px",
+                  lineHeight: 1,
+                }}
+              >
+                ×
+              </button>
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={onQrDropClick}
+            aria-label="Seal into a lemon drop"
+            title="Seal into a QR drop for this contact"
+            className={coachmarkVisible ? "sub-lemon-drop-intro" : undefined}
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              color: color.semantic.textSecondary,
+              padding: 8,
+              lineHeight: 0,
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = color.core.lemon)}
+            onMouseLeave={(e) => (e.currentTarget.style.color = color.semantic.textSecondary)}
+          >
+            {/* Droplet outline: the lemon-drop mark, in currentColor. */}
+            <svg
+              width={20}
+              height={20}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.8}
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <path d="M12 3C8.2 8 5.8 11.4 5.8 14.6a6.2 6.2 0 0 0 12.4 0C18.2 11.4 15.8 8 12 3z" />
+            </svg>
+          </button>
+        </div>
       )}
       <textarea
         value={text}

@@ -62,6 +62,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            save_drop_image,
             i2p::check_i2p_connectivity,
             i2p::i2p_request,
             i2p::ws_open_i2p,
@@ -78,6 +79,15 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Zitrone desktop application");
+}
+
+/// Write a print-grade QR-drop PNG to a user-chosen path. The path always comes
+/// from the frontend's native save dialog (the `dialog:allow-save` capability),
+/// so this command does no path logic of its own — it just writes the bytes.
+/// The WebView has no filesystem plugin, which is why this thin command exists.
+#[tauri::command]
+fn save_drop_image(path: String, bytes: Vec<u8>) -> Result<(), String> {
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())
 }
 
 /// Structured logging only — errors and system events. Never message content,

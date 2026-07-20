@@ -66,6 +66,8 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
   const privacyView = useSettings((s) => s.privacyView);
   const privacyActive = useSettings((s) => s.isPrivacyActive(peerId));
   const togglePrivacy = useSettings((s) => s.togglePrivacyForConversation);
+  const qrDropCoachmarkSeen = useSettings((s) => s.qrDropCoachmarkSeen);
+  const setQrDropCoachmarkSeen = useSettings((s) => s.setQrDropCoachmarkSeen);
 
   const [ttl, setTtl] = useState<number | null>(null);
   const [burnOnRead, setBurnOnRead] = useState(false);
@@ -318,6 +320,8 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
         onAttach={ghost ? undefined : onAttach}
         onSendAsDeadDrop={ghost ? undefined : onSendDeadDrop}
         onSendAsQrDrop={onSendQrDrop}
+        showQrDropCoachmark={!qrDropCoachmarkSeen}
+        onQrDropCoachmarkDismiss={() => setQrDropCoachmarkSeen()}
         placeholder={ghost ? "Message (dead drop)" : "Message"}
       />
 
