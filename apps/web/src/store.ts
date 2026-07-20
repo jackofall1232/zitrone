@@ -1162,8 +1162,16 @@ export const useApp = create<AppState>((set, get) => {
         // after verifying the freshly fetched bundle's identity key equals the
         // claimed one. If the relay-served bundle disagrees with the sealed
         // claim, neither can be trusted, so we refuse to render (same surface).
+        // A 404 — the claimed sender deleted their account, or never existed —
+        // is a FAILED cross-check (the claim is unverifiable), not a transport
+        // error: it maps to "not-for-us" like any other identity mismatch.
+        // Genuine transport failures still propagate.
         const token = await freshToken();
-        const bundle = await api.fetchPrekeyBundle(senderAccountId, token);
+        const bundle = await api.fetchPrekeyBundle(senderAccountId, token).catch((e: unknown) => {
+          if (e instanceof ApiError && e.status === 404) return null;
+          throw e;
+        });
+        if (bundle === null) return "not-for-us";
         if (bundle.identity_key !== claimedIdentityB64) return "not-for-us";
         // The ephemeral responder session openLemonDrop used to decrypt is gone
         // by design (encrypt-and-forget). Spin up a normal OUTBOUND session
