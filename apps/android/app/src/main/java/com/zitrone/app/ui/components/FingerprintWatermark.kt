@@ -199,12 +199,18 @@ fun renderFingerprintTile(fingerprint: String, density: Float): Bitmap {
  */
 private object FingerprintBrushCache {
     private var key: String? = null
-    private var brush: ShaderBrush? = null
+
+    // Weak, not strong: while any composition holds the brush (chat, list,
+    // veil — including during a Crossfade) this is a cache hit, but once the
+    // app locks or the account is wiped nothing references it and the GC may
+    // reclaim the ≤4 MB bitmap instead of it living for the whole process
+    // (PR #9 review).
+    private var brushRef: java.lang.ref.WeakReference<ShaderBrush>? = null
 
     @Synchronized
     fun get(fingerprint: String, density: Float): ShaderBrush {
         val k = "$fingerprint|$density"
-        val cached = brush
+        val cached = brushRef?.get()
         if (cached != null && key == k) return cached
         val fresh = ShaderBrush(
             ImageShader(
@@ -214,7 +220,7 @@ private object FingerprintBrushCache {
             ),
         )
         key = k
-        brush = fresh
+        brushRef = java.lang.ref.WeakReference(fresh)
         return fresh
     }
 }
