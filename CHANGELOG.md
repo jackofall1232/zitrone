@@ -7,6 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.5-beta] - 2026-07-21
+
 ### Added
 
 - **Web / Linux desktop: full contact deletion (cryptographic teardown, not soft-delete).**
