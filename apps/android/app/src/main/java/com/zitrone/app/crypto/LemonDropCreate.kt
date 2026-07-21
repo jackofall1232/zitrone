@@ -249,7 +249,12 @@ object LemonDropCreate {
             val messageKey = hmacSha256(sendingChainKey, byteArrayOf(0x01))
             secrets += messageKey
 
-            paddedPlaintext = MessagePadding.pad(text.toByteArray(Charsets.UTF_8))
+            // The raw plaintext bytes are sensitive; route them through `secrets`
+            // so the finally zeros them (the String itself is immutable and
+            // cannot be wiped — inherent JVM limit — but this ByteArray can).
+            val textBytes = text.toByteArray(Charsets.UTF_8)
+            secrets += textBytes
+            paddedPlaintext = MessagePadding.pad(textBytes)
             // AES-256-GCM with the ratchet header as AAD (ratchet.ts makeHeader:
             // ratchet_pub || n(4, BE) || pn(4, BE)); box = nonce(12) || ct+tag;
             // blob = ratchet_pub || box (what LemonDropOneShot.open slices back).
@@ -372,11 +377,16 @@ object LemonDropCreate {
         val sha = MessageDigest.getInstance("SHA-256")
         val preimage = ByteArray(challenge.size + nonce.size)
         challenge.copyInto(preimage, 0)
+        // One reused 32-byte output buffer for the whole ~1M-hash search instead
+        // of allocating a fresh digest array per iteration (mobile GC pressure).
+        val digest = ByteArray(32)
         var i = 0L
         while (true) {
             nonce.copyInto(preimage, challenge.size)
             sha.reset()
-            if (hasLeadingZeroBits(sha.digest(preimage), difficulty)) return nonce
+            sha.update(preimage)
+            sha.digest(digest, 0, 32)
+            if (hasLeadingZeroBits(digest, difficulty)) return nonce
             incrementCounter(nonce)
             // ~one interrupt check per animation-frame's worth of hashing; keeps
             // the loop cancellable without measurably slowing the ~1M-hash solve.

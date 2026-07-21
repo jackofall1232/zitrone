@@ -362,6 +362,7 @@ object QrDropSticker {
 
         val qr = renderQrBitmap(url, QR_PX)
         canvas.drawBitmap(qr, QR_X.toFloat(), QR_Y.toFloat(), null)
+        qr.recycle() // 1024² ARGB — free the native buffer as soon as it's drawn.
 
         val cx = QR_X + QR_PX / 2f
         val cy = QR_Y + QR_PX / 2f
@@ -383,6 +384,7 @@ object QrDropSticker {
 
         val out = java.io.ByteArrayOutputStream()
         card.compress(Bitmap.CompressFormat.PNG, 100, out)
+        card.recycle() // 1088×1216 ARGB — free it once encoded.
         return out.toByteArray()
     }
 
@@ -445,6 +447,9 @@ object QrDropSticker {
     fun sharePng(context: Context, png: ByteArray, filename: String) {
         runCatching {
             val dir = File(context.cacheDir, "dropshare").apply { mkdirs() }
+            // Each shared sticker PNG carries a live capability URL; don't let
+            // stale ones accumulate in the cache. Clear prior shares first.
+            dir.listFiles()?.forEach { if (it.name != filename) it.delete() }
             val file = File(dir, filename)
             file.writeBytes(png)
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
