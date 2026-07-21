@@ -16,8 +16,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   persist a TTL-bounded tombstone (UserDefaults) so stragglers cannot resurrect
   the contact after restart. Durable fail-abort if keychain teardown fails.
   Re-add requires a fresh X3DH handshake. **Merged unverified** — there is no
-  Xcode/iOS toolchain in CI, so this needs an Xcode build + on-device test
-  before it ships in a release.
+  Xcode/iOS toolchain in CI, and iOS has no distributed build yet, so this
+  needs an Xcode build + on-device test before it ships to users. Held out of
+  the 0.8.6-beta release notes for that reason.
+
+## [0.8.6-beta] - 2026-07-21
+
+### Added
+
 - **Android: camera capture as an attachment source.** Compose attach menu
   offers Take photo (system camera via FileProvider staging under
   `cache/cameracapture/`, deleted immediately after load) alongside Photo
