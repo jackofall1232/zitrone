@@ -18,6 +18,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -26,6 +27,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -37,6 +39,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -63,6 +66,7 @@ import com.zitrone.app.ui.theme.TextOnLemon
 import com.zitrone.app.ui.theme.TextPrimary
 import com.zitrone.app.ui.theme.TextSecondary
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.DateFormat
@@ -138,20 +142,16 @@ fun QrTtlPickerDialog(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(50))
                                 .border(1.dp, BorderColor, RoundedCornerShape(50))
-                                .background(Color.Transparent)
-                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                                .clickable { onPick(hours) }
+                                .heightIn(min = 48.dp)
+                                .padding(horizontal = 16.dp),
                             contentAlignment = Alignment.Center,
                         ) {
-                            TextButton(
-                                onClick = { onPick(hours) },
-                                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
-                            ) {
-                                Text(
-                                    text = qrDropTtlLabel(hours),
-                                    fontSize = MaterialTheme.typography.labelLarge.fontSize,
-                                    color = TextSecondary,
-                                )
-                            }
+                            Text(
+                                text = qrDropTtlLabel(hours),
+                                fontSize = MaterialTheme.typography.labelLarge.fontSize,
+                                color = TextSecondary,
+                            )
                         }
                     }
                 }
@@ -184,6 +184,7 @@ fun QrDropResultDialog(
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    val scope = rememberCoroutineScope()
 
     // On-screen QR (240dp) and the print-grade PNG are both rendered off the
     // main thread; the PNG is retained so Save and Share reuse one composition.
@@ -285,7 +286,7 @@ fun QrDropResultDialog(
                 PillButton("Copy link") { clipboard.setText(AnnotatedString(url)) }
                 PillButton("Save image", enabled = printPng != null) { saveLauncher.launch(filename) }
                 PillButton("Share", enabled = printPng != null) {
-                    printPng?.let { QrDropSticker.sharePng(context, it, filename) }
+                    printPng?.let { scope.launch { QrDropSticker.sharePng(context, it, filename) } }
                 }
                 TextButton(onClick = onClose) { Text("Done", color = TextSecondary) }
             }
@@ -329,7 +330,7 @@ private fun PillButton(label: String, enabled: Boolean = true, onClick: () -> Un
             .padding(horizontal = 4.dp),
     ) {
         TextButton(onClick = onClick, enabled = enabled) {
-            Text(label, color = TextOnLemon, fontWeight = FontWeight.Medium)
+            Text(label, color = if (enabled) TextOnLemon else TextMuted, fontWeight = FontWeight.Medium)
         }
     }
 }
@@ -473,15 +474,19 @@ object QrDropSticker {
     /** Share the PNG via a FileProvider content URI so printer/gallery apps can
      *  reach it (SEND stream). The file lives in cache and is world-unreadable
      *  except through the granted, read-only URI. */
-    fun sharePng(context: Context, png: ByteArray, filename: String) {
+    suspend fun sharePng(context: Context, png: ByteArray, filename: String) {
         runCatching {
-            val dir = File(context.cacheDir, "dropshare").apply { mkdirs() }
-            // Each shared sticker PNG carries a live capability URL; don't let
-            // stale ones accumulate in the cache. Clear prior shares first.
-            dir.listFiles()?.forEach { if (it.name != filename) it.delete() }
-            val file = File(dir, filename)
-            file.writeBytes(png)
-            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            // Disk I/O off the main thread; the resulting content URI is handed
+            // back so startActivity can run on the caller's (main) context.
+            val uri = withContext(Dispatchers.IO) {
+                val dir = File(context.cacheDir, "dropshare").apply { mkdirs() }
+                // Each shared sticker PNG carries a live capability URL; don't let
+                // stale ones accumulate in the cache. Clear prior shares first.
+                dir.listFiles()?.forEach { if (it.name != filename) it.delete() }
+                val file = File(dir, filename)
+                file.writeBytes(png)
+                FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            }
             val intent = Intent(Intent.ACTION_SEND).apply {
                 type = "image/png"
                 putExtra(Intent.EXTRA_STREAM, uri)
