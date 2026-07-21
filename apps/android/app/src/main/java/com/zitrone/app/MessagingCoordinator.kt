@@ -25,7 +25,7 @@ import com.zitrone.app.data.MessageState
 import com.zitrone.app.data.SettingsRepository
 import com.zitrone.app.net.ApiClient
 import com.zitrone.app.net.WsClient
-import com.zitrone.app.notifications.MessagingNotifications
+import com.zitrone.app.notifications.NotificationScheduler
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -87,6 +87,7 @@ class MessagingCoordinator(
     private val conversations: ConversationRepository,
     private val settings: SettingsRepository,
     private val diagnostics: BootDiagnostics,
+    private val notificationScheduler: NotificationScheduler,
 ) : WsClient.Listener {
 
     private val _typingPeers = MutableStateFlow<Set<String>>(emptySet())
@@ -346,6 +347,9 @@ class MessagingCoordinator(
         _linking.value = false
         linkJob?.cancel()
         ws.disconnect()
+        // Teardown hook: drop all pending re-fire jobs + fire state so nothing
+        // carries across an identity switch (see NotificationScheduler).
+        notificationScheduler.cancelAll()
     }
 
     /**
@@ -956,6 +960,8 @@ class MessagingCoordinator(
             ws.disconnect()
             messages.clearAll()
             conversations.clearAll()
+            // Teardown hook: no re-fire job or fire state survives the wipe.
+            notificationScheduler.cancelAll()
             onComplete()
         }
     }
@@ -1039,7 +1045,7 @@ class MessagingCoordinator(
                     // zero-knowledge. Best-effort: a dropped receipt just means
                     // the sender stays at SENT, never worse.
                     ws.sendReceived(envelope.id, envelope.senderId)
-                    MessagingNotifications.showNewMessage(appContext)
+                    notificationScheduler.onIncomingMessage(conversation.id)
                     redeemAttachment(envelope.id, attachment)
                     return@runCatching
                 }
@@ -1061,7 +1067,7 @@ class MessagingCoordinator(
                         ),
                     )
                     ws.ackMessage(envelope.id)
-                    MessagingNotifications.showNewMessage(appContext)
+                    notificationScheduler.onIncomingMessage(conversation.id)
                     return@runCatching
                 }
                 messages.addIncoming(
@@ -1084,10 +1090,21 @@ class MessagingCoordinator(
                 // message.delivered). See the attachment branch above for the
                 // zero-knowledge rationale.
                 ws.sendReceived(envelope.id, envelope.senderId)
-                // Content-free notification: always just "New message".
-                MessagingNotifications.showNewMessage(appContext)
+                // Content-free notification: always just "New message". The
+                // scheduler rate-limits + re-fires it per conversation.
+                notificationScheduler.onIncomingMessage(conversation.id)
             }
         }
+    }
+
+    /**
+     * The chat screen opened this conversation (unread cleared). Route the read
+     * through the coordinator — not straight into the scheduler — so the UI
+     * depends only on the coordinator. Resets the conversation's re-fire cycle
+     * so the next message alerts immediately.
+     */
+    fun onConversationRead(conversationId: String) {
+        notificationScheduler.onConversationRead(conversationId)
     }
 
     /**

@@ -179,6 +179,13 @@ fun SettingsScreen(
 
         // ----- Notifications -------------------------------------------------
         SectionHeader("Notifications")
+        ToggleRow(
+            title = "Repeat unread reminders",
+            subtitle = "Re-alert about unread conversations roughly every 2 " +
+                "minutes until you open them. Off means a single ping per arrival.",
+            checked = settings.unreadReminderEnabled,
+            onToggle = settingsRepository::setUnreadReminderEnabled,
+        )
         ClickableRow(
             title = "Notification sound",
             subtitle = "Plays the Zitrone tone by default. Tap to pick your " +

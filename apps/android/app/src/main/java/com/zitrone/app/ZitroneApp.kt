@@ -29,6 +29,7 @@ import com.zitrone.app.net.HttpConnectI2pProber
 import com.zitrone.app.net.TransportResolver
 import com.zitrone.app.net.WsClient
 import com.zitrone.app.notifications.MessagingNotifications
+import com.zitrone.app.notifications.NotificationScheduler
 import com.zitrone.app.tor.TorIntegration
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -209,6 +210,18 @@ class AppContainer(private val app: Application) {
         }
     }
 
+    /**
+     * Rate-limits + re-fires the content-free notification. Constructed BEFORE
+     * the coordinator (which owns it). fire posts the one and only notification;
+     * isEnabled reads the live toggle at fire time so flipping it takes effect
+     * immediately; scope is the process-lifetime container scope.
+     */
+    val notificationScheduler = NotificationScheduler(
+        scope = scope,
+        fire = { MessagingNotifications.showNewMessage(app) },
+        isEnabled = { settingsRepository.settings.value.unreadReminderEnabled },
+    )
+
     val coordinator = MessagingCoordinator(
         appContext = app,
         scope = scope,
@@ -219,6 +232,7 @@ class AppContainer(private val app: Application) {
         conversations = conversationRepository,
         settings = settingsRepository,
         diagnostics = bootDiagnostics,
+        notificationScheduler = notificationScheduler,
     )
 
     init {

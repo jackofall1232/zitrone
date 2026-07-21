@@ -9,6 +9,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Android: repeating unread-notification reminders.** The single content-free
+  "New message" notification used a fixed id + `setOnlyAlertOnce`, so after the
+  first ping every later message silently updated the same tray entry with no
+  sound — high-volume users heard one ping then silence while unread piled up. A
+  new `NotificationScheduler` rate-limits to at most one alert per conversation
+  per ~2 minutes and RE-FIRES once per window while a conversation stays unread,
+  resetting the moment the chat is opened. `setOnlyAlertOnce` removed so every
+  re-fire is audible. The notification stays byte-identical (single fixed id,
+  content-free text, no counts/sender/extras) to preserve plausible deniability.
+  New Settings → Notifications toggle "Repeat unread reminders" (default ON).
 - **iOS: full contact deletion (cryptographic teardown, not soft-delete).**
   Long-press / context-menu on a conversation → confirm to burn known local
   messages (best-effort peer burn), destroy the Double Ratchet session and

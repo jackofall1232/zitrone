@@ -487,6 +487,10 @@ private fun ZitroneRoot(
                 } else {
                     LaunchedEffect(conversation.id) {
                         container.conversationRepository.markConversationRead(conversation.id)
+                        // Reset this conversation's notification re-fire cycle so
+                        // the next message alerts immediately (and no phantom
+                        // re-fire lands for a chat now on screen).
+                        container.coordinator.onConversationRead(conversation.id)
                     }
                     ChatScreen(
                         conversation = conversation,
