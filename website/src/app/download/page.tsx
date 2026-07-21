@@ -11,7 +11,7 @@ import { ANDROID_BETA_PUBLISHED, GITHUB_URL, SELF_HOSTING_DOC } from "@/lib/link
 export const metadata: Metadata = {
   title: "Download — Zitrone",
   description:
-    "Get Zitrone for iOS, Android, or the browser. Or self-host the whole thing — it's open source.",
+    "Get Zitrone for Android, iOS, or Linux desktop. Or self-host the whole thing — it's open source.",
 };
 
 function StoreBadge({ store, line1 }: { store: string; line1: string }) {
@@ -38,7 +38,7 @@ export default function DownloadPage() {
           Get the app
         </h1>
         <p className="mt-6 text-lg leading-relaxed text-ink-secondary">
-          Several ways to run Zitrone — mobile, desktop, or the browser. And, if you count running
+          Several ways to run Zitrone — mobile or Linux desktop. And, if you count running
           the entire thing yourself, one more — which we encourage.
         </p>
 
@@ -76,22 +76,6 @@ export default function DownloadPage() {
                 : "No public build has been cut yet. See what a beta install will involve, and track releases on GitHub."}
             </div>
           </Link>
-        </section>
-
-        {/* PWA */}
-        <section className="mt-16">
-          <h2 className="font-display text-2xl font-semibold tracking-display text-ink-primary">
-            Browser — no install needed
-          </h2>
-          <p className="mt-3 leading-relaxed text-ink-secondary">
-            The web app is a full client: keys generated and stored in your browser, messages
-            encrypted before they leave it. It&apos;s also an installable PWA — open it, and your
-            browser will offer to add it to your home screen or dock (look for{" "}
-            <span className="text-ink-primary">&ldquo;Install app&rdquo;</span> in the address bar
-            on desktop, or <span className="text-ink-primary">Share → Add to Home Screen</span> on
-            mobile). Installed, it works offline for composing: outbound messages queue locally and
-            send when you reconnect. Only the UI is cached — never your messages.
-          </p>
         </section>
 
         {/* Linux desktop */}
@@ -143,10 +127,10 @@ export default function DownloadPage() {
             </a>
           </div>
           <p className="mt-5 leading-relaxed text-ink-secondary">
-            Screenshot protection on the desktop app is a focus-loss blur overlay — the same
-            mechanism as the browser. It&apos;s best-effort: Linux has no universal way to
-            hard-block screen capture on Wayland or X11. For an OS-level hard block on message
-            content, the Android app is the platform that provides it.
+            Screenshot protection on the desktop app is a focus-loss blur overlay. It&apos;s
+            best-effort: Linux has no universal way to hard-block screen capture on Wayland or X11.
+            For an OS-level hard block on message content, the Android app is the platform that
+            provides it.
           </p>
         </section>
 
