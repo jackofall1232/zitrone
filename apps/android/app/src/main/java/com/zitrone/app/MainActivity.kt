@@ -534,9 +534,12 @@ private fun ZitroneRoot(
                         // not even be offered the button. Null hides the droplet
                         // entirely (LemonDropCreator refuses keyless as a backstop,
                         // but the UI must not offer what it would refuse).
+                        // Settings → Privacy "Lemon-drop compose button" (default OFF)
+                        // plus a trusted identity key. Null hides the droplet.
                         onSendAsQrDrop = if (
-                            (conversation.pinnedIdentityKeyBase64
-                                ?: conversation.contactIdentityKeyBase64) != null
+                            settings.lemonDropComposeEnabled &&
+                                (conversation.pinnedIdentityKeyBase64
+                                    ?: conversation.contactIdentityKeyBase64) != null
                         ) {
                             { text, ttlHours ->
                                 container.lemonDropCreator.create(conversation, text, ttlHours)

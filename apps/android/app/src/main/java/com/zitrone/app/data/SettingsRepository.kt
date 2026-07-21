@@ -37,6 +37,12 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
          * present. Tor stays opt-in because it's a user-chosen fallback.
          */
         val i2pEnabled: Boolean = true,
+        /**
+         * When true, the chat compose bar shows the lemon-drop (droplet) create
+         * affordance. Default false — creation is rarely used, so the toolbar
+         * stays clean until the user opts in under Settings → Privacy.
+         */
+        val lemonDropComposeEnabled: Boolean = false,
     )
 
     private val _settings = MutableStateFlow(load())
@@ -59,6 +65,9 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
 
     fun setI2pEnabled(enabled: Boolean) = put { putBoolean(KEY_I2P, enabled) }
 
+    fun setLemonDropComposeEnabled(enabled: Boolean) =
+        put { putBoolean(KEY_LEMON_DROP_COMPOSE, enabled) }
+
     private fun put(edit: android.content.SharedPreferences.Editor.() -> Unit) {
         prefs.edit().apply(edit).apply()
         _settings.value = load()
@@ -72,6 +81,7 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
         readReceipts = prefs.getBoolean(KEY_READ_RECEIPTS, true),
         torEnabled = prefs.getBoolean(KEY_TOR, false),
         i2pEnabled = prefs.getBoolean(KEY_I2P, true),
+        lemonDropComposeEnabled = prefs.getBoolean(KEY_LEMON_DROP_COMPOSE, false),
     )
 
     companion object {
@@ -83,5 +93,6 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
         private const val KEY_READ_RECEIPTS = "read_receipts"
         private const val KEY_TOR = "tor_enabled"
         private const val KEY_I2P = "i2p_enabled"
+        private const val KEY_LEMON_DROP_COMPOSE = "lemon_drop_compose_enabled"
     }
 }

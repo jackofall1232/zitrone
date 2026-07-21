@@ -7,14 +7,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Compose bar: attachment lives inside the input pill** on web/desktop and
+  Android (paperclip on the leading edge of the field, ≥44px hit target). Burn /
+  TTL stay outside the pill on Android so the field does not become a toolbar.
+  iOS has no free-standing attach control today (ephemeral menu only) — left as-is.
+- **Lemon-drop create droplet is Settings-gated (default off).** Settings → Privacy
+  has “Lemon-drop compose button”; when off, the droplet is not shown in chat.
+  Opening a drop via paste-link in Settings is unchanged. Long-press on send remains
+  dead-drop only (not lemon-drop create).
+
 ### Fixed
 
 - **Lemon-drop creation no longer dies as a generic "Couldn't seal the drop" when
   the relay is stale.** Root cause was deploy drift: production (and local Docker)
   still ran a pre–PR #3 server without `POST /api/v1/qr-drops`, so deposit 404'd
   after a successful client-side seal + PoW. Clients now surface a distinct
-  "stale server build / redeploy the relay" message on that 404; web also
-  distinguishes identity-key change, oversize, rate limit, and offline. Web
+  "stale server build / redeploy the relay" message on that 404 (told apart from a
+  handler `not_found` 404, which means the recipient is gone, not a stale relay);
+  web also distinguishes identity-key change, oversize, rate limit, and offline. Web
   create rejects oversize drafts before the difficulty-20 PoW (parity with
   Android). `scripts/verify-relay-build.sh` and `docs/RELEASING_RELAY.md` check
   lemon-drop routes so the next missed redeploy fails the smoke test.

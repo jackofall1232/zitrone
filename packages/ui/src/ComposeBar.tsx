@@ -17,9 +17,9 @@ export interface ComposeBarProps {
   onSendAsDeadDrop?: (text: string) => void;
   /**
    * Seal the composed text into a QR "lemon drop" addressed to this contact.
-   * Surfaced as a dedicated leading action (a QR glyph) rather than the send
-   * button's long-press, which is already taken by the dead-drop affordance.
-   * Available in every mode, Ghost included — it is a distinct mechanism.
+   * Opt-in affordance: the parent only passes this when Settings → Privacy
+   * "Lemon-drop compose button" is on. When omitted, the droplet is not shown
+   * (toolbar stays clean by default). Long-press on send remains dead-drop only.
    */
   /** QR dead-drop action. The draft is handed up UNCLEARED — sealing has a
    *  TTL-picker step the user may cancel, and clearing here would discard the
@@ -35,6 +35,9 @@ export interface ComposeBarProps {
   /** Fired when the coachmark is dismissed — via its × or by tapping the button. */
   onQrDropCoachmarkDismiss?: () => void;
 }
+
+/** Minimum touch/click target for in-pill icons (WCAG / Material ~44px). */
+const ICON_HIT = 44;
 
 export function ComposeBar({
   onSend,
@@ -95,38 +98,108 @@ export function ComposeBar({
         borderTop: `1px solid ${color.semantic.border}`,
       }}
     >
-      {onAttach && (
-        <button
-          type="button"
-          onClick={onAttach}
-          aria-label="Attach"
-          style={{
-            background: "none",
-            border: "none",
-            cursor: "pointer",
-            color: color.semantic.textSecondary,
-            padding: 8,
-            fontSize: "1.25rem",
-            lineHeight: 1,
+      {/*
+        Input pill: attach lives INSIDE the leading edge so the toolbar row is
+        [pill (📎 + field)] [💧 opt-in] [send] — not a free-standing + beside the
+        field. Icon hit area stays ≥44px; the field keeps flex growth.
+      */}
+      <div
+        style={{
+          flex: 1,
+          minWidth: 0,
+          display: "flex",
+          alignItems: "flex-end",
+          gap: 2,
+          background: color.semantic.backgroundElevated,
+          border: `1px solid ${focused ? color.semantic.borderActive : color.semantic.border}`,
+          borderRadius: 24,
+          padding: onAttach ? "2px 8px 2px 2px" : "2px 12px",
+          transition: `border-color ${motion.durationBase} ${motion.easingDefault}`,
+        }}
+      >
+        {onAttach && (
+          <button
+            type="button"
+            onClick={onAttach}
+            aria-label="Attach a file"
+            title="Attach"
+            style={{
+              flexShrink: 0,
+              width: ICON_HIT,
+              height: ICON_HIT,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "none",
+              border: "none",
+              borderRadius: "50%",
+              cursor: "pointer",
+              color: color.semantic.textSecondary,
+              padding: 0,
+              lineHeight: 0,
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = color.core.lemon)}
+            onMouseLeave={(e) => (e.currentTarget.style.color = color.semantic.textSecondary)}
+          >
+            {/* Paperclip — clearer than a bare "+" next to message text. */}
+            <svg
+              width={20}
+              height={20}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.8}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <path d="M21.44 11.05l-8.49 8.49a5.5 5.5 0 0 1-7.78-7.78l8.49-8.49a3.5 3.5 0 0 1 4.95 4.95l-8.5 8.49a1.5 1.5 0 0 1-2.12-2.12l7.78-7.78" />
+            </svg>
+          </button>
+        )}
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              send();
+            }
           }}
-          onMouseEnter={(e) => (e.currentTarget.style.color = color.core.lemon)}
-          onMouseLeave={(e) => (e.currentTarget.style.color = color.semantic.textSecondary)}
-        >
-          +
-        </button>
-      )}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          placeholder={placeholder}
+          rows={1}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            resize: "none",
+            background: "transparent",
+            border: "none",
+            borderRadius: 0,
+            // Vertical padding keeps single-line height ~aligned with 44px icons.
+            padding: "10px 8px 10px 4px",
+            color: color.semantic.textPrimary,
+            fontFamily: typography.body.family,
+            fontSize: "0.9375rem",
+            outline: "none",
+            lineHeight: 1.35,
+          }}
+        />
+      </div>
+
       {onSendAsQrDrop && (
         // Relative anchor so the coachmark popover can sit ABOVE the droplet
-        // button without pushing the compose row's layout. Nothing on the path
-        // up to the chat <section> clips overflow, so the popover renders freely.
-        <div style={{ position: "relative", display: "inline-flex" }}>
+        // without pushing the compose row. Outside the pill so the field stays
+        // readable when the user opts into lemon-drop create via Settings.
+        <div style={{ position: "relative", display: "inline-flex", flexShrink: 0 }}>
           {coachmarkVisible && (
             <div
               role="note"
               style={{
                 position: "absolute",
                 bottom: "calc(100% + 10px)",
-                left: 0,
+                right: 0,
                 zIndex: 50,
                 maxWidth: 240,
                 background: color.semantic.backgroundElevated,
@@ -169,11 +242,18 @@ export function ComposeBar({
             title="Seal into a QR drop for this contact"
             className={coachmarkVisible ? "sub-lemon-drop-intro" : undefined}
             style={{
+              flexShrink: 0,
+              width: ICON_HIT,
+              height: ICON_HIT,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
               background: "none",
               border: "none",
+              borderRadius: "50%",
               cursor: "pointer",
               color: color.semantic.textSecondary,
-              padding: 8,
+              padding: 0,
               lineHeight: 0,
             }}
             onMouseEnter={(e) => (e.currentTarget.style.color = color.core.lemon)}
@@ -195,33 +275,7 @@ export function ComposeBar({
           </button>
         </div>
       )}
-      <textarea
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            send();
-          }
-        }}
-        onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
-        placeholder={placeholder}
-        rows={1}
-        style={{
-          flex: 1,
-          resize: "none",
-          background: color.semantic.backgroundElevated,
-          border: `1px solid ${focused ? color.semantic.borderActive : color.semantic.border}`,
-          borderRadius: 24,
-          padding: "10px 16px",
-          color: color.semantic.textPrimary,
-          fontFamily: typography.body.family,
-          fontSize: "0.9375rem",
-          outline: "none",
-          transition: `border-color ${motion.durationBase} ${motion.easingDefault}`,
-        }}
-      />
+
       {/* The send button is always lemon yellow — it is the primary action color.
           Long-press surfaces "Send as dead drop" when the handler is provided. */}
       <SendButton

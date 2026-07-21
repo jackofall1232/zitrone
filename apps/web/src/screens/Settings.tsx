@@ -46,6 +46,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const setCoverTraffic = useSettings((s) => s.setCoverTraffic);
   const setAllowClearnetFallback = useSettings((s) => s.setAllowClearnetFallback);
   const setGlobalPrivacyView = useSettings((s) => s.setGlobalPrivacyView);
+  const lemonDropComposeEnabled = useSettings((s) => s.lemonDropComposeEnabled);
+  const setLemonDropComposeEnabled = useSettings((s) => s.setLemonDropComposeEnabled);
   const setRevealMode = useSettings((s) => s.setRevealMode);
 
   const onRedeem = () => {
@@ -209,6 +211,21 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   </button>
                 ))}
               </div>
+            </div>
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex flex-col gap-0.5">
+                <span className="text-sm text-ink-secondary">Lemon-drop compose button</span>
+                <span className="text-xs text-ink-muted">
+                  Show the droplet in chat so you can seal a QR drop. Off by default — rare action.
+                </span>
+              </div>
+              <button
+                onClick={() => setLemonDropComposeEnabled(!lemonDropComposeEnabled)}
+                aria-pressed={lemonDropComposeEnabled}
+                className={`shrink-0 rounded-full px-3 py-1 text-xs ${lemonDropComposeEnabled ? "bg-lemon text-ink-on-lemon" : "border border-line text-ink-secondary"}`}
+              >
+                {lemonDropComposeEnabled ? "On" : "Off"}
+              </button>
             </div>
           </Section>
 

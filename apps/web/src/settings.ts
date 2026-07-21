@@ -40,6 +40,13 @@ interface PersistedSettings {
    * blob that lacks this key still reads as false rather than undefined.
    */
   qrDropCoachmarkSeen: boolean;
+  /**
+   * When true, the compose bar shows the lemon-drop (💧) create affordance.
+   * Default false: lemon-drop creation is rarely used, so the toolbar stays
+   * clean unless the user opts in under Settings → Privacy. Opening/redeeming
+   * a drop (paste link) is unrelated and stays available in Settings.
+   */
+  lemonDropComposeEnabled: boolean;
 }
 
 function fallbackSettings(): PersistedSettings {
@@ -49,6 +56,7 @@ function fallbackSettings(): PersistedSettings {
     allowClearnetFallback: true,
     privacyView: DEFAULT_PRIVACY_VIEW,
     qrDropCoachmarkSeen: false,
+    lemonDropComposeEnabled: false,
   };
 }
 
@@ -102,19 +110,27 @@ interface SettingsState extends PersistedSettings {
   togglePrivacyForConversation: (peerId: string) => void;
   isPrivacyActive: (peerId: string) => boolean;
   setQrDropCoachmarkSeen: () => void;
+  setLemonDropComposeEnabled: (on: boolean) => void;
 }
 
 export const useSettings = create<SettingsState>((set, get) => {
   const initial = load();
   const persist = () => {
-    const { connectionMode, coverTraffic, allowClearnetFallback, privacyView, qrDropCoachmarkSeen } =
-      get();
+    const {
+      connectionMode,
+      coverTraffic,
+      allowClearnetFallback,
+      privacyView,
+      qrDropCoachmarkSeen,
+      lemonDropComposeEnabled,
+    } = get();
     save({
       connectionMode,
       coverTraffic,
       allowClearnetFallback,
       privacyView,
       qrDropCoachmarkSeen,
+      lemonDropComposeEnabled,
     });
   };
 
@@ -184,6 +200,10 @@ export const useSettings = create<SettingsState>((set, get) => {
     setQrDropCoachmarkSeen() {
       // One-way latch: once dismissed, the coachmark never returns.
       set({ qrDropCoachmarkSeen: true });
+      persist();
+    },
+    setLemonDropComposeEnabled(on) {
+      set({ lemonDropComposeEnabled: on });
       persist();
     },
   };
