@@ -34,6 +34,7 @@ class ConversationRepositoryPersistenceTest {
     ) : RosterStore {
         override fun readBlob(): String? = blob
         override fun writeBlob(json: String) { blob = json }
+        override fun writeBlobDurably(json: String): Boolean { blob = json; return true }
         override fun orphanedContacts(): List<OrphanContact> = orphans
     }
 
@@ -127,6 +128,23 @@ class ConversationRepositoryPersistenceTest {
 
         assertEquals(listOf("bob"), repo.conversations.value.map { it.id })
         // Survives a restart — the deleted contact must not reappear from disk.
+        val restored = ConversationRepository(store)
+        assertEquals(listOf("bob"), restored.conversations.value.map { it.id })
+        assertNull(restored.find("alice"))
+    }
+
+    @Test
+    fun `removeDurably drops the contact, reports success, and persists the gap`() {
+        val store = FakeRosterStore()
+        val repo = ConversationRepository(store)
+        repo.upsert(conversation("alice", verified = true, pinned = "pin-a"))
+        repo.upsert(conversation("bob"))
+
+        // Durable remove (contact-deletion path) reports the write reached disk.
+        assertTrue(repo.removeDurably("alice"))
+
+        assertEquals(listOf("bob"), repo.conversations.value.map { it.id })
+        // The gap is durable — a restart must not resurrect the deleted contact.
         val restored = ConversationRepository(store)
         assertEquals(listOf("bob"), restored.conversations.value.map { it.id })
         assertNull(restored.find("alice"))

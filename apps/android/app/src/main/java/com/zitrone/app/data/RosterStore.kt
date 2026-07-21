@@ -31,6 +31,15 @@ interface RosterStore {
     fun writeBlob(json: String)
 
     /**
+     * Overwrites the persisted roster JSON blob **synchronously**, returning
+     * whether the write reached disk. Used by contact deletion so the removal is
+     * durable (a crash right after the crypto teardown must not leave a stale
+     * roster blob that resurrects the deleted contact). Ordinary hot-path writes
+     * use [writeBlob] (async) — this variant is reserved for deletion.
+     */
+    fun writeBlobDurably(json: String): Boolean
+
+    /**
      * Orphaned contacts recoverable from the (persisted) Signal store — used
      * ONLY by the one-time repair path for installs wiped by the in-memory-only
      * bug. Empty on a healthy/fresh install.
@@ -63,6 +72,9 @@ class EncryptedRosterStore(
     override fun writeBlob(json: String) {
         prefs.edit().putString(KEY_ROSTER, json).apply()
     }
+
+    override fun writeBlobDurably(json: String): Boolean =
+        prefs.edit().putString(KEY_ROSTER, json).commit()
 
     override fun orphanedContacts(): List<OrphanContact> =
         signalStore.knownRemoteContacts().map { (id, key) -> OrphanContact(id, key) }

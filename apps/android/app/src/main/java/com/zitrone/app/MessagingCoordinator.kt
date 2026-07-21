@@ -29,9 +29,9 @@ import com.zitrone.app.notifications.MessagingNotifications
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -144,39 +144,38 @@ class MessagingCoordinator(
         sessionLocks.getOrPut(contactId) { Mutex() }.withLock { block() }
 
     /**
-     * Per-contact teardown generation. Bumped by [deleteContact] under the
-     * session lock whenever a contact's crypto is destroyed. A send captures
-     * the epoch at encrypt time and re-checks it (also under the lock) right
-     * before depositing the envelope — see [depositIfNotPurged]. Never cleared,
-     * so a delete-then-re-add still invalidates a stale in-flight send.
+     * Single-worker confinement for ALL coordinator coroutines. Every
+     * [scope].launch below runs on this dispatcher, so no two coordinator
+     * coroutines ever execute in parallel — their state mutations (roster,
+     * message repository, Signal store, typing set, and the [deleteContact]
+     * sequence) can only interleave at explicit suspension points.
+     *
+     * That is the property the post-round-2 epoch guards were emulating by hand
+     * and getting wrong under a multi-threaded dispatcher: with confinement, any
+     * "check the contact still exists → mutate" tail written **without a
+     * suspension in the middle** is atomic with respect to a concurrent
+     * [deleteContact], so a delete can never slip between the check and the
+     * publish. Blocking work that must not stall this one worker (the network
+     * prekey fetch; nothing else) suspends off it as usual. The crypto teardown
+     * in [deleteContact] deliberately runs ON this worker (a background
+     * Default-pool thread, never main) as a short, non-suspending local commit,
+     * so it is mutually exclusive with any same-contact encrypt/decrypt rather
+     * than racing them across threads — which is why deletion needs no session
+     * lock and cannot be stalled behind an in-flight send's network fetch.
      */
-    private val contactEpochs = ConcurrentHashMap<String, Int>()
-
-    private fun contactEpoch(contactId: String): Int = contactEpochs[contactId] ?: 0
-
-    /** Outcome of a guarded envelope deposit — see [depositIfNotPurged]. */
-    private enum class DepositOutcome { DEPOSITED, SOCKET_DOWN, PURGED }
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val confined = Dispatchers.Default.limitedParallelism(1)
 
     /**
-     * Hand [envelope] to the socket only if [contactId] was not torn down after
-     * [epochAtEncrypt] was captured. The epoch check and the ws enqueue run
-     * together under the per-contact session lock, so a concurrent
-     * [deleteContact] cannot slip a crypto purge between the check and the
-     * deposit. If the contact was deleted (or deleted-and-re-added) mid-send,
-     * the already-encrypted envelope is dropped and never reaches the relay —
-     * no ciphertext is deposited for a contact the user was told is gone.
+     * Whether [contactId] is still a live roster entry. The authoritative
+     * "is this contact deleted?" signal: [deleteContact] removes the roster
+     * entry as its last step, so a `false` here (checked with no suspension
+     * before the dependent mutation) means the contact was torn down and no
+     * envelope may be deposited, no plaintext published, and no conversation
+     * recreated for it.
      */
-    private suspend fun depositIfNotPurged(
-        contactId: String,
-        epochAtEncrypt: Int,
-        envelope: MessageEnvelope,
-    ): DepositOutcome = withSessionLock(contactId) {
-        when {
-            contactEpoch(contactId) != epochAtEncrypt -> DepositOutcome.PURGED
-            ws.sendMessage(envelope) -> DepositOutcome.DEPOSITED
-            else -> DepositOutcome.SOCKET_DOWN
-        }
-    }
+    private fun contactExists(contactId: String): Boolean =
+        conversations.findByContact(contactId) != null
 
     /**
      * Read receipts awaiting a live socket, keyed by contact. Queued when the
@@ -201,7 +200,7 @@ class MessagingCoordinator(
         }
         // Re-send read receipts that missed a dead socket whenever the
         // connection comes (back) up.
-        scope.launch {
+        scope.launch(confined) {
             ws.connectionState.collect { state ->
                 if (state == WsClient.ConnectionState.CONNECTED) flushPendingReceipts()
             }
@@ -223,7 +222,7 @@ class MessagingCoordinator(
     fun start() {
         if (linkJob?.isActive == true) return
         _linking.value = true
-        linkJob = scope.launch { bootstrapLoop() }
+        linkJob = scope.launch(confined) { bootstrapLoop() }
     }
 
     private suspend fun bootstrapLoop() {
@@ -363,7 +362,7 @@ class MessagingCoordinator(
      * identical to the user simply never having tapped send.
      */
     fun sendText(conversation: Conversation, text: String, ttlSeconds: Int?, burnOnRead: Boolean) {
-        scope.launch {
+        scope.launch(confined) {
             deliverText(
                 conversation = conversation,
                 messageId = UUID.randomUUID().toString(),
@@ -403,10 +402,6 @@ class MessagingCoordinator(
         // Stage marker for the diagnostic log in onFailure below.
         // Stage names only — never data.
         var stage = "check-session"
-        // Teardown epoch captured under the encrypt lock; re-checked before the
-        // envelope is deposited so a contact deletion racing this send can't
-        // leak a post-delete envelope to the relay.
-        var epochAtEncrypt = 0
         runCatching {
             // Session establishment + encrypt hold the per-contact lock so
             // a concurrent receipt send can't fork the ratchet.
@@ -415,6 +410,15 @@ class MessagingCoordinator(
                     stage = "fetch-prekey-bundle"
                     diag("send: no session — firing GET prekey bundle")
                     val bundle = api.fetchPreKeyBundle(conversation.contactId)
+                    // The prekey fetch suspended; a deleteContact may have landed
+                    // in the meantime. Do NOT establish a session or re-upsert
+                    // (which would resurrect) a contact that is no longer in the
+                    // roster — this is the non-suspending re-check the confinement
+                    // model relies on, right before the resurrecting mutation.
+                    if (!contactExists(conversation.contactId)) {
+                        diag("send: contact deleted during prekey fetch — send aborted")
+                        return@withSessionLock null
+                    }
                     val pinned = conversation.pinnedIdentityKeyBase64
                     if (pinned != null && pinned != bundle.identityKeyBase64) {
                         // The relay returned a different identity key than the
@@ -434,7 +438,6 @@ class MessagingCoordinator(
                     )
                 }
                 stage = "encrypt"
-                epochAtEncrypt = contactEpoch(conversation.contactId)
                 // Length-hiding padding before encryption — see MessagePadding.
                 signal.encrypt(
                     conversation.contactId,
@@ -474,24 +477,22 @@ class MessagingCoordinator(
             }
 
             stage = "ws-send"
-            when (depositIfNotPurged(conversation.contactId, epochAtEncrypt, envelope)) {
-                DepositOutcome.DEPOSITED -> {
-                    // Enqueued — but honestly still just SENDING. The tick waits
-                    // for the relay's message.stored (→SENT) and the recipient's
-                    // message.delivered (→DELIVERED); see [MessageState].
-                }
-                DepositOutcome.SOCKET_DOWN -> {
-                    // Socket not open: the send did not reach the relay.
-                    // Connection state only — never the envelope.
-                    diag("send: hand-off failed — socket not open (${ws.connectionState.value})")
-                    messages.markFailed(messageId)
-                }
-                DepositOutcome.PURGED -> {
-                    // Contact deleted mid-send: the envelope was dropped, so the
-                    // local plaintext must go too (not linger as a FAILED bubble).
-                    diag("send: contact deleted mid-send — dropping local copy")
-                    messages.discard(messageId)
-                }
+            // Non-suspending publish tail: on the confinement worker this
+            // check→deposit is atomic against deleteContact, so a contact torn
+            // down before this point drops the envelope AND the local plaintext,
+            // and one torn down after this point was still live when we deposited.
+            if (!contactExists(conversation.contactId)) {
+                diag("send: contact deleted mid-send — dropping local copy")
+                messages.discard(messageId)
+            } else if (ws.sendMessage(envelope)) {
+                // Enqueued — but honestly still just SENDING. The tick waits
+                // for the relay's message.stored (→SENT) and the recipient's
+                // message.delivered (→DELIVERED); see [MessageState].
+            } else {
+                // Socket not open: the send did not reach the relay.
+                // Connection state only — never the envelope.
+                diag("send: hand-off failed — socket not open (${ws.connectionState.value})")
+                messages.markFailed(messageId)
             }
         }.onFailure { e ->
             if (e is CancellationException) throw e
@@ -539,7 +540,7 @@ class MessagingCoordinator(
         ttlSeconds: Int?,
         burnOnRead: Boolean,
     ) {
-        scope.launch {
+        scope.launch(confined) {
             deliverAttachment(
                 conversation = conversation,
                 messageId = UUID.randomUUID().toString(),
@@ -578,10 +579,6 @@ class MessagingCoordinator(
     ) {
         val accountId = api.accountId ?: return
         var stage = "encrypt-blob"
-        // Teardown epoch captured under the encrypt lock; re-checked before the
-        // envelope is deposited (after the slow blob upload) so a contact
-        // deletion racing this send can't leak a post-delete envelope.
-        var epochAtEncrypt = 0
         runCatching {
             val blob = AttachmentCrypto.encrypt(bytes)
             // filename is forced null for images inside serialize(); mirror
@@ -607,6 +604,12 @@ class MessagingCoordinator(
                     stage = "fetch-prekey-bundle"
                     diag("send: no session — firing GET prekey bundle")
                     val bundle = api.fetchPreKeyBundle(conversation.contactId)
+                    // The prekey fetch suspended; a deleteContact may have landed.
+                    // Do NOT establish/re-upsert (resurrect) a removed contact.
+                    if (!contactExists(conversation.contactId)) {
+                        diag("send: contact deleted during prekey fetch — send aborted")
+                        return@withSessionLock null
+                    }
                     val pinned = conversation.pinnedIdentityKeyBase64
                     if (pinned != null && pinned != bundle.identityKeyBase64) {
                         diag("send: identity key mismatch — send refused, warning raised")
@@ -621,7 +624,6 @@ class MessagingCoordinator(
                     )
                 }
                 stage = "encrypt"
-                epochAtEncrypt = contactEpoch(conversation.contactId)
                 // Control JSON is padded with the DEFAULT 256-byte block like
                 // any message plaintext; only the blob uses 64 KiB buckets.
                 signal.encrypt(
@@ -679,20 +681,19 @@ class MessagingCoordinator(
                 mediaType = MessageEnvelope.MEDIA_TEXT,
             )
             stage = "ws-send"
-            when (depositIfNotPurged(conversation.contactId, epochAtEncrypt, envelope)) {
-                DepositOutcome.DEPOSITED -> {
-                    // Enqueued — honestly still SENDING until the relay/peer acks.
-                }
-                DepositOutcome.SOCKET_DOWN -> {
-                    diag("send: hand-off failed — socket not open (${ws.connectionState.value})")
-                    messages.markFailed(messageId)
-                }
-                DepositOutcome.PURGED -> {
-                    // Contact deleted while the blob uploaded: drop the envelope
-                    // AND the local copy (incl. the in-memory attachment bytes).
-                    diag("send: contact deleted mid-send — dropping local copy")
-                    messages.discard(messageId)
-                }
+            // Non-suspending publish tail (see [confined]): the blob upload above
+            // suspended, so re-check the contact still exists — atomically with
+            // the deposit — before handing ciphertext to the relay. If it was
+            // deleted mid-upload, drop the envelope AND the local copy (incl. the
+            // in-memory attachment bytes).
+            if (!contactExists(conversation.contactId)) {
+                diag("send: contact deleted mid-send — dropping local copy")
+                messages.discard(messageId)
+            } else if (ws.sendMessage(envelope)) {
+                // Enqueued — honestly still SENDING until the relay/peer acks.
+            } else {
+                diag("send: hand-off failed — socket not open (${ws.connectionState.value})")
+                messages.markFailed(messageId)
             }
         }.onFailure { e ->
             if (e is CancellationException) throw e
@@ -715,7 +716,7 @@ class MessagingCoordinator(
      * stays LOADED in memory).
      */
     fun retry(messageId: String) {
-        scope.launch {
+        scope.launch(confined) {
             val message = messages.retryable(messageId) ?: return@launch
             val conversation = conversations.find(message.conversationId) ?: run {
                 messages.markFailed(messageId)
@@ -784,14 +785,12 @@ class MessagingCoordinator(
      * off is queued in [pendingReceipts] and re-sent on reconnect.
      */
     private fun sendReadReceipt(contactId: String, messageIds: List<String>) {
-        scope.launch {
+        scope.launch(confined) {
             val accountId = api.accountId ?: return@launch
             runCatching {
                 val plaintext = ControlPayload.readReceipt(messageIds)
-                var epochAtEncrypt = 0
                 val encrypted = withSessionLock(contactId) {
                     if (!signal.hasSession(contactId)) return@withSessionLock null
-                    epochAtEncrypt = contactEpoch(contactId)
                     // Padded like every text message, so ciphertext length
                     // can't fingerprint the receipt either.
                     signal.encrypt(contactId, MessagePadding.pad(plaintext.toByteArray(Charsets.UTF_8)))
@@ -812,21 +811,20 @@ class MessagingCoordinator(
                     burnOnRead = false,
                     mediaType = MessageEnvelope.MEDIA_TEXT,
                 )
-                when (depositIfNotPurged(contactId, epochAtEncrypt, envelope)) {
-                    DepositOutcome.DEPOSITED -> Unit
-                    DepositOutcome.SOCKET_DOWN -> {
-                        // Socket down. The messages are already READ locally, so
-                        // they will never re-enter onMessagesSeen — queue the ids
-                        // for the reconnect flush. Connection state only — never
-                        // the envelope.
-                        diag("receipt: hand-off failed — queued (${ws.connectionState.value})")
-                        queueReceipts(contactId, messageIds)
-                    }
-                    DepositOutcome.PURGED -> {
-                        // Contact deleted before the receipt went out — drop it
-                        // (no post-delete ciphertext), and do not queue.
-                        diag("receipt: contact deleted mid-send — dropped, not queued")
-                    }
+                // Non-suspending publish tail (see [confined]): atomic with
+                // deleteContact. A receipt for a just-deleted contact is dropped
+                // (no post-delete ciphertext) and not queued.
+                if (!contactExists(contactId)) {
+                    diag("receipt: contact deleted mid-send — dropped, not queued")
+                } else if (ws.sendMessage(envelope)) {
+                    // Delivered to the socket — nothing more to do.
+                } else {
+                    // Socket down. The messages are already READ locally, so
+                    // they will never re-enter onMessagesSeen — queue the ids
+                    // for the reconnect flush. Connection state only — never
+                    // the envelope.
+                    diag("receipt: hand-off failed — queued (${ws.connectionState.value})")
+                    queueReceipts(contactId, messageIds)
                 }
             }.onFailure { e ->
                 if (e is CancellationException) throw e
@@ -863,51 +861,66 @@ class MessagingCoordinator(
      *     `message.burn` to the peer while the roster entry still exists (the
      *     burn callback resolves peer_id from the conversation). That is the
      *     simple purge: no separate relay envelope-delete API.
-     *  2. Then destroy Double Ratchet session state, remote identity, sender
-     *     keys, and the roster entry.
+     *  2. Destroy Double Ratchet session state, remote identity, sender keys,
+     *     and the roster entry.
+     *
+     * Ordering and concurrency (see [confined]): this runs on the confinement
+     * worker, so it is serialized against every send/deliver coroutine.
+     *
+     *  1. **Crypto teardown FIRST**, and it is the fallible step — a blocking
+     *     local commit run directly on the confinement worker (never main), so
+     *     it is non-suspending and therefore mutually exclusive with any
+     *     same-contact encrypt/decrypt (which are also non-suspending here); no
+     *     session lock, and nothing waits on a network fetch. If the commit does
+     *     not reach disk we abort **before** burning anything or removing the
+     *     roster entry, so a storage failure leaves the contact fully intact for
+     *     a retry rather than half-deleted (crypto gone, messages burned).
+     *  2. Only after a durable wipe: burn local messages (+ best-effort peer
+     *     `message.burn`) while the roster entry still resolves the peer.
+     *  3. **Durable** roster removal (commit), so a crash right after teardown
+     *     cannot leave a stale roster blob that resurrects the contact while its
+     *     crypto is already gone.
+     *  4. Drop per-contact transient state (queued receipts, typing) so a re-add
+     *     in this process cannot inherit a stale "typing…" or receipt queue.
+     *
+     * Any send/deliver that raced this deletion re-checks [contactExists] with no
+     * suspension before it publishes, so it drops rather than depositing
+     * ciphertext or resurfacing plaintext for the removed contact.
      *
      * Irreversible for session material: re-adding the same person requires a
      * completely fresh X3DH handshake.
      */
     fun deleteContact(conversationId: String, onComplete: (() -> Unit)? = null) {
-        scope.launch {
+        scope.launch(confined) {
             val conversation = conversations.find(conversationId) ?: run {
                 onComplete?.invoke()
                 return@launch
             }
             val contactId = conversation.contactId
-            // Burn-all BEFORE roster remove so onMessageBurned can still resolve
-            // the peer and send message.burn frames.
-            messages.burnAll(conversationId, notifyPeer = true)
-            // Hold the session lock so an in-flight encrypt/decrypt can't race
-            // a teardown and re-persist a destroyed SessionRecord. The teardown
-            // does blocking EncryptedSharedPreferences I/O (synchronous commit),
-            // so run it on Dispatchers.IO. Bumping the epoch (under the lock, and
-            // only on a durable wipe) makes any send that already encrypted for
-            // this contact refuse to deposit its envelope — see depositIfNotPurged.
-            val wiped = withSessionLock(contactId) {
-                val ok = withContext(Dispatchers.IO) { signal.destroyContact(contactId) }
-                if (ok) contactEpochs[contactId] = contactEpoch(contactId) + 1
-                ok
-            }
+            val wiped = signal.destroyContact(contactId)
             if (!wiped) {
                 // Teardown did not reach disk (I/O error / storage full). Do NOT
-                // report the contact deleted: keeping the roster entry lets the
-                // user retry, and leaves no half-deleted state where the crypto
-                // survives on disk but the contact vanished from the UI.
+                // burn messages or remove the contact: keeping everything intact
+                // lets the user retry, and avoids a half-deleted state where the
+                // crypto survives on disk but the contact vanished from the UI.
                 diag("delete: crypto teardown commit failed — aborting, contact kept")
                 onComplete?.invoke()
                 return@launch
             }
-            conversations.remove(conversationId)
+            // Peer-burn is best-effort (an offline burn frame is not re-queued);
+            // the dialog copy states this. Runs after the durable wipe, while the
+            // roster entry still resolves the peer for onMessageBurned.
+            messages.burnAll(conversationId, notifyPeer = true)
+            conversations.removeDurably(conversationId)
             pendingReceipts.remove(contactId)
+            _typingPeers.value = _typingPeers.value - contactId
             onComplete?.invoke()
         }
     }
 
     /** Wipes the server account AND the local keys/messages. Irreversible. */
     fun deleteAccountAndWipe(onComplete: () -> Unit) {
-        scope.launch {
+        scope.launch(confined) {
             _linking.value = false
             linkJob?.cancel()
             runCatching { api.deleteAccount() }
@@ -921,16 +934,11 @@ class MessagingCoordinator(
     // -- inbound WebSocket events ---------------------------------------------
 
     override fun onMessageDeliver(envelope: MessageEnvelope) {
-        scope.launch {
+        scope.launch(confined) {
             runCatching {
                 // Decrypt advances the receiving ratchet — serialize it with
-                // any concurrent encrypt for the same contact. Capture the
-                // teardown epoch under the same lock so a delete that lands
-                // after decrypt can't have this inbound message resurrect the
-                // conversation below.
-                var epochAtDecrypt = 0
+                // any concurrent encrypt for the same contact.
                 val plaintext = withSessionLock(envelope.senderId) {
-                    epochAtDecrypt = contactEpoch(envelope.senderId)
                     signal.decrypt(
                         remoteAccountId = envelope.senderId,
                         ciphertextBase64 = envelope.ciphertext,
@@ -954,11 +962,17 @@ class MessagingCoordinator(
                 val deliveredAtMs = runCatching {
                     Instant.parse(envelope.timestamp).toEpochMilli()
                 }.getOrDefault(System.currentTimeMillis())
-                // If the contact was deleted while this message was in flight,
-                // do NOT recreate the conversation or surface the plaintext. Ack
-                // so the relay drops its copy — the user deleted this contact.
-                if (contactEpoch(envelope.senderId) != epochAtDecrypt) {
-                    diag("recv: contact deleted mid-delivery — message dropped, not shown")
+                // If the contact was deleted, this inbound message must not
+                // recreate the conversation (onIncomingMessage below would) or
+                // surface plaintext. This check → the publish below is a single
+                // non-suspending run on the confinement worker, so it is atomic
+                // against deleteContact. A PreKey message can re-establish a
+                // session inside decrypt above (TOFU responder), so re-tear-down
+                // to leave no orphaned session for a removed contact, ack so the
+                // relay drops its copy, and stop.
+                if (!contactExists(envelope.senderId)) {
+                    diag("recv: message for deleted contact — dropped, session re-torn-down")
+                    signal.destroyContact(envelope.senderId)
                     ws.ackMessage(envelope.id)
                     return@runCatching
                 }
@@ -1055,7 +1069,7 @@ class MessagingCoordinator(
      * "unavailable" state rather than crashing or retrying.
      */
     private fun redeemAttachment(messageId: String, attachment: AttachmentControlPayload.Attachment) {
-        scope.launch {
+        scope.launch(confined) {
             runCatching {
                 val ciphertext = api.redeemBlob(attachment.blobToken)
                 val plain = AttachmentCrypto.decrypt(
@@ -1111,7 +1125,7 @@ class MessagingCoordinator(
     }
 
     override fun onPreKeyLow(remaining: Int) {
-        scope.launch {
+        scope.launch(confined) {
             runCatching {
                 api.uploadPreKeys(signal.generateOneTimePreKeys())
             }
@@ -1133,7 +1147,7 @@ class MessagingCoordinator(
         // session + socket. Latching via join() avoids the race where start()
         // no-ops against a still-active linkJob and the relink is lost.
         val current = linkJob
-        scope.launch {
+        scope.launch(confined) {
             current?.join()
             // Re-check intent after the join window: a teardown
             // (stop/logout/deleteAccount) may have run in between, and relinking

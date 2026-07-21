@@ -165,6 +165,20 @@ class ConversationRepository(
         setConversations(_conversations.value.filterNot { it.id == conversationId })
     }
 
+    /**
+     * Like [remove], but flushes the roster to disk **synchronously** and reports
+     * whether the write reached disk. Used by contact deletion so the removal is
+     * durable — a crash right after the crypto teardown must not leave a stale
+     * roster blob that resurrects the deleted contact. Returns true when the
+     * store is [readOnly] (nothing is persisted, so there is nothing to lose).
+     */
+    fun removeDurably(conversationId: String): Boolean {
+        _conversations.value = _conversations.value.filterNot { it.id == conversationId }
+        if (readOnly) return true
+        return runCatching { store.writeBlobDurably(serialize(_conversations.value)) }
+            .getOrDefault(false)
+    }
+
     fun clearAll() {
         setConversations(emptyList())
     }
