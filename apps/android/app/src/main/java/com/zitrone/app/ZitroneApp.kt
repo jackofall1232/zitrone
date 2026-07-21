@@ -19,6 +19,7 @@ import com.zitrone.app.data.LemonDropRedeemer
 import com.zitrone.app.data.LemonDropScanOutcome
 import com.zitrone.app.data.LemonDropVeil
 import com.zitrone.app.data.MessageRepository
+import com.zitrone.app.data.MessageState
 import com.zitrone.app.data.SettingsRepository
 import com.zitrone.app.data.TransportState
 import com.zitrone.app.diagnostics.BootDiagnostics
@@ -220,6 +221,14 @@ class AppContainer(private val app: Application) {
         scope = scope,
         fire = { MessagingNotifications.showNewMessage(app) },
         isEnabled = { settingsRepository.settings.value.unreadReminderEnabled },
+        // Fire-time truth for the deferred re-fire: an unseen incoming message
+        // is one still in DELIVERED (READ/BURNING/removed don't count). Keeps
+        // the 2-minute boundary silent when short-TTL or remotely-burned
+        // messages already vanished.
+        hasUnread = { conversationId ->
+            messageRepository.conversationMessages(conversationId)
+                .any { !it.isMine && it.state == MessageState.DELIVERED }
+        },
         // MONOTONIC clock, not wall time: an NTP sync or manual clock change
         // moving wall time backward would stretch the 2-minute cooldown by the
         // adjustment size and suppress alerts. elapsedRealtime() only ever

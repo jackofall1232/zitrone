@@ -154,6 +154,38 @@ class NotificationSchedulerTest {
         assertEquals(2, fired)
     }
 
+    // H — the deferred re-fire consults hasUnread at fire time: if every
+    // message that armed the window already vanished (short-TTL burn, remote
+    // burn), the boundary stays silent instead of alerting for an empty chat.
+    @Test
+    fun `re-fire is skipped when the unread messages already burned`() = runTest {
+        var fired = 0
+        var unread = true
+        val scheduler = NotificationScheduler(
+            scope = backgroundScope,
+            fire = { fired++ },
+            isEnabled = { true },
+            hasUnread = { unread },
+            clock = { currentTime },
+            cooldownMs = COOLDOWN_MS,
+        )
+
+        scheduler.onIncomingMessage("c1")            // fire #1, opens window
+        advanceTimeBy(30_000)
+        scheduler.onIncomingMessage("c1")            // arms the boundary re-fire
+        assertEquals(1, fired)
+
+        unread = false                                // 30s TTL burned them all
+        advanceTimeBy(COOLDOWN_MS)
+        runCurrent()
+        assertEquals(1, fired)                        // boundary stays silent
+
+        // A NEW arrival after the window alerts immediately (it is itself
+        // proof of unread content — hasUnread gates only the deferred path).
+        scheduler.onIncomingMessage("c1")
+        assertEquals(2, fired)
+    }
+
     // G — a removed (deleted) conversation never fires its armed re-fire, and
     // a later re-add starts a completely fresh cycle with no inherited cooldown.
     @Test

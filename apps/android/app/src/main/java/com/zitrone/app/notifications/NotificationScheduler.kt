@@ -63,6 +63,14 @@ class NotificationScheduler(
      */
     private val isEnabled: () -> Boolean,
     /**
+     * Fire-time truth for "does this conversation still hold an unseen
+     * message?" — consulted by the DEFERRED re-fire only (an immediate fire's
+     * own arriving message is proof enough). Short-TTL (30/60 s) or remotely
+     * burned messages can all vanish between arming and the 2-minute boundary;
+     * without this check the boundary would alert for an empty conversation.
+     */
+    private val hasUnread: (String) -> Boolean = { true },
+    /**
      * Duration source. PRODUCTION MUST INJECT A MONOTONIC CLOCK
      * (SystemClock.elapsedRealtime) — wall time can jump backward on NTP sync
      * or a manual change, which would stretch the cooldown far past its window
@@ -142,6 +150,13 @@ class NotificationScheduler(
                             // Nothing new arrived, or the toggle went off — quiet.
                             if (!state.arrivedSinceFire) return@synchronized
                             if (!isEnabled()) return@synchronized
+                            // The messages that armed this window may already be
+                            // gone (short-TTL burn, remote burn) — never alert
+                            // for a conversation with nothing left to read.
+                            if (!hasUnread(conversationId)) {
+                                state.arrivedSinceFire = false
+                                return@synchronized
+                            }
                             fire()
                             state.lastFiredAt = clock()
                             state.arrivedSinceFire = false
