@@ -22,7 +22,9 @@
 
 ## What is Zitrone?
 
-Zitrone is end-to-end encrypted ephemeral messaging for browser, iOS, and Android. Every
+Zitrone is end-to-end encrypted ephemeral messaging. **Android is the reference client**; iOS
+(libsignal) interoperates with it, a Linux desktop app runs the web crypto stack, and a browser
+client exists in the repo but is **not deployed** (see [Platforms](#platforms)). Every
 message is encrypted on your device with the Signal Protocol (X3DH + Double Ratchet) before it goes
 anywhere, and the server deletes each message the instant it's delivered. Messages can burn on read
 or self-destruct on a timer — from 30 seconds to a week — enforced on both sides of the
@@ -63,7 +65,8 @@ Full details in [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md).
 Five layered defenses, each built as if the one beneath it has already failed:
 
 - 🧅 **Plausible deniability** — two separate vaults behind two passphrases, with no cryptographic
-  evidence the second exists and identical unlock timing for both
+  evidence the second exists and identical unlock timing for both (a **per-device** feature, safe
+  because there is no cross-device account access; arriving on **Android** this release)
 - 📨 **Dead-drop mode** — anonymous, account-free message deposit; no metadata links the two parties
 - 🌫️ **Decoy traffic** — continuous cover traffic makes a real send indistinguishable from idle
 - 🔀 **Multi-hop relay** — 3-hop onion routing; no single relay knows both ends
@@ -76,13 +79,25 @@ See [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md) for the full onion diagram.
 
 ## Platforms
 
-| Platform                   | Stack                                | Path                           |
-| -------------------------- | ------------------------------------ | ------------------------------ |
-| Browser                    | React 18 + Vite, PWA                 | [`apps/web`](apps/web)         |
-| iOS 16+                    | SwiftUI + libsignal-client           | [`apps/ios`](apps/ios)         |
-| Android 8+                 | Jetpack Compose + libsignal-client   | [`apps/android`](apps/android) |
-| Linux (Debian/Ubuntu/Kali) | Tauri v2 + Rust, .deb/.AppImage/.rpm | [`apps/desktop`](apps/desktop) |
-| Server                     | Go 1.25+ · Fiber · PostgreSQL 16     | [`server`](server)             |
+Platform priority and maturity run **Android → Linux desktop → Web → iOS**. The
+clients split into two crypto families that **cannot exchange ordinary messages
+across the split** — an Android/iOS identity and a web/desktop identity cannot
+complete an X3DH handshake at all, in either direction. See
+[Platform status and interoperability](docs/SECURITY_MODEL.md#platform-status-and-interoperability)
+for the full matrix.
+
+| Platform                   | Stack                                | Crypto family          | Status                                                                                              | Path                           |
+| -------------------------- | ------------------------------------ | ---------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------ |
+| Android 8+                 | Jetpack Compose + libsignal-client   | libsignal (Curve25519) | **Reference client** — most complete; signed beta APK                                               | [`apps/android`](apps/android) |
+| iOS 16+                    | SwiftUI + libsignal-client           | libsignal (Curve25519) | Interoperates with Android for ordinary messaging; trails on features (e.g. cannot yet receive lemon drops) | [`apps/ios`](apps/ios)         |
+| Linux (Debian/Ubuntu/Kali) | Tauri v2 shell; **frontend is `apps/web`** | libsodium / web (Ed25519) | Runs the web crypto stack; interoperates with web, **not** with Android/iOS                     | [`apps/desktop`](apps/desktop) |
+| Browser                    | React 18 + Vite (`apps/web`)         | libsodium / web (Ed25519) | **Not deployed** — unfinished scaffolding; no live instance, registration, or contact flow; deprioritized indefinitely | [`apps/web`](apps/web)         |
+| Server                     | Go 1.25+ · Fiber · PostgreSQL 16     | —                      | Relay only                                                                                          | [`server`](server)             |
+
+**Single-device by design.** Each install is an independent identity — **no
+account sync, no device linking, no cross-device access**. This is permanent, not
+a limitation; moving to a new device means a new identity. See the
+[security model](docs/SECURITY_MODEL.md#single-device-by-design-permanent).
 
 ## Getting started
 

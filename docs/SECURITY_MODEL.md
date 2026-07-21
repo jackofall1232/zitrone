@@ -90,6 +90,82 @@ for accepting both instead of converging on one. Converging every platform on
 a single scheme remains open (tracked in `.l00prite/todos.md`) but is a
 separate, larger change, not required for correctness today.
 
+## Platform status and interoperability
+
+Zitrone targets four client platforms, but they are **not** at the same level of
+maturity, deployment, or cross-compatibility. This section states where each one
+actually stands and — most importantly — which platforms can and cannot exchange
+messages with each other. The priority order is also the maturity order:
+
+**Android (reference client) → Linux desktop → Web → iOS.**
+
+### Deployment status
+
+- **Android — the reference client.** The most complete and actively developed
+  platform; new features land here first. Distributed as a signed beta APK
+  (GitHub release + Tor mirror).
+- **Linux desktop (Tauri).** A Tauri v2 shell whose **frontend is `apps/web`**.
+  The Rust backend does transport (I2P/Tor/certificate pinning), window
+  hardening, OS keystore wrapping, and the screenshot-blur signal **only** —
+  there is no messaging-crypto crate in the desktop Rust, and `packages/crypto`
+  (libsodium.js) performs all encryption before any blob crosses the Tauri
+  boundary. Desktop therefore runs the **web TypeScript/libsodium crypto stack**
+  and inherits the web client's crypto family and interop limits (below), not
+  libsignal.
+- **Web (browser) — NOT deployed; deprioritized indefinitely.** `apps/web` exists
+  as unfinished scaffolding in the repo. There is **no live instance, no
+  registration flow, and no contact-exchange flow** built for it. Web is last in
+  platform priority and is **not** being actively worked toward launch. Any
+  marketing or download surface that presents the browser as a usable client is
+  ahead of reality (tracked as separate follow-up work on the website).
+- **iOS — libsignal-client.** Shares Android's crypto family (below), so ordinary
+  Android ↔ iOS messaging is fully supported. It trails Android on feature
+  coverage; the one known iOS-specific gap is narrow — iOS cannot yet be a
+  **lemon-drop recipient** (no platform-capability field in the drop protocol
+  yet; drops addressed to an iOS contact expire silently — see the lemon-drop
+  section, which remains the authoritative statement of that limit).
+
+### Cross-platform messaging compatibility (a hard interop block)
+
+Two crypto stacks are in use (see "Libraries" and the signing-scheme subsection
+above), and they define **two mutually incompatible families**:
+
+| Family | Platforms | Identity key | Signing |
+| --- | --- | --- | --- |
+| **libsignal** | Android, iOS | Curve25519 (Montgomery) | XEdDSA |
+| **libsodium / web** | Web, **Linux desktop** | Ed25519 | Ed25519 |
+
+- **Within a family, ordinary messaging works.** Android ↔ iOS interoperate for
+  normal conversations; web ↔ Linux desktop interoperate with each other.
+- **Across the families, ordinary messaging is impossible — a hard block, in
+  both directions.** An Android/iOS identity and a web/desktop identity **cannot
+  complete an X3DH handshake at all**: the published identity-point encodings and
+  the prekey-signature schemes differ, and even if a handshake were forced, the
+  two Double Ratchet implementations emit ciphertext neither side can parse. This
+  is **not** a security-tier difference and **not** a temporary bug to route
+  around — it is a structural incompatibility between the two stacks. Ordinary
+  send/receive across the split fails closed at the first signature gate, in
+  either direction.
+- **The only cross-family path that exists at all is the one-shot lemon-drop
+  bridge**, and it is deliberately scoped to a single sealed payload — it never
+  establishes an ordinary session, so cross-family **conversations** remain
+  impossible. See the lemon-drop section for exactly what that bridge does and
+  does not cover.
+
+Converging every platform onto one signing scheme is tracked, separate, larger
+work; it is not a correctness requirement for the in-family messaging that ships
+today.
+
+### Single-device by design (permanent)
+
+Each install — Android, iOS, Linux desktop, or web — is an **independent
+identity**. There is **no account sync, no device linking, and no cross-device
+access.** This is a permanent architectural decision, not a current limitation: an
+account's keys live on exactly one device, and moving to a new device means a new
+identity. (It is also why each plausible-deniability vault below carries its own
+independent server account, identity key, and prekey bundle — there is no
+cross-device channel for one to leak through.)
+
 ## Key generation and storage per platform
 
 - **Web:** Keys live inside the multi-vault image — a single fixed-size record in IndexedDB (see
@@ -361,6 +437,19 @@ Two VeraCrypt-analogous caveats apply, and are accepted deliberately:
   destroy a vault whose passphrase is not currently entered, exactly as writing to a VeraCrypt
   outer volume without mounting the hidden one can. Creating a vault on a device that may hold
   others is a deliberate, documented risk.
+
+**Per-device scope, and why Android-only is safe.** Plausible-deniability (decoy)
+vaults are a **per-device** feature. Because each install is an independent
+identity with **no cross-device account access** (see "Single-device by design"),
+a decoy vault on one device has no account-sync channel through which its
+existence could leak to another device — there is none to leak through. That is
+precisely why the feature can ship on one platform at a time without weakening the
+deniability guarantee. Plausible deniability is **being built for the current
+Android release**; the fixed-size image, timing-parity, and blind-overwrite model
+described above is applied to Android's own encrypted store. Other platforms show
+a **single default identity** until and unless they implement the same key-slot
+scheme independently — a device without the feature simply has one vault, which is
+itself indistinguishable from a device that has more.
 
 ### Transport hierarchy (I2P primary, Tor fallback)
 
