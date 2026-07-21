@@ -7,6 +7,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Web / Linux desktop: full contact deletion (cryptographic teardown, not soft-delete).**
+  Long-press, context-menu, or × on a conversation → confirm to burn known local
+  messages (and best-effort peer burn signals), zero Double Ratchet session
+  material, drop the verified-identity pin, remove the roster entry, and
+  persist a TTL-bounded tombstone so straggler envelopes cannot resurrect the
+  contact after a restart. Durable fail-abort: if the vault write fails, the
+  contact is kept. Re-adding the same person requires a fresh X3DH handshake.
+  Not a server bulk-purge: undelivered relay envelopes still expire via the
+  standard TTL window (same model as Android — see `docs/SECURITY_MODEL.md`).
+
 ### Fixed
 
 - **Android: permanent R8 compat mode (`android.enableR8.fullMode=false`)** to clear a

@@ -9,8 +9,10 @@
 // constant payload size and AES-256-GCM-encrypted under this vault's key.
 
 import {
+  clearContactDeletions,
   createLemonDrop,
   decryptAttachmentBlob,
+  destroyContactCrypto,
   encryptAttachmentBlob,
   fingerprintOf,
   fromBase64,
@@ -24,6 +26,7 @@ import {
   pad,
   ratchetDecrypt,
   ratchetEncrypt,
+  recordContactDeletion,
   safetyNumber,
   sealTo,
   signWithIdentity,
@@ -32,6 +35,7 @@ import {
   unpad,
   utf8Decode,
   utf8Encode,
+  wasContactRecentlyDeleted,
   wipe,
   x3dhInitiate,
   x3dhRespond,
@@ -242,6 +246,15 @@ interface AppState {
   markVerified: (peerId: string) => Promise<void>;
   getSafetyNumber: (peerId: string) => Promise<string>;
   deleteAccount: () => Promise<void>;
+  /**
+   * Full contact deletion (cryptographic teardown, not soft-delete).
+   * Destroys that peer's Double Ratchet session + verified pin, burns local
+   * messages (and best-effort peer burn signals), removes the roster entry,
+   * and records a TTL-bounded tombstone so stragglers cannot resurrect the
+   * contact. Returns false if crypto teardown could not be made durable
+   * (contact kept intact so the user can retry).
+   */
+  deleteContact: (peerId: string) => Promise<boolean>;
   /** Erase the entire vault image — every vault, real or filler — and return to
    *  setup. The recovery path from the unlock screen (a forgotten passphrase
    *  and an all-filler image are indistinguishable, by design). */
@@ -252,11 +265,36 @@ interface AppState {
 export const useApp = create<AppState>((set, get) => {
   // ── internals ──────────────────────────────────────────────────────────────
 
+  // Serial chain for contact-critical ops (delete / send / receive). JS is
+  // single-threaded but async/await still creates check-then-act races across
+  // suspension points — the same class Android hit with concurrent send+delete.
+  // Every op that mutates or depends on contact/session presence runs through
+  // this queue so a delete cannot slip between "contact exists" and "deposit
+  // ciphertext" / "decrypt inbound".
+  let contactOpChain: Promise<unknown> = Promise.resolve();
+  const enqueueContactOp = <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = contactOpChain.then(fn, fn);
+    contactOpChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
+
   const persist = async (): Promise<void> => {
     const { keyStore, vault, contacts } = get();
     if (!keyStore || !vault) return;
     keyStore.sessions = contacts as unknown as Record<string, unknown>;
     await persistVault(vault, keyStore);
+  };
+
+  /** True when this peer was deleted within the straggler window (or the
+   *  keystore is gone). Used before decrypt so a tombstoned peer never TOFU-
+   *  establishes a fresh session. */
+  const isDeletedContact = (peerId: string): boolean => {
+    const { keyStore } = get();
+    if (!keyStore) return true;
+    return wasContactRecentlyDeleted(keyStore, peerId);
   };
 
   // Derive this device's own identity self-fingerprint for the security-paper
@@ -482,37 +520,50 @@ export const useApp = create<AppState>((set, get) => {
     opts: { ttlSeconds: number | null; burnOnRead: boolean },
     id: string,
   ): Promise<{ id: string; timestamp: string } | null> => {
-    const { contacts, accountId, ws } = get();
-    const contact = contacts[peerId];
-    if (!contact || !accountId || !ws) return null;
-    // A session-less contact is a mobile lemon-drop sender we can't ordinary-
-    // message across the key-family wall — nothing to send over.
-    if (contact.session === null) return null;
+    // Serialize with deleteContact so we never deposit ciphertext for a peer
+    // that was removed between the pre-check and the wire send.
+    return enqueueContactOp(async () => {
+      const { contacts, accountId, ws } = get();
+      const contact = contacts[peerId];
+      if (!contact || !accountId || !ws) return null;
+      if (isDeletedContact(peerId)) return null;
+      // A session-less contact is a mobile lemon-drop sender we can't ordinary-
+      // message across the key-family wall — nothing to send over.
+      if (contact.session === null) return null;
 
-    const session = deserializeSession(contact.session);
-    // Pad the plaintext to a 256-byte block before encrypting so ciphertext
-    // length leaks nothing — and so decoy traffic is the same size as real.
-    const encrypted = await ratchetEncrypt(session, await pad(utf8Encode(plaintext)));
-    contact.session = serializeSession(session);
-    set((s) => ({ contacts: { ...s.contacts, [peerId]: { ...contact } } }));
+      const session = deserializeSession(contact.session);
+      // Pad the plaintext to a 256-byte block before encrypting so ciphertext
+      // length leaks nothing — and so decoy traffic is the same size as real.
+      const encrypted = await ratchetEncrypt(session, await pad(utf8Encode(plaintext)));
+      // Re-check after the await: deleteContact may have torn the peer down.
+      if (isDeletedContact(peerId) || !get().contacts[peerId]) {
+        wipe(session.rootKey);
+        wipe(session.dhSelf.privateKey);
+        if (session.sendingChainKey) wipe(session.sendingChainKey);
+        if (session.receivingChainKey) wipe(session.receivingChainKey);
+        return null;
+      }
+      contact.session = serializeSession(session);
+      set((s) => ({ contacts: { ...s.contacts, [peerId]: { ...contact } } }));
 
-    const envelope: MessageEnvelope = {
-      id,
-      sender_id: accountId,
-      recipient_id: peerId,
-      ciphertext: b64(encrypted.blob),
-      ephemeral_key: contact.pendingEphemeralKey,
-      prekey_id: contact.pendingPrekeyId,
-      message_number: encrypted.messageNumber,
-      previous_chain_length: encrypted.previousChainLength,
-      timestamp: new Date().toISOString(),
-      ttl_seconds: opts.ttlSeconds,
-      burn_on_read: opts.burnOnRead,
-      media_type: "text",
-      version: PROTOCOL_VERSION,
-    };
-    ws.send({ type: "message.send", envelope });
-    return { id: envelope.id, timestamp: envelope.timestamp };
+      const envelope: MessageEnvelope = {
+        id,
+        sender_id: accountId,
+        recipient_id: peerId,
+        ciphertext: b64(encrypted.blob),
+        ephemeral_key: contact.pendingEphemeralKey,
+        prekey_id: contact.pendingPrekeyId,
+        message_number: encrypted.messageNumber,
+        previous_chain_length: encrypted.previousChainLength,
+        timestamp: new Date().toISOString(),
+        ttl_seconds: opts.ttlSeconds,
+        burn_on_read: opts.burnOnRead,
+        media_type: "text",
+        version: PROTOCOL_VERSION,
+      };
+      ws.send({ type: "message.send", envelope });
+      return { id: envelope.id, timestamp: envelope.timestamp };
+    });
   };
 
   // Post-decryption dispatch for a delivered message. Follows the canonical
@@ -645,93 +696,138 @@ export const useApp = create<AppState>((set, get) => {
     void (async () => {
       switch (event.type) {
         case "message.deliver": {
-          const envelope = parseEnvelope(event.envelope);
-          const { contacts, ws } = get();
-          const contact = contacts[envelope.sender_id];
-          try {
-            let text: string;
-            if (!contact) {
-              ({ text } = await respondToInitialMessage(envelope));
-            } else if (contact.session === null) {
-              // A session-less contact is a mobile (Curve25519) lemon-drop
-              // sender: no ordinary web↔mobile session exists, so an inbound
-              // ordinary envelope for them is neither expected nor decryptable.
-              // Drop it rather than run the guarded session-reset against an
-              // impossible cross-family session.
+          // Serialize with deleteContact / send so a straggler cannot decrypt
+          // after a delete has already torn down the peer (or interleave with
+          // one that is mid-teardown).
+          await enqueueContactOp(async () => {
+            const envelope = parseEnvelope(event.envelope);
+            const { contacts, ws } = get();
+            // Tombstone FIRST — before any decrypt that could TOFU-establish a
+            // fresh session, and before treating an absent roster entry as a
+            // first-time "Unknown contact". Ack so the relay drops its copy.
+            if (isDeletedContact(envelope.sender_id)) {
+              ws?.send({ type: "message.ack", message_id: envelope.id });
               return;
-            } else {
-              const storedSession = contact.session;
-              try {
-                const session = deserializeSession(storedSession);
-                const plaintext = await ratchetDecrypt(session, {
-                  blob: unb64(envelope.ciphertext),
-                  messageNumber: envelope.message_number,
-                  previousChainLength: envelope.previous_chain_length,
-                });
-                contact.session = serializeSession(session);
-                // First message from them: our X3DH header is no longer needed.
-                contact.pendingEphemeralKey = null;
-                contact.pendingPrekeyId = null;
-                set((s) => ({ contacts: { ...s.contacts, [envelope.sender_id]: { ...contact } } }));
-                text = utf8Decode(unpad(plaintext));
-              } catch (err) {
-                // GUARDED SESSION RESET (maintainer decision 2a). Two independent
-                // initiators deadlock: each side holds its own outbound session
-                // and neither can decrypt the other's first message. Lemon drops
-                // manufacture this systematically (the recipient's redeem creates
-                // a fresh outbound session while we still hold our original one);
-                // mutual addContact can hit it too. The guard is deliberately
-                // narrow — ALL of the following must hold, else the envelope is
-                // dropped exactly as before:
-                //   1. the stored session failed to decrypt, AND
-                //   2. the envelope carries an X3DH initial-message header
-                //      (ephemeral_key) — ordinary ratchet traffic never does, AND
-                //   3. the X3DH responder handshake keyed on the PINNED contact
-                //      identity key yields a session that decrypts this envelope.
-                // (3) is the authentication: the sender's identity key is mixed
-                // into the X3DH secret, so only the holder of the pinned key's
-                // private half can produce an envelope this reset accepts. The
-                // pinned key — never a freshly fetched bundle — is what we mix,
-                // so a relay swapping bundles cannot steer the reset. Replaying
-                // the contact's ORIGINAL initial message is inert whenever it
-                // consumed a one-time prekey (deleted on first use, so the
-                // re-derivation fails); the no-OTP corner is accepted V1 surface,
-                // documented in SECURITY_MODEL.md.
-                if (!envelope.ephemeral_key) throw err;
-                const { session, text: freshText } = await respondToX3DH(
-                  envelope,
-                  unb64(contact.identityKey),
-                );
-                const reset: ContactRecord = {
-                  ...contact,
-                  session: serializeSession(session),
-                  pendingEphemeralKey: null,
-                  pendingPrekeyId: null,
-                };
-                set((s) => ({ contacts: { ...s.contacts, [envelope.sender_id]: reset } }));
-                text = freshText;
-              }
             }
-            // Shared post-decryption dispatch: receipts swallowed, attachments
-            // redeemed, unknown control payloads shown as a generic notice,
-            // everything else rendered as text (see lib/incoming.ts).
-            deliverIncoming(envelope, text);
-            // Ack triggers immediate server-side deletion of the envelope.
-            ws?.send({ type: "message.ack", message_id: envelope.id });
-            // Delivery receipt: tell the ORIGINAL sender we got it, addressed
-            // back to them by peer_id (their account id, from the decrypted
-            // envelope). The relay peer-routes it as message.delivered without
-            // ever having stored who the sender was (zero-knowledge preserved).
-            ws?.send({
-              type: "message.received",
-              message_id: envelope.id,
-              peer_id: envelope.sender_id,
-            });
-            await persist();
-          } catch {
-            // Undecryptable envelope: never ack what we couldn't deliver to
-            // the user, and never log payloads.
-          }
+            const contact = contacts[envelope.sender_id];
+            try {
+              let text: string;
+              if (!contact) {
+                ({ text } = await respondToInitialMessage(envelope));
+                // Delete may have landed while we awaited the prekey fetch —
+                // re-check tombstone before accepting the new contact.
+                if (isDeletedContact(envelope.sender_id)) {
+                  const { keyStore } = get();
+                  if (keyStore) {
+                    destroyContactCrypto(keyStore, envelope.sender_id);
+                    const next = { ...get().contacts };
+                    delete next[envelope.sender_id];
+                    set({ contacts: next });
+                    await persist();
+                  }
+                  ws?.send({ type: "message.ack", message_id: envelope.id });
+                  return;
+                }
+              } else if (contact.session === null) {
+                // A session-less contact is a mobile (Curve25519) lemon-drop
+                // sender: no ordinary web↔mobile session exists, so an inbound
+                // ordinary envelope for them is neither expected nor decryptable.
+                // Drop it rather than run the guarded session-reset against an
+                // impossible cross-family session.
+                return;
+              } else {
+                const storedSession = contact.session;
+                try {
+                  const session = deserializeSession(storedSession);
+                  const plaintext = await ratchetDecrypt(session, {
+                    blob: unb64(envelope.ciphertext),
+                    messageNumber: envelope.message_number,
+                    previousChainLength: envelope.previous_chain_length,
+                  });
+                  // Re-check after await: deleteContact may have landed.
+                  if (isDeletedContact(envelope.sender_id) || !get().contacts[envelope.sender_id]) {
+                    wipe(session.rootKey);
+                    wipe(session.dhSelf.privateKey);
+                    ws?.send({ type: "message.ack", message_id: envelope.id });
+                    return;
+                  }
+                  contact.session = serializeSession(session);
+                  // First message from them: our X3DH header is no longer needed.
+                  contact.pendingEphemeralKey = null;
+                  contact.pendingPrekeyId = null;
+                  set((s) => ({
+                    contacts: { ...s.contacts, [envelope.sender_id]: { ...contact } },
+                  }));
+                  text = utf8Decode(unpad(plaintext));
+                } catch (err) {
+                  // GUARDED SESSION RESET (maintainer decision 2a). Two independent
+                  // initiators deadlock: each side holds its own outbound session
+                  // and neither can decrypt the other's first message. Lemon drops
+                  // manufacture this systematically (the recipient's redeem creates
+                  // a fresh outbound session while we still hold our original one);
+                  // mutual addContact can hit it too. The guard is deliberately
+                  // narrow — ALL of the following must hold, else the envelope is
+                  // dropped exactly as before:
+                  //   1. the stored session failed to decrypt, AND
+                  //   2. the envelope carries an X3DH initial-message header
+                  //      (ephemeral_key) — ordinary ratchet traffic never does, AND
+                  //   3. the X3DH responder handshake keyed on the PINNED contact
+                  //      identity key yields a session that decrypts this envelope.
+                  // (3) is the authentication: the sender's identity key is mixed
+                  // into the X3DH secret, so only the holder of the pinned key's
+                  // private half can produce an envelope this reset accepts. The
+                  // pinned key — never a freshly fetched bundle — is what we mix,
+                  // so a relay swapping bundles cannot steer the reset. Replaying
+                  // the contact's ORIGINAL initial message is inert whenever it
+                  // consumed a one-time prekey (deleted on first use, so the
+                  // re-derivation fails); the no-OTP corner is accepted V1 surface,
+                  // documented in SECURITY_MODEL.md.
+                  if (!envelope.ephemeral_key) throw err;
+                  if (isDeletedContact(envelope.sender_id) || !get().contacts[envelope.sender_id]) {
+                    ws?.send({ type: "message.ack", message_id: envelope.id });
+                    return;
+                  }
+                  const { session, text: freshText } = await respondToX3DH(
+                    envelope,
+                    unb64(contact.identityKey),
+                  );
+                  if (isDeletedContact(envelope.sender_id) || !get().contacts[envelope.sender_id]) {
+                    wipe(session.rootKey);
+                    wipe(session.dhSelf.privateKey);
+                    ws?.send({ type: "message.ack", message_id: envelope.id });
+                    return;
+                  }
+                  const reset: ContactRecord = {
+                    ...contact,
+                    session: serializeSession(session),
+                    pendingEphemeralKey: null,
+                    pendingPrekeyId: null,
+                  };
+                  set((s) => ({ contacts: { ...s.contacts, [envelope.sender_id]: reset } }));
+                  text = freshText;
+                }
+              }
+              // Shared post-decryption dispatch: receipts swallowed, attachments
+              // redeemed, unknown control payloads shown as a generic notice,
+              // everything else rendered as text (see lib/incoming.ts).
+              deliverIncoming(envelope, text);
+              // Ack triggers immediate server-side deletion of the envelope.
+              ws?.send({ type: "message.ack", message_id: envelope.id });
+              // Delivery receipt: tell the ORIGINAL sender we got it, addressed
+              // back to them by peer_id (their account id, from the decrypted
+              // envelope). The relay peer-routes it as message.delivered without
+              // ever having stored who the sender was (zero-knowledge preserved).
+              ws?.send({
+                type: "message.received",
+                message_id: envelope.id,
+                peer_id: envelope.sender_id,
+              });
+              await persist();
+            } catch {
+              // Undecryptable envelope: never ack what we couldn't deliver to
+              // the user, and never log payloads.
+            }
+          });
           break;
         }
         case "message.stored": {
@@ -1013,9 +1109,11 @@ export const useApp = create<AppState>((set, get) => {
     },
 
     async sendDeadDrop(peerId, text) {
+      return enqueueContactOp(async () => {
       const { contacts, accountId } = get();
       const contact = contacts[peerId];
       if (!contact || !accountId) throw new Error("unknown contact");
+      if (isDeletedContact(peerId)) throw new Error("contact deleted");
       // A session-less mobile lemon-drop contact has no ordinary session to
       // encrypt against (cross-family wall) — a token dead-drop to them is
       // impossible, so refuse rather than crash on a null session.
@@ -1027,6 +1125,11 @@ export const useApp = create<AppState>((set, get) => {
       // Pad the plaintext to a 256-byte block before encrypting so ciphertext
       // length leaks nothing — and so decoy traffic is the same size as real.
       const encrypted = await ratchetEncrypt(session, await pad(utf8Encode(text)));
+      if (isDeletedContact(peerId) || !get().contacts[peerId]) {
+        wipe(session.rootKey);
+        wipe(session.dhSelf.privateKey);
+        throw new Error("contact deleted");
+      }
       contact.session = serializeSession(session);
       set((s) => ({ contacts: { ...s.contacts, [peerId]: { ...contact } } }));
 
@@ -1079,15 +1182,20 @@ export const useApp = create<AppState>((set, get) => {
       await persist();
       // The token is the capability — shared out of band, never with the server.
       return await toBase64(token);
+      });
     },
 
     async sendQrDrop(peerId, text, ttlHours) {
+      // Lemon drops do not advance the live session, but still must not target
+      // a peer the user just deleted (check-then-act across the prekey fetch).
+      return enqueueContactOp(async () => {
       const { keyStore, contacts, accountId } = get();
       const contact = contacts[peerId];
       // Same admission as sendDeadDrop: our keys, our account, and an existing
       // contact to address the drop to. A lemon drop is recipient-targeted by
       // design — never anonymous — so a known contact is required.
       if (!keyStore || !accountId || !contact) throw new Error("unknown contact");
+      if (isDeletedContact(peerId)) throw new Error("contact deleted");
 
       const identity = deserializeIdentity(keyStore.identityKey as unknown as SerializedIdentity);
 
@@ -1097,6 +1205,9 @@ export const useApp = create<AppState>((set, get) => {
       // addContact does (base64 → bytes) for x3dhInitiate inside createLemonDrop.
       const token = await freshToken();
       const bundle = await api.fetchPrekeyBundle(peerId, token);
+      if (isDeletedContact(peerId) || !get().contacts[peerId]) {
+        throw new Error("contact deleted");
+      }
 
       // TRUST BOUNDARY (the creation-side mirror of redeemQrDrop's check): the
       // drop must seal to the identity key we PINNED for this contact, not to
@@ -1180,6 +1291,7 @@ export const useApp = create<AppState>((set, get) => {
       }
 
       return { url: drop.url, expiresAt: expires_at };
+      });
     },
 
     async redeemDeadDrop(tokenB64) {
@@ -1455,6 +1567,81 @@ export const useApp = create<AppState>((set, get) => {
       return safetyNumber(unb64(mine), unb64(contact.identityKey));
     },
 
+    async deleteContact(peerId) {
+      return enqueueContactOp(async () => {
+        const { keyStore, contacts, messages, ws, activePeer } = get();
+        const contact = contacts[peerId];
+        if (!keyStore || !contact) return false;
+
+        // Snapshot for durable fail-abort: if the vault write fails after we
+        // mutate the keystore, restore the prior contact so we never report
+        // "deleted" with crypto still on disk (Android fail-abort semantics).
+        const priorContact = { ...contact };
+        const priorVerified = keyStore.verifiedContacts[peerId];
+        const priorSessionBlob = keyStore.sessions[peerId];
+
+        let liveSession = null as ReturnType<typeof deserializeSession> | null;
+        if (contact.session) {
+          try {
+            liveSession = deserializeSession(contact.session);
+          } catch {
+            liveSession = null;
+          }
+        }
+
+        if (!destroyContactCrypto(keyStore, peerId, liveSession)) {
+          return false;
+        }
+
+        // Tombstone before roster removal so any concurrent inbound path that
+        // re-checks sees the deletion even if persist races.
+        recordContactDeletion(keyStore, peerId);
+
+        // Drop from in-memory roster for the persist snapshot.
+        const nextContacts = { ...contacts };
+        delete nextContacts[peerId];
+        set({
+          contacts: nextContacts,
+          activePeer: activePeer === peerId ? null : activePeer,
+        });
+
+        try {
+          await persist();
+        } catch {
+          // Durable write failed — restore contact + keystore material so the
+          // user can retry. Live session bytes were zeroed and cannot be
+          // reconstructed from the wiped buffer; re-hydrate from the snapshot.
+          keyStore.sessions[peerId] = priorSessionBlob;
+          if (priorVerified !== undefined) {
+            keyStore.verifiedContacts[peerId] = priorVerified;
+          } else {
+            delete keyStore.verifiedContacts[peerId];
+          }
+          // Drop the just-written tombstone so we don't block the restored contact.
+          if (keyStore.deletedContacts) delete keyStore.deletedContacts[peerId];
+          set((s) => ({ contacts: { ...s.contacts, [peerId]: priorContact } }));
+          return false;
+        }
+
+        // Peer-burn is best-effort (not re-queued if offline). Fire for every
+        // message id we still know about, then drop local history for H2
+        // semantics: history is not kept decryptable — we destroy what we hold.
+        // (Web messages are memory-only anyway; this matches Android burn-all
+        // for known in-flight / displayed messages.)
+        const peerMessages = messages[peerId] ?? [];
+        for (const m of peerMessages) {
+          ws?.send({ type: "message.burn", message_id: m.id, peer_id: peerId });
+        }
+        set((s) => {
+          const next = { ...s.messages };
+          delete next[peerId];
+          return { messages: next };
+        });
+
+        return true;
+      });
+    },
+
     async deleteAccount() {
       const token = await freshToken();
       await api.deleteAccount(token);
@@ -1463,7 +1650,8 @@ export const useApp = create<AppState>((set, get) => {
       // Turn this vault's slot back into random filler. The image keeps its
       // exact size and shape — other vaults (if any) are untouched, and the
       // deletion leaves no trace that a vault was ever here.
-      const { vault } = get();
+      const { vault, keyStore } = get();
+      if (keyStore) clearContactDeletions(keyStore);
       try {
         if (vault) await destroyVaultSlot(vault);
       } finally {
