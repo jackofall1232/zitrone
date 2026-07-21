@@ -30,4 +30,14 @@ describe("settings persistence merge", () => {
   it("a corrupt blob falls back to false", () => {
     expect(parsePersisted("{not json").qrDropCoachmarkSeen).toBe(false);
   });
+
+  it("lemonDropComposeEnabled defaults off and merges from a legacy blob", () => {
+    // Pre-toggle installs must not suddenly show the droplet in every chat.
+    expect(parsePersisted(null).lemonDropComposeEnabled).toBe(false);
+    const legacy = JSON.stringify({ connectionMode: "balanced" });
+    expect(parsePersisted(legacy).lemonDropComposeEnabled).toBe(false);
+    expect(parsePersisted(JSON.stringify({ lemonDropComposeEnabled: true })).lemonDropComposeEnabled).toBe(
+      true,
+    );
+  });
 });

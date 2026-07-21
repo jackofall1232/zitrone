@@ -81,8 +81,16 @@ fun ttlLabel(seconds: Int?): String = when (seconds) {
 /**
  * Compose bar (design_system.components.compose_bar):
  * #1A1800 surface with a 1px top border, pill input (#242100, lemon border
- * on focus), burn-on-read flame toggle, TTL cycler, and the 40dp lemon
- * circular send button (scale 0.92 on press, spring back).
+ * on focus) with the **attachment control inside the pill** (leading edge —
+ * paperclip opens photo/file chooser), burn-on-read + TTL outside the pill
+ * (ephemeral controls don't fit cleanly inside without crowding the field),
+ * optional lemon-drop droplet (Settings-gated by the caller), and the 40dp
+ * lemon circular send button.
+ *
+ * Layout:
+ * ```
+ * [🔥] [⏱] [ 📎 | message text …… ] [💧?] [send]
+ * ```
  */
 @Composable
 fun ComposeBar(
@@ -96,8 +104,12 @@ fun ComposeBar(
     onAttachImage: () -> Unit,
     onAttachFile: () -> Unit,
     modifier: Modifier = Modifier,
-    /** Seal the current draft into a lemon drop (QR dead-drop) for this contact.
-     *  Null hides the droplet affordance entirely (e.g. no contact to address). */
+    /**
+     * Seal the current draft into a lemon drop (QR dead-drop) for this contact.
+     * Null hides the droplet entirely — the parent passes null when Settings
+     * "Lemon-drop compose button" is off, or when there is no trusted identity
+     * to seal to.
+     */
     onSendAsQrDrop: (() -> Unit)? = null,
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
@@ -106,52 +118,13 @@ fun ComposeBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(BackgroundSecondary)
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(horizontal = 8.dp, vertical = 8.dp),
             verticalAlignment = Alignment.Bottom,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            // Attach — a paperclip that opens a small chooser (photo/file). The
-            // photo picker needs no permission; the file picker uses SAF.
-            var attachMenuOpen by remember { mutableStateOf(false) }
-            Box {
-                IconButton(onClick = { attachMenuOpen = true }) {
-                    Icon(
-                        imageVector = Icons.Outlined.AttachFile,
-                        contentDescription = "Attach a photo or file",
-                        tint = TextSecondary,
-                    )
-                }
-                DropdownMenu(
-                    expanded = attachMenuOpen,
-                    onDismissRequest = { attachMenuOpen = false },
-                ) {
-                    DropdownMenuItem(
-                        text = { Text("Photo") },
-                        leadingIcon = {
-                            Icon(imageVector = Icons.Outlined.Image, contentDescription = null)
-                        },
-                        onClick = {
-                            attachMenuOpen = false
-                            onAttachImage()
-                        },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("File") },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Outlined.InsertDriveFile,
-                                contentDescription = null,
-                            )
-                        },
-                        onClick = {
-                            attachMenuOpen = false
-                            onAttachFile()
-                        },
-                    )
-                }
-            }
-
-            // Burn-on-read toggle — flame lights orange when armed.
+            // Ephemeral controls stay OUTSIDE the pill — burn + TTL are
+            // message-mode toggles, not field chrome. Putting them inside
+            // with attach would make the pill a crowded toolbar.
             IconButton(onClick = onToggleBurnOnRead) {
                 Icon(
                     imageVector = Icons.Filled.LocalFireDepartment,
@@ -164,7 +137,6 @@ fun ComposeBar(
                 )
             }
 
-            // TTL cycler — taps through Off/30s/1m/5m/1h/1d/1w.
             IconButton(onClick = onCycleTtl) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(
@@ -183,54 +155,67 @@ fun ComposeBar(
                 }
             }
 
-            // Seal-into-a-lemon-drop — the droplet outline mark, enabled only
-            // when there is a non-blank draft to seal. Hidden when no handler is
-            // wired (no recipient to address a drop to).
-            if (onSendAsQrDrop != null) {
-                val dropEnabled = value.isNotBlank()
-                IconButton(onClick = onSendAsQrDrop, enabled = dropEnabled) {
-                    val droplet = remember { PathParser().parsePathString(DROPLET_PATH).toPath() }
-                    val tint = if (dropEnabled) Lemon else TextSecondary
-                    Canvas(
-                        modifier = Modifier
-                            .size(20.dp)
-                            .semantics { contentDescription = "Seal into a lemon drop" },
-                    ) {
-                        // The droplet path is authored in a 24-unit viewBox; scale
-                        // it to the icon and stroke at the SVG's own 1.8 width (the
-                        // same outline the web/mock renders).
-                        val s = size.minDimension / 24f
-                        withTransform({ scale(s, s, pivot = Offset.Zero) }) {
-                            drawPath(
-                                path = droplet,
-                                color = tint,
-                                style = Stroke(width = 1.8f, join = StrokeJoin.Round),
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Pill input.
+            // Pill input with leading attach — Material IconButton already
+            // provides a ≥48dp touch target (a11y-safe on mobile).
             val interactionSource = remember { MutableInteractionSource() }
             val focused by interactionSource.collectIsFocusedAsState()
-            Box(
+            var attachMenuOpen by remember { mutableStateOf(false) }
+            Row(
                 modifier = Modifier
                     .weight(1f)
-                    .heightIn(min = 40.dp)
+                    .heightIn(min = 48.dp)
                     .background(BackgroundElevated, RoundedCornerShape(24.dp))
                     .border(
                         width = 1.dp,
                         color = if (focused) BorderActive else BorderColor,
                         shape = RoundedCornerShape(24.dp),
                     )
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                contentAlignment = Alignment.CenterStart,
+                    .padding(start = 2.dp, end = 12.dp, top = 2.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
+                Box {
+                    IconButton(onClick = { attachMenuOpen = true }) {
+                        Icon(
+                            imageVector = Icons.Outlined.AttachFile,
+                            contentDescription = "Attach a photo or file",
+                            tint = TextSecondary,
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = attachMenuOpen,
+                        onDismissRequest = { attachMenuOpen = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Photo") },
+                            leadingIcon = {
+                                Icon(imageVector = Icons.Outlined.Image, contentDescription = null)
+                            },
+                            onClick = {
+                                attachMenuOpen = false
+                                onAttachImage()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("File") },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Outlined.InsertDriveFile,
+                                    contentDescription = null,
+                                )
+                            },
+                            onClick = {
+                                attachMenuOpen = false
+                                onAttachFile()
+                            },
+                        )
+                    }
+                }
                 BasicTextField(
                     value = value,
                     onValueChange = onValueChange,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(vertical = 10.dp),
                     textStyle = MaterialTheme.typography.bodyMedium.copy(color = TextPrimary),
                     cursorBrush = SolidColor(Lemon),
                     interactionSource = interactionSource,
@@ -248,7 +233,31 @@ fun ComposeBar(
                 )
             }
 
-            // The send button is ALWAYS lemon yellow — primary action colour.
+            // Lemon-drop create — only when the parent wired a handler (Settings
+            // opt-in + trusted contact key). Between pill and send so it reads as
+            // a secondary action, not field chrome.
+            if (onSendAsQrDrop != null) {
+                val dropEnabled = value.isNotBlank()
+                IconButton(onClick = onSendAsQrDrop, enabled = dropEnabled) {
+                    val droplet = remember { PathParser().parsePathString(DROPLET_PATH).toPath() }
+                    val tint = if (dropEnabled) Lemon else TextSecondary
+                    Canvas(
+                        modifier = Modifier
+                            .size(20.dp)
+                            .semantics { contentDescription = "Seal into a lemon drop" },
+                    ) {
+                        val s = size.minDimension / 24f
+                        withTransform({ scale(s, s, pivot = Offset.Zero) }) {
+                            drawPath(
+                                path = droplet,
+                                color = tint,
+                                style = Stroke(width = 1.8f, join = StrokeJoin.Round),
+                            )
+                        }
+                    }
+                }
+            }
+
             LemonSendButton(
                 onClick = onSend,
                 enabled = value.isNotBlank(),

@@ -69,6 +69,8 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
   const togglePrivacy = useSettings((s) => s.togglePrivacyForConversation);
   const qrDropCoachmarkSeen = useSettings((s) => s.qrDropCoachmarkSeen);
   const setQrDropCoachmarkSeen = useSettings((s) => s.setQrDropCoachmarkSeen);
+  // Opt-in: Settings → Privacy. Default off so the compose toolbar stays clean.
+  const lemonDropComposeEnabled = useSettings((s) => s.lemonDropComposeEnabled);
 
   const [ttl, setTtl] = useState<number | null>(null);
   const [burnOnRead, setBurnOnRead] = useState(false);
@@ -329,8 +331,9 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
         onSend={onPrimarySend}
         onAttach={ghost ? undefined : onAttach}
         onSendAsDeadDrop={ghost ? undefined : onSendDeadDrop}
-        onSendAsQrDrop={onSendQrDrop}
-        showQrDropCoachmark={!qrDropCoachmarkSeen}
+        // Droplet only when the user opted in — not a permanent compose icon.
+        onSendAsQrDrop={lemonDropComposeEnabled ? onSendQrDrop : undefined}
+        showQrDropCoachmark={lemonDropComposeEnabled && !qrDropCoachmarkSeen}
         onQrDropCoachmarkDismiss={() => setQrDropCoachmarkSeen()}
         placeholder={ghost ? "Message (dead drop)" : "Message"}
       />

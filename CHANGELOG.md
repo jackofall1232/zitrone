@@ -7,6 +7,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Compose bar: attachment lives inside the input pill** on web/desktop and
+  Android (paperclip on the leading edge of the field, ≥44px hit target). Burn /
+  TTL stay outside the pill on Android so the field does not become a toolbar.
+  iOS has no free-standing attach control today (ephemeral menu only) — left as-is.
+- **Lemon-drop create droplet is Settings-gated (default off).** Settings → Privacy
+  has “Lemon-drop compose button”; when off, the droplet is not shown in chat.
+  Opening a drop via paste-link in Settings is unchanged. Long-press on send remains
+  dead-drop only (not lemon-drop create).
+
 ## [0.8.2-beta] - 2026-07-21
 
 ### Added

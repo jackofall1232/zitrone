@@ -169,6 +169,13 @@ fun SettingsScreen(
             checked = settings.readReceipts,
             onToggle = settingsRepository::setReadReceipts,
         )
+        ToggleRow(
+            title = "Lemon-drop compose button",
+            subtitle = "Show the droplet in chat so you can seal a QR drop. " +
+                "Off by default — rare action.",
+            checked = settings.lemonDropComposeEnabled,
+            onToggle = settingsRepository::setLemonDropComposeEnabled,
+        )
 
         // ----- Notifications -------------------------------------------------
         SectionHeader("Notifications")
