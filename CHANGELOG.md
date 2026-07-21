@@ -7,6 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.3-beta] - 2026-07-21
+
 ### Changed
 
 - **Compose bar: attachment lives inside the input pill** on web/desktop and
