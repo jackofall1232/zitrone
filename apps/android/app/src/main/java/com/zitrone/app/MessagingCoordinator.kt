@@ -131,6 +131,20 @@ class MessagingCoordinator(
     private var linkJob: Job? = null
 
     /**
+     * Delivery gate. Cleared synchronously the instant a session is torn down
+     * ([onSessionRevoked]/[stop]/[deleteAccountAndWipe]) and set on [start].
+     * An [onMessageDeliver] coroutine can be parked at [withSessionLock] (behind
+     * a send holding the mutex across a network prekey fetch) when teardown
+     * fires; when it later resumes it must NOT add a message or arm a
+     * notification for a session that is gone. Re-checked right before the
+     * publish, so no delivery that resumes after teardown can post an alert or
+     * re-arm the reminder scheduler past a logout. @Volatile: written on the
+     * socket-callback/main threads, read on the confined dispatcher.
+     */
+    @Volatile
+    private var acceptingDeliveries = false
+
+    /**
      * One mutex per contact serializes every Double Ratchet operation on
      * that session — text sends, receipt sends, and inbound decrypts all run
      * on pooled dispatcher threads, and two operations advancing the same
@@ -237,6 +251,7 @@ class MessagingCoordinator(
     fun start() {
         if (linkJob?.isActive == true) return
         _linking.value = true
+        acceptingDeliveries = true
         linkJob = scope.launch(confined) { bootstrapLoop() }
     }
 
@@ -345,6 +360,7 @@ class MessagingCoordinator(
 
     fun stop() {
         _linking.value = false
+        acceptingDeliveries = false
         linkJob?.cancel()
         ws.disconnect()
         // Teardown hook: drop all pending re-fire jobs + fire state so nothing
@@ -967,6 +983,7 @@ class MessagingCoordinator(
 
     /** Wipes the server account AND the local keys/messages. Irreversible. */
     fun deleteAccountAndWipe(onComplete: () -> Unit) {
+        acceptingDeliveries = false
         scope.launch(confined) {
             _linking.value = false
             linkJob?.cancel()
@@ -1020,6 +1037,18 @@ class MessagingCoordinator(
                 // and never bumps the conversation or fires a notification.
                 ControlPayload.parseReadReceipt(text)?.let { readIds ->
                     readIds.forEach(messages::onPeerRead)
+                    ws.ackMessage(envelope.id)
+                    return@runCatching
+                }
+                // Revocation gate: this coroutine may have been parked at
+                // withSessionLock (behind a send holding the mutex across a
+                // prekey fetch) when the session was torn down; the ratchet has
+                // now advanced, but the account is gone. Do NOT publish or arm a
+                // notification — a resumed delivery must not alert or re-arm the
+                // reminder scheduler after a logout/wipe. Ack best-effort so the
+                // relay drops its copy.
+                if (!acceptingDeliveries) {
+                    diag("recv: delivery resumed after teardown — dropped, not published")
                     ws.ackMessage(envelope.id)
                     return@runCatching
                 }
@@ -1205,6 +1234,7 @@ class MessagingCoordinator(
         // boundary could otherwise alert AFTER the user sees the logged-out
         // state but before the queued cleanup below runs.
         _linking.value = false
+        acceptingDeliveries = false
         linkJob?.cancel()
         api.clearTokens()
         notificationScheduler.cancelAll()
