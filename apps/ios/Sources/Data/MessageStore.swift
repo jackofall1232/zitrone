@@ -108,6 +108,14 @@ public final class MessageStore: ObservableObject {
                      to contact: Contact,
                      ttlSeconds: Int?,
                      burnOnRead: Bool) async {
+        // Drop immediately if the peer was already deleted — do not paint a
+        // bubble that can only fail after an encrypt await.
+        if conversations.wasRecentlyDeleted(contactID: contact.id)
+            || conversations.conversation(for: contact.id) == nil {
+            diag("send: contact deleted or absent — aborted")
+            return
+        }
+
         var message = Message(conversationID: contact.id,
                               text: text,
                               isOutgoing: true,
@@ -129,6 +137,15 @@ public final class MessageStore: ObservableObject {
                 ttlSeconds: ttlSeconds,
                 burnOnRead: burnOnRead
             )
+            // Re-check after the await: deleteContact may have landed while
+            // we suspended on prekey fetch / encrypt. MainActor serializes
+            // UI mutations; this is the check-then-act gap for async send.
+            if conversations.wasRecentlyDeleted(contactID: contact.id)
+                || conversations.conversation(for: contact.id) == nil {
+                diag("send: contact deleted mid-encrypt — drop ciphertext")
+                remove(messageID: message.id, conversationID: contact.id)
+                return
+            }
             if socket.state != .connected {
                 diag("send: hand-off while socket \(socket.state) — frame will be dropped")
             }
@@ -143,13 +160,25 @@ public final class MessageStore: ObservableObject {
             diag("send: failed: \(BootDiagnostics.describe(error))")
             remove(messageID: message.id, conversationID: contact.id)
         }
-        conversations.noteActivity(contactID: contact.id, incrementUnread: false)
+        if conversations.conversation(for: contact.id) != nil {
+            conversations.noteActivity(contactID: contact.id, incrementUnread: false)
+        }
     }
 
     // MARK: - Receiving
 
     public func receive(envelope: MessageEnvelope) {
         guard let senderID = UUID(uuidString: envelope.senderID) else { return }
+        // Tombstone FIRST — before decrypt. A PreKey message would otherwise
+        // TOFU-establish a fresh session and resurrect crypto state for a
+        // contact the user just deleted. Ack so the relay drops its copy.
+        // Keyed on the deletion tombstone, NOT roster absence: a first-time
+        // inbound sender is legitimately absent and must still be allowed.
+        if conversations.wasRecentlyDeleted(contactID: senderID) {
+            diag("recv: message for deleted contact — dropped before decrypt")
+            try? socket.send(.messageAck(messageID: envelope.id))
+            return
+        }
         do {
             let plaintext = try signal.decrypt(envelope: envelope)
             // Strip length-hiding padding; a legacy (pre-padding) sender's
@@ -243,11 +272,54 @@ public final class MessageStore: ObservableObject {
     /// "Burn all" chat header action: every message in the conversation goes
     /// through the dissolve and is destroyed, and the peer is notified.
     public func burnAll(conversationID: UUID) {
+        burnAll(conversationID: conversationID, notifyPeer: true)
+    }
+
+    /// Burn every local message in the conversation. Peer notification is
+    /// best-effort (not re-queued if offline) — same contract as Android.
+    public func burnAll(conversationID: UUID, notifyPeer: Bool) {
         for message in messages(for: conversationID) {
-            try? socket.send(.messageBurn(messageID: message.id.uuidString.lowercased(),
-                                          peerID: conversationID.uuidString.lowercased()))
+            if notifyPeer {
+                try? socket.send(.messageBurn(messageID: message.id.uuidString.lowercased(),
+                                              peerID: conversationID.uuidString.lowercased()))
+            }
             beginBurn(messageID: message.id, conversationID: conversationID)
         }
+    }
+
+    // MARK: - Contact deletion
+
+    /// Full contact deletion (cryptographic teardown, not soft-delete).
+    ///
+    /// Order matches Android's durable fail-abort:
+    /// 1. `signal.destroyContact` — if false, abort (contact kept)
+    /// 2. Persist tombstone so stragglers drop across restart
+    /// 3. Burn known local messages (+ best-effort peer burn)
+    /// 4. Remove roster entry
+    ///
+    /// Concurrency: this type is `@MainActor`, so delete cannot interleave with
+    /// `receive` / UI-driven `send` start on another MainActor task mid-mutation.
+    /// `send` still re-checks after its encrypt `await` (prekey fetch) because
+    /// that suspension is the remaining check-then-act gap. Signal crypto itself
+    /// is confined to `SignalManager`'s serial queue.
+    ///
+    /// - Returns: `false` when crypto teardown did not reach the keychain —
+    ///   contact is left intact so the user can retry.
+    @discardableResult
+    public func deleteContact(contactID: UUID) -> Bool {
+        guard conversations.conversation(for: contactID) != nil else { return false }
+        let wiped = signal.destroyContact(contactID)
+        if !wiped {
+            diag("delete: crypto teardown failed — aborting, contact kept")
+            return false
+        }
+        conversations.recordDeletion(contactID: contactID)
+        // Peer-burn is best-effort; runs while we still know message ids.
+        burnAll(conversationID: contactID, notifyPeer: true)
+        conversations.remove(contactID: contactID)
+        // Drop any residual message map entry after burn animations schedule.
+        messagesByConversation[contactID] = nil
+        return true
     }
 
     private func beginBurn(messageID: UUID, conversationID: UUID) {

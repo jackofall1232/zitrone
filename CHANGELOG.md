@@ -7,6 +7,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **iOS: full contact deletion (cryptographic teardown, not soft-delete).**
+  Long-press / context-menu on a conversation → confirm to burn known local
+  messages (best-effort peer burn), destroy the Double Ratchet session and
+  remote identity in Keychain for that peer only, remove the roster entry, and
+  persist a TTL-bounded tombstone (UserDefaults) so stragglers cannot resurrect
+  the contact after restart. Durable fail-abort if keychain teardown fails.
+  Re-add requires a fresh X3DH handshake. **Not built/run in CI here** — requires
+  Xcode on HoboJoe's machine before merge.
+
 ## [0.8.4-beta] - 2026-07-21
 
 ### Added

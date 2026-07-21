@@ -309,7 +309,17 @@ struct RootView: View {
                     environment.activeConversation = conversation
                 },
                 onOpenSettings: { environment.showSettings = true },
-                onCompose: { environment.showAddContact = true }
+                onCompose: { environment.showAddContact = true },
+                onDeleteContact: { conversation in
+                    let ok = environment.messages.deleteContact(contactID: conversation.id)
+                    if ok, environment.activeConversation?.id == conversation.id {
+                        environment.activeConversation = nil
+                    }
+                    // Fail-abort leaves the contact in place; ChatListView's
+                    // confirmation already dismissed. A quiet keep-on-failure
+                    // matches Android (diag only) — no partial-delete UI state.
+                    _ = ok
+                }
             )
 
             if let conversation = environment.activeConversation,
