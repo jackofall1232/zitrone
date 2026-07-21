@@ -15,6 +15,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   library and File. Images use **preview-before-send** (caption + Send /
   Discard) — never capture-and-send. Same `AttachmentLoader` pipeline (memory
   only, JPEG re-encode strips EXIF, no send-path watermark).
+- **Android: in-app lemon-drop QR scanner.** Chat list header scan icon opens
+  ZXing (already used for contact exchange; no Play Services) and decodes
+  `https://zitrone.app/d/{id}` stickers in-app, then routes into the same
+  open/resolve path as App Links. Wrong QR content shows a snackbar — no
+  silent failure, no arbitrary-QR handling. Bypasses OEM stock-camera App Link
+  flakiness without depending on external camera apps.
 
 ## [0.8.5-beta] - 2026-07-21
 
