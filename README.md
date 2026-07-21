@@ -60,7 +60,7 @@ Full details in [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md).
 - 📌 TLS 1.3 with certificate pinning on every client — fail-closed against MITM, even on the desktop WebView
 - 🖥️ Native Linux desktop app — .deb, .AppImage, .rpm — with libsecret key storage and focus-loss screenshot blur
 
-### v1.5 — the security onion
+### v1.5 — the security lemon
 
 Five layered defenses, each built as if the one beneath it has already failed:
 
