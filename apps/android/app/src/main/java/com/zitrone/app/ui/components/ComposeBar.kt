@@ -25,6 +25,7 @@ import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
 import androidx.compose.material.icons.filled.LocalFireDepartment
 import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -103,6 +104,11 @@ fun ComposeBar(
     onCycleTtl: () -> Unit,
     onAttachImage: () -> Unit,
     onAttachFile: () -> Unit,
+    /**
+     * Open the system camera for a one-shot photo. Null hides the menu item
+     * (no camera hardware, or parent chose not to offer capture).
+     */
+    onAttachCamera: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
     /**
      * Seal the current draft into a lemon drop (QR dead-drop) for this contact.
@@ -185,8 +191,23 @@ fun ComposeBar(
                         expanded = attachMenuOpen,
                         onDismissRequest = { attachMenuOpen = false },
                     ) {
+                        if (onAttachCamera != null) {
+                            DropdownMenuItem(
+                                text = { Text("Take photo") },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Outlined.PhotoCamera,
+                                        contentDescription = null,
+                                    )
+                                },
+                                onClick = {
+                                    attachMenuOpen = false
+                                    onAttachCamera()
+                                },
+                            )
+                        }
                         DropdownMenuItem(
-                            text = { Text("Photo") },
+                            text = { Text("Photo library") },
                             leadingIcon = {
                                 Icon(imageVector = Icons.Outlined.Image, contentDescription = null)
                             },

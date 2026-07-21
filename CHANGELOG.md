@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Android: camera capture as an attachment source.** Compose attach menu
+  offers Take photo (system camera via FileProvider staging under
+  `cache/cameracapture/`, deleted immediately after load) alongside Photo
+  library and File. Images use **preview-before-send** (caption + Send /
+  Discard) — never capture-and-send. Same `AttachmentLoader` pipeline (memory
+  only, JPEG re-encode strips EXIF, no send-path watermark).
+
 ## [0.8.5-beta] - 2026-07-21
 
 ### Added

@@ -66,6 +66,10 @@ object AttachmentLoader {
      * result callback, within the URI read grant. Photo-picker grants live for
      * the process lifetime, so no persistable permission is taken (and must not
      * be — takePersistableUriPermission would throw on a PickVisualMedia URI).
+     *
+     * Camera captures use the same path after [TakePicture] writes a **staging**
+     * file under `cache/cameracapture/`; the caller MUST delete that file in a
+     * `finally` once this returns (zero-persistence — no lasting photo on disk).
      */
     suspend fun prepareImage(context: Context, uri: Uri): Prepared = withContext(Dispatchers.IO) {
         val resolver = context.contentResolver
@@ -87,6 +91,22 @@ object AttachmentLoader {
         val decoded = resolver.openInputStream(uri)?.use {
             BitmapFactory.decodeStream(it, null, decodeOptions)
         } ?: throw IllegalStateException("cannot decode image")
+        finishImage(decoded)
+    }
+
+    /**
+     * Same downscale + JPEG re-encode as [prepareImage], from an already-decoded
+     * bitmap. Used when tests or alternate capture paths hold a Bitmap without
+     * a content URI. Recycles [bitmap] only if a scaled copy was allocated.
+     */
+    fun prepareImageFromBitmap(bitmap: Bitmap): Prepared = finishImage(bitmap)
+
+    /**
+     * Downscale + JPEG re-encode shared by URI and bitmap entry points. No
+     * watermark — the send path never embeds the security-paper stego layer
+     * (that is a display surface only).
+     */
+    private fun finishImage(decoded: Bitmap): Prepared {
         val scaled = downscale(decoded)
         val out = ByteArrayOutputStream()
         scaled.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
@@ -96,13 +116,17 @@ object AttachmentLoader {
         // A zero-length re-encode means the decode produced nothing usable —
         // fail loudly rather than depositing an empty blob the recipient can't open.
         if (bytes.isEmpty()) throw IllegalStateException("empty image encode")
-        Prepared(
+        if (bytes.size > MAX_ATTACHMENT_BYTES) throw TooLargeException()
+        return Prepared(
             kind = AttachmentControlPayload.KIND_IMAGE,
             mimetype = "image/jpeg",
             filename = null,
             bytes = bytes,
         )
     }
+
+    /** Staging directory under cache for TakePicture (deleted after load). */
+    const val CAMERA_CAPTURE_DIR = "cameracapture"
 
     /**
      * Reads the picked file raw into memory, capped at [MAX_ATTACHMENT_BYTES]

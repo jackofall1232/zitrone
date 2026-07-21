@@ -9,15 +9,17 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!-- The ONLY permissions this app requests. No contacts, no storage,
-         no location. CAMERA is used solely to scan a contact's QR code (their
-         public routing ID + key); the app never records or stores images. -->
+         no location. CAMERA is used to scan QR codes in-app and to capture a
+         one-shot photo for attachments (system camera → memory; staging file
+         deleted immediately). The app never keeps photos as durable files. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.CAMERA" />
 
     <!-- A camera is optional — devices without one still install and work
-         (QR scanning is simply unavailable); paste/link add still functions. -->
+         (QR scan + take-photo attach are hidden); library/file attach and
+         paste/link add still function. -->
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <!-- Required on Android 11+ (package-visibility filtering) to detect the
