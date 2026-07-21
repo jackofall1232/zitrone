@@ -58,14 +58,25 @@ public struct ContactExchangePayload: Codable {
     }
 }
 
-/// In-memory conversation/contact registry. Holds no message content; contact
-/// records contain only public keys and a local display name. Nothing here is
-/// written to disk — restart means re-sync, by design (nothing lasts).
+/// Conversation/contact registry. Contact records hold only public keys and a
+/// local display name (no message content). The roster itself is still
+/// memory-only (restart re-sync), but **deletion tombstones** are persisted so
+/// a straggler from a deleted contact cannot resurrect the roster after an
+/// app restart within the relay's undelivered window.
 @MainActor
 public final class ConversationStore: ObservableObject {
     @Published public private(set) var conversations: [Conversation] = []
 
-    public init() {}
+    private static let tombstoneDefaultsKey = "org.zitrone.deleted_contact_tombstones"
+    private var tombstones: ContactDeletionTombstones
+    private let defaults: UserDefaults
+
+    public init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        self.tombstones = ContactDeletionTombstones.decode(
+            defaults.data(forKey: Self.tombstoneDefaultsKey)
+        )
+    }
 
     public var sorted: [Conversation] {
         conversations.sorted {
@@ -130,5 +141,34 @@ public final class ConversationStore: ObservableObject {
 
     public func remove(contactID: UUID) {
         conversations.removeAll { $0.id == contactID }
+    }
+
+    // MARK: - Deletion tombstones
+
+    /// Records that `contactID` was just deleted. Persisted to UserDefaults so
+    /// the guard survives process restart. Call from the contact-deletion path
+    /// after crypto teardown succeeds.
+    public func recordDeletion(contactID: UUID, now: Date = Date()) {
+        tombstones.record(contactID: contactID, now: now)
+        persistTombstones()
+    }
+
+    /// Whether an inbound message from `contactID` must be dropped because the
+    /// contact was deleted within the straggler window.
+    public func wasRecentlyDeleted(contactID: UUID, now: Date = Date()) -> Bool {
+        let hit = tombstones.wasRecentlyDeleted(contactID: contactID, now: now)
+        // Lazy prune may have mutated entries — keep disk in sync.
+        persistTombstones()
+        return hit
+    }
+
+    /// Account wipe: drop every tombstone so no deleted-contact history remains.
+    public func clearDeletions() {
+        tombstones.clear()
+        persistTombstones()
+    }
+
+    private func persistTombstones() {
+        defaults.set(tombstones.encode(), forKey: Self.tombstoneDefaultsKey)
     }
 }

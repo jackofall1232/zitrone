@@ -9,6 +9,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **iOS: full contact deletion (cryptographic teardown, not soft-delete).**
+  Long-press / context-menu on a conversation → confirm to burn known local
+  messages (best-effort peer burn), destroy the Double Ratchet session and
+  remote identity in Keychain for that peer only, remove the roster entry, and
+  persist a TTL-bounded tombstone (UserDefaults) so stragglers cannot resurrect
+  the contact after restart. Durable fail-abort if keychain teardown fails.
+  Re-add requires a fresh X3DH handshake. **Merged unverified** — there is no
+  Xcode/iOS toolchain in CI, so this needs an Xcode build + on-device test
+  before it ships in a release.
 - **Android: in-app lemon-drop QR scanner.** Chat list header scan icon opens
   ZXing (already used for contact exchange; no Play Services) and decodes
   `https://zitrone.app/d/{id}` stickers in-app, then routes into the same

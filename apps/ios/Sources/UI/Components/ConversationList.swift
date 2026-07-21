@@ -11,10 +11,16 @@ import SwiftUI
 public struct ConversationList: View {
     public let conversations: [Conversation]
     public var onSelect: (Conversation) -> Void
+    /// Long-press delete. Host must show an irreversible confirmation dialog
+    /// before calling `MessageStore.deleteContact`.
+    public var onDelete: ((Conversation) -> Void)?
 
-    public init(conversations: [Conversation], onSelect: @escaping (Conversation) -> Void) {
+    public init(conversations: [Conversation],
+                onSelect: @escaping (Conversation) -> Void,
+                onDelete: ((Conversation) -> Void)? = nil) {
         self.conversations = conversations
         self.onSelect = onSelect
+        self.onDelete = onDelete
     }
 
     public var body: some View {
@@ -27,6 +33,20 @@ public struct ConversationList: View {
                         ConversationListItem(conversation: conversation)
                     }
                     .buttonStyle(ConversationRowStyle())
+                    .contextMenu {
+                        if let onDelete {
+                            Button(role: .destructive) {
+                                onDelete(conversation)
+                            } label: {
+                                Label("Delete contact", systemImage: "trash")
+                            }
+                        }
+                    }
+                    // Long-press affordance for users who don't discover the
+                    // context menu: same action as the destructive menu item.
+                    .onLongPressGesture(minimumDuration: 0.55) {
+                        onDelete?(conversation)
+                    }
                 }
             }
         }
