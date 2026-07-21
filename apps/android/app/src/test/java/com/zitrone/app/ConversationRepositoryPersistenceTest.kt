@@ -10,6 +10,7 @@ import com.zitrone.app.data.ConversationRepository
 import com.zitrone.app.data.OrphanContact
 import com.zitrone.app.data.RosterStore
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -31,10 +32,14 @@ class ConversationRepositoryPersistenceTest {
     private class FakeRosterStore(
         var blob: String? = null,
         private val orphans: List<OrphanContact> = emptyList(),
+        var tombstones: String? = null,
     ) : RosterStore {
         override fun readBlob(): String? = blob
         override fun writeBlob(json: String) { blob = json }
+        override fun writeBlobDurably(json: String): Boolean { blob = json; return true }
         override fun orphanedContacts(): List<OrphanContact> = orphans
+        override fun readTombstonesBlob(): String? = tombstones
+        override fun writeTombstonesBlob(json: String) { tombstones = json }
     }
 
     private fun conversation(id: String, verified: Boolean = false, pinned: String? = null) =
@@ -114,5 +119,97 @@ class ConversationRepositoryPersistenceTest {
 
         // In-memory only; the newer-client blob must not be clobbered.
         assertEquals(newer, store.blob)
+    }
+
+    @Test
+    fun `remove drops the contact from the roster and persists the gap`() {
+        val store = FakeRosterStore()
+        val repo = ConversationRepository(store)
+        repo.upsert(conversation("alice", verified = true, pinned = "pin-a"))
+        repo.upsert(conversation("bob"))
+
+        repo.remove("alice")
+
+        assertEquals(listOf("bob"), repo.conversations.value.map { it.id })
+        // Survives a restart — the deleted contact must not reappear from disk.
+        val restored = ConversationRepository(store)
+        assertEquals(listOf("bob"), restored.conversations.value.map { it.id })
+        assertNull(restored.find("alice"))
+    }
+
+    @Test
+    fun `recordDeletion tombstones a contact, survives restart, and expires`() {
+        var now = 1_000_000L
+        val store = FakeRosterStore()
+        val repo = ConversationRepository(store) { now }
+
+        repo.recordDeletion("alice")
+        assertTrue(repo.wasRecentlyDeleted("alice"))
+        assertFalse("a never-deleted contact is not tombstoned", repo.wasRecentlyDeleted("bob"))
+
+        // Persisted independently of the roster blob — survives a restart so a
+        // straggler after an app update is still dropped.
+        val restored = ConversationRepository(store) { now }
+        assertTrue(restored.wasRecentlyDeleted("alice"))
+
+        // Past the window it expires (a genuinely-later fresh contact attempt is
+        // not silently blocked), and a restart past the window prunes it away.
+        now += ConversationRepository.TOMBSTONE_WINDOW_MS
+        assertFalse(restored.wasRecentlyDeleted("alice"))
+        val afterExpiry = ConversationRepository(store) { now }
+        assertFalse(afterExpiry.wasRecentlyDeleted("alice"))
+    }
+
+    @Test
+    fun `removeDurably drops the contact, reports success, and persists the gap`() {
+        val store = FakeRosterStore()
+        val repo = ConversationRepository(store)
+        repo.upsert(conversation("alice", verified = true, pinned = "pin-a"))
+        repo.upsert(conversation("bob"))
+
+        // Durable remove (contact-deletion path) reports the write reached disk.
+        assertTrue(repo.removeDurably("alice"))
+
+        assertEquals(listOf("bob"), repo.conversations.value.map { it.id })
+        // The gap is durable — a restart must not resurrect the deleted contact.
+        val restored = ConversationRepository(store)
+        assertEquals(listOf("bob"), restored.conversations.value.map { it.id })
+        assertNull(restored.find("alice"))
+    }
+
+    @Test
+    fun `setDisplayName updates the local label only and persists`() {
+        val store = FakeRosterStore()
+        val repo = ConversationRepository(store)
+        repo.upsert(conversation("alice", verified = true, pinned = "pin-a"))
+
+        assertEquals("New Label", repo.setDisplayName("alice", "  New   Label  "))
+        assertEquals("New Label", repo.find("alice")!!.displayName)
+        // Crypto-adjacent fields unchanged.
+        assertEquals("pin-a", repo.find("alice")!!.pinnedIdentityKeyBase64)
+        assertTrue(repo.find("alice")!!.verified)
+
+        val restored = ConversationRepository(store)
+        assertEquals("New Label", restored.find("alice")!!.displayName)
+        assertEquals("pin-a", restored.find("alice")!!.pinnedIdentityKeyBase64)
+    }
+
+    @Test
+    fun `sanitizeDisplayName rejects empty and over-long`() {
+        assertNull(ConversationRepository.sanitizeDisplayName("   "))
+        assertNull(ConversationRepository.sanitizeDisplayName(""))
+        assertNull(
+            ConversationRepository.sanitizeDisplayName(
+                "x".repeat(ConversationRepository.DISPLAY_NAME_MAX_LEN + 1),
+            ),
+        )
+        assertEquals(
+            "x".repeat(ConversationRepository.DISPLAY_NAME_MAX_LEN),
+            ConversationRepository.sanitizeDisplayName(
+                "x".repeat(ConversationRepository.DISPLAY_NAME_MAX_LEN),
+            ),
+        )
+        // Control chars stripped.
+        assertEquals("ab", ConversationRepository.sanitizeDisplayName("a\u0000b\n"))
     }
 }

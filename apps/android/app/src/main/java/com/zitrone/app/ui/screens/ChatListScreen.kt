@@ -66,6 +66,7 @@ fun ChatListScreen(
     rootWarningVisible: Boolean,
     onDismissRootWarning: () -> Unit,
     onOpenConversation: (Conversation) -> Unit,
+    onDeleteContact: (Conversation) -> Unit,
     onOpenSettings: () -> Unit,
     onNewChat: () -> Unit,
     modifier: Modifier = Modifier,
@@ -155,6 +156,7 @@ fun ChatListScreen(
                 ConversationList(
                     conversations = filtered,
                     onOpenConversation = onOpenConversation,
+                    onDeleteContact = onDeleteContact,
                     modifier = Modifier
                         .weight(1f)
                         .padding(top = 8.dp),

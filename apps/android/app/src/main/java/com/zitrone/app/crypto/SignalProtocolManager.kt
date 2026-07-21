@@ -255,8 +255,27 @@ class SignalProtocolManager(
         }
     }
 
+    /**
+     * Full contact crypto teardown (not soft-delete): destroys the Double
+     * Ratchet session, the peer's identity key record, and any sender keys.
+     * After this, [hasSession] is false and a re-add must fetch a fresh prekey
+     * bundle and re-run X3DH — zero reuse of prior session/key material.
+     *
+     * @return `false` if the teardown could not be flushed to disk; the caller
+     *         must then treat the deletion as failed (see
+     *         [EncryptedSignalProtocolStore.destroyContactCrypto]).
+     */
+    fun destroyContact(remoteAccountId: String): Boolean =
+        store.destroyContactCrypto(remoteAccountId)
+
+    @Deprecated(
+        message = "Prefer destroyContact — a session-only wipe leaves the pinned " +
+            "remote identity and sender keys behind, which is insufficient for " +
+            "full contact deletion.",
+        replaceWith = ReplaceWith("destroyContact(remoteAccountId)"),
+    )
     fun endSession(remoteAccountId: String) {
-        store.deleteAllSessions(remoteAccountId)
+        destroyContact(remoteAccountId)
     }
 
     // -- verification --------------------------------------------------------------

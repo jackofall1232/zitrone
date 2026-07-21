@@ -417,6 +417,14 @@ class MessageRepository(
         }
     }
 
+    /**
+     * Immediately drop a message with no burn animation and no peer signal.
+     * Used when an outbound send is abandoned because its contact was deleted
+     * mid-send: the envelope was never deposited, so the local plaintext (and
+     * any attachment bytes) must not linger in the repository either.
+     */
+    fun discard(messageId: String) = remove(messageId)
+
     companion object {
         /** Duration of the burn particle dissolve before hard removal. */
         const val BURN_ANIMATION_MS = 600L

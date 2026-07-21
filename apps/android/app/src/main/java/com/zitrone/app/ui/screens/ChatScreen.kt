@@ -9,6 +9,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,13 +22,19 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.LocalFireDepartment
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -39,9 +46,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.zitrone.app.data.Conversation
+import com.zitrone.app.data.ConversationRepository
 import com.zitrone.app.data.LemonDropCreator
 import com.zitrone.app.data.Message
 import com.zitrone.app.data.MessageState
@@ -54,13 +63,16 @@ import com.zitrone.app.ui.components.QrTtlPickerDialog
 import com.zitrone.app.ui.components.fingerprintWatermark
 import com.zitrone.app.ui.components.SecurityBadge
 import com.zitrone.app.ui.components.SecurityState
+import com.zitrone.app.ui.theme.BackgroundElevated
 import com.zitrone.app.ui.theme.BackgroundPrimary
 import com.zitrone.app.ui.theme.BackgroundSecondary
 import com.zitrone.app.ui.theme.BurnOrange
+import com.zitrone.app.ui.theme.ErrorRed
 import com.zitrone.app.ui.theme.Lemon
 import com.zitrone.app.ui.theme.MonoFamily
 import com.zitrone.app.ui.theme.TextMuted
 import com.zitrone.app.ui.theme.TextPrimary
+import com.zitrone.app.ui.theme.TextSecondary
 import com.zitrone.app.ui.theme.TypeScale
 import kotlinx.coroutines.launch
 import java.time.Instant
@@ -89,6 +101,11 @@ fun ChatScreen(
     onBack: () -> Unit,
     onVerifyKeys: () -> Unit,
     onBurnAll: () -> Unit,
+    /**
+     * Local-only display-name rename. Caller persists via the roster;
+     * returns true if the name was accepted (non-empty, max length).
+     */
+    onRename: (newDisplayName: String) -> Boolean = { false },
     onSend: (text: String, ttlSeconds: Int?, burnOnRead: Boolean) -> Unit,
     onSendAttachment: (
         bytes: ByteArray,
@@ -201,10 +218,26 @@ fun ChatScreen(
     // remember — the URL is the only unrecoverable piece.)
     var qrResult by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
     val qrScope = rememberCoroutineScope()
+    var showRename by remember { mutableStateOf(false) }
 
     val listState = rememberLazyListState()
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+    }
+
+    if (showRename) {
+        EditDisplayNameDialog(
+            currentName = conversation.displayName,
+            onDismiss = { showRename = false },
+            onSave = { candidate ->
+                if (onRename(candidate)) {
+                    showRename = false
+                    true
+                } else {
+                    false
+                }
+            },
+        )
     }
 
     Column(
@@ -234,7 +267,9 @@ fun ChatScreen(
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .padding(horizontal = 10.dp),
+                    .padding(horizontal = 10.dp)
+                    // Tap the name/subtitle to rename — local label only.
+                    .clickable { showRename = true },
             ) {
                 Text(
                     text = conversation.displayName,
@@ -243,7 +278,7 @@ fun ChatScreen(
                     maxLines = 1,
                 )
                 Text(
-                    text = if (peerTyping) "typing…" else "Encrypted",
+                    text = if (peerTyping) "typing…" else "Encrypted · tap name to edit",
                     fontFamily = MonoFamily,
                     fontSize = TypeScale.Xs,
                     color = if (peerTyping) Lemon else TextMuted,
@@ -414,6 +449,99 @@ fun ChatScreen(
             onClose = { qrResult = null },
         )
     }
+}
+
+/**
+ * Rename dialog for the local-only contact label. Validation matches
+ * [ConversationRepository.sanitizeDisplayName] (non-empty, max length,
+ * control-char strip). Nothing crypto-related is edited here.
+ */
+@Composable
+private fun EditDisplayNameDialog(
+    currentName: String,
+    onDismiss: () -> Unit,
+    /** Returns true when the name was accepted and persisted. */
+    onSave: (String) -> Boolean,
+) {
+    var draft by remember(currentName) { mutableStateOf(currentName) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val trySave = {
+        val candidate = draft
+        when {
+            ConversationRepository.sanitizeDisplayName(candidate) == null -> {
+                error = if (candidate.trim().isEmpty()) {
+                    "Name can’t be empty"
+                } else {
+                    "Name is too long (max ${ConversationRepository.DISPLAY_NAME_MAX_LEN})"
+                }
+            }
+            onSave(candidate) -> Unit
+            else -> error = "Couldn’t save that name"
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "Edit name",
+                style = MaterialTheme.typography.titleLarge,
+                color = TextPrimary,
+            )
+        },
+        text = {
+            Column {
+                Text(
+                    text = "Only stored on this device. Never sent or synced.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary,
+                    modifier = Modifier.padding(bottom = 12.dp),
+                )
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { input ->
+                        // Soft cap the raw input; never split a surrogate pair
+                        // (an emoji) in half — an orphaned surrogate is invalid
+                        // UTF-16 and can crash rendering. sanitizeDisplayName does
+                        // the real length check on save.
+                        val cap = ConversationRepository.DISPLAY_NAME_MAX_LEN + 8
+                        draft = if (input.length <= cap) {
+                            input
+                        } else {
+                            val end = if (Character.isHighSurrogate(input[cap - 1])) cap - 1 else cap
+                            input.substring(0, end)
+                        }
+                        error = null
+                    },
+                    singleLine = true,
+                    isError = error != null,
+                    supportingText = error?.let { msg ->
+                        { Text(text = msg, color = ErrorRed) }
+                    },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { trySave() }),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Lemon,
+                        focusedLabelColor = Lemon,
+                        cursorColor = Lemon,
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = trySave) {
+                Text(text = "Save", color = Lemon, style = MaterialTheme.typography.labelLarge)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "Cancel", color = TextSecondary, style = MaterialTheme.typography.labelLarge)
+            }
+        },
+        containerColor = BackgroundElevated,
+    )
 }
 
 @Composable

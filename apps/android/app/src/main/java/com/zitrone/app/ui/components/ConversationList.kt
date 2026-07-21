@@ -5,9 +5,10 @@
 
 package com.zitrone.app.ui.components
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,15 +20,22 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.zitrone.app.data.Conversation
+import com.zitrone.app.ui.theme.ErrorRed
 import com.zitrone.app.ui.theme.Lemon
 import com.zitrone.app.ui.theme.LemonZest
 import com.zitrone.app.ui.theme.MonoFamily
@@ -35,6 +43,7 @@ import com.zitrone.app.ui.theme.PillShape
 import com.zitrone.app.ui.theme.TextMuted
 import com.zitrone.app.ui.theme.TextOnLemon
 import com.zitrone.app.ui.theme.TextPrimary
+import com.zitrone.app.ui.theme.TextSecondary
 import com.zitrone.app.ui.theme.TypeScale
 import com.zitrone.app.ui.theme.VerifiedGreen
 import java.time.Instant
@@ -48,33 +57,110 @@ private val ListTimeFormatter: DateTimeFormatter =
  * Conversation list (design_system.components.conversation_list_item).
  * Privacy rule baked in: the preview line is ALWAYS the literal text
  * "Encrypted message" — message content never appears outside an open chat.
+ *
+ * Long-press opens the irreversible "Delete contact" confirmation: full
+ * cryptographic session teardown (X3DH/Double Ratchet + identity record).
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ConversationList(
     conversations: List<Conversation>,
     onOpenConversation: (Conversation) -> Unit,
+    onDeleteContact: (Conversation) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var pendingDelete by remember { mutableStateOf<Conversation?>(null) }
+
+    pendingDelete?.let { target ->
+        DeleteContactConfirmDialog(
+            displayName = target.displayName,
+            onConfirm = {
+                pendingDelete = null
+                onDeleteContact(target)
+            },
+            onDismiss = { pendingDelete = null },
+        )
+    }
+
     LazyColumn(modifier = modifier.fillMaxSize()) {
         items(conversations, key = { it.id }) { conversation ->
             ConversationListItem(
                 conversation = conversation,
                 onClick = { onOpenConversation(conversation) },
+                onLongClick = { pendingDelete = conversation },
             )
         }
     }
 }
 
+/**
+ * Explicit confirmation before irreversible contact crypto teardown. Delete
+ * burns every message in the conversation (same as burn-all, including peer
+ * `message.burn` signals) and then destroys the session/identity.
+ */
+@Composable
+fun DeleteContactConfirmDialog(
+    displayName: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "Delete contact?",
+                style = MaterialTheme.typography.titleLarge,
+                color = TextPrimary,
+            )
+        },
+        text = {
+            Text(
+                text = "This burns every message with “$displayName” on this device and " +
+                    "signals them to burn their copies, then permanently destroys the " +
+                    "encryption session — identity key, ratchet keys, and the contact " +
+                    "entry. Re-adding them later starts a completely fresh key exchange.\n\n" +
+                    "This cannot be undone.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextSecondary,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text(
+                    text = "Delete contact",
+                    color = ErrorRed,
+                    style = MaterialTheme.typography.labelLarge,
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(
+                    text = "Cancel",
+                    color = Lemon,
+                    style = MaterialTheme.typography.labelLarge,
+                )
+            }
+        },
+        containerColor = com.zitrone.app.ui.theme.BackgroundElevated,
+    )
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ConversationListItem(
     conversation: Conversation,
     onClick: () -> Unit,
+    onLongClick: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick,
+            )
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),

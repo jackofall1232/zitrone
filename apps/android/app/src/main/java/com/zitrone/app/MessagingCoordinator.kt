@@ -28,6 +28,8 @@ import com.zitrone.app.net.WsClient
 import com.zitrone.app.notifications.MessagingNotifications
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -142,6 +144,54 @@ class MessagingCoordinator(
         sessionLocks.getOrPut(contactId) { Mutex() }.withLock { block() }
 
     /**
+     * Single-worker confinement for ALL coordinator coroutines. Every
+     * [scope].launch below runs on this dispatcher, so no two coordinator
+     * coroutines ever execute in parallel — their state mutations (roster,
+     * message repository, Signal store, typing set, and the [deleteContact]
+     * sequence) can only interleave at explicit suspension points.
+     *
+     * That is the property the post-round-2 epoch guards were emulating by hand
+     * and getting wrong under a multi-threaded dispatcher: with confinement, any
+     * "check the contact still exists → mutate" tail written **without a
+     * suspension in the middle** is atomic with respect to a concurrent
+     * [deleteContact], so a delete can never slip between the check and the
+     * publish. Blocking work that must not stall this one worker (the network
+     * prekey fetch; nothing else) suspends off it as usual. The crypto teardown
+     * in [deleteContact] deliberately runs ON this worker (a background IO-pool
+     * thread, never main) as a short, non-suspending local commit, so it is
+     * mutually exclusive with any same-contact encrypt/decrypt rather than
+     * racing them across threads — which is why deletion needs no session lock
+     * and cannot be stalled behind an in-flight send's network fetch.
+     *
+     * IO (not Default) because this worker performs blocking disk commits
+     * (EncryptedSharedPreferences); `limitedParallelism(1)` still gives the
+     * single-worker confinement guarantee.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val confined = Dispatchers.IO.limitedParallelism(1)
+
+    /**
+     * Whether [contactId] is still a live roster entry. Used by the send/deliver
+     * publish tails: a send is always to an existing conversation, so a `false`
+     * here means the contact was torn down mid-send and nothing may be deposited
+     * or published for it.
+     */
+    private fun contactExists(contactId: String): Boolean =
+        conversations.findByContact(contactId) != null
+
+    /**
+     * Whether [contactId] was explicitly deleted (within the straggler window)
+     * and has NOT since been re-added — the inbound guard. Backed by the
+     * PERSISTED tombstone in [conversations], so it holds across a process
+     * restart (an app update forces one) for as long as a straggler could still
+     * be sitting on the relay. True only for a genuine deleted-contact straggler:
+     * never for a first-time inbound sender (never deleted) nor for a re-added
+     * contact (a live roster entry again).
+     */
+    private fun isDeletedContact(contactId: String): Boolean =
+        conversations.wasRecentlyDeleted(contactId) && !contactExists(contactId)
+
+    /**
      * Read receipts awaiting a live socket, keyed by contact. Queued when the
      * hand-off fails (socket down) and flushed on the next CONNECTED
      * transition: the underlying messages are already READ locally, so they
@@ -164,7 +214,7 @@ class MessagingCoordinator(
         }
         // Re-send read receipts that missed a dead socket whenever the
         // connection comes (back) up.
-        scope.launch {
+        scope.launch(confined) {
             ws.connectionState.collect { state ->
                 if (state == WsClient.ConnectionState.CONNECTED) flushPendingReceipts()
             }
@@ -186,7 +236,7 @@ class MessagingCoordinator(
     fun start() {
         if (linkJob?.isActive == true) return
         _linking.value = true
-        linkJob = scope.launch { bootstrapLoop() }
+        linkJob = scope.launch(confined) { bootstrapLoop() }
     }
 
     private suspend fun bootstrapLoop() {
@@ -326,7 +376,7 @@ class MessagingCoordinator(
      * identical to the user simply never having tapped send.
      */
     fun sendText(conversation: Conversation, text: String, ttlSeconds: Int?, burnOnRead: Boolean) {
-        scope.launch {
+        scope.launch(confined) {
             deliverText(
                 conversation = conversation,
                 messageId = UUID.randomUUID().toString(),
@@ -374,6 +424,15 @@ class MessagingCoordinator(
                     stage = "fetch-prekey-bundle"
                     diag("send: no session — firing GET prekey bundle")
                     val bundle = api.fetchPreKeyBundle(conversation.contactId)
+                    // The prekey fetch suspended; a deleteContact may have landed
+                    // in the meantime. Do NOT establish a session or re-upsert
+                    // (which would resurrect) a contact that is no longer in the
+                    // roster — this is the non-suspending re-check the confinement
+                    // model relies on, right before the resurrecting mutation.
+                    if (!contactExists(conversation.contactId)) {
+                        diag("send: contact deleted during prekey fetch — send aborted")
+                        return@withSessionLock null
+                    }
                     val pinned = conversation.pinnedIdentityKeyBase64
                     if (pinned != null && pinned != bundle.identityKeyBase64) {
                         // The relay returned a different identity key than the
@@ -432,9 +491,16 @@ class MessagingCoordinator(
             }
 
             stage = "ws-send"
-            if (ws.sendMessage(envelope)) {
-                // Enqueued — but honestly still just SENDING. The tick waits for
-                // the relay's message.stored (→SENT) and the recipient's
+            // Non-suspending publish tail: on the confinement worker this
+            // check→deposit is atomic against deleteContact, so a contact torn
+            // down before this point drops the envelope AND the local plaintext,
+            // and one torn down after this point was still live when we deposited.
+            if (!contactExists(conversation.contactId)) {
+                diag("send: contact deleted mid-send — dropping local copy")
+                messages.discard(messageId)
+            } else if (ws.sendMessage(envelope)) {
+                // Enqueued — but honestly still just SENDING. The tick waits
+                // for the relay's message.stored (→SENT) and the recipient's
                 // message.delivered (→DELIVERED); see [MessageState].
             } else {
                 // Socket not open: the send did not reach the relay.
@@ -488,7 +554,7 @@ class MessagingCoordinator(
         ttlSeconds: Int?,
         burnOnRead: Boolean,
     ) {
-        scope.launch {
+        scope.launch(confined) {
             deliverAttachment(
                 conversation = conversation,
                 messageId = UUID.randomUUID().toString(),
@@ -552,6 +618,12 @@ class MessagingCoordinator(
                     stage = "fetch-prekey-bundle"
                     diag("send: no session — firing GET prekey bundle")
                     val bundle = api.fetchPreKeyBundle(conversation.contactId)
+                    // The prekey fetch suspended; a deleteContact may have landed.
+                    // Do NOT establish/re-upsert (resurrect) a removed contact.
+                    if (!contactExists(conversation.contactId)) {
+                        diag("send: contact deleted during prekey fetch — send aborted")
+                        return@withSessionLock null
+                    }
                     val pinned = conversation.pinnedIdentityKeyBase64
                     if (pinned != null && pinned != bundle.identityKeyBase64) {
                         diag("send: identity key mismatch — send refused, warning raised")
@@ -623,7 +695,15 @@ class MessagingCoordinator(
                 mediaType = MessageEnvelope.MEDIA_TEXT,
             )
             stage = "ws-send"
-            if (ws.sendMessage(envelope)) {
+            // Non-suspending publish tail (see [confined]): the blob upload above
+            // suspended, so re-check the contact still exists — atomically with
+            // the deposit — before handing ciphertext to the relay. If it was
+            // deleted mid-upload, drop the envelope AND the local copy (incl. the
+            // in-memory attachment bytes).
+            if (!contactExists(conversation.contactId)) {
+                diag("send: contact deleted mid-send — dropping local copy")
+                messages.discard(messageId)
+            } else if (ws.sendMessage(envelope)) {
                 // Enqueued — honestly still SENDING until the relay/peer acks.
             } else {
                 diag("send: hand-off failed — socket not open (${ws.connectionState.value})")
@@ -650,7 +730,7 @@ class MessagingCoordinator(
      * stays LOADED in memory).
      */
     fun retry(messageId: String) {
-        scope.launch {
+        scope.launch(confined) {
             val message = messages.retryable(messageId) ?: return@launch
             val conversation = conversations.find(message.conversationId) ?: run {
                 messages.markFailed(messageId)
@@ -719,7 +799,7 @@ class MessagingCoordinator(
      * off is queued in [pendingReceipts] and re-sent on reconnect.
      */
     private fun sendReadReceipt(contactId: String, messageIds: List<String>) {
-        scope.launch {
+        scope.launch(confined) {
             val accountId = api.accountId ?: return@launch
             runCatching {
                 val plaintext = ControlPayload.readReceipt(messageIds)
@@ -745,7 +825,14 @@ class MessagingCoordinator(
                     burnOnRead = false,
                     mediaType = MessageEnvelope.MEDIA_TEXT,
                 )
-                if (!ws.sendMessage(envelope)) {
+                // Non-suspending publish tail (see [confined]): atomic with
+                // deleteContact. A receipt for a just-deleted contact is dropped
+                // (no post-delete ciphertext) and not queued.
+                if (!contactExists(contactId)) {
+                    diag("receipt: contact deleted mid-send — dropped, not queued")
+                } else if (ws.sendMessage(envelope)) {
+                    // Delivered to the socket — nothing more to do.
+                } else {
                     // Socket down. The messages are already READ locally, so
                     // they will never re-enter onMessagesSeen — queue the ids
                     // for the reconnect flush. Connection state only — never
@@ -779,9 +866,90 @@ class MessagingCoordinator(
         }
     }
 
+    /**
+     * Full contact deletion (cryptographic teardown, not soft-delete).
+     *
+     * Order matters:
+     *  1. Burn-all for this conversation first — same path as the chat-header
+     *     "burn all" action: every local message is destroyed and each fires a
+     *     `message.burn` to the peer while the roster entry still exists (the
+     *     burn callback resolves peer_id from the conversation). That is the
+     *     simple purge: no separate relay envelope-delete API.
+     *  2. Destroy Double Ratchet session state, remote identity, sender keys,
+     *     and the roster entry.
+     *
+     * Ordering and concurrency (see [confined]): this runs on the confinement
+     * worker, so it is serialized against every send/deliver coroutine.
+     *
+     *  1. **Crypto teardown FIRST**, and it is the fallible step — a blocking
+     *     local commit run directly on the confinement worker (never main), so
+     *     it is non-suspending and therefore mutually exclusive with any
+     *     same-contact encrypt/decrypt (which are also non-suspending here); no
+     *     session lock, and nothing waits on a network fetch. If the commit does
+     *     not reach disk we abort **before** burning anything or removing the
+     *     roster entry, so a storage failure leaves the contact fully intact for
+     *     a retry rather than half-deleted (crypto gone, messages burned).
+     *  2. Only after a durable wipe: burn local messages (+ best-effort peer
+     *     `message.burn`) while the roster entry still resolves the peer.
+     *  3. **Durable** roster removal (commit), so a crash right after teardown
+     *     cannot leave a stale roster blob that resurrects the contact while its
+     *     crypto is already gone.
+     *  4. Drop per-contact transient state (queued receipts, typing) so a re-add
+     *     in this process cannot inherit a stale "typing…" or receipt queue.
+     *
+     * Any send/deliver that raced this deletion re-checks [contactExists] with no
+     * suspension before it publishes, so it drops rather than depositing
+     * ciphertext or resurfacing plaintext for the removed contact.
+     *
+     * Irreversible for session material: re-adding the same person requires a
+     * completely fresh X3DH handshake.
+     */
+    fun deleteContact(conversationId: String, onComplete: (() -> Unit)? = null) {
+        scope.launch(confined) {
+            val conversation = conversations.find(conversationId) ?: run {
+                onComplete?.invoke()
+                return@launch
+            }
+            val contactId = conversation.contactId
+            val wiped = signal.destroyContact(contactId)
+            if (!wiped) {
+                // Teardown did not reach disk (I/O error / storage full). Do NOT
+                // burn messages or remove the contact: keeping everything intact
+                // lets the user retry, and avoids a half-deleted state where the
+                // crypto survives on disk but the contact vanished from the UI.
+                diag("delete: crypto teardown commit failed — aborting, contact kept")
+                onComplete?.invoke()
+                return@launch
+            }
+            // Tombstone the contact (persisted, TTL-bounded) so a straggler
+            // inbound message — including one that arrives after a process
+            // restart, within the relay's undelivered window — is dropped rather
+            // than TOFU-establishing a fresh session and popping the contact back
+            // as "Unknown", without blocking genuine first-time inbound senders.
+            // See isDeletedContact / ConversationRepository.wasRecentlyDeleted.
+            conversations.recordDeletion(contactId)
+            // Peer-burn is best-effort (an offline burn frame is not re-queued);
+            // the dialog copy states this. Runs after the durable wipe, while the
+            // roster entry still resolves the peer for onMessageBurned.
+            messages.burnAll(conversationId, notifyPeer = true)
+            // Crypto is already durably gone and messages are burned, so we can't
+            // roll back; if the roster write did not reach disk we surface it
+            // rather than reporting a clean delete. The residual is bounded and
+            // safe: a restart would show a session-less ghost (its crypto is
+            // gone, so a re-add performs a fresh X3DH), which the user can remove
+            // again — never a contact that can still send/receive.
+            if (!conversations.removeDurably(conversationId)) {
+                diag("delete: roster removal did not reach disk — contact gone in-memory; a restart may show a session-less ghost")
+            }
+            pendingReceipts.remove(contactId)
+            _typingPeers.value = _typingPeers.value - contactId
+            onComplete?.invoke()
+        }
+    }
+
     /** Wipes the server account AND the local keys/messages. Irreversible. */
     fun deleteAccountAndWipe(onComplete: () -> Unit) {
-        scope.launch {
+        scope.launch(confined) {
             _linking.value = false
             linkJob?.cancel()
             runCatching { api.deleteAccount() }
@@ -795,8 +963,23 @@ class MessagingCoordinator(
     // -- inbound WebSocket events ---------------------------------------------
 
     override fun onMessageDeliver(envelope: MessageEnvelope) {
-        scope.launch {
+        scope.launch(confined) {
             runCatching {
+                // A straggler from a DELETED contact must not be decrypted:
+                //  - a normal (non-PreKey) message has no session and would throw
+                //    NoSessionException BEFORE any later guard, so it would never
+                //    be acked → the relay redelivers it forever;
+                //  - a PreKey message would TOFU-establish a fresh session and
+                //    remote identity inside decrypt, resurrecting crypto state.
+                // Check the tombstone FIRST, ack so the relay drops its copy, and
+                // drop. Keyed on the deletion tombstone, NOT roster absence — a
+                // first-time inbound sender is legitimately absent and must still
+                // create an "Unknown contact" below (see isDeletedContact).
+                if (isDeletedContact(envelope.senderId)) {
+                    diag("recv: message for deleted contact — dropped before decrypt")
+                    ws.ackMessage(envelope.id)
+                    return@runCatching
+                }
                 // Decrypt advances the receiving ratchet — serialize it with
                 // any concurrent encrypt for the same contact.
                 val plaintext = withSessionLock(envelope.senderId) {
@@ -916,7 +1099,7 @@ class MessagingCoordinator(
      * "unavailable" state rather than crashing or retrying.
      */
     private fun redeemAttachment(messageId: String, attachment: AttachmentControlPayload.Attachment) {
-        scope.launch {
+        scope.launch(confined) {
             runCatching {
                 val ciphertext = api.redeemBlob(attachment.blobToken)
                 val plain = AttachmentCrypto.decrypt(
@@ -964,6 +1147,10 @@ class MessagingCoordinator(
     }
 
     override fun onTyping(senderId: String, started: Boolean) {
+        // Ignore a typing.start from anyone not in the roster — a deleted
+        // contact whose late frame arrives after teardown, or an unknown sender.
+        // Never show or restore a "typing…" for a contact the user can't see.
+        if (started && conversations.findByContact(senderId) == null) return
         _typingPeers.value = if (started) {
             _typingPeers.value + senderId
         } else {
@@ -972,7 +1159,7 @@ class MessagingCoordinator(
     }
 
     override fun onPreKeyLow(remaining: Int) {
-        scope.launch {
+        scope.launch(confined) {
             runCatching {
                 api.uploadPreKeys(signal.generateOneTimePreKeys())
             }
@@ -994,7 +1181,7 @@ class MessagingCoordinator(
         // session + socket. Latching via join() avoids the race where start()
         // no-ops against a still-active linkJob and the relink is lost.
         val current = linkJob
-        scope.launch {
+        scope.launch(confined) {
             current?.join()
             // Re-check intent after the join window: a teardown
             // (stop/logout/deleteAccount) may have run in between, and relinking
