@@ -1,6 +1,6 @@
 {
   "name": "@zitrone/protocol",
-  "version": "0.8.3-beta",
+  "version": "0.8.4-beta",
   "description": "Shared message format, types, and serialization for Zitrone",
   "license": "AGPL-3.0-only",
   "type": "module",

@@ -7,6 +7,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.4-beta] - 2026-07-21
+
+### Added
+
+- **Android: full contact deletion (cryptographic teardown, not soft-delete).**
+  Long-press a conversation → confirm to burn every local message (and signal the
+  peer to burn its copies, best-effort), then irreversibly destroy the Double
+  Ratchet session, the peer's remote identity record, and any sender keys, and
+  remove the roster entry. The teardown is a single synchronous, durable commit
+  that aborts (keeping the contact intact) if it cannot reach disk, and the
+  roster removal is durable too. Re-adding the same person starts a completely
+  fresh X3DH handshake — zero reuse of prior key material. A persisted,
+  time-bounded tombstone drops straggler messages from a deleted contact (even
+  across an app restart, within the relay's undelivered window) without blocking
+  genuine first-time inbound senders.
+- **Android: local contact rename.** Tap the name in the chat header to edit the
+  on-device display label. Local only — never touches sessions, keys, pinned
+  identities, or safety numbers, and never leaves the device.
+
+### Changed
+
+- **Android messaging is confined to a single-worker dispatcher** so contact
+  deletion cannot race an in-flight send or delivery — no post-delete envelope
+  is deposited and a deleted contact cannot be resurrected by a straggler.
+
 ## [0.8.3-beta] - 2026-07-21
 
 ### Changed
