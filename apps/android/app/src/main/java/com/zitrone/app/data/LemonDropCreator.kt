@@ -69,6 +69,14 @@ class LemonDropCreator(
          *  of offering a pointless retry. The draft is kept. */
         data object TooLarge : Result
 
+        /**
+         * Deposit returned a router 404 — the live relay build predates the
+         * `/api/v1/qr-drops` routes (same class of outage as pre-blob attachment
+         * 404s). Distinct so the UI can say "redeploy the relay" instead of a
+         * useless "try again". The draft is kept.
+         */
+        data object StaleRelay : Result
+
         /** Any other failure (no account, network, bundle verification, deposit
          *  rejected). Retryable; the caller keeps the user's draft untouched. */
         data object Failed : Result
@@ -183,6 +191,16 @@ class LemonDropCreator(
             return success
         } catch (e: CancellationException) {
             throw e
+        } catch (e: ApiClient.ApiException) {
+            // Router 404 with Fiber's generic {"error":"error"} means the route
+            // is ABSENT (stale pre–lemon-drop build) — not "drop not found" (that
+            // only appears on fetch/burn handlers). Surface distinctly.
+            if (e.code == 404) {
+                Log.e("LemonDropCreator", "lemon-drop deposit 404 — relay missing /api/v1/qr-drops (stale build)", e)
+                return Result.StaleRelay
+            }
+            Log.e("LemonDropCreator", "lemon-drop create/deposit failed before the deposit boundary", e)
+            return Result.Failed
         } catch (e: Exception) {
             // Failure at or before the deposit boundary — nothing was deposited,
             // so nothing is half-created and the draft is kept for retry. Log the
