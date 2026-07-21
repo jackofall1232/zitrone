@@ -18,6 +18,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Re-add requires a fresh X3DH handshake. **Merged unverified** — there is no
   Xcode/iOS toolchain in CI, so this needs an Xcode build + on-device test
   before it ships in a release.
+- **Android: camera capture as an attachment source.** Compose attach menu
+  offers Take photo (system camera via FileProvider staging under
+  `cache/cameracapture/`, deleted immediately after load) alongside Photo
+  library and File. Images use **preview-before-send** (caption + Send /
+  Discard) — never capture-and-send. Same `AttachmentLoader` pipeline (memory
+  only, JPEG re-encode strips EXIF, no send-path watermark).
 - **Android: in-app lemon-drop QR scanner.** Chat list header scan icon opens
   ZXing (already used for contact exchange; no Play Services) and decodes
   `https://zitrone.app/d/{id}` stickers in-app, then routes into the same
