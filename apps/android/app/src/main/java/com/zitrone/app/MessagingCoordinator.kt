@@ -789,6 +789,12 @@ class MessagingCoordinator(
     fun onMessagesSeen(conversation: Conversation, messageIds: List<String>) {
         val newlyRead = messageIds.filter { messages.markRead(it) }
         if (newlyRead.isEmpty()) return
+        // Messages became visible IN the open chat — that is a read for the
+        // reminder cycle too. Without this, a message arriving while its chat
+        // is on screen (route unchanged, so MainActivity's onConversationRead
+        // never re-runs) would leave a re-fire armed and buzz at the window
+        // boundary for a conversation the user visibly read.
+        notificationScheduler.onConversationRead(conversation.id)
         if (!settings.settings.value.readReceipts) return
         sendReadReceipt(conversation.contactId, newlyRead)
     }
@@ -947,6 +953,10 @@ class MessagingCoordinator(
             }
             pendingReceipts.remove(contactId)
             _typingPeers.value = _typingPeers.value - contactId
+            // A deleted conversation must never buzz again: cancel any armed
+            // re-fire and drop its reminder state entirely, so a later re-add
+            // starts fresh (no inherited cooldown).
+            notificationScheduler.onConversationRemoved(conversationId)
             onComplete?.invoke()
         }
     }
@@ -1184,15 +1194,24 @@ class MessagingCoordinator(
     }
 
     override fun onSessionRevoked() {
+        // Fast, thread-safe teardown on the socket callback thread: stop the
+        // relink loop, drop tokens, bounce the UI to the gate immediately.
         _linking.value = false
         linkJob?.cancel()
-        messages.clearAll()
-        // A pending unread-reminder must not outlive the revoked session — a
-        // re-fire after forced logout would be a phantom alert (and, once
-        // multiple identities exist, an alert from an identity that is no
-        // longer live). Same teardown contract as stop()/deleteAccountAndWipe().
-        notificationScheduler.cancelAll()
         api.clearTokens()
+        // The stateful teardown is SERIALIZED BEHIND any message.deliver work
+        // already queued on the confined dispatcher: this callback runs on the
+        // socket thread, but queued deliveries would otherwise re-add messages
+        // and re-arm reminder state AFTER a synchronous cancelAll() here —
+        // leaving a re-fire alive after forced logout. Queued last, this block
+        // runs once those deliveries have drained, so nothing they armed
+        // survives. (A delivery processed in between may still post one
+        // content-free alert — that message genuinely arrived before logout
+        // completed; no timer outlives this block.)
+        scope.launch(confined) {
+            messages.clearAll()
+            notificationScheduler.cancelAll()
+        }
         onForcedLogout?.invoke()
     }
 

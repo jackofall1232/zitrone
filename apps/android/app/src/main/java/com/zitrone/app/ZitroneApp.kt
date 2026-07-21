@@ -220,6 +220,12 @@ class AppContainer(private val app: Application) {
         scope = scope,
         fire = { MessagingNotifications.showNewMessage(app) },
         isEnabled = { settingsRepository.settings.value.unreadReminderEnabled },
+        // MONOTONIC clock, not wall time: an NTP sync or manual clock change
+        // moving wall time backward would stretch the 2-minute cooldown by the
+        // adjustment size and suppress alerts. elapsedRealtime() only ever
+        // moves forward. (The scheduler's wall-clock default exists solely for
+        // plain-JVM tests.)
+        clock = { android.os.SystemClock.elapsedRealtime() },
     )
 
     val coordinator = MessagingCoordinator(

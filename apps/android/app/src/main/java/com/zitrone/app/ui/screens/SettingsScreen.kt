@@ -181,8 +181,10 @@ fun SettingsScreen(
         SectionHeader("Notifications")
         ToggleRow(
             title = "Repeat unread reminders",
-            subtitle = "Re-alert about unread conversations roughly every 2 " +
-                "minutes until you open them. Off means a single ping per arrival.",
+            subtitle = "While new messages keep arriving in an unread chat, " +
+                "re-alert roughly every 2 minutes until you open it. Off: new " +
+                "messages still alert (at most one per chat every 2 minutes), " +
+                "but never repeat for the same unread pile.",
             checked = settings.unreadReminderEnabled,
             onToggle = settingsRepository::setUnreadReminderEnabled,
         )

@@ -127,19 +127,52 @@ class NotificationSchedulerTest {
         assertEquals(2, fired) // exactly one re-fire, then nothing
     }
 
-    // F — toggle off: zero alerts, no scheduling at all.
+    // F — toggle off gates ONLY the repeat reminders: arrival alerts still
+    // fire (rate-limited to one per window), but nothing is scheduled and the
+    // window boundary stays silent. Turning the toggle off must never
+    // silently disable message notifications altogether.
     @Test
-    fun `toggle off produces no alerts`() = runTest {
+    fun `toggle off still alerts on arrival but never re-fires`() = runTest {
         var fired = 0
         val scheduler = scheduler(fire = { fired++ }, isEnabled = { false })
 
-        repeat(5) {
+        // Burst inside the first window: exactly one arrival alert.
+        repeat(4) {
             scheduler.onIncomingMessage("c1")
-            advanceTimeBy(30_000)
+            advanceTimeBy(20_000)
         }
-        advanceTimeBy(300_000)
-        runCurrent()
+        assertEquals(1, fired)
 
-        assertEquals(0, fired)
+        // Window boundary passes with messages having arrived during it —
+        // toggle off means NO deferred re-fire.
+        advanceTimeBy(COOLDOWN_MS)
+        runCurrent()
+        assertEquals(1, fired)
+
+        // A fresh arrival AFTER the window still alerts immediately.
+        scheduler.onIncomingMessage("c1")
+        assertEquals(2, fired)
+    }
+
+    // G — a removed (deleted) conversation never fires its armed re-fire, and
+    // a later re-add starts a completely fresh cycle with no inherited cooldown.
+    @Test
+    fun `removing a conversation cancels its re-fire and clears its state`() = runTest {
+        var fired = 0
+        val scheduler = scheduler(fire = { fired++ })
+
+        scheduler.onIncomingMessage("c1")            // fire #1, opens window
+        advanceTimeBy(30_000)
+        scheduler.onIncomingMessage("c1")            // in-window: arms re-fire
+        assertEquals(1, fired)
+
+        scheduler.onConversationRemoved("c1")        // contact deleted
+        advanceTimeBy(COOLDOWN_MS * 2)
+        runCurrent()
+        assertEquals(1, fired)                       // boundary stays silent
+
+        // Re-added contact: fresh state, immediate alert.
+        scheduler.onIncomingMessage("c1")
+        assertEquals(2, fired)
     }
 }

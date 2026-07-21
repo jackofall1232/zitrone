@@ -56,7 +56,19 @@ import java.util.concurrent.ConcurrentHashMap
 class NotificationScheduler(
     private val scope: CoroutineScope,
     private val fire: () -> Unit,
+    /**
+     * Gates ONLY the deferred re-fire ("repeat reminders"). Immediate arrival
+     * alerts (rate-limited to one per window) fire regardless, so the toggle
+     * can never silently disable message notifications altogether.
+     */
     private val isEnabled: () -> Boolean,
+    /**
+     * Duration source. PRODUCTION MUST INJECT A MONOTONIC CLOCK
+     * (SystemClock.elapsedRealtime) — wall time can jump backward on NTP sync
+     * or a manual change, which would stretch the cooldown far past its window
+     * and suppress alerts. The wall-clock default exists only so plain-JVM
+     * tests (which drive virtual time) don't need Android APIs.
+     */
     private val clock: () -> Long = System::currentTimeMillis,
     private val cooldownMs: Long = 120_000L,
 ) {
@@ -85,22 +97,28 @@ class NotificationScheduler(
     fun onIncomingMessage(conversationId: String) {
         val state = states.getOrPut(conversationId) { ConvState() }
         synchronized(state) {
-            // Toggle off ⇒ no alert and no scheduling at all.
-            if (!isEnabled()) return
             val now = clock()
             val last = state.lastFiredAt
             if (last == null || now - last >= cooldownMs) {
-                // Outside the cooldown (or first ever) — fire right now.
+                // Outside the cooldown (or first ever) — fire right now. This
+                // path is NOT gated on [isEnabled]: the toggle controls only the
+                // REPEAT reminders (the deferred re-fire below). Arrival alerts
+                // themselves — still rate-limited to one per window — always
+                // fire, so turning "Repeat unread reminders" off can never
+                // silently disable message notifications altogether.
                 fire()
                 state.lastFiredAt = now
                 state.arrivedSinceFire = false
                 state.job?.cancel()
                 state.job = null
             } else {
-                // Suppressed inside the cooldown — remember it's still unread and
-                // arm ONE re-fire at the window boundary if not already armed.
+                // Suppressed inside the cooldown — remember it's still unread
+                // and, when repeat reminders are enabled, arm ONE re-fire at the
+                // window boundary if not already armed. Toggle off ⇒ no deferred
+                // job; the next arrival AFTER the window still alerts via the
+                // immediate path above.
                 state.arrivedSinceFire = true
-                if (state.job == null) {
+                if (isEnabled() && state.job == null) {
                     val myEpoch = state.epoch
                     state.job = scope.launch {
                         // Residual wait on the injected clock, like
@@ -141,6 +159,23 @@ class NotificationScheduler(
      */
     fun onConversationRead(conversationId: String) {
         val state = states[conversationId] ?: return
+        synchronized(state) {
+            state.job?.cancel()
+            state.job = null
+            state.lastFiredAt = null
+            state.arrivedSinceFire = false
+            state.epoch++
+        }
+    }
+
+    /**
+     * The conversation ceased to exist (contact deleted). Cancel its pending
+     * job, neutralize any past-delay job via the epoch bump, and drop the map
+     * entry entirely — a deleted contact must never fire, and a later re-add
+     * must start with completely fresh state, inheriting no old cooldown.
+     */
+    fun onConversationRemoved(conversationId: String) {
+        val state = states.remove(conversationId) ?: return
         synchronized(state) {
             state.job?.cancel()
             state.job = null
