@@ -242,6 +242,13 @@ final class AppEnvironment: ObservableObject {
             socket.disconnect()
             messages.wipeAll()
             try? signal.wipe()
+            // Drop roster + deletion tombstones so no deleted-contact trace
+            // survives an account wipe (mirrors Android ConversationRepository.clearAll).
+            for c in conversations.conversations {
+                conversations.remove(contactID: c.id)
+            }
+            conversations.clearDeletions()
+            activeConversation = nil
             showSettings = false
             onboarded = false
             phase = .onboarding
