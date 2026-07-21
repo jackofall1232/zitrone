@@ -5,6 +5,8 @@
 
 package com.zitrone.app.ui.screens
 
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -22,26 +24,35 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import com.zitrone.app.data.Conversation
+import com.zitrone.app.data.parseQrDropLink
 import com.zitrone.app.ui.components.ConversationList
 import com.zitrone.app.ui.components.LemonSliceLogo
+import com.zitrone.app.ui.components.SecureCaptureActivity
 import com.zitrone.app.ui.components.fingerprintWatermark
 import com.zitrone.app.ui.theme.BackgroundElevated
 import com.zitrone.app.ui.theme.BackgroundPrimary
@@ -53,12 +64,18 @@ import com.zitrone.app.ui.theme.TextMuted
 import com.zitrone.app.ui.theme.TextOnLemon
 import com.zitrone.app.ui.theme.TextPrimary
 import com.zitrone.app.ui.theme.TextSecondary
+import kotlinx.coroutines.launch
 
 /**
- * Chat list (design_system.screens.chat_list): wordmark header with settings
- * action, lemon-bordered pill search, conversation list, and the lemon FAB
- * with its glow shadow. Root warning (security/RootDetection) appears as a
- * dismissible banner — warn, never block.
+ * Chat list (design_system.screens.chat_list): wordmark header with lemon-drop
+ * scan + settings actions, lemon-bordered pill search, conversation list, and
+ * the lemon FAB with its glow shadow. Root warning (security/RootDetection)
+ * appears as a dismissible banner — warn, never block.
+ *
+ * The header QR control opens an in-app ZXing scanner (same stack as add-contact)
+ * scoped to lemon-drop sticker URLs only. A valid scan hands the qr_id to
+ * [onOpenLemonDrop] — the same entry as App Links / VIEW intents — so resolve
+ * logic is never duplicated. Non-matching codes surface a snackbar (not silent).
  */
 @Composable
 fun ChatListScreen(
@@ -69,6 +86,11 @@ fun ChatListScreen(
     onDeleteContact: (Conversation) -> Unit,
     onOpenSettings: () -> Unit,
     onNewChat: () -> Unit,
+    /**
+     * A successfully scanned lemon-drop qr_id (verbatim path segment). Caller
+     * routes into the existing AppContainer open/resolve path.
+     */
+    onOpenLemonDrop: (qrId: String) -> Unit,
     modifier: Modifier = Modifier,
     /** This device's own identity fingerprint for the security-paper watermark. */
     identityFingerprint: String? = null,
@@ -80,6 +102,29 @@ fun ChatListScreen(
         conversations.filter { it.displayName.contains(query, ignoreCase = true) }
     }
 
+    val context = LocalContext.current
+    val hasCamera = remember {
+        context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)
+    }
+    val snackbarHostState = remember { SnackbarHostState() }
+    val snackbarScope = rememberCoroutineScope()
+
+    // ZXing owns the camera + runtime permission flow (same as AddContactScreen).
+    // Results are untrusted text: only [parseQrDropLink] may promote them.
+    val lemonDropScanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+        val raw = result.contents ?: return@rememberLauncherForActivityResult
+        val qrId = parseQrDropLink(raw)
+        if (qrId != null) {
+            onOpenLemonDrop(qrId)
+        } else {
+            snackbarScope.launch {
+                snackbarHostState.showSnackbar(
+                    message = "That isn’t a Zitrone lemon-drop code.",
+                )
+            }
+        }
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -88,7 +133,7 @@ fun ChatListScreen(
             .fingerprintWatermark(identityFingerprint),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Header — wordmark left, settings right.
+            // Header — wordmark left, scan + settings right.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -101,6 +146,26 @@ fun ChatListScreen(
                     color = Lemon,
                     modifier = Modifier.weight(1f),
                 )
+                if (hasCamera) {
+                    IconButton(
+                        onClick = {
+                            lemonDropScanLauncher.launch(
+                                ScanOptions()
+                                    .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                    .setBeepEnabled(false)
+                                    .setOrientationLocked(false)
+                                    .setPrompt("Point at a lemon-drop sticker")
+                                    .setCaptureActivity(SecureCaptureActivity::class.java),
+                            )
+                        },
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.QrCodeScanner,
+                            contentDescription = "Scan lemon drop",
+                            tint = Lemon,
+                        )
+                    }
+                }
                 IconButton(onClick = onOpenSettings) {
                     Icon(
                         imageVector = Icons.Outlined.Settings,
@@ -181,6 +246,13 @@ fun ChatListScreen(
                 tint = TextOnLemon,
             )
         }
+
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 96.dp),
+        )
     }
 }
 

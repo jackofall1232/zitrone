@@ -474,6 +474,8 @@ private fun ZitroneRoot(
                 },
                 onOpenSettings = { route = Route.Settings },
                 onNewChat = { route = Route.AddContact },
+                // Same resolve path as App Links / VIEW intents — do not fork.
+                onOpenLemonDrop = { qrId -> container.onLemonDropLink(qrId) },
                 identityFingerprint = identityFingerprint,
             )
 
