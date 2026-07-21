@@ -199,6 +199,24 @@ func (s *Store) DeleteEnvelope(ctx context.Context, id, recipientID uuid.UUID) e
 	return err
 }
 
+// PurgeEnvelopesToPeer deletes undelivered envelopes addressed TO peerID that
+// were deposited BY senderID. Scoped to one relationship only: the envelopes
+// table has no sender column (zero-knowledge), so sender is matched against
+// the opaque payload's JSON "sender_id" field — the same field the hub already
+// validates at store time. Envelopes from other senders to the same peer are
+// untouched. Returns the number of rows deleted.
+func (s *Store) PurgeEnvelopesToPeer(ctx context.Context, senderID, peerID uuid.UUID) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM envelopes
+		WHERE recipient_id = $1
+		  AND convert_from(payload, 'UTF8')::jsonb->>'sender_id' = $2`,
+		peerID, senderID.String())
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // PurgeExpiredEnvelopes deletes undelivered envelopes older than the cutoff and
 // returns their IDs grouped by recipient is intentionally NOT returned —
 // senders are notified via the janitor without identity linkage.

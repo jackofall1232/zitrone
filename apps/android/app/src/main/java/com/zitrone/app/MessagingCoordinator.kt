@@ -779,6 +779,49 @@ class MessagingCoordinator(
         }
     }
 
+    /**
+     * Full contact deletion (cryptographic teardown, not soft-delete).
+     *
+     * Destroys, for [conversationId]'s peer:
+     *  - Double Ratchet session state (root/chain/skipped keys)
+     *  - The contact's remote identity key record (and any sender keys)
+     *  - The contact-list / roster entry
+     * and best-effort purges this account's undelivered envelopes addressed to
+     * that peer on the relay.
+     *
+     * Message history is deliberately DECOUPLED (H2): in-memory decrypted
+     * messages for this peer are left alone; after process death they are gone
+     * anyway (MessageRepository never persists plaintext). They are not wiped
+     * here so history deletion stays an intentional, separate decision.
+     *
+     * Irreversible for session material: re-adding the same person requires a
+     * completely fresh X3DH handshake.
+     */
+    fun deleteContact(conversationId: String, onComplete: (() -> Unit)? = null) {
+        scope.launch {
+            val conversation = conversations.find(conversationId) ?: run {
+                onComplete?.invoke()
+                return@launch
+            }
+            val contactId = conversation.contactId
+            // Hold the session lock so an in-flight encrypt/decrypt can't race
+            // a teardown and re-persist a destroyed SessionRecord.
+            withSessionLock(contactId) {
+                signal.destroyContact(contactId)
+            }
+            conversations.remove(conversationId)
+            pendingReceipts.remove(contactId)
+            // Best-effort relay purge — local crypto teardown already succeeded
+            // and must not be rolled back if the network is down.
+            runCatching { api.purgePendingEnvelopesToPeer(contactId) }
+                .onFailure { e ->
+                    if (e is CancellationException) throw e
+                    diag("contact-delete: relay envelope purge failed: ${e.javaClass.name}")
+                }
+            onComplete?.invoke()
+        }
+    }
+
     /** Wipes the server account AND the local keys/messages. Irreversible. */
     fun deleteAccountAndWipe(onComplete: () -> Unit) {
         scope.launch {

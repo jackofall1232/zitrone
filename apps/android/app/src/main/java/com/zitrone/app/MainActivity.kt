@@ -469,6 +469,9 @@ private fun ZitroneRoot(
                 rootWarningVisible = rootWarningVisible,
                 onDismissRootWarning = { rootWarningVisible = false },
                 onOpenConversation = { route = Route.Chat(it.id) },
+                onDeleteContact = { conversation ->
+                    container.coordinator.deleteContact(conversation.id)
+                },
                 onOpenSettings = { route = Route.Settings },
                 onNewChat = { route = Route.AddContact },
                 identityFingerprint = identityFingerprint,

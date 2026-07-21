@@ -154,6 +154,43 @@ class EncryptedSignalProtocolStore(
         editor.apply()
     }
 
+    /**
+     * Drops every remote identity record for [name] (all device ids). Used by
+     * full contact teardown so a re-add cannot inherit a prior TOFU pin and
+     * must complete a fresh X3DH handshake against a newly fetched bundle.
+     */
+    fun deleteRemoteIdentity(name: String) {
+        val editor = prefs.edit()
+        prefs.all.keys
+            .filter { it.startsWith("$KEY_REMOTE_IDENTITY$name:") }
+            .forEach(editor::remove)
+        editor.apply()
+    }
+
+    /**
+     * Drops any group sender-key records for [name]. Groups are phase-2, but
+     * contact teardown must leave no keyed material for the peer behind.
+     */
+    fun deleteSenderKeys(name: String) {
+        val editor = prefs.edit()
+        prefs.all.keys
+            .filter { it.startsWith("$KEY_SENDER_KEY$name:") }
+            .forEach(editor::remove)
+        editor.apply()
+    }
+
+    /**
+     * Full cryptographic teardown for one peer: Double Ratchet session state
+     * (root/chain/skipped message keys live inside the SessionRecord), remote
+     * identity key, and any sender keys. Does NOT touch local identity or
+     * our own prekeys. Irreversible — a re-add must re-run X3DH.
+     */
+    fun destroyContactCrypto(name: String) {
+        deleteAllSessions(name)
+        deleteRemoteIdentity(name)
+        deleteSenderKeys(name)
+    }
+
     // -- Kyber prekeys (post-quantum, required by the store interface) --------
 
     override fun loadKyberPreKey(kyberPreKeyId: Int): KyberPreKeyRecord {

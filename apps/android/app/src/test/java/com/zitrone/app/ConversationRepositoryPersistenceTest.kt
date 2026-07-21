@@ -115,4 +115,20 @@ class ConversationRepositoryPersistenceTest {
         // In-memory only; the newer-client blob must not be clobbered.
         assertEquals(newer, store.blob)
     }
+
+    @Test
+    fun `remove drops the contact from the roster and persists the gap`() {
+        val store = FakeRosterStore()
+        val repo = ConversationRepository(store)
+        repo.upsert(conversation("alice", verified = true, pinned = "pin-a"))
+        repo.upsert(conversation("bob"))
+
+        repo.remove("alice")
+
+        assertEquals(listOf("bob"), repo.conversations.value.map { it.id })
+        // Survives a restart — the deleted contact must not reappear from disk.
+        val restored = ConversationRepository(store)
+        assertEquals(listOf("bob"), restored.conversations.value.map { it.id })
+        assertNull(restored.find("alice"))
+    }
 }
