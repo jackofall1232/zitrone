@@ -28,8 +28,8 @@ enum FingerprintWatermarkDefaults {
     /// Fundamental tile edge, in tile-space points before the density scale.
     static let tileSize: CGFloat = 512
     static let rotationDeg: CGFloat = -24
-    static let alpha: CGFloat = 0.045
-    static let fontPx: CGFloat = 11.5
+    static let alpha: CGFloat = 0.07
+    static let fontPx: CGFloat = 12.5
     static let rowGapPx: CGFloat = 28
     static let brickOffset: CGFloat = 0.5
 
