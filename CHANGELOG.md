@@ -18,6 +18,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Re-add requires a fresh X3DH handshake. **Merged unverified** — there is no
   Xcode/iOS toolchain in CI, so this needs an Xcode build + on-device test
   before it ships in a release.
+- **Android: in-app lemon-drop QR scanner.** Chat list header scan icon opens
+  ZXing (already used for contact exchange; no Play Services) and decodes
+  `https://zitrone.app/d/{id}` stickers in-app, then routes into the same
+  open/resolve path as App Links. Wrong QR content shows a snackbar — no
+  silent failure, no arbitrary-QR handling. Bypasses OEM stock-camera App Link
+  flakiness without depending on external camera apps.
 
 ## [0.8.5-beta] - 2026-07-21
 
