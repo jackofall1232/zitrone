@@ -32,8 +32,8 @@ export interface FingerprintTileOptions {
 export const WATERMARK_TILE_DEFAULTS: FingerprintTileOptions = {
   tileSize: 512,
   rotationDeg: -24,
-  alpha: 0.045,
-  fontPx: 11.5,
+  alpha: 0.07,
+  fontPx: 12.5,
   rowGapPx: 28,
   brickOffset: 0.5,
   color: "#F5E642",
