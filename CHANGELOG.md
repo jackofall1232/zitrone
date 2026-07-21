@@ -40,7 +40,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the 0.8.4 release APK (same signing cert and app logic; only optimization shape differed).
   Documented tradeoff and do-not-revert note in `docs/RELEASING_ANDROID.md`. Play Protect
   appeal remains a maintainer-side follow-up (not in-repo).
->>>>>>> origin/main
 
 ## [0.8.4-beta] - 2026-07-21
 
