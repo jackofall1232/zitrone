@@ -18,6 +18,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Opening a drop via paste-link in Settings is unchanged. Long-press on send remains
   dead-drop only (not lemon-drop create).
 
+### Fixed
+
+- **Lemon-drop creation no longer dies as a generic "Couldn't seal the drop" when
+  the relay is stale.** Root cause was deploy drift: production (and local Docker)
+  still ran a pre–PR #3 server without `POST /api/v1/qr-drops`, so deposit 404'd
+  after a successful client-side seal + PoW. Clients now surface a distinct
+  "stale server build / redeploy the relay" message on that 404 (told apart from a
+  handler `not_found` 404, which means the recipient is gone, not a stale relay);
+  web also distinguishes identity-key change, oversize, rate limit, and offline. Web
+  create rejects oversize drafts before the difficulty-20 PoW (parity with
+  Android). `scripts/verify-relay-build.sh` and `docs/RELEASING_RELAY.md` check
+  lemon-drop routes so the next missed redeploy fails the smoke test.
+
 ## [0.8.2-beta] - 2026-07-21
 
 ### Added

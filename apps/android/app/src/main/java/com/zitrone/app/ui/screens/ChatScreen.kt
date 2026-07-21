@@ -385,8 +385,14 @@ fun ChatScreen(
                             qrError = "This contact's key changed — the drop was refused."
                         LemonDropCreator.Result.TooLarge ->
                             qrError = "This message is too long to seal into a QR drop — shorten it and try again."
+                        LemonDropCreator.Result.StaleRelay ->
+                            qrError =
+                                "The relay doesn't support QR drops yet (stale server build). Redeploy the relay, then try again."
+                        LemonDropCreator.Result.RecipientUnavailable ->
+                            qrError =
+                                "This contact isn't reachable right now — they may have reset their account."
                         LemonDropCreator.Result.Failed ->
-                            qrError = "Couldn't seal the drop — try again."
+                            qrError = "Couldn't create the drop — try again."
                     }
                     qrSealing = false
                 }

@@ -92,9 +92,10 @@ object LemonDropCreate {
     const val POW_DIFFICULTY = 20
 
     /** Max deposited ciphertext, in bytes — mirrors the relay's
-     *  qrMaxCiphertextBytes (server/internal/api/qrdrops.go). A padded sealed box
-     *  past this ceiling is 413'd on deposit, so we reject it BEFORE burning the
-     *  difficulty-20 PoW rather than after. */
+     *  qrMaxCiphertextBytes (server/internal/api/qrdrops.go) and protocol
+     *  QR_DROP_MAX_CIPHERTEXT_BYTES. A padded sealed box past this ceiling is
+     *  413'd on deposit, so we reject it BEFORE burning the difficulty-20 PoW
+     *  rather than after. */
     const val QR_DROP_MAX_CIPHERTEXT_BYTES = 64 * 1024
 
     /** The sender family an Android creator always stamps — its identity key IS

@@ -24,6 +24,7 @@ import { MESSAGES_CONTAINER_ID } from "../components/ScreenshotShield.js";
 import { Attachment } from "../components/Attachment.js";
 import { QrDropModal } from "../components/QrDropModal.js";
 import { AttachmentTooLargeError, prepareAttachment } from "../lib/attachments.js";
+import { formatQrDropCreateError } from "../lib/qrDropErrors.js";
 import { useApp } from "../store.js";
 import { useSettings } from "../settings.js";
 
@@ -147,7 +148,10 @@ export function ChatView({ peerId, onVerify }: { peerId: string; onVerify: () =>
         draft.clearDraft();
         setQrDraft(null);
       })
-      .catch(() => setQrError("Couldn't seal the drop — try again."))
+      // Surface the real failure class (stale relay 404, identity change, oversize,
+      // rate limit) — never collapse everything into a generic "seal" string that
+      // masks a missing /api/v1/qr-drops route on an undeployed relay.
+      .catch((err: unknown) => setQrError(formatQrDropCreateError(err)))
       .finally(() => setQrSealing(false));
   };
   const cancelQrDraft = () => {
