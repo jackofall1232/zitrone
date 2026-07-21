@@ -325,16 +325,6 @@ class ApiClient(
         execute(post("/api/v1/qr-drops/burn", body, authenticated = false))
     }
 
-    /**
-     * DELETE /api/v1/envelopes/to/:peerId — purge undelivered envelopes THIS
-     * account deposited that are still pending for [peerId]. Server-side half
-     * of contact deletion: scoped to one relationship's outbound store-and-
-     * forward ciphertext only. 204 on success (including empty purge).
-     */
-    suspend fun purgePendingEnvelopesToPeer(peerId: String) {
-        execute(request("/api/v1/envelopes/to/$peerId").delete().build())
-    }
-
     /** DELETE /api/v1/account — full, irreversible purge of all server data. */
     suspend fun deleteAccount() {
         try {

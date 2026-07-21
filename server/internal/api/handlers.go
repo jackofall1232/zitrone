@@ -376,34 +376,6 @@ func (h *Handlers) PrekeyCount(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"count": count})
 }
 
-// ── envelopes (scoped relationship purge) ────────────────────────────────────
-
-// PurgeEnvelopesToPeer deletes undelivered envelopes THIS account deposited
-// that are still pending delivery to :peerId. Used by client-side contact
-// deletion so store-and-forward ciphertext for a destroyed relationship does
-// not sit on the relay until TTL. Scope is deliberately narrow:
-//   - only envelopes with recipient_id = peerId
-//   - only those whose payload sender_id matches the authenticated caller
-//
-// There is no general "delete contact" concept on the server — the relay holds
-// no contact graph, only opaque envelopes.
-func (h *Handlers) PurgeEnvelopesToPeer(c *fiber.Ctx) error {
-	peerID, err := uuid.Parse(c.Params("peerId"))
-	if err != nil {
-		return errJSON(c, fiber.StatusBadRequest, "bad_peer")
-	}
-	senderID := AccountID(c)
-	if peerID == senderID {
-		// No relationship with self; treat as a no-op rather than an error so a
-		// miswired client can't turn a local teardown into a 4xx loop.
-		return c.SendStatus(fiber.StatusNoContent)
-	}
-	if _, err := h.store.PurgeEnvelopesToPeer(c.Context(), senderID, peerID); err != nil {
-		return errJSON(c, fiber.StatusInternalServerError, "store_failed")
-	}
-	return c.SendStatus(fiber.StatusNoContent)
-}
-
 // ── account ──────────────────────────────────────────────────────────────────
 
 // DeleteAccount is a full, irreversible purge of all data for the account.

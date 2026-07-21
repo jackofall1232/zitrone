@@ -94,9 +94,6 @@ func main() {
 	v1.Get("/users/:id/prekey", handlers.RequireAuth, handlers.GetPrekeyBundle)
 	v1.Post("/prekeys", handlers.RequireAuth, handlers.UploadPrekeys)
 	v1.Get("/prekeys/count", handlers.RequireAuth, handlers.PrekeyCount)
-	// Scoped relationship purge: undelivered envelopes this account deposited
-	// that are still pending for :peerId. Not a contact graph — envelopes only.
-	v1.Delete("/envelopes/to/:peerId", handlers.RequireAuth, handlers.PurgeEnvelopesToPeer)
 	v1.Delete("/account", handlers.RequireAuth, handlers.DeleteAccount)
 
 	// Dead drops (v1.5) — anonymous, unauthenticated. Proof-of-work on deposit

@@ -94,9 +94,9 @@ fun ConversationList(
 }
 
 /**
- * Explicit confirmation before irreversible contact crypto teardown. Past
- * messages from this contact become permanently undecryptable once session
- * keys are destroyed; history rows themselves are not removed (decoupled).
+ * Explicit confirmation before irreversible contact crypto teardown. Delete
+ * burns every message in the conversation (same as burn-all, including peer
+ * `message.burn` signals) and then destroys the session/identity.
  */
 @Composable
 fun DeleteContactConfirmDialog(
@@ -115,10 +115,10 @@ fun DeleteContactConfirmDialog(
         },
         text = {
             Text(
-                text = "This permanently destroys the encryption session with " +
-                    "“$displayName”, including their identity key and all ratchet " +
-                    "keys. You will not be able to decrypt past messages from them. " +
-                    "Re-adding them later starts a completely fresh key exchange.\n\n" +
+                text = "This burns every message with “$displayName” on both sides, " +
+                    "then permanently destroys the encryption session — identity key, " +
+                    "ratchet keys, and the contact entry. Re-adding them later starts a " +
+                    "completely fresh key exchange.\n\n" +
                     "This cannot be undone.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = TextSecondary,
