@@ -512,7 +512,8 @@ itself.
   human-known in practice; a wire-level capability signal that would let the software refuse an
   iOS recipient up front is deferred follow-up work, not part of this release.
 - **Platform status, honestly.** Web and Linux desktop have the full flow (create and redeem).
-  Android cannot create drops, but it can now **be a true recipient**: a scan performs one
+  Android now has it too — it can **create** drops as of 0.8.2 (see below), and it can
+  **be a true recipient**: a scan performs one
   fetch (network-indistinguishable from any other scanner) and one open attempt in a
   **self-contained one-shot responder** (`LemonDropOneShot`) that mirrors the web stack's
   bytes exactly and is deliberately separate from ordinary libsignal messaging — it never
@@ -529,6 +530,26 @@ itself.
   the site serves the ordinary marketing page at `/d/{id}`, so an unverified or app-less scan
   lands on the homepage (see `docs/RELEASING_ANDROID.md` for verification propagation, which
   can take days).
+- **Android creation (0.8.2).** Android now seals and deposits its own drops through
+  `LemonDropCreate` — a byte-exact mirror of the web `createLemonDrop` (one-shot X3DH initiate +
+  one ratchet step + sealed box + difficulty-20 hashcash), on the same self-contained,
+  session-less path as the opener and just as isolated from ordinary libsignal messaging. It
+  reuses the same narrow private-scalar bridge (documented above) and zeros every derived secret,
+  including the plaintext, before returning. Two honest properties, stated plainly:
+  - **The sender family is on the wire.** An Android creator's identity is a Curve25519
+    (Montgomery) key, so its drops carry `sender_key_family: "curve25519"` and the recipient DHs
+    against the key verbatim. The field is optional and defaults to `"ed25519"`, so every existing
+    web-created drop is byte-identical and unaffected; **only clients on 0.8.1-beta or newer can
+    open an Android-created drop** — older ones fail the family-aware step and show the same "not
+    for you" advocacy screen (safe, no leak). A web recipient who receives such a drop from a
+    sender they have never keyed pins that identity but stores a **session-less** contact: web and
+    a mobile peer cannot hold an ordinary cross-family session, and a drop is one-way regardless,
+    so no reply channel is implied or created.
+  - **Creation refuses an unkeyed contact.** Unlike ordinary messaging, which trusts-on-first-use,
+    a one-shot sealed drop gets no later safety-number verification, so the creator will only seal
+    to an identity it already holds for the contact (pinned or previously learned); the compose UI
+    hides the drop button otherwise. A relay that serves a different key than the one held is
+    refused, not trusted.
 
 ### Attachments (encrypted sideloaded blobs — 0.7.0-beta)
 

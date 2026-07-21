@@ -7,6 +7,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.2-beta] - 2026-07-21
+
+### Added
+
+- **Android can now create lemon drops, not just open them.** The compose bar's lemon-drop
+  button seals a message to a contact with a one-shot X3DH + proof-of-work and deposits it to the
+  relay, then shows the QR to copy, save for printing, or share — the same one-way, session-less
+  dead-drop the web client creates. Creation never establishes a session or writes a contact
+  record. A drop only appears for a contact whose identity key you already hold. See
+  `docs/SECURITY_MODEL.md`.
+
+### Fixed
+
+- **A lemon drop from an Android sender now opens for a web recipient who hasn't added them.**
+  Previously such a drop decrypted but then failed to render while the client tried to set up an
+  ordinary — and impossible — cross-family session. The message now renders and burns, and the
+  sender's identity is pinned, without attempting a session that can't exist.
+- The watermark fingerprint renders slightly larger for legibility; every other aspect of the
+  treatment is unchanged.
+
+### Known limitations
+
+- Only clients on 0.8.1-beta or newer can open an Android-created drop. On older clients it
+  degrades safely to "not for you". iOS still cannot open drops.
+
 ## [0.8.1-beta] - 2026-07-20
 
 ### Added
