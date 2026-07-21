@@ -498,8 +498,18 @@ private fun EditDisplayNameDialog(
                 )
                 OutlinedTextField(
                     value = draft,
-                    onValueChange = {
-                        draft = it.take(ConversationRepository.DISPLAY_NAME_MAX_LEN + 8)
+                    onValueChange = { input ->
+                        // Soft cap the raw input; never split a surrogate pair
+                        // (an emoji) in half — an orphaned surrogate is invalid
+                        // UTF-16 and can crash rendering. sanitizeDisplayName does
+                        // the real length check on save.
+                        val cap = ConversationRepository.DISPLAY_NAME_MAX_LEN + 8
+                        draft = if (input.length <= cap) {
+                            input
+                        } else {
+                            val end = if (Character.isHighSurrogate(input[cap - 1])) cap - 1 else cap
+                            input.substring(0, end)
+                        }
                         error = null
                     },
                     singleLine = true,

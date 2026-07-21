@@ -171,18 +171,6 @@ class MessagingCoordinator(
     private val confined = Dispatchers.IO.limitedParallelism(1)
 
     /**
-     * Contacts explicitly torn down by [deleteContact] this process lifetime.
-     * The authoritative "was this contact DELETED?" signal — distinct from
-     * "absent from the roster", which is also true for a brand-new inbound
-     * sender that TOFU has not added yet. Used only on the inbound path (see
-     * [isDeletedContact]); a straggler message from a deleted contact must be
-     * dropped, while a first message from a never-seen sender must still create
-     * an "Unknown contact". Re-adding a contact makes it a live roster entry
-     * again, at which point the stale tombstone is inert (see [isDeletedContact]).
-     */
-    private val deletedContacts: MutableSet<String> = ConcurrentHashMap.newKeySet()
-
-    /**
      * Whether [contactId] is still a live roster entry. Used by the send/deliver
      * publish tails: a send is always to an existing conversation, so a `false`
      * here means the contact was torn down mid-send and nothing may be deposited
@@ -192,13 +180,16 @@ class MessagingCoordinator(
         conversations.findByContact(contactId) != null
 
     /**
-     * Whether [contactId] was explicitly deleted and has NOT since been re-added.
-     * The inbound guard: true only for a genuine deleted-contact straggler, never
-     * for a first-time inbound sender (absent from both the roster and this set)
-     * nor for a re-added contact (a live roster entry again).
+     * Whether [contactId] was explicitly deleted (within the straggler window)
+     * and has NOT since been re-added — the inbound guard. Backed by the
+     * PERSISTED tombstone in [conversations], so it holds across a process
+     * restart (an app update forces one) for as long as a straggler could still
+     * be sitting on the relay. True only for a genuine deleted-contact straggler:
+     * never for a first-time inbound sender (never deleted) nor for a re-added
+     * contact (a live roster entry again).
      */
     private fun isDeletedContact(contactId: String): Boolean =
-        deletedContacts.contains(contactId) && !contactExists(contactId)
+        conversations.wasRecentlyDeleted(contactId) && !contactExists(contactId)
 
     /**
      * Read receipts awaiting a live socket, keyed by contact. Queued when the
@@ -930,11 +921,13 @@ class MessagingCoordinator(
                 onComplete?.invoke()
                 return@launch
             }
-            // Tombstone the contact so a straggler inbound message (a PreKey
-            // message would otherwise TOFU-establish a fresh session and pop the
-            // contact back as "Unknown") is dropped, without also blocking
-            // genuine first-time inbound senders. See isDeletedContact.
-            deletedContacts.add(contactId)
+            // Tombstone the contact (persisted, TTL-bounded) so a straggler
+            // inbound message — including one that arrives after a process
+            // restart, within the relay's undelivered window — is dropped rather
+            // than TOFU-establishing a fresh session and popping the contact back
+            // as "Unknown", without blocking genuine first-time inbound senders.
+            // See isDeletedContact / ConversationRepository.wasRecentlyDeleted.
+            conversations.recordDeletion(contactId)
             // Peer-burn is best-effort (an offline burn frame is not re-queued);
             // the dialog copy states this. Runs after the durable wipe, while the
             // roster entry still resolves the peer for onMessageBurned.
@@ -1154,6 +1147,10 @@ class MessagingCoordinator(
     }
 
     override fun onTyping(senderId: String, started: Boolean) {
+        // Ignore a typing.start from anyone not in the roster — a deleted
+        // contact whose late frame arrives after teardown, or an unknown sender.
+        // Never show or restore a "typing…" for a contact the user can't see.
+        if (started && conversations.findByContact(senderId) == null) return
         _typingPeers.value = if (started) {
             _typingPeers.value + senderId
         } else {

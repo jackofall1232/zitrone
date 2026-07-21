@@ -46,7 +46,32 @@ class ConversationRepository(
      */
     private var readOnly = false
 
+    /**
+     * Persisted deleted-contact tombstones: contactId → deletedAtEpochMs. A
+     * message arriving for a contact deleted within [TOMBSTONE_WINDOW_MS] is
+     * dropped rather than resurrecting the contact (see [wasRecentlyDeleted]).
+     * Loaded at boot and pruned to the window so it can't grow unbounded and so a
+     * genuinely-later fresh contact attempt (past the relay's straggler window)
+     * is NOT silently blocked. Guarded by the instance monitor like every other
+     * mutator.
+     */
+    private val tombstones = mutableMapOf<String, Long>()
+
     init {
+        // Load + prune deleted-contact tombstones (independent of the roster
+        // blob, so a tombstone survives a restart even if the roster is
+        // read-only). A parse error just starts with none.
+        runCatching { store.readTombstonesBlob() }.getOrNull()?.let { raw ->
+            runCatching {
+                val obj = JSONObject(raw)
+                val now = clock()
+                obj.keys().forEach { id ->
+                    val at = obj.getLong(id)
+                    if (now - at < TOMBSTONE_WINDOW_MS) tombstones[id] = at
+                }
+            }
+        }
+
         // Load-and-seed at boot instead of starting empty. Guarded so no read or
         // parse error can wipe the roster or crash boot.
         val raw = runCatching { store.readBlob() }.getOrNull()
@@ -189,6 +214,36 @@ class ConversationRepository(
             .getOrDefault(false)
     }
 
+    /**
+     * Records that [contactId] was just deleted, so a straggler message from it
+     * (within [TOMBSTONE_WINDOW_MS]) is dropped rather than resurrecting the
+     * contact — including after a process restart, since the tombstones are
+     * persisted. Prunes expired entries on the way through. Call from the
+     * contact-deletion path.
+     */
+    @Synchronized
+    fun recordDeletion(contactId: String) {
+        val now = clock()
+        tombstones.entries.removeAll { now - it.value >= TOMBSTONE_WINDOW_MS }
+        tombstones[contactId] = now
+        runCatching { store.writeTombstonesBlob(serializeTombstones()) }
+    }
+
+    /**
+     * Whether [contactId] was deleted within the straggler window and so an
+     * inbound message from it must be dropped. False for a never-deleted sender
+     * (a first-time inbound sender still becomes an "Unknown contact") and, past
+     * the window, for a genuinely-later fresh contact attempt.
+     */
+    @Synchronized
+    fun wasRecentlyDeleted(contactId: String): Boolean {
+        val at = tombstones[contactId] ?: return false
+        return clock() - at < TOMBSTONE_WINDOW_MS
+    }
+
+    private fun serializeTombstones(): String =
+        JSONObject().apply { tombstones.forEach { (id, at) -> put(id, at) } }.toString()
+
     @Synchronized
     fun clearAll() {
         setConversations(emptyList())
@@ -289,6 +344,15 @@ class ConversationRepository(
         private const val SCHEMA_VERSION = 1
         private const val KEY_SCHEMA = "schema_version"
         private const val KEY_CONVERSATIONS = "conversations"
+
+        /**
+         * How long a deleted contact stays tombstoned. Covers the relay's
+         * undelivered-envelope window (72 h) plus margin for a message queued
+         * just before deletion and clock skew, so every possible straggler is
+         * dropped — while a genuinely-later fresh contact attempt past this
+         * window is NOT silently blocked.
+         */
+        const val TOMBSTONE_WINDOW_MS = 96L * 60 * 60 * 1000
 
         /** Hard cap on contact labels rendered in the UI (and stored in the roster). */
         const val DISPLAY_NAME_MAX_LEN = 64

@@ -10,6 +10,7 @@ import com.zitrone.app.data.ConversationRepository
 import com.zitrone.app.data.OrphanContact
 import com.zitrone.app.data.RosterStore
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -31,11 +32,14 @@ class ConversationRepositoryPersistenceTest {
     private class FakeRosterStore(
         var blob: String? = null,
         private val orphans: List<OrphanContact> = emptyList(),
+        var tombstones: String? = null,
     ) : RosterStore {
         override fun readBlob(): String? = blob
         override fun writeBlob(json: String) { blob = json }
         override fun writeBlobDurably(json: String): Boolean { blob = json; return true }
         override fun orphanedContacts(): List<OrphanContact> = orphans
+        override fun readTombstonesBlob(): String? = tombstones
+        override fun writeTombstonesBlob(json: String) { tombstones = json }
     }
 
     private fun conversation(id: String, verified: Boolean = false, pinned: String? = null) =
@@ -131,6 +135,29 @@ class ConversationRepositoryPersistenceTest {
         val restored = ConversationRepository(store)
         assertEquals(listOf("bob"), restored.conversations.value.map { it.id })
         assertNull(restored.find("alice"))
+    }
+
+    @Test
+    fun `recordDeletion tombstones a contact, survives restart, and expires`() {
+        var now = 1_000_000L
+        val store = FakeRosterStore()
+        val repo = ConversationRepository(store) { now }
+
+        repo.recordDeletion("alice")
+        assertTrue(repo.wasRecentlyDeleted("alice"))
+        assertFalse("a never-deleted contact is not tombstoned", repo.wasRecentlyDeleted("bob"))
+
+        // Persisted independently of the roster blob — survives a restart so a
+        // straggler after an app update is still dropped.
+        val restored = ConversationRepository(store) { now }
+        assertTrue(restored.wasRecentlyDeleted("alice"))
+
+        // Past the window it expires (a genuinely-later fresh contact attempt is
+        // not silently blocked), and a restart past the window prunes it away.
+        now += ConversationRepository.TOMBSTONE_WINDOW_MS
+        assertFalse(restored.wasRecentlyDeleted("alice"))
+        val afterExpiry = ConversationRepository(store) { now }
+        assertFalse(afterExpiry.wasRecentlyDeleted("alice"))
     }
 
     @Test

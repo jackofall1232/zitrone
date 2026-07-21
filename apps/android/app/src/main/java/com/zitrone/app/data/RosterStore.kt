@@ -45,6 +45,19 @@ interface RosterStore {
      * bug. Empty on a healthy/fresh install.
      */
     fun orphanedContacts(): List<OrphanContact>
+
+    /**
+     * Persisted deleted-contact tombstones (a JSON blob of contactId →
+     * deletedAtEpochMs), or null when none stored. Kept separate from the roster
+     * blob so a deletion tombstone survives a process restart independently: a
+     * straggler message from a contact deleted within the relay's undelivered
+     * window must stay dropped even across an app update (which forces a
+     * restart). See [ConversationRepository.wasRecentlyDeleted].
+     */
+    fun readTombstonesBlob(): String?
+
+    /** Overwrites the tombstone blob synchronously (deletion is the trigger). */
+    fun writeTombstonesBlob(json: String)
 }
 
 /** A contact reconstructed from a surviving Signal-store identity record. */
@@ -79,7 +92,14 @@ class EncryptedRosterStore(
     override fun orphanedContacts(): List<OrphanContact> =
         signalStore.knownRemoteContacts().map { (id, key) -> OrphanContact(id, key) }
 
+    override fun readTombstonesBlob(): String? = prefs.getString(KEY_TOMBSTONES, null)
+
+    override fun writeTombstonesBlob(json: String) {
+        prefs.edit().putString(KEY_TOMBSTONES, json).commit()
+    }
+
     companion object {
         private const val KEY_ROSTER = "roster_json"
+        private const val KEY_TOMBSTONES = "deleted_tombstones_json"
     }
 }
