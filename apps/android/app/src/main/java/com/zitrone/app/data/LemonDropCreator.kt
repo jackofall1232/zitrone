@@ -6,6 +6,7 @@
 package com.zitrone.app.data
 
 import android.util.Base64
+import android.util.Log
 import com.zitrone.app.crypto.EncryptedSignalProtocolStore
 import com.zitrone.app.crypto.LemonDropCreate
 import com.zitrone.app.crypto.LemonDropOneShot
@@ -61,6 +62,12 @@ class LemonDropCreator(
          *  contact — a key-substitution attempt. Refused; NOTHING was created or
          *  written. Distinct so the UI can say so honestly (and keep the draft). */
         data object IdentityChanged : Result
+
+        /** The draft is too long to seal into a depositable drop — the padded
+         *  sealed ciphertext would exceed the relay's ceiling, so it was refused
+         *  BEFORE the PoW. Distinct so the UI can say "message too long" instead
+         *  of offering a pointless retry. The draft is kept. */
+        data object TooLarge : Result
 
         /** Any other failure (no account, network, bundle verification, deposit
          *  rejected). Retryable; the caller keeps the user's draft untouched. */
@@ -125,6 +132,7 @@ class LemonDropCreator(
             val drop = when (created) {
                 is LemonDropCreate.Result.Created -> created
                 LemonDropCreate.Result.BundleUnverified -> return Result.Failed
+                LemonDropCreate.Result.TooLarge -> return Result.TooLarge
             }
 
             val expiresAt = api.depositQrDrop(
@@ -165,16 +173,21 @@ class LemonDropCreator(
                 conversations.onOutgoingMessage(conversation.id)
             } catch (e: CancellationException) {
                 throw e
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 // Deposit already succeeded — never fail the drop for a local
-                // bookkeeping error; the URL still returns to the creator.
+                // bookkeeping error; the URL still returns to the creator. Log the
+                // exception (never the URL/plaintext/keys) so a silent local-write
+                // failure is still diagnosable.
+                Log.e("LemonDropCreator", "local sent-bubble write failed after a successful deposit", e)
             }
             return success
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             // Failure at or before the deposit boundary — nothing was deposited,
-            // so nothing is half-created and the draft is kept for retry.
+            // so nothing is half-created and the draft is kept for retry. Log the
+            // exception (never the URL/plaintext/keys) so the failure is visible.
+            Log.e("LemonDropCreator", "lemon-drop create/deposit failed before the deposit boundary", e)
             return Result.Failed
         }
     }

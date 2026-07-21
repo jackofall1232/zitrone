@@ -52,6 +52,7 @@ import {
   serializeLemonDrop,
   parseLemonDrop,
   type MessageEnvelope,
+  type SenderKeyFamily,
 } from "@zitrone/protocol";
 
 export interface CreateLemonDropInput {
@@ -173,6 +174,14 @@ export type LemonDropOpenResult =
       /** The envelope's claimed sender account UUID. */
       senderAccountId: string;
       /**
+       * The sender's key family, from the sealed payload. "curve25519" means a
+       * mobile (Android/iOS) creator whose identity IS a Montgomery point — the
+       * caller must NOT try to build an ordinary web↔mobile session for them
+       * (unsupported cross-family; and a drop is one-way regardless). "ed25519"
+       * is a web/desktop creator, handled the ordinary way.
+       */
+      senderKeyFamily: SenderKeyFamily;
+      /**
        * The sender's CLAIMED identity key from inside the sealed payload —
        * Ed25519 for a web/desktop creator, Curve25519 (Montgomery) for an
        * Android/iOS creator (see the payload's sender_key_family). TRUST
@@ -277,6 +286,7 @@ export async function openLemonDrop(input: OpenLemonDropInput): Promise<LemonDro
         outcome: "message",
         text,
         senderAccountId: envelope.sender_id,
+        senderKeyFamily: senderIdentityIsMontgomery ? "curve25519" : "ed25519",
         senderIdentityKey,
         burnToken,
         usedOneTimePrekeyId: usedOtp?.id ?? null,

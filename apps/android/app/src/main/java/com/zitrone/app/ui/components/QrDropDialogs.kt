@@ -18,6 +18,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -122,7 +125,14 @@ fun QrTtlPickerDialog(
                     )
                 }
             } else {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                // Horizontally scrollable: all five pills ("24h"…"2 weeks") don't
+                // fit on a 360dp phone, and a plain Row would clip the last ones.
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                ) {
                     QR_DROP_TTL_HOURS.forEach { hours ->
                         Box(
                             modifier = Modifier
@@ -200,7 +210,7 @@ fun QrDropResultDialog(
     }
 
     Dialog(onDismissRequest = onClose) {
-        DialogCard {
+        DialogCard(scrollable = true) {
             Text(
                 text = "QR drop sealed",
                 style = MaterialTheme.typography.titleLarge,
@@ -290,13 +300,20 @@ fun QrDropResultDialog(
 }
 
 @Composable
-private fun DialogCard(content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
+private fun DialogCard(
+    scrollable: Boolean = false,
+    content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
             .border(1.dp, BorderColor, RoundedCornerShape(16.dp))
             .background(BackgroundSecondary)
+            // Result dialog only: in landscape / multi-window the 240dp QR + copy
+            // block + button row can exceed the window height, so let the content
+            // scroll instead of clipping Save/Share/Done off the bottom.
+            .then(if (scrollable) Modifier.verticalScroll(rememberScrollState()) else Modifier)
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
         content = content,
@@ -346,46 +363,58 @@ object QrDropSticker {
         )
         val matrix = QRCodeWriter().encode(url, BarcodeFormat.QR_CODE, sizePx, sizePx, hints)
         val bmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
-        for (x in 0 until sizePx) {
-            for (y in 0 until sizePx) {
-                bmp.setPixel(x, y, if (matrix.get(x, y)) INK else PAPER)
+        // Fill one IntArray (dark module = ink, light = paper) and blit it in a
+        // single setPixels — collapses up to 1,048,576 per-pixel JNI setPixel
+        // calls into one native copy. Identical output, far less overhead.
+        val pixels = IntArray(sizePx * sizePx)
+        for (y in 0 until sizePx) {
+            val row = y * sizePx
+            for (x in 0 until sizePx) {
+                pixels[row + x] = if (matrix.get(x, y)) INK else PAPER
             }
         }
+        bmp.setPixels(pixels, 0, sizePx, 0, 0, sizePx, sizePx)
         return bmp
     }
 
     /** Compose the print-grade card and return it PNG-encoded. */
     fun composePrintPng(url: String, expiresAt: String): ByteArray {
         val card = Bitmap.createBitmap(CARD_W, CARD_H, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(card)
-        canvas.drawColor(PAPER)
+        // Both native ARGB buffers (1024² QR + 1088×1216 card) are freed in the
+        // finally on EVERY path — a throw in drawing or compress must not leak them.
+        var qr: Bitmap? = null
+        try {
+            val canvas = Canvas(card)
+            canvas.drawColor(PAPER)
 
-        val qr = renderQrBitmap(url, QR_PX)
-        canvas.drawBitmap(qr, QR_X.toFloat(), QR_Y.toFloat(), null)
-        qr.recycle() // 1024² ARGB — free the native buffer as soon as it's drawn.
+            qr = renderQrBitmap(url, QR_PX)
+            canvas.drawBitmap(qr, QR_X.toFloat(), QR_Y.toFloat(), null)
 
-        val cx = QR_X + QR_PX / 2f
-        val cy = QR_Y + QR_PX / 2f
-        val backing = (QR_PX * 0.26f)
-        val paperPaint = Paint().apply { color = PAPER; isAntiAlias = true }
-        canvas.drawRect(cx - backing / 2f, cy - backing / 2f, cx + backing / 2f, cy + backing / 2f, paperPaint)
-        drawLemonMark(canvas, cx, cy, QR_PX * 0.2f)
+            val cx = QR_X + QR_PX / 2f
+            val cy = QR_Y + QR_PX / 2f
+            val backing = (QR_PX * 0.26f)
+            val paperPaint = Paint().apply { color = PAPER; isAntiAlias = true }
+            canvas.drawRect(cx - backing / 2f, cy - backing / 2f, cx + backing / 2f, cy + backing / 2f, paperPaint)
+            drawLemonMark(canvas, cx, cy, QR_PX * 0.2f)
 
-        val caption = burnsByLabel(expiresAt)
-        val textPaint = Paint().apply {
-            color = INK
-            isAntiAlias = true
-            textAlign = Paint.Align.CENTER
-            textSize = 34f
+            val caption = burnsByLabel(expiresAt)
+            val textPaint = Paint().apply {
+                color = INK
+                isAntiAlias = true
+                textAlign = Paint.Align.CENTER
+                textSize = 34f
+            }
+            val captionY = QR_Y + QR_PX + (CARD_H - (QR_Y + QR_PX)) / 2f
+            // Baseline-centre the text roughly in the caption zone.
+            canvas.drawText(caption, CARD_W / 2f, captionY + textPaint.textSize / 3f, textPaint)
+
+            val out = java.io.ByteArrayOutputStream()
+            card.compress(Bitmap.CompressFormat.PNG, 100, out)
+            return out.toByteArray()
+        } finally {
+            qr?.recycle()
+            card.recycle()
         }
-        val captionY = QR_Y + QR_PX + (CARD_H - (QR_Y + QR_PX)) / 2f
-        // Baseline-centre the text roughly in the caption zone.
-        canvas.drawText(caption, CARD_W / 2f, captionY + textPaint.textSize / 3f, textPaint)
-
-        val out = java.io.ByteArrayOutputStream()
-        card.compress(Bitmap.CompressFormat.PNG, 100, out)
-        card.recycle() // 1088×1216 ARGB — free it once encoded.
-        return out.toByteArray()
     }
 
     /** The 8-wedge lemon slice, drawn straight onto [canvas] with the same

@@ -146,6 +146,9 @@ describe("lemon drops from a Curve25519 (Montgomery) sender", () => {
     if (result.outcome !== "message") return;
     expect(result.text).toBe("sealed by a mobile hand");
     expect(result.senderAccountId).toBe(drop.senderAccountId);
+    // The family is surfaced so the redeem layer skips the impossible ordinary
+    // cross-family session and stores a session-less contact instead.
+    expect(result.senderKeyFamily).toBe("curve25519");
     // The recovered claimed key is the raw Montgomery key verbatim — exactly the
     // form the recipient pins/compares as base64 (no conversion either side).
     expect(result.senderIdentityKey).toEqual(drop.senderMontgomeryKey);

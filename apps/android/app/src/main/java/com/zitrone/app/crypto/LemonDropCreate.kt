@@ -91,6 +91,12 @@ object LemonDropCreate {
      *  cfg.DropPoWDifficulty). */
     const val POW_DIFFICULTY = 20
 
+    /** Max deposited ciphertext, in bytes — mirrors the relay's
+     *  qrMaxCiphertextBytes (server/internal/api/qrdrops.go). A padded sealed box
+     *  past this ceiling is 413'd on deposit, so we reject it BEFORE burning the
+     *  difficulty-20 PoW rather than after. */
+    const val QR_DROP_MAX_CIPHERTEXT_BYTES = 64 * 1024
+
     /** The sender family an Android creator always stamps — its identity key IS
      *  the Montgomery point, so the recipient DHs against it verbatim (protocol
      *  SenderKeyFamily; mirrors [LemonDropOneShot]'s curve25519 branch). */
@@ -159,6 +165,15 @@ object LemonDropCreate {
          * unverifiable key).
          */
         data object BundleUnverified : Result
+
+        /**
+         * The padded sealed ciphertext exceeds the relay's deposit ceiling
+         * ([QR_DROP_MAX_CIPHERTEXT_BYTES]) — the draft is too long to seal into a
+         * depositable drop. Refused BEFORE the PoW so an over-long draft doesn't
+         * burn ~1M hashes only to be 413'd. No drop is created; the caller
+         * surfaces a distinct "message too long" refusal.
+         */
+        data object TooLarge : Result
     }
 
     /**
@@ -316,6 +331,12 @@ object LemonDropCreate {
             // opaque, length-uninformative bytes.
             val sealed = sodium.sealTo(recipientX25519, payloadBytes) ?: return Result.BundleUnverified
             val ciphertext = MessagePadding.pad(sealed)
+
+            // Reject an over-long draft BEFORE the ~1M-hash PoW: a padded sealed
+            // box past the relay's ceiling is 413'd on deposit, so spending the
+            // difficulty-20 proof-of-work on it is pure waste. Fail closed with a
+            // distinct result the UI maps to "message too long".
+            if (ciphertext.size > QR_DROP_MAX_CIPHERTEXT_BYTES) return Result.TooLarge
 
             // Admission control: hashcash over the qr_id, bound to this deposit so
             // it cannot be precomputed or reused. Deposit is unauthenticated; PoW

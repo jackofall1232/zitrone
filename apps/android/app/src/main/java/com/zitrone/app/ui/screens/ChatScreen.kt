@@ -193,7 +193,13 @@ fun ChatScreen(
     var qrDraftText by remember { mutableStateOf<String?>(null) }
     var qrSealing by remember { mutableStateOf(false) }
     var qrError by remember { mutableStateOf<String?>(null) }
-    var qrResult by remember { mutableStateOf<Pair<String, String>?>(null) }
+    // rememberSaveable, not plain remember: the result (drop URL + expiry) is the
+    // ONE copy of the live drop link the creator ever gets. A rotation / Activity
+    // recreation while this dialog is up would null a plain remember and lose it
+    // before they can copy/save/share. A Pair<String, String> is Serializable, so
+    // the default saver bundles it. (The transient sealing/picker state stays plain
+    // remember — the URL is the only unrecoverable piece.)
+    var qrResult by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
     val qrScope = rememberCoroutineScope()
 
     val listState = rememberLazyListState()
@@ -377,6 +383,8 @@ fun ChatScreen(
                         }
                         LemonDropCreator.Result.IdentityChanged ->
                             qrError = "This contact's key changed — the drop was refused."
+                        LemonDropCreator.Result.TooLarge ->
+                            qrError = "This message is too long to seal into a QR drop — shorten it and try again."
                         LemonDropCreator.Result.Failed ->
                             qrError = "Couldn't seal the drop — try again."
                     }
