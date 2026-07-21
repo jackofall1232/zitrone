@@ -972,6 +972,21 @@ class MessagingCoordinator(
     override fun onMessageDeliver(envelope: MessageEnvelope) {
         scope.launch(confined) {
             runCatching {
+                // A straggler from a DELETED contact must not be decrypted:
+                //  - a normal (non-PreKey) message has no session and would throw
+                //    NoSessionException BEFORE any later guard, so it would never
+                //    be acked → the relay redelivers it forever;
+                //  - a PreKey message would TOFU-establish a fresh session and
+                //    remote identity inside decrypt, resurrecting crypto state.
+                // Check the tombstone FIRST, ack so the relay drops its copy, and
+                // drop. Keyed on the deletion tombstone, NOT roster absence — a
+                // first-time inbound sender is legitimately absent and must still
+                // create an "Unknown contact" below (see isDeletedContact).
+                if (isDeletedContact(envelope.senderId)) {
+                    diag("recv: message for deleted contact — dropped before decrypt")
+                    ws.ackMessage(envelope.id)
+                    return@runCatching
+                }
                 // Decrypt advances the receiving ratchet — serialize it with
                 // any concurrent encrypt for the same contact.
                 val plaintext = withSessionLock(envelope.senderId) {
@@ -998,23 +1013,6 @@ class MessagingCoordinator(
                 val deliveredAtMs = runCatching {
                     Instant.parse(envelope.timestamp).toEpochMilli()
                 }.getOrDefault(System.currentTimeMillis())
-                // If this is a straggler from a DELETED contact, it must not
-                // recreate the conversation (onIncomingMessage below would) or
-                // surface plaintext. This check → the publish below is a single
-                // non-suspending run on the confinement worker, so it is atomic
-                // against deleteContact. A PreKey message can re-establish a
-                // session inside decrypt above (TOFU responder), so re-tear-down
-                // to leave no orphaned session for a removed contact, ack so the
-                // relay drops its copy, and stop. NOTE: this deliberately keys on
-                // the deletion tombstone, NOT mere roster absence — a first-time
-                // inbound sender is legitimately absent and must still create an
-                // "Unknown contact" (see isDeletedContact).
-                if (isDeletedContact(envelope.senderId)) {
-                    diag("recv: message for deleted contact — dropped, session re-torn-down")
-                    signal.destroyContact(envelope.senderId)
-                    ws.ackMessage(envelope.id)
-                    return@runCatching
-                }
                 val conversation = conversations.onIncomingMessage(envelope.senderId)
                 // Attachments ride inside ordinary envelopes too (see
                 // AttachmentControlPayload) — recognize them AFTER receipts but
