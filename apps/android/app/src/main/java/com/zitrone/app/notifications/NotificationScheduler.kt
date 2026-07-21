@@ -108,6 +108,16 @@ class NotificationScheduler(
                         val wait = (last + cooldownMs) - clock()
                         if (wait > 0) delay(wait)
                         synchronized(state) {
+                            // Drop our own handle FIRST, on every exit path
+                            // (house idiom — see MessageRepository's read-burn
+                            // jobs): this job is finished no matter what happens
+                            // below, and a stale handle would block the next
+                            // window's re-arm. If a newer job was armed after a
+                            // read while this one was already past its delay,
+                            // nulling here merely allows one redundant re-arm —
+                            // arrivedSinceFire is consumed under this monitor,
+                            // so a double fire is impossible.
+                            state.job = null
                             // A read (or teardown) between arming and now bumped
                             // the epoch — do not fire a phantom alert.
                             if (state.epoch != myEpoch) return@synchronized
@@ -117,9 +127,6 @@ class NotificationScheduler(
                             fire()
                             state.lastFiredAt = clock()
                             state.arrivedSinceFire = false
-                            // Drop our own handle inside the lock so a later
-                            // re-arm can schedule a fresh job for the next window.
-                            state.job = null
                         }
                     }
                 }

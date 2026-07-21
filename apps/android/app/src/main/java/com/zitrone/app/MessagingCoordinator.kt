@@ -1187,6 +1187,11 @@ class MessagingCoordinator(
         _linking.value = false
         linkJob?.cancel()
         messages.clearAll()
+        // A pending unread-reminder must not outlive the revoked session — a
+        // re-fire after forced logout would be a phantom alert (and, once
+        // multiple identities exist, an alert from an identity that is no
+        // longer live). Same teardown contract as stop()/deleteAccountAndWipe().
+        notificationScheduler.cancelAll()
         api.clearTokens()
         onForcedLogout?.invoke()
     }
