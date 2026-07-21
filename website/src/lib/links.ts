@@ -19,12 +19,12 @@ export const GITHUB_ISSUES = `${GITHUB_URL}/issues`;
 // Release pointer — updated every Android release (version tag + asset checksum).
 // Both surfaces (this GitHub Release asset and the Tor onion mirror) must serve a
 // byte-identical binary with a matching checksum.
-export const ANDROID_BETA_VERSION = "v0.8.6-beta";
+export const ANDROID_BETA_VERSION = "v0.9.0-beta";
 export const ANDROID_BETA_APK_URL = `${GITHUB_URL}/releases/download/${ANDROID_BETA_VERSION}/zitrone-${ANDROID_BETA_VERSION}.apk`;
 // 64 hex chars. Must be byte-identical to onion-site/SHA256SUMS — both surfaces
-// must serve the same binary. Verify: sha256sum onion-site/zitrone-v0.8.6-beta.apk
+// must serve the same binary. Verify: sha256sum onion-site/zitrone-v0.9.0-beta.apk
 export const ANDROID_BETA_SHA256 =
-  "dab742380e832d9f544c99ab57ea8e846dc79b94f590eeb270e641860a59bc33";
+  "68b7a2526d447b37c2d9f0e803dd51871e7ac96216b2fef00ef2115bc48a3a7a";
 export const ANDROID_BETA_MIN_OS = "Android 8.0 (Oreo)";
 
 // Single source of truth for "is there actually a downloadable release?".
