@@ -49,6 +49,7 @@ import {
   PROTOCOL_VERSION,
   QR_DROP_BURN_TOKEN_BYTES,
   QR_DROP_ID_BYTES,
+  QR_DROP_MAX_CIPHERTEXT_BYTES,
   serializeLemonDrop,
   parseLemonDrop,
   type MessageEnvelope,
@@ -144,6 +145,13 @@ export async function createLemonDrop(input: CreateLemonDropInput): Promise<Crea
       ? recipientBundle.identityKey
       : await identityKeyToX25519(recipientBundle.identityKey);
   const ciphertext = await pad(await sealTo(recipientX25519, payloadBytes));
+
+  // Reject an over-long draft BEFORE the ~1M-hash PoW: a padded sealed box past
+  // the relay's ceiling is 413'd on deposit, so spending difficulty-20 work on
+  // it is pure waste. Mirror of Android LemonDropCreate.Result.TooLarge.
+  if (ciphertext.length > QR_DROP_MAX_CIPHERTEXT_BYTES) {
+    throw new Error("payload too large");
+  }
 
   // Admission control identical to dead drops: hashcash over the qr_id, so the
   // work is bound to this deposit and cannot be precomputed or reused. Deposit

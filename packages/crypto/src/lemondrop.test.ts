@@ -162,6 +162,23 @@ describe("lemon drops", { timeout: 30_000 }, () => {
     expect(result.usedOneTimePrekeyId).toBeNull();
   });
 
+  it("refuses an oversize draft before the proof-of-work", async () => {
+    const sender = await makeSender();
+    const recipient = await makeRecipient();
+    // Far past the 64 KiB deposit ceiling once sealed + padded — must throw
+    // payload too large and MUST NOT spend ~1M hashes on a doomed deposit.
+    const huge = "x".repeat(100_000);
+    await expect(
+      createLemonDrop({
+        senderAccountId: sender.accountId,
+        senderIdentity: sender.identity,
+        recipientAccountId: recipient.accountId,
+        recipientBundle: recipient.bundle,
+        text: huge,
+      }),
+    ).rejects.toThrow("payload too large");
+  });
+
   it("opens a drop made against an older signed prekey after rotation", async () => {
     const sender = await makeSender();
     const recipient = await makeRecipient();

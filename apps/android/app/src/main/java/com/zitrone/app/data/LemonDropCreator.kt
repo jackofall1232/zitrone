@@ -69,6 +69,22 @@ class LemonDropCreator(
          *  of offering a pointless retry. The draft is kept. */
         data object TooLarge : Result
 
+        /**
+         * Deposit returned a ROUTER 404 (Fiber's generic `{"error":"error"}`) —
+         * the live relay build predates the `/api/v1/qr-drops` routes (same class
+         * of outage as pre-blob attachment 404s). Distinct so the UI can say
+         * "redeploy the relay" instead of a useless "try again". The draft is kept.
+         */
+        data object StaleRelay : Result
+
+        /**
+         * A HANDLER 404 (`{"error":"not_found"}`) — the recipient's prekey bundle
+         * is gone (account reset/deleted). Distinct from [StaleRelay]: the relay
+         * is healthy, so "redeploy" would be wrong; the recipient is simply not
+         * reachable. The draft is kept.
+         */
+        data object RecipientUnavailable : Result
+
         /** Any other failure (no account, network, bundle verification, deposit
          *  rejected). Retryable; the caller keeps the user's draft untouched. */
         data object Failed : Result
@@ -183,6 +199,25 @@ class LemonDropCreator(
             return success
         } catch (e: CancellationException) {
             throw e
+        } catch (e: ApiClient.ApiException) {
+            // A 404 in this block has two distinct causes, told apart by the body:
+            //   - ROUTER 404 {"error":"error"}: the deposit route is ABSENT (stale
+            //     pre-qr-drops build) → StaleRelay, "redeploy the relay".
+            //   - HANDLER 404 {"error":"not_found"}: from the prekey-bundle fetch
+            //     that precedes the deposit — the recipient is gone, the relay is
+            //     healthy → RecipientUnavailable. Telling the user to redeploy a
+            //     working relay would be wrong.
+            if (e.code == 404) {
+                return if (isRouterAbsent404(e.responseBody)) {
+                    Log.e("LemonDropCreator", "lemon-drop deposit 404 — relay missing /api/v1/qr-drops (stale build)", e)
+                    Result.StaleRelay
+                } else {
+                    Log.e("LemonDropCreator", "lemon-drop create 404 — recipient bundle unavailable", e)
+                    Result.RecipientUnavailable
+                }
+            }
+            Log.e("LemonDropCreator", "lemon-drop create/deposit failed before the deposit boundary", e)
+            return Result.Failed
         } catch (e: Exception) {
             // Failure at or before the deposit boundary — nothing was deposited,
             // so nothing is half-created and the draft is kept for retry. Log the
@@ -231,3 +266,14 @@ class LemonDropCreator(
  */
 internal fun qrDropBundleTrusted(knownKey: String?, bundleKey: String): Boolean =
     knownKey != null && knownKey == bundleKey
+
+/**
+ * True when a 404 response body is Fiber's generic ROUTER 404 — `{"error":"error"}`
+ * — meaning the route was never registered (a stale relay build). A HANDLER 404
+ * carries a specific code like `{"error":"not_found"}` and must NOT match, so a
+ * missing recipient is not misread as a stale relay. Pure + pinned by a JVM test;
+ * mirrors the body check in scripts/verify-relay-build.sh and the web
+ * `ApiError.code === "error"` discrimination.
+ */
+internal fun isRouterAbsent404(body: String?): Boolean =
+    body != null && Regex("\"error\"\\s*:\\s*\"error\"").containsMatchIn(body)

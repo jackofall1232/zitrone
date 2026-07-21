@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# Verify a deployed relay is running a build that includes the attachment (blob)
-# feature — i.e. NOT a pre-0.7.0-beta build. Run this after redeploying the
-# relay, or any time attachments misbehave, to confirm the live server has the
-# blob routes and the raised body limit.
+# Verify a deployed relay is running a current enough build for client features
+# that depend on server routes — specifically:
+#   - attachments (blob store, post-0.7.0-beta)
+#   - lemon drops / QR dead drops (qr-drops routes, post-0.8.0 / PR #3)
+#
+# Run this after redeploying the relay, or any time attachments or QR-drop
+# creation misbehave (generic "Couldn't seal/create the drop" on clients often
+# means the deposit route is a router 404 on a stale build).
 #
 # Usage:
 #   scripts/verify-relay-build.sh [BASE_URL]
@@ -19,6 +23,10 @@
 #   5. Guard signature (new build): POST /api/v1/register >512KiB must return the
 #      guard's {"error":"payload_too_large"} — the current build's signature.
 #      A generic {"error":"error"} 413 at exactly 512KiB indicates the OLD build.
+#   6. Lemon-drop deposit route PRESENT: POST /api/v1/qr-drops with {} must reach
+#      the handler (400 with a deposit validation code) — NOT a router 404 with
+#      generic {"error":"error"} (that is a pre-PR#3 / pre-0.8.0 build).
+#   7. Lemon-drop fetch + burn routes PRESENT: same handler-vs-router distinction.
 #
 # Exit non-zero if any check fails. No secrets, no auth needed.
 set -euo pipefail
@@ -41,6 +49,13 @@ code_for() {
   fi
 }
 body() { cat /tmp/_relaybody 2>/dev/null; }
+
+# True when the body is Fiber's generic router 404 (route never registered).
+# Handler 404s on fetch/burn use {"error":"not_found"} and must not match this.
+is_router_404() {
+  local c="$1"
+  [ "$c" = "404" ] && grep -qE '"error"[[:space:]]*:[[:space:]]*"error"' /tmp/_relaybody 2>/dev/null
+}
 
 echo "Verifying relay build at: $BASE"
 echo "────────────────────────────────────────────────────────────"
@@ -81,6 +96,31 @@ elif [ "$c" = 413 ]; then
 else
   bad "POST /api/v1/register 600KiB -> $c (expected 413 payload_too_large; body=$(body))"
 fi
+
+# 6. lemon-drop deposit route present (handler 400, not router 404)
+# Empty body fails validation (bad_qr_id / bad_request / bad_burn_hash) only if
+# DepositQrDrop is registered. A pre-PR#3 build returns router 404 {"error":"error"}
+# — the exact failure clients were masking as "Couldn't seal the drop".
+c=$(code_for POST /api/v1/qr-drops)
+if is_router_404 "$c"; then
+  bad "POST /api/v1/qr-drops -> 404 {\"error\":\"error\"} — lemon-drop deposit route ABSENT (STALE pre-0.8.0 / pre-PR#3 build). Redeploy required — QR-drop creation will fail on every client."
+elif [ "$c" = 400 ]; then
+  ok "POST /api/v1/qr-drops -> 400 (handler reached; lemon-drop deposit route present)"
+else
+  bad "POST /api/v1/qr-drops -> $c body=$(body) (expected handler 400; router 404 {\"error\":\"error\"} = route absent)"
+fi
+
+# 7. lemon-drop fetch + burn routes present
+for path in /api/v1/qr-drops/fetch /api/v1/qr-drops/burn; do
+  c=$(code_for POST "$path")
+  if is_router_404 "$c"; then
+    bad "POST $path -> 404 {\"error\":\"error\"} — route ABSENT (stale pre-lemon-drop build). Redeploy required."
+  elif [ "$c" = 400 ]; then
+    ok "POST $path -> 400 (handler reached)"
+  else
+    bad "POST $path -> $c body=$(body) (expected handler 400; router 404 {\"error\":\"error\"} = route absent)"
+  fi
+done
 
 echo "────────────────────────────────────────────────────────────"
 echo "  $PASS passed, $FAIL failed"

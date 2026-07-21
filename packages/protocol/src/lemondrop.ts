@@ -34,6 +34,15 @@ export const QR_DROP_ID_BYTES = 16;
 export const QR_DROP_BURN_TOKEN_BYTES = 32;
 
 /**
+ * Max deposited ciphertext length in bytes — mirrors the relay's
+ * `qrMaxCiphertextBytes` (server/internal/api/qrdrops.go). Lemon drops are
+ * message-only (attachments use the blind blob store), so 64 KiB is ample for
+ * any text payload. Clients MUST refuse oversize drafts BEFORE the difficulty-20
+ * PoW; the relay still enforces the same ceiling with 413 payload_too_large.
+ */
+export const QR_DROP_MAX_CIPHERTEXT_BYTES = 64 * 1024;
+
+/**
  * Creator-chosen drop lifetime, in hours. A FIXED server-enforced allowlist:
  * arbitrary TTLs would fingerprint a drop (a 37-hour drop is a rarer, more
  * identifiable thing than one of five common values), so only these are
