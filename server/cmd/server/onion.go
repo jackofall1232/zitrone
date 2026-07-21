@@ -47,7 +47,7 @@ import (
 // are intentionally left in place (see mirrorAssets), and filepath.Glob returns
 // matches in lexical order, which would keep advertising an older version
 // (v0.7.6 sorts before v0.8.0). Bump this and mirrorAssets together each release.
-const currentAPK = "zitrone-v0.8.0-beta.apk"
+const currentAPK = "zitrone-v0.8.2-beta.apk"
 
 func registerOnionMirror(app *fiber.App, cfg *config.Config) {
 	dir := cfg.OnionSiteDir
@@ -102,11 +102,12 @@ func registerOnionMirror(app *fiber.App, cfg *config.Config) {
 	mirrorAssets := map[string]bool{
 		"style.css":  true,
 		"SHA256SUMS": true,
-		currentAPK:   true, // zitrone-v0.8.0-beta.apk — the advertised build
+		currentAPK:   true, // zitrone-v0.8.2-beta.apk — the advertised build
 		// Superseded builds are kept downloadable (left in place so existing
 		// links keep working) but are no longer advertised or listed in
 		// SHA256SUMS. Prune these when old links no longer need to resolve.
 		"zitrone-v0.7.6-beta.apk": true,
+		"zitrone-v0.8.0-beta.apk": true,
 	}
 
 	// Static asset handler. Same Host gate as the index; SendFile wraps
