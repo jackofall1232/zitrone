@@ -42,12 +42,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.zitrone.app.data.Conversation
+import com.zitrone.app.data.LemonDropCreator
 import com.zitrone.app.data.Message
 import com.zitrone.app.data.MessageState
 import com.zitrone.app.ui.AttachmentLoader
 import com.zitrone.app.ui.components.ComposeBar
 import com.zitrone.app.ui.components.LemonAvatar
 import com.zitrone.app.ui.components.MessageBubble
+import com.zitrone.app.ui.components.QrDropResultDialog
+import com.zitrone.app.ui.components.QrTtlPickerDialog
 import com.zitrone.app.ui.components.fingerprintWatermark
 import com.zitrone.app.ui.components.SecurityBadge
 import com.zitrone.app.ui.components.SecurityState
@@ -105,6 +108,10 @@ fun ChatScreen(
     onRevealImage: (messageId: String) -> Unit = {},
     /** This device's own identity fingerprint for the security-paper watermark. */
     identityFingerprint: String? = null,
+    /** Seal the current draft into a lemon drop (QR dead-drop) for this contact
+     *  under a chosen TTL. Null hides the droplet affordance. Suspends over the
+     *  one-shot seal + PoW + deposit; the caller stays on the ChatScreen. */
+    onSendAsQrDrop: (suspend (text: String, ttlHours: Int) -> LemonDropCreator.Result)? = null,
 ) {
     var draft by rememberSaveable { mutableStateOf("") }
     // Per-message overrides for the compose-bar burn controls. null = no
@@ -179,6 +186,21 @@ fun ChatScreen(
     LaunchedEffect(draft.isNotBlank()) {
         onTyping(draft.isNotBlank())
     }
+
+    // Lemon-drop creation flow (mirror of the web ChatView's qrDraft/qrResult):
+    // the droplet captures the draft and opens the TTL picker; a chosen lifetime
+    // seals + deposits; only THEN is the draft cleared and the result shown.
+    var qrDraftText by remember { mutableStateOf<String?>(null) }
+    var qrSealing by remember { mutableStateOf(false) }
+    var qrError by remember { mutableStateOf<String?>(null) }
+    // rememberSaveable, not plain remember: the result (drop URL + expiry) is the
+    // ONE copy of the live drop link the creator ever gets. A rotation / Activity
+    // recreation while this dialog is up would null a plain remember and lose it
+    // before they can copy/save/share. A Pair<String, String> is Serializable, so
+    // the default saver bundles it. (The transient sealing/picker state stays plain
+    // remember — the URL is the only unrecoverable piece.)
+    var qrResult by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
+    val qrScope = rememberCoroutineScope()
 
     val listState = rememberLazyListState()
     LaunchedEffect(messages.size) {
@@ -329,6 +351,61 @@ fun ChatScreen(
             // "*/*" — any document. SAF grants a one-shot read on the returned
             // uri; we consume it straight into memory and never persist it.
             onAttachFile = { filePicker.launch(arrayOf("*/*")) },
+            onSendAsQrDrop = onSendAsQrDrop?.let {
+                {
+                    if (draft.isNotBlank()) {
+                        qrError = null
+                        qrDraftText = draft.trim()
+                    }
+                }
+            },
+        )
+    }
+
+    qrDraftText?.let { text ->
+        QrTtlPickerDialog(
+            sealing = qrSealing,
+            error = qrError,
+            onPick = { hours ->
+                val seal = onSendAsQrDrop ?: return@QrTtlPickerDialog
+                if (qrSealing) return@QrTtlPickerDialog
+                qrSealing = true
+                qrError = null
+                qrScope.launch {
+                    when (val res = seal(text, hours)) {
+                        is LemonDropCreator.Result.Success -> {
+                            qrResult = res.url to res.expiresAt
+                            // Clear the draft ONLY after a successful deposit — a
+                            // cancel or failed seal leaves the user's only copy in
+                            // the box (web discipline).
+                            draft = ""
+                            qrDraftText = null
+                        }
+                        LemonDropCreator.Result.IdentityChanged ->
+                            qrError = "This contact's key changed — the drop was refused."
+                        LemonDropCreator.Result.TooLarge ->
+                            qrError = "This message is too long to seal into a QR drop — shorten it and try again."
+                        LemonDropCreator.Result.Failed ->
+                            qrError = "Couldn't seal the drop — try again."
+                    }
+                    qrSealing = false
+                }
+            },
+            onCancel = {
+                if (!qrSealing) {
+                    qrDraftText = null
+                    qrError = null
+                }
+            },
+        )
+    }
+
+    qrResult?.let { (url, expiresAt) ->
+        QrDropResultDialog(
+            url = url,
+            expiresAt = expiresAt,
+            recipientName = conversation.displayName,
+            onClose = { qrResult = null },
         )
     }
 }

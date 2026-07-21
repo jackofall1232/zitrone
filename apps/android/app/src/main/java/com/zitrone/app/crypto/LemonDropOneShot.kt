@@ -70,7 +70,14 @@ object LemonDropOneShot {
     /** libsodium crypto_box_seal overhead: ephemeral pk (32) + MAC (16). */
     private const val SEAL_OVERHEAD_BYTES = 48
 
-    /** The three libsodium calls this module needs, and nothing more. */
+    /**
+     * The libsodium calls the lemon-drop crypto needs, and nothing more. The
+     * first three are the OPEN half (this file); the last four are the CREATE
+     * half (crypto/LemonDropCreate.kt, sub-phase 5b) — kept on ONE interface,
+     * behind ONE adapter ([LemonDropSodiumOps]), so both halves bind the exact
+     * same libsodium C functions (lazysodium-android on device, lazysodium-java
+     * in the JVM suite) and the cross-stack round trip is a real byte test.
+     */
     interface SodiumOps {
         /** crypto_box_seal_open; null when the seal does not open for this key. */
         fun sealOpen(sealed: ByteArray, publicKey: ByteArray, privateKey: ByteArray): ByteArray?
@@ -80,6 +87,27 @@ object LemonDropOneShot {
 
         /** crypto_sign_ed25519_pk_to_curve25519; null when not a valid Edwards point. */
         fun ed25519PublicKeyToCurve25519(ed25519PublicKey: ByteArray): ByteArray?
+
+        /** crypto_box_seal — anonymous sealed box to a recipient X25519 key; null
+         *  on failure. The CREATE-side counterpart of [sealOpen]. */
+        fun sealTo(recipientPublicKey: ByteArray, message: ByteArray): ByteArray?
+
+        /** crypto_sign_verify_detached — plain Ed25519 verify (web/desktop family
+         *  bundle classification). False on any failure OR malformed length, so
+         *  the caller falls through to the XEdDSA branch exactly as the web's
+         *  classifyBundleIdentity does. */
+        fun ed25519Verify(signature: ByteArray, message: ByteArray, publicKey: ByteArray): Boolean
+
+        /** crypto_box_keypair — a fresh X25519 keypair (the X3DH ephemeral and the
+         *  Double-Ratchet sending key on the create side); null on failure. */
+        fun generateX25519KeyPair(): X25519KeyPair?
+
+        /** randombytes_buf — cryptographically secure random bytes (qr_id, burn
+         *  token, AEAD nonce). */
+        fun randomBytes(length: Int): ByteArray
+
+        /** A fresh X25519 keypair. [privateKey] is secret — the caller zeroes it. */
+        class X25519KeyPair(val publicKey: ByteArray, val privateKey: ByteArray)
     }
 
     /** A signed prekey's raw key material (public point, private scalar). */
@@ -142,10 +170,13 @@ object LemonDropOneShot {
             /** The envelope's claimed sender account UUID. */
             val senderAccountId: String,
             /**
-             * The sender's CLAIMED Ed25519 identity key from inside the sealed
-             * payload. TRUST BOUNDARY: opening the seal proves the box was
-             * addressed to us, NOT who wrote it — the caller MUST cross-check
-             * against any pinned contact key before trusting the sender.
+             * The sender's CLAIMED identity key from inside the sealed payload —
+             * Ed25519 for a web/desktop creator, Curve25519 (Montgomery) for an
+             * Android/iOS creator (see the payload's sender_key_family). TRUST
+             * BOUNDARY: opening the seal proves the box was addressed to us, NOT
+             * who wrote it — the caller MUST cross-check against any pinned
+             * contact key before trusting the sender. The pinned key is the same
+             * raw wire form on both sides, so the base64 compare is direct.
              */
             val senderIdentityKey: ByteArray,
             /** The recovered 32-byte burn token — present it to burn the drop. */
@@ -180,8 +211,20 @@ object LemonDropOneShot {
         val payload = parsePayload(payloadBytes).also { payloadBytes.fill(0) }
             ?: return Result.Invalid
 
-        val senderIdentityCurve = sodium.ed25519PublicKeyToCurve25519(payload.senderIdentityKey)
-            ?: return Result.Invalid
+        // Sender-family awareness (mirror of packages/crypto lemondrop.ts /
+        // x3dh.ts x3dhRespond's senderIdentityIsMontgomery). A "curve25519" drop
+        // (an Android/iOS creator, e.g. sub-phase 5b) carries a Curve25519
+        // Montgomery identity key that ALREADY IS the point the responder DH
+        // needs — use it verbatim. An "ed25519" (or absent → default) drop
+        // (every web/desktop-created drop) converts via the birational map;
+        // running that map on a Montgomery key would derive garbage.
+        val senderIdentityCurve =
+            if (payload.senderKeyFamily == "curve25519") {
+                payload.senderIdentityKey
+            } else {
+                sodium.ed25519PublicKeyToCurve25519(payload.senderIdentityKey)
+                    ?: return Result.Invalid
+            }
 
         // The one-time prekey the initiator consumed. If they named an id we no
         // longer hold, the responder DH simply won't reconstruct and every
@@ -297,7 +340,8 @@ object LemonDropOneShot {
 
     // ── payload parsing (mirror of packages/protocol parseLemonDrop) ─────────
 
-    private class Payload(
+    // `internal` (with parsePayload) solely for JVM parser-decision tests.
+    internal class Payload(
         val senderAccountId: String,
         val senderIdentityKey: ByteArray,
         val burnToken: ByteArray,
@@ -306,6 +350,10 @@ object LemonDropOneShot {
         val prekeyId: Int?,
         val messageNumber: Int,
         val previousChainLength: Int,
+        /** The sender_identity_key's crypto family — "ed25519" (web/desktop, the
+         *  default when the wire field is absent) or "curve25519" (Android/iOS).
+         *  Kept in lockstep with packages/protocol SenderKeyFamily. */
+        val senderKeyFamily: String,
     )
 
     /** RFC-4122 shape (versions 1–8, variant 89ab) — the SAME strictness the
@@ -316,8 +364,11 @@ object LemonDropOneShot {
         RegexOption.IGNORE_CASE,
     )
 
-    /** Strict parse; null on ANY malformed field (fail closed → Invalid). */
-    private fun parsePayload(payloadBytes: ByteArray): Payload? = try {
+    /** Strict parse; null on ANY malformed field (fail closed → Invalid).
+     *  `internal` (not private) solely so the JVM suite can pin parser
+     *  decisions — like explicit-null vs absent `sender_key_family` — that are
+     *  indistinguishable through [open]'s collapsed Invalid outcome. */
+    internal fun parsePayload(payloadBytes: ByteArray): Payload? = try {
         val root = JSONObject(payloadBytes.toString(Charsets.UTF_8))
         val envelope = root.getJSONObject("envelope")
         val senderIdentityKey = base64Decode32(root.getString("sender_identity_key"))
@@ -328,9 +379,23 @@ object LemonDropOneShot {
         val previousChainLength = envelope.getInt("previous_chain_length")
         val senderAccountId = envelope.getString("sender_id")
         val prekeyId = if (envelope.isNull("prekey_id")) null else envelope.getInt("prekey_id")
+        // Optional sender_key_family, FAIL-CLOSED and in lockstep with the TS
+        // parser (packages/protocol parseLemonDrop): only a truly ABSENT key
+        // normalizes to "ed25519" — the pre-0.8.1 default that keeps every
+        // web-created drop parsing identically. PRESENT must be EXACTLY one of
+        // the two known strings — an explicit JSON null is a present,
+        // wrong-typed value and is rejected, exactly as TS rejects it (isNull
+        // alone would conflate missing-and-null and let the two stacks call
+        // different payloads "invalid"). Never guessed.
+        val senderKeyFamily = when {
+            !root.has("sender_key_family") -> "ed25519"
+            root.isNull("sender_key_family") -> "__invalid__"
+            else -> root.getString("sender_key_family")
+        }
         if (senderIdentityKey == null || burnToken == null || ephemeralKey == null ||
             envelopeCiphertext.isEmpty() || messageNumber < 0 || previousChainLength < 0 ||
-            !UUID_RE.matches(senderAccountId)
+            !UUID_RE.matches(senderAccountId) ||
+            (senderKeyFamily != "ed25519" && senderKeyFamily != "curve25519")
         ) {
             null
         } else {
@@ -343,6 +408,7 @@ object LemonDropOneShot {
                 prekeyId = prekeyId,
                 messageNumber = messageNumber,
                 previousChainLength = previousChainLength,
+                senderKeyFamily = senderKeyFamily,
             )
         }
     } catch (_: Exception) {

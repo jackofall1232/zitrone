@@ -53,6 +53,43 @@ class LemonDropSodiumOps(private val sodium: Sodium) : LemonDropOneShot.SodiumOp
         return if (rc == 0) curve else null
     }
 
+    override fun sealTo(recipientPublicKey: ByteArray, message: ByteArray): ByteArray? {
+        if (recipientPublicKey.size != 32) return null
+        val sealed = ByteArray(message.size + SEAL_BYTES)
+        val rc = sodium.crypto_box_seal(sealed, message, message.size.toLong(), recipientPublicKey)
+        return if (rc == 0) sealed else null
+    }
+
+    override fun ed25519Verify(
+        signature: ByteArray,
+        message: ByteArray,
+        publicKey: ByteArray,
+    ): Boolean {
+        // libsodium rejects wrong lengths; guard so a Curve25519 (mobile) bundle,
+        // whose 64-byte XEdDSA signature is NOT a valid Ed25519 signature over the
+        // raw prekey, simply returns false and the caller tries the XEdDSA branch.
+        if (signature.size != 64 || publicKey.size != 32) return false
+        val rc = sodium.crypto_sign_verify_detached(signature, message, message.size.toLong(), publicKey)
+        return rc == 0
+    }
+
+    override fun generateX25519KeyPair(): LemonDropOneShot.SodiumOps.X25519KeyPair? {
+        val publicKey = ByteArray(32)
+        val privateKey = ByteArray(32)
+        val rc = sodium.crypto_box_keypair(publicKey, privateKey)
+        return if (rc == 0) {
+            LemonDropOneShot.SodiumOps.X25519KeyPair(publicKey, privateKey)
+        } else {
+            null
+        }
+    }
+
+    override fun randomBytes(length: Int): ByteArray {
+        val out = ByteArray(length)
+        sodium.randombytes_buf(out, length)
+        return out
+    }
+
     private companion object {
         /** crypto_box_SEALBYTES: ephemeral pk (32) + Poly1305 MAC (16). */
         const val SEAL_BYTES = 48

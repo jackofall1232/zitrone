@@ -89,7 +89,12 @@ import { WsClient, type WsStatus } from "./lib/ws.js";
 export interface ContactRecord {
   displayName: string;
   identityKey: string; // peer's Ed25519 public key, base64
-  session: SerializedSession;
+  // Null ONLY for a mobile (Curve25519) lemon-drop sender we learned from an
+  // opened drop: web cannot build an ordinary session across the key-family
+  // wall, and a drop is one-way, so there is no session to store. Such a
+  // contact renders received drops but cannot be sent ordinary messages —
+  // every ordinary-send path guards on this being non-null.
+  session: SerializedSession | null;
   // X3DH header data repeated on every message until the peer first replies
   pendingEphemeralKey: string | null;
   pendingPrekeyId: number | null;
@@ -480,6 +485,9 @@ export const useApp = create<AppState>((set, get) => {
     const { contacts, accountId, ws } = get();
     const contact = contacts[peerId];
     if (!contact || !accountId || !ws) return null;
+    // A session-less contact is a mobile lemon-drop sender we can't ordinary-
+    // message across the key-family wall — nothing to send over.
+    if (contact.session === null) return null;
 
     const session = deserializeSession(contact.session);
     // Pad the plaintext to a 256-byte block before encrypting so ciphertext
@@ -644,9 +652,17 @@ export const useApp = create<AppState>((set, get) => {
             let text: string;
             if (!contact) {
               ({ text } = await respondToInitialMessage(envelope));
+            } else if (contact.session === null) {
+              // A session-less contact is a mobile (Curve25519) lemon-drop
+              // sender: no ordinary web↔mobile session exists, so an inbound
+              // ordinary envelope for them is neither expected nor decryptable.
+              // Drop it rather than run the guarded session-reset against an
+              // impossible cross-family session.
+              return;
             } else {
+              const storedSession = contact.session;
               try {
-                const session = deserializeSession(contact.session);
+                const session = deserializeSession(storedSession);
                 const plaintext = await ratchetDecrypt(session, {
                   blob: unb64(envelope.ciphertext),
                   messageNumber: envelope.message_number,
@@ -1000,6 +1016,10 @@ export const useApp = create<AppState>((set, get) => {
       const { contacts, accountId } = get();
       const contact = contacts[peerId];
       if (!contact || !accountId) throw new Error("unknown contact");
+      // A session-less mobile lemon-drop contact has no ordinary session to
+      // encrypt against (cross-family wall) — a token dead-drop to them is
+      // impossible, so refuse rather than crash on a null session.
+      if (contact.session === null) throw new Error("no session for this contact");
 
       // Encrypt exactly as a normal message — the dead drop carries a full
       // envelope so the recipient decrypts it with the established session.
@@ -1219,7 +1239,8 @@ export const useApp = create<AppState>((set, get) => {
       // they can open, and we will not dress either up as an error.
       if (result.outcome !== "message") return "not-for-us";
 
-      const { text, senderAccountId, senderIdentityKey, burnToken, usedOneTimePrekeyId } = result;
+      const { text, senderAccountId, senderKeyFamily, senderIdentityKey, burnToken, usedOneTimePrekeyId } =
+        result;
       // The sender's identity key is CLAIMED (opening the seal proves who the box
       // was addressed TO, never who wrote it). Compare against the base64 form we
       // store on contacts / receive in bundles.
@@ -1250,32 +1271,52 @@ export const useApp = create<AppState>((set, get) => {
         });
         if (bundle === null) return "not-for-us";
         if (bundle.identity_key !== claimedIdentityB64) return "not-for-us";
-        // The ephemeral responder session openLemonDrop used to decrypt is gone
-        // by design (encrypt-and-forget). Spin up a normal OUTBOUND session
-        // against their current bundle so any reply rides an ordinary ratchet —
-        // exactly the shape addContact stores.
-        const init = await x3dhInitiate(identity, {
-          identityKey: unb64(bundle.identity_key),
-          signedPrekey: {
-            id: bundle.signed_prekey.id,
-            publicKey: unb64(bundle.signed_prekey.public_key),
-            signature: unb64(bundle.signed_prekey.signature),
-          },
-          oneTimePrekey: bundle.one_time_prekey
-            ? {
-                id: bundle.one_time_prekey.id,
-                publicKey: unb64(bundle.one_time_prekey.public_key),
-              }
-            : null,
-        });
-        const contact: ContactRecord = {
-          displayName: `Contact ${senderAccountId.slice(0, 8)}`,
-          identityKey: bundle.identity_key,
-          session: serializeSession(init.session),
-          pendingEphemeralKey: b64(init.ephemeralPublicKey),
-          pendingPrekeyId: init.usedPrekeyId,
-        };
-        set((s) => ({ contacts: { ...s.contacts, [senderAccountId]: contact } }));
+
+        if (senderKeyFamily === "curve25519") {
+          // A mobile (Android/iOS) creator. We CANNOT stand up an ordinary
+          // web↔mobile session (the key families are wire-incompatible), and a
+          // lemon drop is one-way anyway — so we establish a SESSION-LESS
+          // contact: the sender's identity is now pinned (a later drop from them
+          // is recognized, and impersonation is caught by the same key compare),
+          // the drop renders below, but no reply session is attempted. Trying to
+          // x3dhInitiate against their Curve25519 bundle would throw. This is the
+          // reviewed cross-family fix — the drop no longer decrypts-then-dies.
+          const contact: ContactRecord = {
+            displayName: `Contact ${senderAccountId.slice(0, 8)}`,
+            identityKey: bundle.identity_key,
+            session: null,
+            pendingEphemeralKey: null,
+            pendingPrekeyId: null,
+          };
+          set((s) => ({ contacts: { ...s.contacts, [senderAccountId]: contact } }));
+        } else {
+          // The ephemeral responder session openLemonDrop used to decrypt is gone
+          // by design (encrypt-and-forget). Spin up a normal OUTBOUND session
+          // against their current bundle so any reply rides an ordinary ratchet —
+          // exactly the shape addContact stores.
+          const init = await x3dhInitiate(identity, {
+            identityKey: unb64(bundle.identity_key),
+            signedPrekey: {
+              id: bundle.signed_prekey.id,
+              publicKey: unb64(bundle.signed_prekey.public_key),
+              signature: unb64(bundle.signed_prekey.signature),
+            },
+            oneTimePrekey: bundle.one_time_prekey
+              ? {
+                  id: bundle.one_time_prekey.id,
+                  publicKey: unb64(bundle.one_time_prekey.public_key),
+                }
+              : null,
+          });
+          const contact: ContactRecord = {
+            displayName: `Contact ${senderAccountId.slice(0, 8)}`,
+            identityKey: bundle.identity_key,
+            session: serializeSession(init.session),
+            pendingEphemeralKey: b64(init.ephemeralPublicKey),
+            pendingPrekeyId: init.usedPrekeyId,
+          };
+          set((s) => ({ contacts: { ...s.contacts, [senderAccountId]: contact } }));
+        }
       }
 
       // Surface the drop as a received message — mirrors deliverIncoming's

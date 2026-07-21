@@ -141,6 +141,53 @@ describe("lemon drop payload", () => {
     expect(parseLemonDrop(JSON.stringify({ ...good, envelope: null }))).toBeNull();
   });
 
+  it("defaults sender_key_family to ed25519 when absent, omitting it on the wire", () => {
+    // The compat guarantee: a drop with no family field is the pre-0.8.1 shape.
+    // It must (a) NOT serialize the field at all — keeping bytes stable for
+    // existing fixtures / the PR #4 bridge — and (b) parse back as "ed25519".
+    const serialized = serializeLemonDrop({
+      envelope,
+      senderIdentityKey: b64of32,
+      burnToken: b64of32,
+    });
+    expect(serialized).not.toContain("sender_key_family");
+    expect(parseLemonDrop(serialized)?.sender_key_family).toBe("ed25519");
+
+    // An explicit "ed25519" is treated identically to absent — still omitted.
+    const explicit = serializeLemonDrop({
+      envelope,
+      senderIdentityKey: b64of32,
+      burnToken: b64of32,
+      senderKeyFamily: "ed25519",
+    });
+    expect(explicit).not.toContain("sender_key_family");
+    expect(explicit).toBe(serialized);
+  });
+
+  it("round-trips a curve25519 sender family (Android/iOS creator)", () => {
+    const serialized = serializeLemonDrop({
+      envelope,
+      senderIdentityKey: b64of32,
+      burnToken: b64of32,
+      senderKeyFamily: "curve25519",
+    });
+    expect(serialized).toContain('"sender_key_family":"curve25519"');
+    expect(parseLemonDrop(serialized)?.sender_key_family).toBe("curve25519");
+  });
+
+  it("rejects an unknown or wrong-typed sender_key_family (fail closed)", () => {
+    const good = JSON.parse(
+      serializeLemonDrop({ envelope, senderIdentityKey: b64of32, burnToken: b64of32 }),
+    );
+    // A bad string, or the wrong type entirely, is a malformed drop — the
+    // family gates the recipient's DH branch, so a lenient parse is a footgun.
+    for (const bad of ["x25519", "Ed25519", "", "curve25519 ", 1, true, null, {}]) {
+      expect(parseLemonDrop(JSON.stringify({ ...good, sender_key_family: bad }))).toBeNull();
+    }
+    // Explicit null is not "absent" — JSON null is a present, wrong-typed value.
+    // (absence is tested above via the default-to-ed25519 case.)
+  });
+
   it("is lenient about unknown extra fields (future revisions)", () => {
     const good = JSON.parse(
       serializeLemonDrop({ envelope, senderIdentityKey: b64of32, burnToken: b64of32 }),

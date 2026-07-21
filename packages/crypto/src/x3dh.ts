@@ -121,6 +121,21 @@ export async function x3dhInitiate(
   };
 }
 
+export interface X3DHRespondOptions {
+  /**
+   * The peer identity key handed in is ALREADY an X25519/Montgomery point, so
+   * skip [identityKeyToX25519] and DH against it verbatim. Defaults FALSE, and
+   * that default is the byte-identical existing path: an Ed25519 (web/desktop)
+   * sender identity is converted via the birational map first. Set true ONLY
+   * by the lemon-drop opener when the sealed payload's `sender_key_family` is
+   * `"curve25519"` — an Android/iOS creator's identity key IS the Montgomery
+   * point already, and converting it as-if-Edwards would derive garbage so no
+   * drop would decrypt. Ordinary messaging (`respondToInitialMessage`) never
+   * sets this, so its responder DH is completely unchanged.
+   */
+  senderIdentityIsMontgomery?: boolean;
+}
+
 /**
  * X3DH as the responder (Bob), on receiving an initial message that carries
  * the initiator's ephemeral key. The consumed one-time prekey's private half
@@ -132,9 +147,16 @@ export async function x3dhRespond(
   myOneTimePrekey: OneTimePrekey | null,
   theirIdentityKey: Uint8Array,
   theirEphemeralKey: Uint8Array,
+  options: X3DHRespondOptions = {},
 ): Promise<RatchetSession> {
   await ready();
-  const theirIdentityX = await identityKeyToX25519(theirIdentityKey);
+  // Family-aware: a Curve25519 (mobile) sender identity is already the X25519
+  // point we DH against; an Ed25519 (web/desktop) one converts via the
+  // birational map. The default (options omitted → false) is the pre-family
+  // behavior, so live messaging is byte-for-byte unaffected.
+  const theirIdentityX = options.senderIdentityIsMontgomery
+    ? theirIdentityKey
+    : await identityKeyToX25519(theirIdentityKey);
 
   const dh1 = sodium.crypto_scalarmult(mySignedPrekey.privateKey, theirIdentityX);
   const dh2 = sodium.crypto_scalarmult(myIdentityKey.x25519PrivateKey, theirEphemeralKey);
