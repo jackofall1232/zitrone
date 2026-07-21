@@ -265,7 +265,12 @@ class SignalProtocolManager(
         store.destroyContactCrypto(remoteAccountId)
     }
 
-    /** @deprecated Prefer [destroyContact] — session-only wipe is insufficient. */
+    @Deprecated(
+        message = "Prefer destroyContact — a session-only wipe leaves the pinned " +
+            "remote identity and sender keys behind, which is insufficient for " +
+            "full contact deletion.",
+        replaceWith = ReplaceWith("destroyContact(remoteAccountId)"),
+    )
     fun endSession(remoteAccountId: String) {
         destroyContact(remoteAccountId)
     }

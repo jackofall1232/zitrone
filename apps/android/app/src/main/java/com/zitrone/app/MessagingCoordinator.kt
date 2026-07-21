@@ -142,6 +142,42 @@ class MessagingCoordinator(
         sessionLocks.getOrPut(contactId) { Mutex() }.withLock { block() }
 
     /**
+     * Per-contact teardown generation. Bumped by [deleteContact] under the
+     * session lock whenever a contact's crypto is destroyed. A send captures
+     * the epoch at encrypt time and re-checks it (also under the lock) right
+     * before depositing the envelope — see [depositIfNotPurged]. Never cleared,
+     * so a delete-then-re-add still invalidates a stale in-flight send.
+     */
+    private val contactEpochs = ConcurrentHashMap<String, Int>()
+
+    private fun contactEpoch(contactId: String): Int = contactEpochs[contactId] ?: 0
+
+    /**
+     * Hand [envelope] to the socket only if [contactId] was not torn down after
+     * [epochAtEncrypt] was captured. The epoch check and the ws enqueue run
+     * together under the per-contact session lock, so a concurrent
+     * [deleteContact] cannot slip a crypto purge between the check and the
+     * deposit. If the contact was deleted (or deleted-and-re-added) mid-send,
+     * the already-encrypted envelope is dropped and never reaches the relay —
+     * no ciphertext is deposited for a contact the user was told is gone.
+     *
+     * @return true if enqueued; false if the socket was down OR the contact was
+     *         purged mid-send (caller flips the local copy to FAILED either way).
+     */
+    private suspend fun depositIfNotPurged(
+        contactId: String,
+        epochAtEncrypt: Int,
+        envelope: MessageEnvelope,
+    ): Boolean = withSessionLock(contactId) {
+        if (contactEpoch(contactId) != epochAtEncrypt) {
+            diag("send: contact torn down mid-send — envelope dropped, not deposited")
+            false
+        } else {
+            ws.sendMessage(envelope)
+        }
+    }
+
+    /**
      * Read receipts awaiting a live socket, keyed by contact. Queued when the
      * hand-off fails (socket down) and flushed on the next CONNECTED
      * transition: the underlying messages are already READ locally, so they
@@ -366,6 +402,10 @@ class MessagingCoordinator(
         // Stage marker for the diagnostic log in onFailure below.
         // Stage names only — never data.
         var stage = "check-session"
+        // Teardown epoch captured under the encrypt lock; re-checked before the
+        // envelope is deposited so a contact deletion racing this send can't
+        // leak a post-delete envelope to the relay.
+        var epochAtEncrypt = 0
         runCatching {
             // Session establishment + encrypt hold the per-contact lock so
             // a concurrent receipt send can't fork the ratchet.
@@ -393,6 +433,7 @@ class MessagingCoordinator(
                     )
                 }
                 stage = "encrypt"
+                epochAtEncrypt = contactEpoch(conversation.contactId)
                 // Length-hiding padding before encryption — see MessagePadding.
                 signal.encrypt(
                     conversation.contactId,
@@ -432,14 +473,15 @@ class MessagingCoordinator(
             }
 
             stage = "ws-send"
-            if (ws.sendMessage(envelope)) {
+            if (depositIfNotPurged(conversation.contactId, epochAtEncrypt, envelope)) {
                 // Enqueued — but honestly still just SENDING. The tick waits for
                 // the relay's message.stored (→SENT) and the recipient's
                 // message.delivered (→DELIVERED); see [MessageState].
             } else {
-                // Socket not open: the send did not reach the relay.
+                // Socket not open, or the contact was deleted mid-send: either
+                // way the send did not (and must not) reach the relay.
                 // Connection state only — never the envelope.
-                diag("send: hand-off failed — socket not open (${ws.connectionState.value})")
+                diag("send: hand-off failed — socket down or contact purged (${ws.connectionState.value})")
                 messages.markFailed(messageId)
             }
         }.onFailure { e ->
@@ -527,6 +569,10 @@ class MessagingCoordinator(
     ) {
         val accountId = api.accountId ?: return
         var stage = "encrypt-blob"
+        // Teardown epoch captured under the encrypt lock; re-checked before the
+        // envelope is deposited (after the slow blob upload) so a contact
+        // deletion racing this send can't leak a post-delete envelope.
+        var epochAtEncrypt = 0
         runCatching {
             val blob = AttachmentCrypto.encrypt(bytes)
             // filename is forced null for images inside serialize(); mirror
@@ -566,6 +612,7 @@ class MessagingCoordinator(
                     )
                 }
                 stage = "encrypt"
+                epochAtEncrypt = contactEpoch(conversation.contactId)
                 // Control JSON is padded with the DEFAULT 256-byte block like
                 // any message plaintext; only the blob uses 64 KiB buckets.
                 signal.encrypt(
@@ -623,10 +670,12 @@ class MessagingCoordinator(
                 mediaType = MessageEnvelope.MEDIA_TEXT,
             )
             stage = "ws-send"
-            if (ws.sendMessage(envelope)) {
+            if (depositIfNotPurged(conversation.contactId, epochAtEncrypt, envelope)) {
                 // Enqueued — honestly still SENDING until the relay/peer acks.
             } else {
-                diag("send: hand-off failed — socket not open (${ws.connectionState.value})")
+                // Socket down, or the contact was deleted while the blob
+                // uploaded: the envelope did not (and must not) reach the relay.
+                diag("send: hand-off failed — socket down or contact purged (${ws.connectionState.value})")
                 messages.markFailed(messageId)
             }
         }.onFailure { e ->
@@ -805,9 +854,13 @@ class MessagingCoordinator(
             // the peer and send message.burn frames.
             messages.burnAll(conversationId, notifyPeer = true)
             // Hold the session lock so an in-flight encrypt/decrypt can't race
-            // a teardown and re-persist a destroyed SessionRecord.
+            // a teardown and re-persist a destroyed SessionRecord. Bumping the
+            // epoch here (under the lock) makes any send that already encrypted
+            // for this contact refuse to deposit its envelope — see
+            // depositIfNotPurged.
             withSessionLock(contactId) {
                 signal.destroyContact(contactId)
+                contactEpochs.merge(contactId, 1, Int::plus)
             }
             conversations.remove(conversationId)
             pendingReceipts.remove(contactId)
