@@ -43,8 +43,9 @@ export default function SecurityPage() {
           your history is probably already gone anyway.
         </p>
         <p>
-          The implementations are established libraries, not homemade: <code>libsodium.js</code> in
-          the browser, and <code>libsignal-client</code> on iOS and Android.
+          The implementations are established libraries, not homemade:{" "}
+          <code>libsodium.js</code> and <code>libsignal-client</code> (the latter on iOS and
+          Android).
         </p>
 
         <h2 id="keys">Key generation and storage</h2>
@@ -75,11 +76,6 @@ export default function SecurityPage() {
         </ul>
         <p>Where your keys live depends on your platform:</p>
         <ul>
-          <li>
-            <strong>Browser</strong> — IndexedDB, encrypted with AES-256-GCM under a master key
-            derived from your passphrase via Argon2id (64 MB memory, 3 iterations, 4 lanes —
-            parameters chosen to make brute force expensive).
-          </li>
           <li>
             <strong>iOS</strong> — Secure Enclave and Keychain, biometric-protected.
           </li>
@@ -143,16 +139,12 @@ export default function SecurityPage() {
             after the fact — so we detect them, warn you, and log the event locally on your device.
           </li>
           <li>
-            <strong>Browser</strong> — the moment the window loses focus or visibility, the message
-            list is blurred and desaturated within 120 milliseconds. On top of that, every
-            conversation carries an invisible watermark encoding the recipient and timestamp — if a
-            screenshot leaks, it identifies who leaked it.
-          </li>
-          <li>
-            <strong>Linux (desktop app)</strong> — a focus-loss blur overlay, the same mechanism as
-            the browser. This is best-effort: Linux exposes no universal API to hard-block screen
-            capture on either Wayland or X11, and we won&apos;t pretend otherwise. Android remains
-            the platform with a true OS-level hard block.
+            <strong>Linux (desktop app)</strong> — a focus-loss blur overlay: the moment the window
+            loses focus or visibility, the message list is blurred and desaturated. On top of that,
+            every conversation carries an invisible watermark encoding the recipient and timestamp —
+            if a screenshot leaks, it identifies who leaked it. This is best-effort: Linux exposes no
+            universal API to hard-block screen capture on either Wayland or X11, and we won&apos;t
+            pretend otherwise. Android remains the platform with a true OS-level hard block.
           </li>
         </ul>
         <p>
@@ -165,9 +157,9 @@ export default function SecurityPage() {
         <p>
           Network-level metadata — who connected, from where — is the hardest thing for any
           messenger to hide. Zitrone keeps stored metadata minimal, and for the network layer it
-          offers optional Tor routing: Orbot integration on iOS and Android, and a{" "}
-          <code>.onion</code> address for the browser app via Tor Browser. It&apos;s opt-in, not on
-          by default, because it trades latency for anonymity and that should be your call.
+          offers optional Tor routing: Orbot integration on iOS and Android, and a local Tor daemon
+          (or Tor Browser&apos;s port) on the Linux desktop app. It&apos;s opt-in, not on by
+          default, because it trades latency for anonymity and that should be your call.
         </p>
 
         <h2 id="open-source">Open source and audit history</h2>
