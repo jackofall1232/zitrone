@@ -44,7 +44,7 @@ object WatermarkTileDefaults {
     const val tileSize: Float = 512f
     const val rotationDeg: Float = -24f
     const val alpha: Float = 0.045f
-    const val fontPx: Float = 10.5f
+    const val fontPx: Float = 11.5f
     const val rowGapPx: Float = 28f
     const val brickOffset: Float = 0.5f
 
