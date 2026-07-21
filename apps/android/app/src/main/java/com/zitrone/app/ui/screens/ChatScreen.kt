@@ -388,6 +388,9 @@ fun ChatScreen(
                         LemonDropCreator.Result.StaleRelay ->
                             qrError =
                                 "The relay doesn't support QR drops yet (stale server build). Redeploy the relay, then try again."
+                        LemonDropCreator.Result.RecipientUnavailable ->
+                            qrError =
+                                "This contact isn't reachable right now — they may have reset their account."
                         LemonDropCreator.Result.Failed ->
                             qrError = "Couldn't create the drop — try again."
                     }

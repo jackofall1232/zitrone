@@ -5,6 +5,7 @@
 
 package com.zitrone.app
 
+import com.zitrone.app.data.isRouterAbsent404
 import com.zitrone.app.data.qrDropBundleTrusted
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -38,5 +39,18 @@ class LemonDropCreatorTrustTest {
         // an identity already established for the contact, never to whatever the
         // relay serves for a peer we have never keyed.
         assertFalse(qrDropBundleTrusted(null, substituted))
+    }
+
+    @Test
+    fun `router 404 is told apart from a handler not_found 404`() {
+        // Only Fiber's generic {"error":"error"} means the route is absent (stale
+        // relay). A handler 404 (recipient's bundle gone) must NOT be read as a
+        // stale relay, or a healthy relay would be blamed. Whitespace-tolerant.
+        assertTrue(isRouterAbsent404("""{"error":"error"}"""))
+        assertTrue(isRouterAbsent404("""{ "error" : "error" }"""))
+        assertFalse(isRouterAbsent404("""{"error":"not_found"}"""))
+        assertFalse(isRouterAbsent404("""{"error":"bad_pow"}"""))
+        assertFalse(isRouterAbsent404(null))
+        assertFalse(isRouterAbsent404(""))
     }
 }

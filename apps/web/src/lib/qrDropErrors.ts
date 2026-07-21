@@ -17,12 +17,22 @@ export function formatQrDropCreateError(err: unknown): string {
     if (err.code === "transport_offline") {
       return "You're offline — connect to deposit a QR drop.";
     }
-    // Router 404 on a missing route is Fiber's generic {"error":"error"} — the
-    // same signature attachments hit when the relay was left pre-blob. Surface
-    // it distinctly so "try again" is not the only advice when redeploy is
-    // required.
     if (err.status === 404) {
-      return "The relay doesn't support QR drops yet (stale server build). Redeploy the relay, then try again.";
+      // A 404 has two very different causes on this path, told apart by the
+      // response body Fiber returns:
+      //   - ROUTER 404 {"error":"error"} (code "error") — the qr-drops route is
+      //     ABSENT, i.e. the relay build predates PR #3. Redeploy is the fix.
+      //   - HANDLER 404 {"error":"not_found"} (code "not_found") — here it comes
+      //     from the recipient's prekey-bundle fetch, which precedes the deposit:
+      //     the recipient is gone, and the relay is perfectly healthy. Telling
+      //     someone to redeploy a working relay would be actively misleading.
+      if (err.code === "not_found") {
+        return "This contact isn't reachable right now — they may have reset their account.";
+      }
+      if (err.code === "error") {
+        return "The relay doesn't support QR drops yet (stale server build). Redeploy the relay, then try again.";
+      }
+      // Any other 404 falls through to the generic deposit-failure line below.
     }
     if (err.status === 429 || err.code === "rate_limited") {
       return "Too many QR drops from this network — wait a minute and try again.";

@@ -8,8 +8,21 @@ import { ApiError } from "./api.js";
 import { formatQrDropCreateError } from "./qrDropErrors.js";
 
 describe("formatQrDropCreateError", () => {
-  it("names a stale relay when deposit 404s (missing qr-drops route)", () => {
+  it("names a stale relay only for a ROUTER 404 (missing qr-drops route)", () => {
+    // Fiber's generic router 404 body is {"error":"error"} → code "error".
     expect(formatQrDropCreateError(new ApiError(404, "error"))).toMatch(/stale server build/i);
+  });
+
+  it("names a missing recipient — NOT a stale relay — for a handler not_found 404", () => {
+    // The prekey-bundle fetch (before deposit) returns {"error":"not_found"} when
+    // the recipient is gone. It must NOT tell the user to redeploy a healthy relay.
+    const msg = formatQrDropCreateError(new ApiError(404, "not_found"));
+    expect(msg).toMatch(/isn't reachable/i);
+    expect(msg).not.toMatch(/redeploy|stale/i);
+  });
+
+  it("does not claim a stale relay for an unlabeled 404", () => {
+    expect(formatQrDropCreateError(new ApiError(404, "request_failed"))).not.toMatch(/stale|redeploy/i);
   });
 
   it("names identity change and oversize distinctly", () => {
