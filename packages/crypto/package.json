@@ -1,6 +1,6 @@
 {
   "name": "@zitrone/crypto",
-  "version": "0.8.6-beta",
+  "version": "0.9.0-beta",
   "description": "Crypto primitives for the Zitrone web client — wraps libsodium.js",
   "license": "AGPL-3.0-only",
   "type": "module",

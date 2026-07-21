@@ -9,16 +9,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **Android: repeating unread-notification reminders.** The single content-free
-  "New message" notification used a fixed id + `setOnlyAlertOnce`, so after the
-  first ping every later message silently updated the same tray entry with no
-  sound — high-volume users heard one ping then silence while unread piled up. A
-  new `NotificationScheduler` rate-limits to at most one alert per conversation
-  per ~2 minutes and RE-FIRES once per window while a conversation stays unread,
-  resetting the moment the chat is opened. `setOnlyAlertOnce` removed so every
-  re-fire is audible. The notification stays byte-identical (single fixed id,
-  content-free text, no counts/sender/extras) to preserve plausible deniability.
-  New Settings → Notifications toggle "Repeat unread reminders" (default ON).
 - **iOS: full contact deletion (cryptographic teardown, not soft-delete).**
   Long-press / context-menu on a conversation → confirm to burn known local
   messages (best-effort peer burn), destroy the Double Ratchet session and
@@ -29,6 +19,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Xcode/iOS toolchain in CI, and iOS has no distributed build yet, so this
   needs an Xcode build + on-device test before it ships to users. Held out of
   the 0.8.6-beta release notes for that reason.
+
+## [0.9.0-beta] - 2026-07-21
+
+Notification-system fix plus the plausible-deniability **vault architecture as a
+locked design document** — the vault runtime itself is **not** implemented in this
+release. `0.9.0-beta` does not add a usable second vault; that is a separate,
+adversarially-reviewed track (see `docs/VAULT_ARCHITECTURE.md`).
+
+### Added
+
+- **Android: repeating unread-notification reminders.** The single content-free
+  "New message" notification used a fixed id + `setOnlyAlertOnce`, so after the
+  first ping every later message silently updated the same tray entry with no
+  sound — high-volume users heard one ping then silence while unread piled up. A
+  new `NotificationScheduler` rate-limits to at most one alert per conversation
+  per ~2 minutes and RE-FIRES once per window while a conversation stays unread,
+  resetting the moment the chat is opened. `setOnlyAlertOnce` removed so every
+  re-fire is audible. The notification stays byte-identical (single fixed id,
+  content-free text, no counts/sender/extras) to preserve plausible deniability.
+  New Settings → Notifications toggle "Repeat unread reminders" (default ON).
+- **Docs: `docs/VAULT_ARCHITECTURE.md`** — the locked plausible-deniability vault
+  design (no-button principle, dual-slot model, PIN-fallback unlock router,
+  teardown-on-switch, zero-knowledge invariant, notification-parity requirement).
+  Design only; the Android vault runtime is not built. `SECURITY_MODEL.md` and
+  `README.md` reconciled to that honest status.
 
 ## [0.8.6-beta] - 2026-07-21
 
