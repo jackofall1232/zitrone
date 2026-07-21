@@ -3,7 +3,7 @@
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { color, typography } from "./tokens.js";
 
 export interface Conversation {
@@ -18,9 +18,20 @@ export interface ConversationListProps {
   conversations: Conversation[];
   activeId?: string;
   onSelect: (id: string) => void;
+  /**
+   * Optional delete affordance. When provided, each row gets a long-press /
+   * context-menu path that calls this with the conversation id. The host is
+   * responsible for the irreversible confirmation dialog.
+   */
+  onDelete?: (id: string) => void;
 }
 
-export function ConversationList({ conversations, activeId, onSelect }: ConversationListProps) {
+export function ConversationList({
+  conversations,
+  activeId,
+  onSelect,
+  onDelete,
+}: ConversationListProps) {
   return (
     <nav aria-label="Conversations" style={{ display: "flex", flexDirection: "column" }}>
       {conversations.map((c) => (
@@ -29,6 +40,7 @@ export function ConversationList({ conversations, activeId, onSelect }: Conversa
           conversation={c}
           active={c.id === activeId}
           onSelect={onSelect}
+          onDelete={onDelete}
         />
       ))}
     </nav>
@@ -39,18 +51,59 @@ function ConversationListItem({
   conversation: c,
   active,
   onSelect,
+  onDelete,
 }: {
   conversation: Conversation;
   active: boolean;
   onSelect: (id: string) => void;
+  onDelete?: (id: string) => void;
 }) {
   const [hovered, setHovered] = useState(false);
+  // Long-press (≥550ms) mirrors mobile: fire delete request, suppress the
+  // click that would otherwise open the conversation on pointer-up.
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressFired = useRef(false);
+
+  const clearLongPress = () => {
+    if (longPressTimer.current != null) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+  };
+
+  const armLongPress = () => {
+    if (!onDelete) return;
+    longPressFired.current = false;
+    clearLongPress();
+    longPressTimer.current = setTimeout(() => {
+      longPressFired.current = true;
+      onDelete(c.id);
+    }, 550);
+  };
+
   return (
     <button
       type="button"
-      onClick={() => onSelect(c.id)}
+      onClick={() => {
+        if (longPressFired.current) {
+          longPressFired.current = false;
+          return;
+        }
+        onSelect(c.id);
+      }}
+      onContextMenu={(e) => {
+        if (!onDelete) return;
+        e.preventDefault();
+        onDelete(c.id);
+      }}
+      onPointerDown={armLongPress}
+      onPointerUp={clearLongPress}
+      onPointerLeave={() => {
+        clearLongPress();
+        setHovered(false);
+      }}
+      onPointerCancel={clearLongPress}
       onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
       style={{
         display: "flex",
         alignItems: "center",
@@ -141,6 +194,35 @@ function ConversationListItem({
           }}
         >
           {c.unreadCount}
+        </span>
+      )}
+      {onDelete && hovered && (
+        <span
+          role="button"
+          tabIndex={-1}
+          aria-label={`Delete ${c.displayName}`}
+          title="Delete contact"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(c.id);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.stopPropagation();
+              e.preventDefault();
+              onDelete(c.id);
+            }
+          }}
+          style={{
+            flexShrink: 0,
+            color: color.semantic.textMuted,
+            fontSize: "0.875rem",
+            padding: "4px 6px",
+            borderRadius: 6,
+            lineHeight: 1,
+          }}
+        >
+          ×
         </span>
       )}
     </button>

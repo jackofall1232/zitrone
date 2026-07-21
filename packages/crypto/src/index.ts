@@ -50,6 +50,15 @@ export {
 } from "./ratchet.js";
 export { encryptKeyStore, decryptKeyStore, type KeyStore } from "./keystore.js";
 export {
+  CONTACT_TOMBSTONE_WINDOW_MS,
+  wipeRatchetSession,
+  destroyContactCrypto,
+  recordContactDeletion,
+  wasContactRecentlyDeleted,
+  clearContactDeletions,
+} from "./contact-destroy.js";
+
+export {
   generateInvisibleWatermark,
   embedWatermarkInCanvas,
   embedWatermarkInPixels,

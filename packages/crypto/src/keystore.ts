@@ -28,6 +28,13 @@ export interface KeyStore {
   sessions: Record<string, unknown>;
   /** Verified peer identity keys (Safety Number basis), keyed by peer account ID */
   verifiedContacts: Record<string, string>;
+  /**
+   * Optional deletion tombstones: peer account id → deletedAt epoch ms.
+   * Present on builds that support contact delete; absent on older vaults
+   * (treated as empty). TTL-pruned by recordContactDeletion /
+   * wasContactRecentlyDeleted.
+   */
+  deletedContacts?: Record<string, number>;
 }
 
 const KEYSTORE_AD = utf8Encode("Zitrone-KeyStore-v1");
