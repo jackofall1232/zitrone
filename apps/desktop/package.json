@@ -1,6 +1,6 @@
 {
   "name": "@zitrone/desktop",
-  "version": "0.8.2-beta",
+  "version": "0.8.3-beta",
   "private": true,
   "description": "Zitrone Linux desktop app — Tauri v2 (frontend is apps/web)",
   "license": "AGPL-3.0-only",
