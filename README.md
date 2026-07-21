@@ -60,17 +60,17 @@ Full details in [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md).
 - 📌 TLS 1.3 with certificate pinning on every client — fail-closed against MITM, even on the desktop WebView
 - 🖥️ Native Linux desktop app — .deb, .AppImage, .rpm — with libsecret key storage and focus-loss screenshot blur
 
-### v1.5 — the security onion
+### v1.5 — the security lemon
 
 Five layered defenses, each built as if the one beneath it has already failed:
 
-- 🧅 **Plausible deniability** — two separate vaults behind two passphrases, with no cryptographic
+- 🤷‍♂️ **Plausible deniability** — two separate vaults behind two passphrases, with no cryptographic
   evidence the second exists and identical unlock timing for both (a **per-device** feature, safe
   because there is no cross-device account access; arriving on **Android** this release)
-- 📨 **Dead-drop mode** — anonymous, account-free message deposit; no metadata links the two parties
+- 🕵‍♂️💼 **Dead-drop mode** — anonymous, account-free message deposit; no metadata links the two parties
 - 🌫️ **Decoy traffic** — continuous cover traffic makes a real send indistinguishable from idle
-- 🔀 **Multi-hop relay** — 3-hop onion routing; no single relay knows both ends
-- 🧅 **I2P-first** — I2P is the primary transport (still in development — Tor is the active
+- 🧅 **Multi-hop relay** — 3-hop onion routing; no single relay knows both ends
+- 🤿 **I2P-first** — I2P is the primary transport (still in development — Tor is the active
   fallback today), clearnet only as a flagged last resort
 - 👻 **Standard / Stealth / Ghost** connection modes
 - 🍋 **Privacy view** — frosted-lemon blur until you reveal, for shoulder-surfing defense

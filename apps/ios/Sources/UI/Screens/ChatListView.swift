@@ -16,19 +16,24 @@ public struct ChatListView: View {
     public var onOpenConversation: (Conversation) -> Void
     public var onOpenSettings: () -> Void
     public var onCompose: () -> Void
+    /// Irreversible contact delete (crypto teardown). Host wires MessageStore.
+    public var onDeleteContact: ((Conversation) -> Void)?
 
     @State private var searchText = ""
+    @State private var pendingDelete: Conversation?
 
     public init(conversations: ConversationStore,
                 localFingerprint: String? = nil,
                 onOpenConversation: @escaping (Conversation) -> Void,
                 onOpenSettings: @escaping () -> Void,
-                onCompose: @escaping () -> Void) {
+                onCompose: @escaping () -> Void,
+                onDeleteContact: ((Conversation) -> Void)? = nil) {
         self.conversations = conversations
         self.localFingerprint = localFingerprint
         self.onOpenConversation = onOpenConversation
         self.onOpenSettings = onOpenSettings
         self.onCompose = onCompose
+        self.onDeleteContact = onDeleteContact
     }
 
     private var filtered: [Conversation] {
@@ -54,11 +59,39 @@ public struct ChatListView: View {
                 if filtered.isEmpty {
                     emptyState
                 } else {
-                    ConversationList(conversations: filtered, onSelect: onOpenConversation)
+                    ConversationList(
+                        conversations: filtered,
+                        onSelect: onOpenConversation,
+                        onDelete: onDeleteContact == nil ? nil : { pendingDelete = $0 }
+                    )
                 }
             }
 
             composeFAB
+        }
+        .confirmationDialog(
+            "Delete \(pendingDelete?.contact.displayName ?? "contact")?",
+            isPresented: Binding(
+                get: { pendingDelete != nil },
+                set: { if !$0 { pendingDelete = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete permanently", role: .destructive) {
+                if let conversation = pendingDelete {
+                    onDeleteContact?(conversation)
+                }
+                pendingDelete = nil
+            }
+            Button("Cancel", role: .cancel) {
+                pendingDelete = nil
+            }
+        } message: {
+            Text(
+                "This permanently destroys the encryption session and keys for this contact. " +
+                "Past messages become permanently undecryptable. You cannot undo this. " +
+                "Re-adding the same person starts a completely fresh handshake."
+            )
         }
     }
 

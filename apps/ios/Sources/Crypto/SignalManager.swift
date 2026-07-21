@@ -247,6 +247,38 @@ public final class ZitroneProtocolStore: IdentityKeyStore, PreKeyStore,
     public func hasSession(for address: ProtocolAddress) -> Bool {
         (try? keychain.data(forKey: Key.session(address))) != nil
     }
+
+    // MARK: Per-contact crypto teardown
+
+    /// Destroys Double Ratchet session state and the remote identity record for
+    /// one peer. Scans keychain account names with the session / remote-identity
+    /// prefixes so multi-device addresses for the same account name are covered.
+    ///
+    /// - Returns: `true` when every matching item was deleted (or none existed).
+    ///   `false` if any keychain delete threw — the caller must **not** report
+    ///   the contact deleted on `false` (durable fail-abort; matches Android).
+    public func destroyContactCrypto(contactID: UUID) -> Bool {
+        let name = contactID.uuidString.lowercased()
+        let prefixes = [
+            "session.\(name).",
+            "remote-identity.\(name).",
+            // Sender keys are unused in v1 1:1 messaging but share the same
+            // peer-scoped naming convention if/when groups land.
+            "sender-key.\(name).",
+        ]
+        do {
+            var keysToDelete: [String] = []
+            for prefix in prefixes {
+                keysToDelete.append(contentsOf: try keychain.keys(withPrefix: prefix))
+            }
+            for key in keysToDelete {
+                try keychain.delete(key)
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
 }
 
 /// High-level Signal Protocol facade: identity generation, prekey
@@ -623,6 +655,21 @@ public final class SignalManager {
     }
 
     // MARK: - Destruction
+
+    /// Per-contact cryptographic teardown. Destroys the Double Ratchet session
+    /// and remote identity for `contactID` only. Returns `false` if the wipe
+    /// could not be made durable — caller must abort the contact-delete UI
+    /// path and keep the contact intact (Android fail-abort semantics).
+    ///
+    /// Re-adding the same person afterwards requires a completely fresh X3DH
+    /// handshake; no prior session material is reused.
+    @discardableResult
+    public func destroyContact(_ contactID: UUID) -> Bool {
+        queue.sync {
+            sendCounters.removeValue(forKey: contactID)
+            return store.destroyContactCrypto(contactID: contactID)
+        }
+    }
 
     /// Account deletion: destroys all local key material irreversibly.
     public func wipe() throws {

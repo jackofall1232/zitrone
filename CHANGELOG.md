@@ -9,6 +9,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **iOS: full contact deletion (cryptographic teardown, not soft-delete).**
+  Long-press / context-menu on a conversation → confirm to burn known local
+  messages (best-effort peer burn), destroy the Double Ratchet session and
+  remote identity in Keychain for that peer only, remove the roster entry, and
+  persist a TTL-bounded tombstone (UserDefaults) so stragglers cannot resurrect
+  the contact after restart. Durable fail-abort if keychain teardown fails.
+  Re-add requires a fresh X3DH handshake. **Merged unverified** — there is no
+  Xcode/iOS toolchain in CI, so this needs an Xcode build + on-device test
+  before it ships in a release.
 - **Android: camera capture as an attachment source.** Compose attach menu
   offers Take photo (system camera via FileProvider staging under
   `cache/cameracapture/`, deleted immediately after load) alongside Photo
