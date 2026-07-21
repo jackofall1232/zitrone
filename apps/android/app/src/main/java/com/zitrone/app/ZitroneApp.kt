@@ -19,6 +19,7 @@ import com.zitrone.app.data.LemonDropRedeemer
 import com.zitrone.app.data.LemonDropScanOutcome
 import com.zitrone.app.data.LemonDropVeil
 import com.zitrone.app.data.MessageRepository
+import com.zitrone.app.data.MessageState
 import com.zitrone.app.data.SettingsRepository
 import com.zitrone.app.data.TransportState
 import com.zitrone.app.diagnostics.BootDiagnostics
@@ -29,6 +30,7 @@ import com.zitrone.app.net.HttpConnectI2pProber
 import com.zitrone.app.net.TransportResolver
 import com.zitrone.app.net.WsClient
 import com.zitrone.app.notifications.MessagingNotifications
+import com.zitrone.app.notifications.NotificationScheduler
 import com.zitrone.app.tor.TorIntegration
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -209,6 +211,32 @@ class AppContainer(private val app: Application) {
         }
     }
 
+    /**
+     * Rate-limits + re-fires the content-free notification. Constructed BEFORE
+     * the coordinator (which owns it). fire posts the one and only notification;
+     * isEnabled reads the live toggle at fire time so flipping it takes effect
+     * immediately; scope is the process-lifetime container scope.
+     */
+    val notificationScheduler = NotificationScheduler(
+        scope = scope,
+        fire = { MessagingNotifications.showNewMessage(app) },
+        isEnabled = { settingsRepository.settings.value.unreadReminderEnabled },
+        // Fire-time truth for the deferred re-fire: an unseen incoming message
+        // is one still in DELIVERED (READ/BURNING/removed don't count). Keeps
+        // the 2-minute boundary silent when short-TTL or remotely-burned
+        // messages already vanished.
+        hasUnread = { conversationId ->
+            messageRepository.conversationMessages(conversationId)
+                .any { !it.isMine && it.state == MessageState.DELIVERED }
+        },
+        // MONOTONIC clock, not wall time: an NTP sync or manual clock change
+        // moving wall time backward would stretch the 2-minute cooldown by the
+        // adjustment size and suppress alerts. elapsedRealtime() only ever
+        // moves forward. (The scheduler's wall-clock default exists solely for
+        // plain-JVM tests.)
+        clock = { android.os.SystemClock.elapsedRealtime() },
+    )
+
     val coordinator = MessagingCoordinator(
         appContext = app,
         scope = scope,
@@ -219,6 +247,7 @@ class AppContainer(private val app: Application) {
         conversations = conversationRepository,
         settings = settingsRepository,
         diagnostics = bootDiagnostics,
+        notificationScheduler = notificationScheduler,
     )
 
     init {

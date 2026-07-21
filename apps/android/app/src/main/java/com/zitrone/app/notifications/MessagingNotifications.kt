@@ -85,6 +85,21 @@ object MessagingNotifications {
      * Shows the one and only notification this app produces. A single fixed
      * id keeps multiple arrivals collapsed into one "New message" entry —
      * even the COUNT of pending messages is metadata we choose not to leak.
+     *
+     * ======================= SECURITY INVARIANT =======================
+     * This notification MUST be identical regardless of which identity/vault
+     * produced the triggering message: same channel, same content-free
+     * "New message" text, same sound, same single fixed [NOTIFICATION_ID],
+     * same priority, same extra-free tap intent. A notification that reveals
+     * which identity it came from — or that a second identity even exists —
+     * is a SECURITY FAILURE (it breaks plausible deniability). The single
+     * fixed id and content-free text are load-bearing: do NOT introduce
+     * per-conversation / per-identity ids, unread counts, sender info,
+     * previews, or intent extras. NotificationScheduler.cancelAll() tears the
+     * trigger layer down on an identity switch so nothing carries across.
+     * Language here is deliberately slot-agnostic — a decompiler reading these
+     * strings must learn nothing about how identities are stored.
+     * ==================================================================
      */
     fun showNewMessage(context: Context) {
         if (!canPost(context)) return
@@ -108,7 +123,11 @@ object MessagingNotifications {
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setContentIntent(contentIntent)
             .setAutoCancel(true)
-            .setOnlyAlertOnce(true)
+            // NO setOnlyAlertOnce: NotificationScheduler already rate-limits to
+            // at most one alert per conversation per ~2 min, so every call here
+            // IS an intended, audible alert. setOnlyAlertOnce would silence the
+            // re-fire buzz that is the entire point of the fix — a later arrival
+            // would update the single tray entry with no sound/vibration.
             .build()
 
         NotificationManagerCompat.from(context).notify(NOTIFICATION_ID, notification)

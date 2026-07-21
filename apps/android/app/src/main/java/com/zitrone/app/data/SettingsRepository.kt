@@ -43,6 +43,12 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
          * stays clean until the user opts in under Settings → Privacy.
          */
         val lemonDropComposeEnabled: Boolean = false,
+        /**
+         * Re-alert (roughly every 2 min) about a conversation that stays unread,
+         * instead of a single ping. Default ON — the single fixed-id notification
+         * otherwise goes silent after the first arrival. Global on/off.
+         */
+        val unreadReminderEnabled: Boolean = true,
     )
 
     private val _settings = MutableStateFlow(load())
@@ -68,6 +74,9 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
     fun setLemonDropComposeEnabled(enabled: Boolean) =
         put { putBoolean(KEY_LEMON_DROP_COMPOSE, enabled) }
 
+    fun setUnreadReminderEnabled(enabled: Boolean) =
+        put { putBoolean(KEY_UNREAD_REMINDER, enabled) }
+
     private fun put(edit: android.content.SharedPreferences.Editor.() -> Unit) {
         prefs.edit().apply(edit).apply()
         _settings.value = load()
@@ -82,6 +91,7 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
         torEnabled = prefs.getBoolean(KEY_TOR, false),
         i2pEnabled = prefs.getBoolean(KEY_I2P, true),
         lemonDropComposeEnabled = prefs.getBoolean(KEY_LEMON_DROP_COMPOSE, false),
+        unreadReminderEnabled = prefs.getBoolean(KEY_UNREAD_REMINDER, true),
     )
 
     companion object {
@@ -94,5 +104,6 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
         private const val KEY_TOR = "tor_enabled"
         private const val KEY_I2P = "i2p_enabled"
         private const val KEY_LEMON_DROP_COMPOSE = "lemon_drop_compose_enabled"
+        private const val KEY_UNREAD_REMINDER = "unread_reminder_enabled"
     }
 }

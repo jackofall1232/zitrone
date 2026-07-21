@@ -25,7 +25,7 @@ import com.zitrone.app.data.MessageState
 import com.zitrone.app.data.SettingsRepository
 import com.zitrone.app.net.ApiClient
 import com.zitrone.app.net.WsClient
-import com.zitrone.app.notifications.MessagingNotifications
+import com.zitrone.app.notifications.NotificationScheduler
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -87,6 +87,7 @@ class MessagingCoordinator(
     private val conversations: ConversationRepository,
     private val settings: SettingsRepository,
     private val diagnostics: BootDiagnostics,
+    private val notificationScheduler: NotificationScheduler,
 ) : WsClient.Listener {
 
     private val _typingPeers = MutableStateFlow<Set<String>>(emptySet())
@@ -128,6 +129,20 @@ class MessagingCoordinator(
      */
     @Volatile
     private var linkJob: Job? = null
+
+    /**
+     * Delivery gate. Cleared synchronously the instant a session is torn down
+     * ([onSessionRevoked]/[stop]/[deleteAccountAndWipe]) and set on [start].
+     * An [onMessageDeliver] coroutine can be parked at [withSessionLock] (behind
+     * a send holding the mutex across a network prekey fetch) when teardown
+     * fires; when it later resumes it must NOT add a message or arm a
+     * notification for a session that is gone. Re-checked right before the
+     * publish, so no delivery that resumes after teardown can post an alert or
+     * re-arm the reminder scheduler past a logout. @Volatile: written on the
+     * socket-callback/main threads, read on the confined dispatcher.
+     */
+    @Volatile
+    private var acceptingDeliveries = false
 
     /**
      * One mutex per contact serializes every Double Ratchet operation on
@@ -236,6 +251,7 @@ class MessagingCoordinator(
     fun start() {
         if (linkJob?.isActive == true) return
         _linking.value = true
+        acceptingDeliveries = true
         linkJob = scope.launch(confined) { bootstrapLoop() }
     }
 
@@ -344,8 +360,12 @@ class MessagingCoordinator(
 
     fun stop() {
         _linking.value = false
+        acceptingDeliveries = false
         linkJob?.cancel()
         ws.disconnect()
+        // Teardown hook: drop all pending re-fire jobs + fire state so nothing
+        // carries across an identity switch (see NotificationScheduler).
+        notificationScheduler.cancelAll()
     }
 
     /**
@@ -783,6 +803,16 @@ class MessagingCoordinator(
      * false for them).
      */
     fun onMessagesSeen(conversation: Conversation, messageIds: List<String>) {
+        // Messages became visible IN the open chat — that is a read for the
+        // reminder cycle, and it must happen for EVERY seen batch, BEFORE the
+        // newlyRead filter: burn-on-read messages deliberately return false
+        // from markRead (their read-state is the armed burn timer), so a
+        // burn-on-read-only batch has an empty newlyRead — but the user still
+        // visibly saw those messages, and an armed re-fire must not buzz at
+        // the boundary for them. newlyRead below decides receipts only.
+        if (messageIds.isNotEmpty()) {
+            notificationScheduler.onConversationRead(conversation.id)
+        }
         val newlyRead = messageIds.filter { messages.markRead(it) }
         if (newlyRead.isEmpty()) return
         if (!settings.settings.value.readReceipts) return
@@ -943,12 +973,17 @@ class MessagingCoordinator(
             }
             pendingReceipts.remove(contactId)
             _typingPeers.value = _typingPeers.value - contactId
+            // A deleted conversation must never buzz again: cancel any armed
+            // re-fire and drop its reminder state entirely, so a later re-add
+            // starts fresh (no inherited cooldown).
+            notificationScheduler.onConversationRemoved(conversationId)
             onComplete?.invoke()
         }
     }
 
     /** Wipes the server account AND the local keys/messages. Irreversible. */
     fun deleteAccountAndWipe(onComplete: () -> Unit) {
+        acceptingDeliveries = false
         scope.launch(confined) {
             _linking.value = false
             linkJob?.cancel()
@@ -956,6 +991,8 @@ class MessagingCoordinator(
             ws.disconnect()
             messages.clearAll()
             conversations.clearAll()
+            // Teardown hook: no re-fire job or fire state survives the wipe.
+            notificationScheduler.cancelAll()
             onComplete()
         }
     }
@@ -1003,6 +1040,18 @@ class MessagingCoordinator(
                     ws.ackMessage(envelope.id)
                     return@runCatching
                 }
+                // Revocation gate: this coroutine may have been parked at
+                // withSessionLock (behind a send holding the mutex across a
+                // prekey fetch) when the session was torn down; the ratchet has
+                // now advanced, but the account is gone. Do NOT publish or arm a
+                // notification — a resumed delivery must not alert or re-arm the
+                // reminder scheduler after a logout/wipe. Ack best-effort so the
+                // relay drops its copy.
+                if (!acceptingDeliveries) {
+                    diag("recv: delivery resumed after teardown — dropped, not published")
+                    ws.ackMessage(envelope.id)
+                    return@runCatching
+                }
                 val deliveredAtMs = runCatching {
                     Instant.parse(envelope.timestamp).toEpochMilli()
                 }.getOrDefault(System.currentTimeMillis())
@@ -1039,7 +1088,7 @@ class MessagingCoordinator(
                     // zero-knowledge. Best-effort: a dropped receipt just means
                     // the sender stays at SENT, never worse.
                     ws.sendReceived(envelope.id, envelope.senderId)
-                    MessagingNotifications.showNewMessage(appContext)
+                    notificationScheduler.onIncomingMessage(conversation.id)
                     redeemAttachment(envelope.id, attachment)
                     return@runCatching
                 }
@@ -1061,7 +1110,7 @@ class MessagingCoordinator(
                         ),
                     )
                     ws.ackMessage(envelope.id)
-                    MessagingNotifications.showNewMessage(appContext)
+                    notificationScheduler.onIncomingMessage(conversation.id)
                     return@runCatching
                 }
                 messages.addIncoming(
@@ -1084,10 +1133,21 @@ class MessagingCoordinator(
                 // message.delivered). See the attachment branch above for the
                 // zero-knowledge rationale.
                 ws.sendReceived(envelope.id, envelope.senderId)
-                // Content-free notification: always just "New message".
-                MessagingNotifications.showNewMessage(appContext)
+                // Content-free notification: always just "New message". The
+                // scheduler rate-limits + re-fires it per conversation.
+                notificationScheduler.onIncomingMessage(conversation.id)
             }
         }
+    }
+
+    /**
+     * The chat screen opened this conversation (unread cleared). Route the read
+     * through the coordinator — not straight into the scheduler — so the UI
+     * depends only on the coordinator. Resets the conversation's re-fire cycle
+     * so the next message alerts immediately.
+     */
+    fun onConversationRead(conversationId: String) {
+        notificationScheduler.onConversationRead(conversationId)
     }
 
     /**
@@ -1167,10 +1227,29 @@ class MessagingCoordinator(
     }
 
     override fun onSessionRevoked() {
+        // Fast, thread-safe teardown on the socket callback thread: stop the
+        // relink loop, drop tokens, and — BEFORE the UI is bounced to the gate —
+        // synchronously cancel every armed reminder job. Re-fire jobs run on
+        // the container scope (not the confined dispatcher), so one at its
+        // boundary could otherwise alert AFTER the user sees the logged-out
+        // state but before the queued cleanup below runs.
         _linking.value = false
+        acceptingDeliveries = false
         linkJob?.cancel()
-        messages.clearAll()
         api.clearTokens()
+        notificationScheduler.cancelAll()
+        // Second, SERIALIZED cancel behind any message.deliver work already
+        // queued on the confined dispatcher: those queued deliveries would
+        // otherwise re-add messages and re-arm reminder state AFTER the
+        // synchronous cancel above. Queued last, this block runs once they
+        // have drained, so nothing they armed survives either. (A delivery
+        // processed in between may still post one content-free alert — that
+        // message genuinely arrived before logout completed; no timer
+        // outlives this block.)
+        scope.launch(confined) {
+            messages.clearAll()
+            notificationScheduler.cancelAll()
+        }
         onForcedLogout?.invoke()
     }
 
