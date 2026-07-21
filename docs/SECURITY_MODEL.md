@@ -444,12 +444,39 @@ identity with **no cross-device account access** (see "Single-device by design")
 a decoy vault on one device has no account-sync channel through which its
 existence could leak to another device — there is none to leak through. That is
 precisely why the feature can ship on one platform at a time without weakening the
-deniability guarantee. Plausible deniability is **being built for the current
-Android release**; the fixed-size image, timing-parity, and blind-overwrite model
-described above is applied to Android's own encrypted store. Other platforms show
-a **single default identity** until and unless they implement the same key-slot
-scheme independently — a device without the feature simply has one vault, which is
-itself indistinguishable from a device that has more.
+deniability guarantee. Other platforms show a **single default identity** until
+and unless they implement the same key-slot scheme independently — a device
+without the feature simply has one vault, which is itself indistinguishable from
+a device that has more.
+
+**Implementation status, stated honestly.** The key-slot crypto primitive above is
+built and tested in `packages/crypto` (web/desktop storage layer). The **Android
+vault runtime is not yet implemented** — its full architecture (dual-slot model,
+PIN-fallback unlock routing, teardown-on-switch, setup and destruction flows) is a
+**locked design**, specified in [`docs/VAULT_ARCHITECTURE.md`](VAULT_ARCHITECTURE.md),
+and lands as its own dedicated, adversarially-reviewed track. What ships ahead of it
+is the **vault-ready notification structure** (below). No release before that track
+completes should be described as having a usable second vault.
+
+Two invariants from that architecture are restated here because they are permanent
+security properties, not implementation details:
+
+- **Vault unlock and vault routing are 100% local, forever.** The relay never sees,
+  stores, verifies, or can infer how many vaults exist on a device, which passphrase
+  corresponds to which vault, or any verifier/hash/challenge related to vault unlock.
+  Each vault is just an independently-pinned identity, indistinguishable from any
+  unrelated user's account. No future convenience feature (e.g. any form of
+  passphrase-recovery assistance) may introduce server involvement in vault unlock —
+  doing so breaks this guarantee. (`docs/VAULT_ARCHITECTURE.md` §5.)
+- **Notification parity.** A notification triggered by a message arriving in either
+  vault must be identical in every observable way — content, sound, vibration,
+  channel, priority, icon, tap behavior — and tapping one must land on the ordinary
+  lock screen with no unlock bypass and no pre-unlock hint of which identity has a
+  message. A notification that reveals which vault produced it, or that a second
+  vault exists at all, is a security failure. The Android notification path is built
+  to this requirement today: one fixed notification id, content-free text, an
+  extra-free tap intent, and per-instance reminder state with a full-teardown hook —
+  guarded by invariant comments at the trigger sites. (`docs/VAULT_ARCHITECTURE.md` §7.)
 
 ### Transport hierarchy (I2P primary, Tor fallback)
 

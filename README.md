@@ -66,7 +66,8 @@ Five layered defenses, each built as if the one beneath it has already failed:
 
 - 🤷‍♂️ **Plausible deniability** — two separate vaults behind two passphrases, with no cryptographic
   evidence the second exists and identical unlock timing for both (a **per-device** feature, safe
-  because there is no cross-device account access; arriving on **Android** this release)
+  because there is no cross-device account access; crypto primitive built, Android runtime is a
+  locked design landing as its own track — see [docs/VAULT_ARCHITECTURE.md](docs/VAULT_ARCHITECTURE.md))
 - 🕵‍♂️💼 **Dead-drop mode** — anonymous, account-free message deposit; no metadata links the two parties
 - 🌫️ **Decoy traffic** — continuous cover traffic makes a real send indistinguishable from idle
 - 🧅 **Multi-hop relay** — 3-hop onion routing; no single relay knows both ends
