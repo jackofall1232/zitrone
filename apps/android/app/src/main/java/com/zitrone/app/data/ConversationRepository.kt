@@ -82,6 +82,7 @@ class ConversationRepository(
     fun findByContact(contactId: String): Conversation? =
         _conversations.value.firstOrNull { it.contactId == contactId }
 
+    @Synchronized
     fun upsert(conversation: Conversation) {
         setConversations(
             _conversations.value
@@ -92,6 +93,7 @@ class ConversationRepository(
     }
 
     /** Bumps activity + unread counter when a message arrives. */
+    @Synchronized
     fun onIncomingMessage(contactId: String, displayName: String? = null): Conversation {
         val existing = findByContact(contactId)
         val updated = existing?.copy(
@@ -108,14 +110,17 @@ class ConversationRepository(
         return updated
     }
 
+    @Synchronized
     fun onOutgoingMessage(conversationId: String) {
         find(conversationId)?.let { upsert(it.copy(lastActivityMs = clock())) }
     }
 
+    @Synchronized
     fun markConversationRead(conversationId: String) {
         find(conversationId)?.let { upsert(it.copy(unreadCount = 0)) }
     }
 
+    @Synchronized
     fun setVerified(conversationId: String, verified: Boolean) {
         find(conversationId)?.let {
             upsert(it.copy(verified = verified, keyChanged = if (verified) false else it.keyChanged))
@@ -130,6 +135,7 @@ class ConversationRepository(
      * @return the sanitized name on success, or null if validation rejected the input
      *         (empty after trim, or over [DISPLAY_NAME_MAX_LEN]).
      */
+    @Synchronized
     fun setDisplayName(conversationId: String, rawName: String): String? {
         val name = sanitizeDisplayName(rawName) ?: return null
         find(conversationId)?.let { upsert(it.copy(displayName = name)) }
@@ -138,6 +144,7 @@ class ConversationRepository(
     }
 
     /** Identity key changed for a contact — surface the warning badge. */
+    @Synchronized
     fun flagKeyChanged(contactId: String, newIdentityKeyBase64: String) {
         findByContact(contactId)?.let {
             upsert(
@@ -155,12 +162,14 @@ class ConversationRepository(
      * pinned when this contact was added. Raise the warning and drop verified,
      * but KEEP the pinned key (do not adopt the relay's substitute).
      */
+    @Synchronized
     fun flagIdentityMismatch(contactId: String) {
         findByContact(contactId)?.let {
             upsert(it.copy(keyChanged = true, verified = false))
         }
     }
 
+    @Synchronized
     fun remove(conversationId: String) {
         setConversations(_conversations.value.filterNot { it.id == conversationId })
     }
@@ -172,6 +181,7 @@ class ConversationRepository(
      * roster blob that resurrects the deleted contact. Returns true when the
      * store is [readOnly] (nothing is persisted, so there is nothing to lose).
      */
+    @Synchronized
     fun removeDurably(conversationId: String): Boolean {
         _conversations.value = _conversations.value.filterNot { it.id == conversationId }
         if (readOnly) return true
@@ -179,6 +189,7 @@ class ConversationRepository(
             .getOrDefault(false)
     }
 
+    @Synchronized
     fun clearAll() {
         setConversations(emptyList())
     }

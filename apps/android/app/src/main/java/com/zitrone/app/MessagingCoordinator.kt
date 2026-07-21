@@ -157,25 +157,48 @@ class MessagingCoordinator(
      * [deleteContact], so a delete can never slip between the check and the
      * publish. Blocking work that must not stall this one worker (the network
      * prekey fetch; nothing else) suspends off it as usual. The crypto teardown
-     * in [deleteContact] deliberately runs ON this worker (a background
-     * Default-pool thread, never main) as a short, non-suspending local commit,
-     * so it is mutually exclusive with any same-contact encrypt/decrypt rather
-     * than racing them across threads — which is why deletion needs no session
-     * lock and cannot be stalled behind an in-flight send's network fetch.
+     * in [deleteContact] deliberately runs ON this worker (a background IO-pool
+     * thread, never main) as a short, non-suspending local commit, so it is
+     * mutually exclusive with any same-contact encrypt/decrypt rather than
+     * racing them across threads — which is why deletion needs no session lock
+     * and cannot be stalled behind an in-flight send's network fetch.
+     *
+     * IO (not Default) because this worker performs blocking disk commits
+     * (EncryptedSharedPreferences); `limitedParallelism(1)` still gives the
+     * single-worker confinement guarantee.
      */
     @OptIn(ExperimentalCoroutinesApi::class)
-    private val confined = Dispatchers.Default.limitedParallelism(1)
+    private val confined = Dispatchers.IO.limitedParallelism(1)
 
     /**
-     * Whether [contactId] is still a live roster entry. The authoritative
-     * "is this contact deleted?" signal: [deleteContact] removes the roster
-     * entry as its last step, so a `false` here (checked with no suspension
-     * before the dependent mutation) means the contact was torn down and no
-     * envelope may be deposited, no plaintext published, and no conversation
-     * recreated for it.
+     * Contacts explicitly torn down by [deleteContact] this process lifetime.
+     * The authoritative "was this contact DELETED?" signal — distinct from
+     * "absent from the roster", which is also true for a brand-new inbound
+     * sender that TOFU has not added yet. Used only on the inbound path (see
+     * [isDeletedContact]); a straggler message from a deleted contact must be
+     * dropped, while a first message from a never-seen sender must still create
+     * an "Unknown contact". Re-adding a contact makes it a live roster entry
+     * again, at which point the stale tombstone is inert (see [isDeletedContact]).
+     */
+    private val deletedContacts: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /**
+     * Whether [contactId] is still a live roster entry. Used by the send/deliver
+     * publish tails: a send is always to an existing conversation, so a `false`
+     * here means the contact was torn down mid-send and nothing may be deposited
+     * or published for it.
      */
     private fun contactExists(contactId: String): Boolean =
         conversations.findByContact(contactId) != null
+
+    /**
+     * Whether [contactId] was explicitly deleted and has NOT since been re-added.
+     * The inbound guard: true only for a genuine deleted-contact straggler, never
+     * for a first-time inbound sender (absent from both the roster and this set)
+     * nor for a re-added contact (a live roster entry again).
+     */
+    private fun isDeletedContact(contactId: String): Boolean =
+        deletedContacts.contains(contactId) && !contactExists(contactId)
 
     /**
      * Read receipts awaiting a live socket, keyed by contact. Queued when the
@@ -907,11 +930,24 @@ class MessagingCoordinator(
                 onComplete?.invoke()
                 return@launch
             }
+            // Tombstone the contact so a straggler inbound message (a PreKey
+            // message would otherwise TOFU-establish a fresh session and pop the
+            // contact back as "Unknown") is dropped, without also blocking
+            // genuine first-time inbound senders. See isDeletedContact.
+            deletedContacts.add(contactId)
             // Peer-burn is best-effort (an offline burn frame is not re-queued);
             // the dialog copy states this. Runs after the durable wipe, while the
             // roster entry still resolves the peer for onMessageBurned.
             messages.burnAll(conversationId, notifyPeer = true)
-            conversations.removeDurably(conversationId)
+            // Crypto is already durably gone and messages are burned, so we can't
+            // roll back; if the roster write did not reach disk we surface it
+            // rather than reporting a clean delete. The residual is bounded and
+            // safe: a restart would show a session-less ghost (its crypto is
+            // gone, so a re-add performs a fresh X3DH), which the user can remove
+            // again — never a contact that can still send/receive.
+            if (!conversations.removeDurably(conversationId)) {
+                diag("delete: roster removal did not reach disk — contact gone in-memory; a restart may show a session-less ghost")
+            }
             pendingReceipts.remove(contactId)
             _typingPeers.value = _typingPeers.value - contactId
             onComplete?.invoke()
@@ -962,15 +998,18 @@ class MessagingCoordinator(
                 val deliveredAtMs = runCatching {
                     Instant.parse(envelope.timestamp).toEpochMilli()
                 }.getOrDefault(System.currentTimeMillis())
-                // If the contact was deleted, this inbound message must not
+                // If this is a straggler from a DELETED contact, it must not
                 // recreate the conversation (onIncomingMessage below would) or
                 // surface plaintext. This check → the publish below is a single
                 // non-suspending run on the confinement worker, so it is atomic
                 // against deleteContact. A PreKey message can re-establish a
                 // session inside decrypt above (TOFU responder), so re-tear-down
                 // to leave no orphaned session for a removed contact, ack so the
-                // relay drops its copy, and stop.
-                if (!contactExists(envelope.senderId)) {
+                // relay drops its copy, and stop. NOTE: this deliberately keys on
+                // the deletion tombstone, NOT mere roster absence — a first-time
+                // inbound sender is legitimately absent and must still create an
+                // "Unknown contact" (see isDeletedContact).
+                if (isDeletedContact(envelope.senderId)) {
                     diag("recv: message for deleted contact — dropped, session re-torn-down")
                     signal.destroyContact(envelope.senderId)
                     ws.ackMessage(envelope.id)
