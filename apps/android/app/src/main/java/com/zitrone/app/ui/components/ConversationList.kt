@@ -115,10 +115,10 @@ fun DeleteContactConfirmDialog(
         },
         text = {
             Text(
-                text = "This burns every message with “$displayName” on both sides, " +
-                    "then permanently destroys the encryption session — identity key, " +
-                    "ratchet keys, and the contact entry. Re-adding them later starts a " +
-                    "completely fresh key exchange.\n\n" +
+                text = "This burns every message with “$displayName” on this device and " +
+                    "signals them to burn their copies, then permanently destroys the " +
+                    "encryption session — identity key, ratchet keys, and the contact " +
+                    "entry. Re-adding them later starts a completely fresh key exchange.\n\n" +
                     "This cannot be undone.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = TextSecondary,

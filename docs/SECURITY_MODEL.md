@@ -145,6 +145,14 @@ state, the peer's remote identity record, and any messages already known in loca
 (including in-flight ones still held in the message repository), and removes the roster
 entry. Display names and contact lists never leave the device.
 
+The crypto teardown is a single **synchronous, durable** transaction; if it cannot be
+flushed to disk the deletion is aborted and the contact is kept (no half-deleted state
+where the keys survive but the contact vanished). Any message that is still being sent to,
+or received from, the contact at the moment of deletion is dropped rather than deposited or
+surfaced, so no ciphertext reaches — and no plaintext reappears for — a contact the user
+deleted. The peer-side burn is **best-effort**: the client asks the peer to burn its copies
+of messages it still knows about, but that signal is not re-queued if the transport is down.
+
 **Deleting a contact does not immediately purge any not-yet-delivered envelopes from the
 relay; they expire via the standard TTL window like any other undelivered message.** The
 existing per-message `message.burn` path only notifies the peer for messages the client

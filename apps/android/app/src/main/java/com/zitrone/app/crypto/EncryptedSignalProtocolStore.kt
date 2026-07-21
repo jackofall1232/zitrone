@@ -167,14 +167,20 @@ class EncryptedSignalProtocolStore(
      * to disk before this returns, so a crash or power loss immediately after
      * teardown cannot resurrect a deleted session or identity. One `prefs.all`
      * scan, one write (vs. three separate async `apply()`s).
+     *
+     * @return the [android.content.SharedPreferences.Editor.commit] result —
+     *         `false` means the wipe did NOT reach disk (I/O error / storage
+     *         exhaustion). The caller must NOT report the contact deleted on
+     *         `false`, or orphaned session/identity state can reappear on
+     *         restart and be reused instead of forcing a fresh X3DH.
      */
-    fun destroyContactCrypto(name: String) {
+    fun destroyContactCrypto(name: String): Boolean {
         val editor = prefs.edit()
         val prefixes = listOf(KEY_SESSION, KEY_REMOTE_IDENTITY, KEY_SENDER_KEY)
         prefs.all.keys
             .filter { key -> prefixes.any { key.startsWith("$it$name:") } }
             .forEach(editor::remove)
-        editor.commit()
+        return editor.commit()
     }
 
     // -- Kyber prekeys (post-quantum, required by the store interface) --------

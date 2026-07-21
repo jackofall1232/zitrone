@@ -28,8 +28,10 @@ import com.zitrone.app.net.WsClient
 import com.zitrone.app.notifications.MessagingNotifications
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -152,6 +154,9 @@ class MessagingCoordinator(
 
     private fun contactEpoch(contactId: String): Int = contactEpochs[contactId] ?: 0
 
+    /** Outcome of a guarded envelope deposit — see [depositIfNotPurged]. */
+    private enum class DepositOutcome { DEPOSITED, SOCKET_DOWN, PURGED }
+
     /**
      * Hand [envelope] to the socket only if [contactId] was not torn down after
      * [epochAtEncrypt] was captured. The epoch check and the ws enqueue run
@@ -160,20 +165,16 @@ class MessagingCoordinator(
      * deposit. If the contact was deleted (or deleted-and-re-added) mid-send,
      * the already-encrypted envelope is dropped and never reaches the relay —
      * no ciphertext is deposited for a contact the user was told is gone.
-     *
-     * @return true if enqueued; false if the socket was down OR the contact was
-     *         purged mid-send (caller flips the local copy to FAILED either way).
      */
     private suspend fun depositIfNotPurged(
         contactId: String,
         epochAtEncrypt: Int,
         envelope: MessageEnvelope,
-    ): Boolean = withSessionLock(contactId) {
-        if (contactEpoch(contactId) != epochAtEncrypt) {
-            diag("send: contact torn down mid-send — envelope dropped, not deposited")
-            false
-        } else {
-            ws.sendMessage(envelope)
+    ): DepositOutcome = withSessionLock(contactId) {
+        when {
+            contactEpoch(contactId) != epochAtEncrypt -> DepositOutcome.PURGED
+            ws.sendMessage(envelope) -> DepositOutcome.DEPOSITED
+            else -> DepositOutcome.SOCKET_DOWN
         }
     }
 
@@ -473,16 +474,24 @@ class MessagingCoordinator(
             }
 
             stage = "ws-send"
-            if (depositIfNotPurged(conversation.contactId, epochAtEncrypt, envelope)) {
-                // Enqueued — but honestly still just SENDING. The tick waits for
-                // the relay's message.stored (→SENT) and the recipient's
-                // message.delivered (→DELIVERED); see [MessageState].
-            } else {
-                // Socket not open, or the contact was deleted mid-send: either
-                // way the send did not (and must not) reach the relay.
-                // Connection state only — never the envelope.
-                diag("send: hand-off failed — socket down or contact purged (${ws.connectionState.value})")
-                messages.markFailed(messageId)
+            when (depositIfNotPurged(conversation.contactId, epochAtEncrypt, envelope)) {
+                DepositOutcome.DEPOSITED -> {
+                    // Enqueued — but honestly still just SENDING. The tick waits
+                    // for the relay's message.stored (→SENT) and the recipient's
+                    // message.delivered (→DELIVERED); see [MessageState].
+                }
+                DepositOutcome.SOCKET_DOWN -> {
+                    // Socket not open: the send did not reach the relay.
+                    // Connection state only — never the envelope.
+                    diag("send: hand-off failed — socket not open (${ws.connectionState.value})")
+                    messages.markFailed(messageId)
+                }
+                DepositOutcome.PURGED -> {
+                    // Contact deleted mid-send: the envelope was dropped, so the
+                    // local plaintext must go too (not linger as a FAILED bubble).
+                    diag("send: contact deleted mid-send — dropping local copy")
+                    messages.discard(messageId)
+                }
             }
         }.onFailure { e ->
             if (e is CancellationException) throw e
@@ -670,13 +679,20 @@ class MessagingCoordinator(
                 mediaType = MessageEnvelope.MEDIA_TEXT,
             )
             stage = "ws-send"
-            if (depositIfNotPurged(conversation.contactId, epochAtEncrypt, envelope)) {
-                // Enqueued — honestly still SENDING until the relay/peer acks.
-            } else {
-                // Socket down, or the contact was deleted while the blob
-                // uploaded: the envelope did not (and must not) reach the relay.
-                diag("send: hand-off failed — socket down or contact purged (${ws.connectionState.value})")
-                messages.markFailed(messageId)
+            when (depositIfNotPurged(conversation.contactId, epochAtEncrypt, envelope)) {
+                DepositOutcome.DEPOSITED -> {
+                    // Enqueued — honestly still SENDING until the relay/peer acks.
+                }
+                DepositOutcome.SOCKET_DOWN -> {
+                    diag("send: hand-off failed — socket not open (${ws.connectionState.value})")
+                    messages.markFailed(messageId)
+                }
+                DepositOutcome.PURGED -> {
+                    // Contact deleted while the blob uploaded: drop the envelope
+                    // AND the local copy (incl. the in-memory attachment bytes).
+                    diag("send: contact deleted mid-send — dropping local copy")
+                    messages.discard(messageId)
+                }
             }
         }.onFailure { e ->
             if (e is CancellationException) throw e
@@ -772,8 +788,10 @@ class MessagingCoordinator(
             val accountId = api.accountId ?: return@launch
             runCatching {
                 val plaintext = ControlPayload.readReceipt(messageIds)
+                var epochAtEncrypt = 0
                 val encrypted = withSessionLock(contactId) {
                     if (!signal.hasSession(contactId)) return@withSessionLock null
+                    epochAtEncrypt = contactEpoch(contactId)
                     // Padded like every text message, so ciphertext length
                     // can't fingerprint the receipt either.
                     signal.encrypt(contactId, MessagePadding.pad(plaintext.toByteArray(Charsets.UTF_8)))
@@ -794,13 +812,21 @@ class MessagingCoordinator(
                     burnOnRead = false,
                     mediaType = MessageEnvelope.MEDIA_TEXT,
                 )
-                if (!ws.sendMessage(envelope)) {
-                    // Socket down. The messages are already READ locally, so
-                    // they will never re-enter onMessagesSeen — queue the ids
-                    // for the reconnect flush. Connection state only — never
-                    // the envelope.
-                    diag("receipt: hand-off failed — queued (${ws.connectionState.value})")
-                    queueReceipts(contactId, messageIds)
+                when (depositIfNotPurged(contactId, epochAtEncrypt, envelope)) {
+                    DepositOutcome.DEPOSITED -> Unit
+                    DepositOutcome.SOCKET_DOWN -> {
+                        // Socket down. The messages are already READ locally, so
+                        // they will never re-enter onMessagesSeen — queue the ids
+                        // for the reconnect flush. Connection state only — never
+                        // the envelope.
+                        diag("receipt: hand-off failed — queued (${ws.connectionState.value})")
+                        queueReceipts(contactId, messageIds)
+                    }
+                    DepositOutcome.PURGED -> {
+                        // Contact deleted before the receipt went out — drop it
+                        // (no post-delete ciphertext), and do not queue.
+                        diag("receipt: contact deleted mid-send — dropped, not queued")
+                    }
                 }
             }.onFailure { e ->
                 if (e is CancellationException) throw e
@@ -854,13 +880,24 @@ class MessagingCoordinator(
             // the peer and send message.burn frames.
             messages.burnAll(conversationId, notifyPeer = true)
             // Hold the session lock so an in-flight encrypt/decrypt can't race
-            // a teardown and re-persist a destroyed SessionRecord. Bumping the
-            // epoch here (under the lock) makes any send that already encrypted
-            // for this contact refuse to deposit its envelope — see
-            // depositIfNotPurged.
-            withSessionLock(contactId) {
-                signal.destroyContact(contactId)
-                contactEpochs.merge(contactId, 1, Int::plus)
+            // a teardown and re-persist a destroyed SessionRecord. The teardown
+            // does blocking EncryptedSharedPreferences I/O (synchronous commit),
+            // so run it on Dispatchers.IO. Bumping the epoch (under the lock, and
+            // only on a durable wipe) makes any send that already encrypted for
+            // this contact refuse to deposit its envelope — see depositIfNotPurged.
+            val wiped = withSessionLock(contactId) {
+                val ok = withContext(Dispatchers.IO) { signal.destroyContact(contactId) }
+                if (ok) contactEpochs[contactId] = contactEpoch(contactId) + 1
+                ok
+            }
+            if (!wiped) {
+                // Teardown did not reach disk (I/O error / storage full). Do NOT
+                // report the contact deleted: keeping the roster entry lets the
+                // user retry, and leaves no half-deleted state where the crypto
+                // survives on disk but the contact vanished from the UI.
+                diag("delete: crypto teardown commit failed — aborting, contact kept")
+                onComplete?.invoke()
+                return@launch
             }
             conversations.remove(conversationId)
             pendingReceipts.remove(contactId)
@@ -887,8 +924,13 @@ class MessagingCoordinator(
         scope.launch {
             runCatching {
                 // Decrypt advances the receiving ratchet — serialize it with
-                // any concurrent encrypt for the same contact.
+                // any concurrent encrypt for the same contact. Capture the
+                // teardown epoch under the same lock so a delete that lands
+                // after decrypt can't have this inbound message resurrect the
+                // conversation below.
+                var epochAtDecrypt = 0
                 val plaintext = withSessionLock(envelope.senderId) {
+                    epochAtDecrypt = contactEpoch(envelope.senderId)
                     signal.decrypt(
                         remoteAccountId = envelope.senderId,
                         ciphertextBase64 = envelope.ciphertext,
@@ -912,6 +954,14 @@ class MessagingCoordinator(
                 val deliveredAtMs = runCatching {
                     Instant.parse(envelope.timestamp).toEpochMilli()
                 }.getOrDefault(System.currentTimeMillis())
+                // If the contact was deleted while this message was in flight,
+                // do NOT recreate the conversation or surface the plaintext. Ack
+                // so the relay drops its copy — the user deleted this contact.
+                if (contactEpoch(envelope.senderId) != epochAtDecrypt) {
+                    diag("recv: contact deleted mid-delivery — message dropped, not shown")
+                    ws.ackMessage(envelope.id)
+                    return@runCatching
+                }
                 val conversation = conversations.onIncomingMessage(envelope.senderId)
                 // Attachments ride inside ordinary envelopes too (see
                 // AttachmentControlPayload) — recognize them AFTER receipts but
