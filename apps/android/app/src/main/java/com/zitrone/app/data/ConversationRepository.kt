@@ -122,6 +122,21 @@ class ConversationRepository(
         }
     }
 
+    /**
+     * Updates the local-only display label for a contact. Does not touch session
+     * state, identity keys, pinned keys, safety numbers, or anything transmitted
+     * off-device — [Conversation.displayName] is UI chrome stored in the roster blob.
+     *
+     * @return the sanitized name on success, or null if validation rejected the input
+     *         (empty after trim, or over [DISPLAY_NAME_MAX_LEN]).
+     */
+    fun setDisplayName(conversationId: String, rawName: String): String? {
+        val name = sanitizeDisplayName(rawName) ?: return null
+        find(conversationId)?.let { upsert(it.copy(displayName = name)) }
+            ?: return null
+        return name
+    }
+
     /** Identity key changed for a contact — surface the warning badge. */
     fun flagKeyChanged(contactId: String, newIdentityKeyBase64: String) {
         findByContact(contactId)?.let {
@@ -249,5 +264,32 @@ class ConversationRepository(
         private const val SCHEMA_VERSION = 1
         private const val KEY_SCHEMA = "schema_version"
         private const val KEY_CONVERSATIONS = "conversations"
+
+        /** Hard cap on contact labels rendered in the UI (and stored in the roster). */
+        const val DISPLAY_NAME_MAX_LEN = 64
+
+        /**
+         * Trim, strip control characters, collapse whitespace, reject empty /
+         * over-long. Pure function for unit tests. Display names are local labels
+         * only — never fed into crypto or the wire.
+         */
+        fun sanitizeDisplayName(raw: String): String? {
+            val collapsed = buildString(raw.length) {
+                var pendingSpace = false
+                for (ch in raw.trim()) {
+                    when {
+                        ch.isISOControl() -> Unit
+                        ch.isWhitespace() -> pendingSpace = true
+                        else -> {
+                            if (pendingSpace && isNotEmpty()) append(' ')
+                            pendingSpace = false
+                            append(ch)
+                        }
+                    }
+                }
+            }
+            if (collapsed.isEmpty() || collapsed.length > DISPLAY_NAME_MAX_LEN) return null
+            return collapsed
+        }
     }
 }

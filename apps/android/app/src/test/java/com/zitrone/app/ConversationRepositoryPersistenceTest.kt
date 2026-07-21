@@ -131,4 +131,40 @@ class ConversationRepositoryPersistenceTest {
         assertEquals(listOf("bob"), restored.conversations.value.map { it.id })
         assertNull(restored.find("alice"))
     }
+
+    @Test
+    fun `setDisplayName updates the local label only and persists`() {
+        val store = FakeRosterStore()
+        val repo = ConversationRepository(store)
+        repo.upsert(conversation("alice", verified = true, pinned = "pin-a"))
+
+        assertEquals("New Label", repo.setDisplayName("alice", "  New   Label  "))
+        assertEquals("New Label", repo.find("alice")!!.displayName)
+        // Crypto-adjacent fields unchanged.
+        assertEquals("pin-a", repo.find("alice")!!.pinnedIdentityKeyBase64)
+        assertTrue(repo.find("alice")!!.verified)
+
+        val restored = ConversationRepository(store)
+        assertEquals("New Label", restored.find("alice")!!.displayName)
+        assertEquals("pin-a", restored.find("alice")!!.pinnedIdentityKeyBase64)
+    }
+
+    @Test
+    fun `sanitizeDisplayName rejects empty and over-long`() {
+        assertNull(ConversationRepository.sanitizeDisplayName("   "))
+        assertNull(ConversationRepository.sanitizeDisplayName(""))
+        assertNull(
+            ConversationRepository.sanitizeDisplayName(
+                "x".repeat(ConversationRepository.DISPLAY_NAME_MAX_LEN + 1),
+            ),
+        )
+        assertEquals(
+            "x".repeat(ConversationRepository.DISPLAY_NAME_MAX_LEN),
+            ConversationRepository.sanitizeDisplayName(
+                "x".repeat(ConversationRepository.DISPLAY_NAME_MAX_LEN),
+            ),
+        )
+        // Control chars stripped.
+        assertEquals("ab", ConversationRepository.sanitizeDisplayName("a\u0000b\n"))
+    }
 }

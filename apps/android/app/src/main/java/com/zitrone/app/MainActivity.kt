@@ -496,6 +496,12 @@ private fun ZitroneRoot(
                         onBack = { route = Route.ChatList },
                         onVerifyKeys = { route = Route.Verify(conversation.id) },
                         onBurnAll = { container.messageRepository.burnAll(conversation.id) },
+                        onRename = { newName ->
+                            container.conversationRepository.setDisplayName(
+                                conversation.id,
+                                newName,
+                            ) != null
+                        },
                         onSend = { text, ttl, burn ->
                             container.coordinator.sendText(conversation, text, ttl, burn)
                         },
