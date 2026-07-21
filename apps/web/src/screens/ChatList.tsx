@@ -16,12 +16,15 @@ export function ChatList({ onOpenSettings }: { onOpenSettings: () => void }) {
   const activePeer = useApp((s) => s.activePeer);
   const setActivePeer = useApp((s) => s.setActivePeer);
   const addContact = useApp((s) => s.addContact);
+  const deleteContact = useApp((s) => s.deleteContact);
   const accountId = useApp((s) => s.accountId);
   const localFingerprint = useApp((s) => s.localFingerprint);
   const [adding, setAdding] = useState(false);
   const [peerId, setPeerId] = useState("");
   const [name, setName] = useState("");
   const [addError, setAddError] = useState<string | undefined>();
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
   const conversations = Object.entries(contacts).map(([id, c]) => ({
     id,
@@ -29,6 +32,9 @@ export function ChatList({ onOpenSettings }: { onOpenSettings: () => void }) {
     verified: keyStore?.verifiedContacts[id] === c.identityKey,
     unreadCount: (messages[id] ?? []).filter((m) => m.direction === "received" && !m.opened).length,
   }));
+
+  const pendingName =
+    pendingDelete != null ? (contacts[pendingDelete]?.displayName ?? "this contact") : "";
 
   // Same security-paper watermark as ChatView, behind the conversation list. A
   // fixed conversation id ("chat-list") stands in for the per-peer id in the
@@ -72,6 +78,7 @@ export function ChatList({ onOpenSettings }: { onOpenSettings: () => void }) {
           conversations={conversations}
           activeId={activePeer ?? undefined}
           onSelect={setActivePeer}
+          onDelete={(id) => setPendingDelete(id)}
         />
         {conversations.length === 0 && (
           <p className="px-4 py-8 text-center text-sm text-ink-muted">
@@ -79,6 +86,52 @@ export function ChatList({ onOpenSettings }: { onOpenSettings: () => void }) {
           </p>
         )}
       </div>
+
+      {pendingDelete && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-contact-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+        >
+          <div className="w-full max-w-sm rounded-xl border border-line bg-bg-elevated p-5 shadow-lg">
+            <h2 id="delete-contact-title" className="font-display text-base font-semibold text-ink-primary">
+              Delete {pendingName}?
+            </h2>
+            <p className="mt-2 text-sm text-ink-secondary">
+              This permanently destroys the encryption session and keys for this
+              contact. Past messages become permanently undecryptable. You cannot
+              undo this. Re-adding the same person starts a completely fresh
+              handshake.
+            </p>
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                disabled={deleteBusy}
+                onClick={() => {
+                  setDeleteBusy(true);
+                  void deleteContact(pendingDelete)
+                    .then(() => {
+                      setPendingDelete(null);
+                    })
+                    .finally(() => setDeleteBusy(false));
+                }}
+                className="flex-1 rounded-full bg-burn-red py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+              >
+                {deleteBusy ? "Deleting…" : "Delete permanently"}
+              </button>
+              <button
+                type="button"
+                disabled={deleteBusy}
+                onClick={() => setPendingDelete(null)}
+                className="rounded-full px-4 text-sm text-ink-secondary hover:text-ink-primary disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {adding ? (
         <form
