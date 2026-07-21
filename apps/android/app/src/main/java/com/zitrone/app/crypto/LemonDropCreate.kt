@@ -176,28 +176,35 @@ object LemonDropCreate {
         bundle: RecipientBundle,
         text: String,
     ): Result {
-        // Family classification — the client mirror of the relay's try-both
-        // verifySignedPrekey (handlers.go) and the web classifyBundleIdentity:
-        // plain Ed25519 over the raw prekey (web/desktop), else XEdDSA over the
-        // 33-byte tagged form (Android/iOS). FAIL CLOSED — neither ⇒ refuse.
-        val family = classify(sodium, verifyXEdDSA, bundle) ?: return Result.BundleUnverified
-
-        // An Ed25519 (web) recipient identity participates in DH via the
-        // birational map; a Curve25519 (mobile) one ALREADY IS the X25519 point
-        // and is used verbatim — converting it as-if-Edwards would derive
-        // garbage and seal to a key nobody holds (mirror of x3dhInitiate's
-        // family-aware branch, and of sealTo's in lemondrop.ts).
-        val recipientX25519 =
-            if (family == SENDER_KEY_FAMILY_CURVE) {
-                bundle.identityKey
-            } else {
-                sodium.ed25519PublicKeyToCurve25519(bundle.identityKey) ?: return Result.BundleUnverified
-            }
-
+        // The raw identity scalar enters `secrets` BEFORE any work, and the
+        // try/finally wraps classification and the birational conversion too, so
+        // it is zeroed on EVERY return — including the two fail-closed early
+        // exits below (an unverifiable bundle, or an Ed25519 key that fails
+        // conversion). This honors the "never survives the call" guarantee this
+        // file documents for the one private scalar that leaves the store.
         val secrets = mutableListOf<ByteArray>(sender.privateScalar)
         var paddedPlaintext: ByteArray? = null
         var payloadBytes: ByteArray? = null
         try {
+            // Family classification — the client mirror of the relay's try-both
+            // verifySignedPrekey (handlers.go) and the web classifyBundleIdentity:
+            // plain Ed25519 over the raw prekey (web/desktop), else XEdDSA over the
+            // 33-byte tagged form (Android/iOS). FAIL CLOSED — neither ⇒ refuse.
+            val family = classify(sodium, verifyXEdDSA, bundle) ?: return Result.BundleUnverified
+
+            // An Ed25519 (web) recipient identity participates in DH via the
+            // birational map; a Curve25519 (mobile) one ALREADY IS the X25519 point
+            // and is used verbatim — converting it as-if-Edwards would derive
+            // garbage and seal to a key nobody holds (mirror of x3dhInitiate's
+            // family-aware branch, and of sealTo's in lemondrop.ts).
+            val recipientX25519 =
+                if (family == SENDER_KEY_FAMILY_CURVE) {
+                    bundle.identityKey
+                } else {
+                    sodium.ed25519PublicKeyToCurve25519(bundle.identityKey)
+                        ?: return Result.BundleUnverified
+                }
+
             val ephemeral = sodium.generateX25519KeyPair() ?: return Result.BundleUnverified
             secrets += ephemeral.privateKey
 

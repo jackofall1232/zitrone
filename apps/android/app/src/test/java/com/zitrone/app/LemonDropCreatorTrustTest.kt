@@ -33,7 +33,10 @@ class LemonDropCreatorTrustTest {
     }
 
     @Test
-    fun `proceeds trust-on-first-use when no key is held to compare`() {
-        assertTrue(qrDropBundleTrusted(null, substituted))
+    fun `refuses when no key is held to compare (one-shot seal has no later verification)`() {
+        // Stricter than ordinary TOFU messaging: a lemon drop must seal only to
+        // an identity already established for the contact, never to whatever the
+        // relay serves for a peer we have never keyed.
+        assertFalse(qrDropBundleTrusted(null, substituted))
     }
 }

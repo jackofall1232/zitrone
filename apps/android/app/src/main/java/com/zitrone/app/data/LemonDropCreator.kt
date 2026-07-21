@@ -88,9 +88,11 @@ class LemonDropCreator(
             // TOFU key learned on first contact — not to whatever the relay serves
             // today. A substituted bundle (malicious relay, re-registration,
             // corruption) would otherwise be silently readable by someone other
-            // than the person this UI names. When we hold no key at all there is
-            // nothing to compare (brand-new contact-by-UUID) and we proceed TOFU,
-            // exactly as the ordinary send path does.
+            // than the person this UI names. A one-shot drop gets NO later
+            // safety-number check, so unlike ordinary messaging we also refuse
+            // when we hold no key at all (see qrDropBundleTrusted); the compose
+            // UI additionally hides the drop button for a keyless conversation,
+            // so this is a defense-in-depth backstop.
             val knownKey = conversation.pinnedIdentityKeyBase64 ?: conversation.contactIdentityKeyBase64
             if (!qrDropBundleTrusted(knownKey, bundleDto.identityKeyBase64)) {
                 return Result.IdentityChanged
@@ -133,30 +135,46 @@ class LemonDropCreator(
                 burnHashB64 = b64(drop.burnHash),
             )
 
-            // Local sent bubble, exactly like the ordinary send — but the state
-            // stays SENT and never advances: a drop's redemption is UNKNOWABLE
-            // (the blind relay can't tell us whether or when anyone scanned it),
-            // so there is no honest DELIVERED to reach.
-            messages.addOutgoing(
-                Message(
-                    id = UUID.randomUUID().toString(),
-                    conversationId = conversation.id,
-                    text = text,
-                    isMine = true,
-                    timestampMs = System.currentTimeMillis(),
-                    ttlSeconds = null,
-                    burnOnRead = false,
-                    state = MessageState.SENT,
-                ),
-            )
-            conversations.onOutgoingMessage(conversation.id)
-
-            return Result.Success(url = drop.url, expiresAt = expiresAt)
+            // The deposit is ACCEPTED — the drop is now live on the relay and the
+            // sticker URL is the only copy the creator gets. The success is fixed
+            // HERE: the local sent-bubble writes below must NOT be able to flip it
+            // to Failed. If they could, a persistence hiccup would send the user
+            // to retry, minting a SECOND live drop and consuming another of the
+            // recipient's one-time prekeys while the first is stranded unseen.
+            // This mirrors web sendQrDrop's guarded persist(). (Cancellation still
+            // propagates — structured concurrency — but an ordinary write failure
+            // is swallowed; the bubble simply catches up on the next persist.)
+            val success = Result.Success(url = drop.url, expiresAt = expiresAt)
+            try {
+                // Local sent bubble, exactly like the ordinary send — but the state
+                // stays SENT and never advances: a drop's redemption is UNKNOWABLE
+                // (the blind relay can't tell us whether or when anyone scanned it),
+                // so there is no honest DELIVERED to reach.
+                messages.addOutgoing(
+                    Message(
+                        id = UUID.randomUUID().toString(),
+                        conversationId = conversation.id,
+                        text = text,
+                        isMine = true,
+                        timestampMs = System.currentTimeMillis(),
+                        ttlSeconds = null,
+                        burnOnRead = false,
+                        state = MessageState.SENT,
+                    ),
+                )
+                conversations.onOutgoingMessage(conversation.id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Deposit already succeeded — never fail the drop for a local
+                // bookkeeping error; the URL still returns to the creator.
+            }
+            return success
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
-            // No local write happened past the deposit call boundary, so a
-            // failure here leaves nothing half-created; the draft is kept.
+            // Failure at or before the deposit boundary — nothing was deposited,
+            // so nothing is half-created and the draft is kept for retry.
             return Result.Failed
         }
     }
@@ -186,10 +204,17 @@ class LemonDropCreator(
  *
  * [knownKey] is the identity we already trust for the contact — pinned out of
  * band, else the TOFU key learned on first contact ([Conversation.pinnedIdentityKeyBase64]
- * ?: [Conversation.contactIdentityKeyBase64]). Returns true (proceed) when we
- * hold NO key to compare (brand-new contact-by-UUID → TOFU, as the ordinary send
- * path does) OR the relay's [bundleKey] equals it; false (REFUSE) on a mismatch —
- * a key-substitution attempt the drop must not seal to.
+ * ?: [Conversation.contactIdentityKeyBase64]). Returns true (proceed) ONLY when
+ * we hold a key AND the relay's [bundleKey] equals it; false (REFUSE) both on a
+ * mismatch (a key-substitution attempt) AND when we hold no key at all.
+ *
+ * This is stricter than ordinary messaging, which TOFUs on first contact: a
+ * lemon drop is a ONE-SHOT sealed payload with no later safety-number
+ * verification to catch a substituted key, so it must only seal to an identity
+ * already established out of band or through prior contact — never to whatever
+ * the relay serves for a peer we have never keyed. Web `sendQrDrop` gets this
+ * for free by requiring a real contact (which always carries an identity key);
+ * we enforce presence explicitly.
  */
 internal fun qrDropBundleTrusted(knownKey: String?, bundleKey: String): Boolean =
-    knownKey == null || knownKey == bundleKey
+    knownKey != null && knownKey == bundleKey

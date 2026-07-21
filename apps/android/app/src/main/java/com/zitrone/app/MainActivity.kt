@@ -526,8 +526,23 @@ private fun ZitroneRoot(
                         identityFingerprint = identityFingerprint,
                         // Seal the draft into a lemon drop for this contact — the
                         // one-shot creator (never touches the persistent session).
-                        onSendAsQrDrop = { text, ttlHours ->
-                            container.lemonDropCreator.create(conversation, text, ttlHours)
+                        // P3-1 (review): offer the droplet ONLY when we already hold
+                        // an identity key for this contact — pinned out of band, else
+                        // the TOFU key learned on first contact. A one-shot drop gets
+                        // NO later safety-number check, so it must seal only to an
+                        // identity we ALREADY trust; a keyless contact-by-UUID must
+                        // not even be offered the button. Null hides the droplet
+                        // entirely (LemonDropCreator refuses keyless as a backstop,
+                        // but the UI must not offer what it would refuse).
+                        onSendAsQrDrop = if (
+                            (conversation.pinnedIdentityKeyBase64
+                                ?: conversation.contactIdentityKeyBase64) != null
+                        ) {
+                            { text, ttlHours ->
+                                container.lemonDropCreator.create(conversation, text, ttlHours)
+                            }
+                        } else {
+                            null
                         },
                     )
                 }
