@@ -29,7 +29,7 @@ enum FingerprintWatermarkDefaults {
     static let tileSize: CGFloat = 512
     static let rotationDeg: CGFloat = -24
     static let alpha: CGFloat = 0.045
-    static let fontPx: CGFloat = 10.5
+    static let fontPx: CGFloat = 11.5
     static let rowGapPx: CGFloat = 28
     static let brickOffset: CGFloat = 0.5
 
