@@ -92,6 +92,25 @@ class QrDropLinkTest {
         assertNull(parseQrDropLink("https://zitrone.app/d/$padded"))
     }
 
+    /**
+     * The chat-list in-app scanner (ChatListScreen) promotes scan results ONLY
+     * through [parseQrDropLink] before calling onOpenLemonDrop — same choke
+     * point as App Links. Anything else is a snackbar, never a redeem attempt.
+     */
+    @Test
+    fun `in-app scanner rejects contact payloads and bare text`() {
+        // Contact-exchange JSON (what AddContactScreen scans) must not open a drop.
+        assertNull(
+            parseQrDropLink(
+                """{"version":"1","account_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","identity_key":"AA=="}""",
+            ),
+        )
+        assertNull(parseQrDropLink("hello world"))
+        assertNull(parseQrDropLink(""))
+        // Canonical sticker still works — the success path for the scanner.
+        assertEquals(id, parseQrDropLink(url))
+    }
+
     @Test
     fun `rejects unrelated or blank input`() {
         assertNull(parseQrDropLink(""))
