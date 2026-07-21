@@ -7,6 +7,43 @@ was last uploaded as a GitHub Release asset — until a signed `v1.5.1` APK is b
 the download link keeps handing out the pre-fix `v1.5.0-beta` build. This is the runbook that closes
 that gap.
 
+## R8 full mode — permanently disabled (Play Protect false positive)
+
+**Do not set `android.enableR8.fullMode=true` and do not delete the
+`android.enableR8.fullMode=false` line from `apps/android/gradle.properties`.**
+
+### Why
+
+Google Play Protect flagged a released **0.8.4** APK as a “harmful app.” A diagnostic rebuild
+with **identical signing certificate and identical application logic**, differing only by
+`android.enableR8.fullMode=false` (R8 *compat* mode instead of *full* mode), cleared the flag on
+**two separate physical devices**. That pins the cause to a **fuzzy bytecode-fingerprint false
+positive** driven by full-mode DEX layout / optimization shape — not malware and not a logic bug
+in Zitrone.
+
+AGP’s default is full mode when the property is unset. Leaving the flag off (or “forgetting” it)
+would silently reintroduce the Play Protect hit on the next release APK. The property is set
+permanently in `gradle.properties` with an in-file “do not revert” comment for the same reason.
+
+### Tradeoff (compat vs full mode)
+
+| | R8 full mode (default, **do not use**) | R8 compat mode (**what we ship**) |
+| --- | --- | --- |
+| Play Protect | Triggered false positive on 0.8.4 | Cleared on same cert / logic |
+| Optimization | More aggressive shrinking / inlining / rewriting | Less aggressive — some optimizations left on the table |
+| APK size | Smaller | **Larger** than full mode (accept the size cost) |
+| Runtime | Potentially slightly leaner | Negligible difference for this app; safety of distribution wins |
+
+We accept a larger APK and less aggressive R8 optimization in exchange for sideload / Play Protect
+installability. Do not “optimize” this away without a new, multi-device Play Protect regression
+test on a full-mode APK signed with the **same** production cert.
+
+### Follow-up (not done in-repo)
+
+Submitting an appeal / false-positive report to Google’s Play Protect process is on the maintainer’s
+Google account (HoboJoe) — not something the build pipeline or contributors can complete here.
+Keep this note so the appeal stays a human follow-up, not a forgotten side quest.
+
 ## Signing-key custody
 
 By default the release **signing key never exists in this session or in CI**: it is the app's trust

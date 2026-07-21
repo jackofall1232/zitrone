@@ -19,6 +19,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Not a server bulk-purge: undelivered relay envelopes still expire via the
   standard TTL window (same model as Android — see `docs/SECURITY_MODEL.md`).
 
+### Fixed
+
+- **Android: permanent R8 compat mode (`android.enableR8.fullMode=false`)** to clear a
+  Google Play Protect “harmful app” false positive that tracked full-mode DEX layout on
+  the 0.8.4 release APK (same signing cert and app logic; only optimization shape differed).
+  Documented tradeoff and do-not-revert note in `docs/RELEASING_ANDROID.md`. Play Protect
+  appeal remains a maintainer-side follow-up (not in-repo).
+
 ## [0.8.4-beta] - 2026-07-21
 
 ### Added
