@@ -246,6 +246,12 @@ class ConversationRepository(
 
     @Synchronized
     fun clearAll() {
+        // Account wipe: drop the deleted-contact tombstones too, so no trace of
+        // who was deleted survives on disk past the wipe.
+        if (tombstones.isNotEmpty()) {
+            tombstones.clear()
+            runCatching { store.writeTombstonesBlob(serializeTombstones()) }
+        }
         setConversations(emptyList())
     }
 
