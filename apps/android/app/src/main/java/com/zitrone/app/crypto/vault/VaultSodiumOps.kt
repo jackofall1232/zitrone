@@ -8,25 +8,36 @@ package com.zitrone.app.crypto.vault
 import com.goterl.lazysodium.Sodium
 import com.goterl.lazysodium.interfaces.PwHash
 import com.sun.jna.NativeLong
+import javax.crypto.AEADBadTagException
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 /**
- * The libsodium surface the vault primitive needs, and nothing more. Kept a
- * plain interface so tests can inject a fast, deterministic key deriver while
- * still exercising the REAL AEAD byte path.
+ * The crypto surface the vault primitive needs, and nothing more. Kept a plain
+ * interface so tests can inject a fast, deterministic key deriver while still
+ * exercising the REAL AEAD byte path.
  *
- * The production impl [LibsodiumVaultOps] runs over lazysodium's raw JNA
- * bindings — the SAME `Sodium` base class LemonDropSodiumOps uses — so the code
- * is identical against lazysodium-android's `SodiumAndroid` (device: prebuilt
- * .so per ABI, no NDK build) and lazysodium-java's `SodiumJava` (JVM unit
- * tests). Both bind the identical libsodium C functions, so a unit test through
- * this adapter is a real test of the on-device byte path.
+ * Two backends by deliberate design ([LibsodiumVaultOps]):
+ *  - **Argon2id** runs on libsodium (`crypto_pwhash`, via lazysodium's raw JNA
+ *    bindings — the SAME `Sodium` base class LemonDropSodiumOps uses), so the
+ *    KDF is identical on device (`SodiumAndroid`, prebuilt .so per ABI, no NDK)
+ *    and in host tests (`SodiumJava`). libsodium's Argon2id is pure software —
+ *    available on every device.
+ *  - **AES-256-GCM** runs on the JDK/Android `javax.crypto` provider, NOT
+ *    libsodium. This is the important portability fix: libsodium's
+ *    `crypto_aead_aes256gcm` is HARDWARE-GATED (AES-NI / ARMv8 Crypto
+ *    Extensions) and simply unavailable on many low-end ARM devices — using it
+ *    would crash vault unlock on exactly the hardware we most need to support.
+ *    `javax.crypto`'s "AES/GCM/NoPadding" is available on every Android device
+ *    (software fallback when there's no hardware), and AES-256-GCM is AES-256-GCM
+ *    regardless of implementation, so the output stays byte-identical to the web
+ *    reference's WebCrypto AES-GCM (same algorithm, same key/nonce/AAD).
  *
- * Byte-compatibility with the web reference (packages/crypto): the KDF is
- * Argon2id with the exact kdf.ts parameters, and BOTH the wrapped-key layer
- * (vault.ts) and the payload layer (apps/web storage.ts) are AES-256-GCM with a
- * 12-byte nonce — the same algorithm the web reaches for its WebCrypto
- * AES-GCM. The goal is auditability against the reference, not cross-device
- * image sharing.
+ * Byte-compatibility with the web reference (packages/crypto): Argon2id with the
+ * exact kdf.ts parameters, and both the wrapped-key layer (vault.ts) and the
+ * payload layer (apps/web storage.ts) are AES-256-GCM with a 12-byte nonce. The
+ * goal is auditability against the reference, not cross-device image sharing.
  */
 interface VaultSodiumOps {
     /**
@@ -67,16 +78,6 @@ interface VaultSodiumOps {
  */
 class LibsodiumVaultOps(private val sodium: Sodium) : VaultSodiumOps {
 
-    init {
-        // AES-256-GCM in libsodium requires hardware AES (AES-NI / ARMv8
-        // Crypto Extensions). Fail loudly at construction rather than let a
-        // later encrypt/decrypt abort deep in native code. Effectively all
-        // 64-bit Android devices and CI hosts provide it.
-        check(sodium.crypto_aead_aes256gcm_is_available() == 1) {
-            "AES-256-GCM (hardware AES) is unavailable on this platform"
-        }
-    }
-
     override fun argon2idDeriveKey(password: ByteArray, salt: ByteArray): ByteArray {
         require(salt.size == SALT_BYTES) { "salt must be $SALT_BYTES bytes" }
         val out = ByteArray(MASTER_KEY_BYTES)
@@ -100,24 +101,20 @@ class LibsodiumVaultOps(private val sodium: Sodium) : VaultSodiumOps {
         associatedData: ByteArray,
     ): ByteArray {
         require(key.size == MASTER_KEY_BYTES) { "AES-256-GCM key must be $MASTER_KEY_BYTES bytes" }
+        // Fresh random 12-byte nonce per call — nonce reuse under GCM is
+        // catastrophic, so the caller never supplies one.
         val nonce = randomBytes(NONCE_BYTES)
-        val cipher = ByteArray(plaintext.size + AEAD_TAG_BYTES)
-        val cipherLen = LongArray(1)
-        val rc = sodium.crypto_aead_aes256gcm_encrypt(
-            cipher,
-            cipherLen,
-            plaintext,
-            plaintext.size.toLong(),
-            associatedData,
-            associatedData.size.toLong(),
-            null, // nsec — unused by AES-256-GCM
-            nonce,
-            key,
+        val cipher = Cipher.getInstance(AES_GCM_TRANSFORM)
+        cipher.init(
+            Cipher.ENCRYPT_MODE,
+            SecretKeySpec(key, "AES"),
+            GCMParameterSpec(AEAD_TAG_BYTES * 8, nonce),
         )
-        check(rc == 0) { "crypto_aead_aes256gcm_encrypt failed (rc=$rc)" }
-        // Layout: nonce || ciphertext || tag — the combined-mode ciphertext
-        // already carries the 16-byte tag as its tail.
-        return nonce + cipher
+        if (associatedData.isNotEmpty()) cipher.updateAAD(associatedData)
+        // JCE GCM appends the 16-byte tag to the ciphertext, so doFinal returns
+        // ciphertext || tag — matching aead.ts's WebCrypto layout exactly.
+        val cipherAndTag = cipher.doFinal(plaintext)
+        return nonce + cipherAndTag
     }
 
     override fun aeadDecrypt(
@@ -128,23 +125,21 @@ class LibsodiumVaultOps(private val sodium: Sodium) : VaultSodiumOps {
         require(key.size == MASTER_KEY_BYTES) { "AES-256-GCM key must be $MASTER_KEY_BYTES bytes" }
         if (box.size < NONCE_BYTES + AEAD_TAG_BYTES) return null
         val nonce = box.copyOfRange(0, NONCE_BYTES)
-        val cipher = box.copyOfRange(NONCE_BYTES, box.size)
-        val message = ByteArray(cipher.size - AEAD_TAG_BYTES)
-        val messageLen = LongArray(1)
-        val rc = sodium.crypto_aead_aes256gcm_decrypt(
-            message,
-            messageLen,
-            null, // nsec
-            cipher,
-            cipher.size.toLong(),
-            associatedData,
-            associatedData.size.toLong(),
-            nonce,
-            key,
-        )
-        // rc != 0 is a tag failure: wrong key, filler slot, or tampering — all
-        // reported the same way, as "no match".
-        return if (rc == 0) message else null
+        val cipherAndTag = box.copyOfRange(NONCE_BYTES, box.size)
+        return try {
+            val cipher = Cipher.getInstance(AES_GCM_TRANSFORM)
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                SecretKeySpec(key, "AES"),
+                GCMParameterSpec(AEAD_TAG_BYTES * 8, nonce),
+            )
+            if (associatedData.isNotEmpty()) cipher.updateAAD(associatedData)
+            cipher.doFinal(cipherAndTag)
+        } catch (e: AEADBadTagException) {
+            // Tag failure: wrong key, a filler slot, or tampering — all reported
+            // the same way, as "no match" (mirrors aead.ts aeadDecrypt throwing).
+            null
+        }
     }
 
     override fun randomBytes(length: Int): ByteArray {
@@ -162,6 +157,9 @@ class LibsodiumVaultOps(private val sodium: Sodium) : VaultSodiumOps {
 
         /** crypto_pwhash_ALG_ARGON2ID13, mirrored from kdf.ts. */
         val ARGON2ID_ALG: Int = PwHash.Alg.PWHASH_ALG_ARGON2ID13.value
+
+        /** Portable AES-256-GCM via the platform JCE provider (see class kdoc). */
+        const val AES_GCM_TRANSFORM = "AES/GCM/NoPadding"
     }
 }
 

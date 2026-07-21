@@ -293,4 +293,31 @@ class VaultPrimitiveTest {
         assertArrayEquals(payload, opened!!.payloadPlaintext)
         assertNull(unlockImage("nope", image, ops))
     }
+
+    /**
+     * GOLDEN VECTOR — proves the AEAD is standard AES-256-GCM, byte-identical to
+     * the web reference's WebCrypto AES-GCM (and to libsodium's), so the switch
+     * to the portable javax.crypto backend did not change the on-the-wire format.
+     * NIST GCM test case (AES-256, 128-bit tag): all-zero key + nonce, empty AAD,
+     * 16 zero plaintext bytes → ct cea7403d4d606b6e074ec5d3baf39d18,
+     * tag d0d1c8a799996bf0265b98b5d48ab919. Fed through the production aeadDecrypt
+     * as nonce(12)||ct||tag, it must recover the 16 zero plaintext bytes — which
+     * confirms both the AES-256-GCM correctness and the box layout.
+     */
+    @Test
+    fun aead_matchesNistAes256GcmVector() {
+        val key = ByteArray(MASTER_KEY_BYTES) // 32 zero bytes
+        val nonce = ByteArray(NONCE_BYTES) // 12 zero bytes
+        val ctAndTag = hex("cea7403d4d606b6e074ec5d3baf39d18d0d1c8a799996bf0265b98b5d48ab919")
+        val box = nonce + ctAndTag
+        val opened = ops.aeadDecrypt(key, box, ByteArray(0))
+        assertNotNull("NIST AES-256-GCM vector must open", opened)
+        assertArrayEquals(ByteArray(16), opened) // 16 zero plaintext bytes
+        // And a one-bit tamper is rejected the same way a filler slot is (null).
+        box[box.size - 1] = (box[box.size - 1].toInt() xor 1).toByte()
+        assertNull(ops.aeadDecrypt(key, box, ByteArray(0)))
+    }
+
+    private fun hex(s: String): ByteArray =
+        ByteArray(s.length / 2) { ((s[it * 2].digitToInt(16) shl 4) or s[it * 2 + 1].digitToInt(16)).toByte() }
 }
