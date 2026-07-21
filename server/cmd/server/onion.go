@@ -8,13 +8,11 @@ package main
 import (
 	"bytes"
 	"html/template"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/filesystem"
 
 	"github.com/zitrone/server/internal/config"
 )
@@ -43,6 +41,14 @@ import (
 // staged by the operator, so when no *.apk is present in the site directory the
 // page hides the download/verify section and shows staging guidance instead of
 // linking to a dead 404.
+// currentAPK is the single, explicit source of truth for the APK the mirror
+// advertises on the index page and treats as "the current build". It is
+// deliberately a constant rather than globbing the directory: superseded builds
+// are intentionally left in place (see mirrorAssets), and filepath.Glob returns
+// matches in lexical order, which would keep advertising an older version
+// (v0.7.6 sorts before v0.8.0). Bump this and mirrorAssets together each release.
+const currentAPK = "zitrone-v0.8.0-beta.apk"
+
 func registerOnionMirror(app *fiber.App, cfg *config.Config) {
 	dir := cfg.OnionSiteDir
 	if dir == "" || !cfg.TorEnabled {
@@ -65,7 +71,9 @@ func registerOnionMirror(app *fiber.App, cfg *config.Config) {
 		if err != nil {
 			return c.Next()
 		}
-		apkName, apkAvailable := findStagedAPK(dir)
+		apkName := currentAPK
+		_, statErr := os.Stat(filepath.Join(dir, apkName))
+		apkAvailable := statErr == nil
 		var buf bytes.Buffer
 		// The template displays the canonical (public) onion address. The secret
 		// and relay addresses are NEVER passed to the template or any response.
@@ -83,16 +91,46 @@ func registerOnionMirror(app *fiber.App, cfg *config.Config) {
 	app.Get("/", renderIndex)
 	app.Get("/index.html", renderIndex)
 
-	// Static assets (style.css, SHA256SUMS, the staged .apk). Same Host gate;
-	// missing/unmatched files fall through to a 404 without touching the API,
-	// which is registered earlier in the middleware chain.
-	app.Use("/", filesystem.New(filesystem.Config{
-		Root:   http.Dir(dir),
-		Browse: false,
-		Next: func(c *fiber.Ctx) bool {
-			return !isMirrorHost(c, cfg)
-		},
-	}))
+	// mirrorAssets is a STRICT ALLOWLIST of the exact basenames the mirror will
+	// serve. This is a literal whitelist, not path sanitising: a request is
+	// served only if its basename is a key here; every other path falls through
+	// to a 404. Because the keys contain no path separators and the response
+	// path is filepath.Join(dir, <allowlisted key>), there is no way to escape
+	// dir — traversal input (e.g. /../onion.go, /../../etc/passwd) simply is not
+	// a key and 404s. To publish a new asset (e.g. a new APK), add its exact
+	// filename here and rebuild.
+	mirrorAssets := map[string]bool{
+		"style.css":  true,
+		"SHA256SUMS": true,
+		currentAPK:   true, // zitrone-v0.8.0-beta.apk — the advertised build
+		// Superseded builds are kept downloadable (left in place so existing
+		// links keep working) but are no longer advertised or listed in
+		// SHA256SUMS. Prune these when old links no longer need to resolve.
+		"zitrone-v0.7.6-beta.apk": true,
+	}
+
+	// Static asset handler. Same Host gate as the index; SendFile wraps
+	// fasthttp's byte-range-aware file server, so large downloads (the APK over
+	// a flaky Tor circuit) get Accept-Ranges: bytes and resumable 206 replies.
+	app.Use("/", func(c *fiber.Ctx) error {
+		if !isMirrorHost(c, cfg) {
+			return c.Next()
+		}
+		name := strings.TrimPrefix(c.Path(), "/")
+		if !mirrorAssets[name] {
+			return c.Next() // unmatched -> 404 (no API route serves these paths)
+		}
+		if err := c.SendFile(filepath.Join(dir, name)); err != nil {
+			return c.Next()
+		}
+		// fasthttp's extension table doesn't map .apk; set the canonical MIME
+		// after SendFile so it wins over the auto-detected content type (kept on
+		// 206 range replies too).
+		if strings.HasSuffix(name, ".apk") {
+			c.Set(fiber.HeaderContentType, "application/vnd.android.package-archive")
+		}
+		return nil
+	})
 }
 
 // isMirrorHost returns true when the request Host matches the public or secret
@@ -122,15 +160,4 @@ func normaliseHost(h string) string {
 		h = h[:i]
 	}
 	return strings.ToLower(h)
-}
-
-// findStagedAPK returns the basename of the first *.apk in dir and whether one
-// exists. The APK is never committed (it is .gitignored); operators stage it
-// into the mirror directory before enabling the hidden service.
-func findStagedAPK(dir string) (string, bool) {
-	matches, err := filepath.Glob(filepath.Join(dir, "*.apk"))
-	if err != nil || len(matches) == 0 {
-		return "", false
-	}
-	return filepath.Base(matches[0]), true
 }
