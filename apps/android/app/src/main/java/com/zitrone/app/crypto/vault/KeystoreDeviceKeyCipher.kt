@@ -103,8 +103,20 @@ class KeystoreDeviceKeyCipher(
     // existingKey / wrap / unwrap. Lazily loaded on first use (mirrors lazy key generation).
     private val keyStore: KeyStore by lazy { KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) } }
 
-    private fun existingKey(): SecretKey? =
+    private fun existingKey(): SecretKey? = try {
         (keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.secretKey
+    } catch (e: Exception) {
+        // A corrupted / invalidated Keystore entry (an OS update, a device-credential
+        // clear, or hardware-backed key invalidation) makes getEntry throw
+        // UnrecoverableEntryException / GeneralSecurityException. Treat it as "no usable
+        // key" rather than crash: on the wrap path [getOrCreateKey] then regenerates — and
+        // because [wrapDek] runs only from VaultImageStore.create(), which requires NO vault
+        // image exists, overwriting the device key loses nothing recoverable; on the unwrap
+        // path the caller gets null → CorruptImage, the honest outcome for an image sealed
+        // under a key the hardware can no longer produce. Exception-broad (Errors — OOM /
+        // LinkageError — still propagate), mirroring [unwrapDek]'s null-on-any-failure posture.
+        null
+    }
 
     private fun getOrCreateKey(): SecretKey = existingKey() ?: generateKey()
 
