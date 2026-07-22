@@ -43,8 +43,14 @@ class EncryptedSignalProtocolStore internal constructor(
     override fun hasLocalIdentity(): Boolean = prefs.contains(KEY_IDENTITY)
 
     override fun setLocalIdentity(identityKeyPair: IdentityKeyPair, registrationId: Int) {
-        putBytes(KEY_IDENTITY, identityKeyPair.serialize())
-        prefs.edit().putInt(KEY_REGISTRATION_ID, registrationId).apply()
+        // One transaction so the identity pair and registration id can never be
+        // torn apart by a crash between writes. The string form MUST stay
+        // byte-identical to what putBytes writes ([getIdentityKeyPair] reads it
+        // back through getBytes).
+        prefs.edit()
+            .putString(KEY_IDENTITY, Base64.encodeToString(identityKeyPair.serialize(), Base64.NO_WRAP))
+            .putInt(KEY_REGISTRATION_ID, registrationId)
+            .apply()
     }
 
     override fun getIdentityKeyPair(): IdentityKeyPair {
@@ -288,8 +294,9 @@ class EncryptedSignalProtocolStore internal constructor(
             }
             .distinct()
             .map { accountId ->
-                val b64 = getBytes("$KEY_REMOTE_IDENTITY$accountId:$DEFAULT_DEVICE_ID")
-                    ?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
+                // The stored value already IS the NO_WRAP base64 putBytes wrote —
+                // read it directly instead of decode+re-encode round-tripping.
+                val b64 = prefs.getString("$KEY_REMOTE_IDENTITY$accountId:$DEFAULT_DEVICE_ID", null)
                 accountId to b64
             }
 

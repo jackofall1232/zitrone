@@ -73,6 +73,19 @@ class EncryptedAuthStoreTest {
     }
 
     @Test
+    fun `setting accountId to null removes the key rather than storing a null`() {
+        // EncryptedSharedPreferences would persist an encrypted "__NULL__"
+        // sentinel for putString(key, null) (contains() stays true); the store
+        // must translate null to an explicit remove so null always means ABSENT.
+        val prefs = FakeSharedPreferences()
+        val store = EncryptedAuthStore(prefs)
+        store.accountId = "acct-123"
+        store.accountId = null
+        assertNull(store.accountId)
+        assertFalse(prefs.contains("account_id"))
+    }
+
+    @Test
     fun `a token refresh overwrites the previous pair`() {
         val store = EncryptedAuthStore(FakeSharedPreferences())
         store.storeTokens("access-1", "refresh-1")

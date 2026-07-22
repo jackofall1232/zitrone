@@ -79,7 +79,16 @@ class EncryptedAuthStore(private val prefs: SharedPreferences) : AuthStore {
     override var accountId: String?
         get() = prefs.getString(KEY_ACCOUNT_ID, null)
         set(value) {
-            prefs.edit().putString(KEY_ACCOUNT_ID, value).apply()
+            // null means ABSENT: EncryptedSharedPreferences diverges from the
+            // platform putString(key, null)==remove contract by persisting an
+            // encrypted "__NULL__" sentinel (leaving contains() true), so remove
+            // explicitly. No production caller passes null today (register
+            // stores a non-null id; deletion goes through clearAccount()).
+            if (value == null) {
+                prefs.edit().remove(KEY_ACCOUNT_ID).apply()
+            } else {
+                prefs.edit().putString(KEY_ACCOUNT_ID, value).apply()
+            }
         }
 
     override val accessToken: String?
