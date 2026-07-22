@@ -156,7 +156,7 @@ class VaultSessionTest {
     // The resealed region round-trips: persist gets THIS slot's index and exactly one
     // sealed payload region, and opening it under the slot key yields the UPDATED payload.
     @Test
-    fun `resealed image opens to the updated payload`() = runTest {
+    fun `resealed region opens to the updated payload`() = runTest {
         val image = createImage(passphrase, "genesis".toByteArray(), ops, fast)
         val open = unlockImage(passphrase, image, ops, fast)!!
         val vaultKey = open.vaultKey.copyOf() // copy BEFORE construction wipes it

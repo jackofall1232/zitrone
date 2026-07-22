@@ -65,9 +65,12 @@ import kotlin.coroutines.CoroutineContext
  *    transitions — a cheap payload + key snapshot and version capture — NEVER
  *    across the reseal, [persist], or a suspension.
  *  - [flushLock] serializes a whole reseal → persist → commit cycle so two flushes
- *    cannot interleave their disk writes (which could land a stale image and lose
- *    an update). Lock ordering is ALWAYS [flushLock] then [stateLock], never the
- *    reverse.
+ *    cannot deliver their sealed regions to the sink OUT OF ORDER — without it an
+ *    older sealed payload could reach the sink after a newer one, and the storage
+ *    layer would durably splice stale ratchet state that may already have been acked.
+ *    This is NOT redundant with the storage layer's image-mutation lock: that lock
+ *    serializes the splices themselves but cannot know their generation order. Lock
+ *    ordering is ALWAYS [flushLock] then [stateLock], never the reverse.
  *
  * Both the AES-GCM reseal (CPU-heavy, ~256 KiB) and [persist] (a blocking,
  * caller-provided alien sink) run OUTSIDE [stateLock] — under [flushLock], on
@@ -100,12 +103,22 @@ class VaultSession(
      * the session dirty, so a flush-before-ack caller must NOT ack.
      *
      * Because the sink re-reads / holds the canonical image under its own lock, a
-     * concurrent image mutation (another slot being added or destroyed) now composes
-     * correctly with a live session — the old "session splices into a stale snapshot,
-     * so the next flush reverts that mutation" hazard (tracked as the P1b-2 persist-API
-     * decision) is resolved by construction, because the session no longer holds any
-     * image snapshot. The sealedPayload is ciphertext (not secret); the sink may retain
-     * it.
+     * concurrent mutation of ANOTHER slot's regions (another vault being added or
+     * destroyed) now composes correctly with a live session — the old "session splices
+     * into a stale snapshot, so the next flush reverts that mutation" hazard (tracked as
+     * the P1b-2 persist-API decision) is resolved by construction, because the session
+     * no longer holds any image snapshot. The sealedPayload is ciphertext (not secret);
+     * the sink may retain it.
+     *
+     * A mutation of THIS slot's own material is a different obligation the sink CANNOT
+     * cover: destroying this vault, resealing it under a new passphrase, or overwriting
+     * this slot's own table entry or payload region still REQUIRES closing this session
+     * first. Otherwise a pending flush can hand the sink a stale sealed region for this
+     * slot and clobber the mutation — e.g. destroy-then-recreate at this index would
+     * have the new vault's payload region overwritten by the old session's late flush,
+     * leaving the new vault permanently unopenable. Relatedly, at most ONE live session
+     * per slot: two sessions on the same slot are unsupported (last-writer-wins would
+     * silently roll back the other's ratchet state).
      */
     private val persist: (slotIndex: Int, sealedPayload: ByteArray) -> Unit,
     /**
