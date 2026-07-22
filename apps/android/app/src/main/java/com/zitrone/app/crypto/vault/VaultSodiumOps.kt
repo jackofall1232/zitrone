@@ -8,7 +8,7 @@ package com.zitrone.app.crypto.vault
 import com.goterl.lazysodium.Sodium
 import com.goterl.lazysodium.interfaces.PwHash
 import com.sun.jna.NativeLong
-import javax.crypto.AEADBadTagException
+import java.security.GeneralSecurityException
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -135,9 +135,13 @@ class LibsodiumVaultOps(private val sodium: Sodium) : VaultSodiumOps {
             )
             if (associatedData.isNotEmpty()) cipher.updateAAD(associatedData)
             cipher.doFinal(cipherAndTag)
-        } catch (e: AEADBadTagException) {
+        } catch (e: GeneralSecurityException) {
             // Tag failure: wrong key, a filler slot, or tampering — all reported
             // the same way, as "no match" (mirrors aead.ts aeadDecrypt throwing).
+            // GeneralSecurityException (not just AEADBadTagException) because some
+            // providers surface a GCM tag mismatch as its parent BadPaddingException
+            // — a filler slot MUST decrypt-fail silently, never escape and crash
+            // tryPassphrase.
             null
         }
     }
@@ -171,4 +175,16 @@ class LibsodiumVaultOps(private val sodium: Sodium) : VaultSodiumOps {
  * SLOT_COUNT times.
  */
 fun argon2idDeriver(ops: VaultSodiumOps): KeyDeriver =
-    { passphrase, salt -> ops.argon2idDeriveKey(passphrase.toByteArray(Charsets.UTF_8), salt) }
+    { passphrase, salt ->
+        // The passphrase String itself is immutable and unwipeable (a JVM limit,
+        // same as the web's JS string), but the transient UTF-8 ByteArray we
+        // hand to libsodium IS wipeable — zero it as soon as derivation returns
+        // so a normal 4-slot unlock doesn't leave four recoverable passphrase
+        // copies in heap.
+        val pw = passphrase.toByteArray(Charsets.UTF_8)
+        try {
+            ops.argon2idDeriveKey(pw, salt)
+        } finally {
+            pw.fill(0)
+        }
+    }

@@ -318,6 +318,27 @@ class VaultPrimitiveTest {
         assertNull(ops.aeadDecrypt(key, box, ByteArray(0)))
     }
 
+    /**
+     * A vault must not be added under a passphrase that already opens one:
+     * tryPassphrase returns only the first match, so a duplicate seal would
+     * silently shadow (make unreachable) one of the two vaults.
+     */
+    @Test
+    fun addVault_rejectsAPassphraseThatAlreadyUnlocksASlot() {
+        val image = createImage("shared-pass", "A".toByteArray(), ops, fast)
+        val idx = unlockImage("shared-pass", image, ops, fast)!!.slotIndex
+        try {
+            addVaultToImage(image, setOf(idx), "shared-pass", "B".toByteArray(), ops, fast)
+            fail("adding a vault under an existing passphrase must throw")
+        } catch (e: IllegalArgumentException) {
+            // expected — collision rejected
+        }
+        // A DIFFERENT passphrase still succeeds.
+        val two = addVaultToImage(image, setOf(idx), "other-pass", "B".toByteArray(), ops, fast)
+        assertNotNull(unlockImage("shared-pass", two, ops, fast))
+        assertNotNull(unlockImage("other-pass", two, ops, fast))
+    }
+
     private fun hex(s: String): ByteArray =
         ByteArray(s.length / 2) { ((s[it * 2].digitToInt(16) shl 4) or s[it * 2 + 1].digitToInt(16)).toByte() }
 }

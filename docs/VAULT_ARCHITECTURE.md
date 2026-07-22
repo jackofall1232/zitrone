@@ -15,9 +15,10 @@ disagrees with this document, that is a bug (same convention as `SECURITY_MODEL.
 
 | Layer | State |
 | --- | --- |
-| Crypto primitive (key-slot vaults, timing parity) | **Built** — `packages/crypto/src/vault.ts` (web/desktop), unit-tested incl. timing-parity |
+| Crypto primitive (key-slot vaults, timing parity) — web/desktop | **Built** — `packages/crypto/src/vault.ts`, unit-tested incl. timing-parity |
+| Crypto primitive — **Android** (Argon2id + no-early-exit `tryPassphrase` + fixed-size blind payload/image) | **Built** as of 0.9.1 P1a — `apps/android/.../crypto/vault/` (`VaultSodiumOps`, `VaultSlots`, `VaultPayload`, `VaultImage`), byte-mirrored from the web reference, unit-tested (no-early-exit, wipe discipline, NIST AES-GCM KAT). **Isolated — not yet wired into unlock/storage.** |
 | Notification-parity structure (single-id, content-free, extra-free intent, teardown hook) | **Built** on Android as of the notification re-fire work (0.9.0-beta) — see §7 |
-| Android vault runtime (two key-slots, PIN router, per-vault stores/coordinator) | **NOT built.** No `apps/android` vault/slot code exists yet. This document is the spec *for* building it. |
+| Android vault RUNTIME (dual-wrap unlock, PIN router, per-slot stores/coordinator, migration, teardown-on-switch) | **NOT built yet.** The 0.9.1 P1b/P2/P3 phases wire the P1a primitive into the app. This document is the spec for that work. |
 | Decoy traffic (§8) | Deferred to a later release (0.10.0-beta) — specced adjacent, not built |
 
 > **Documentation-accuracy note.** `SECURITY_MODEL.md` and `README.md` currently describe

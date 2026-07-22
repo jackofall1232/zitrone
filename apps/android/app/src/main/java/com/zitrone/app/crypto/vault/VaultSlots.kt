@@ -57,11 +57,18 @@ fun createVaultSlots(
     deriver: KeyDeriver = argon2idDeriver(ops),
 ): CreatedVault {
     val vaultKey = ops.randomBytes(VAULT_KEY_BYTES)
-    val slots = ArrayList<KeySlot>(SLOT_COUNT)
-    for (i in 0 until SLOT_COUNT) slots.add(randomSlot(ops))
-    val slotIndex = randomIndex(SLOT_COUNT, ops)
-    slots[slotIndex] = sealSlot(passphrase, vaultKey, ops, deriver)
-    return CreatedVault(slots = slots, vaultKey = vaultKey, slotIndex = slotIndex)
+    // On SUCCESS the caller owns (and later wipes) vaultKey; on ANY failure path
+    // after generation, wipe it here so no live key is abandoned in heap.
+    try {
+        val slots = ArrayList<KeySlot>(SLOT_COUNT)
+        for (i in 0 until SLOT_COUNT) slots.add(randomSlot(ops))
+        val slotIndex = randomIndex(SLOT_COUNT, ops)
+        slots[slotIndex] = sealSlot(passphrase, vaultKey, ops, deriver)
+        return CreatedVault(slots = slots, vaultKey = vaultKey, slotIndex = slotIndex)
+    } catch (t: Throwable) {
+        wipe(vaultKey)
+        throw t
+    }
 }
 
 /**
@@ -83,14 +90,26 @@ fun addVaultSlot(
     ops: VaultSodiumOps,
     deriver: KeyDeriver = argon2idDeriver(ops),
 ): CreatedVault {
+    // Reject a passphrase that already unlocks an existing vault: tryPassphrase
+    // returns only the FIRST matching slot, so a second seal under the same
+    // passphrase would shadow one vault and silently make it unreachable.
+    tryPassphrase(passphrase, slots, ops, deriver)?.let {
+        wipe(it.vaultKey)
+        throw IllegalArgumentException("passphrase already unlocks an existing vault")
+    }
     val free = ArrayList<Int>()
     for (i in slots.indices) if (i !in occupied) free.add(i)
     if (free.isEmpty()) throw IllegalStateException("no free key slots")
     val slotIndex = free[randomIndex(free.size, ops)]
     val vaultKey = ops.randomBytes(VAULT_KEY_BYTES)
-    val next = slots.toMutableList()
-    next[slotIndex] = sealSlot(passphrase, vaultKey, ops, deriver)
-    return CreatedVault(slots = next, vaultKey = vaultKey, slotIndex = slotIndex)
+    try {
+        val next = slots.toMutableList()
+        next[slotIndex] = sealSlot(passphrase, vaultKey, ops, deriver)
+        return CreatedVault(slots = next, vaultKey = vaultKey, slotIndex = slotIndex)
+    } catch (t: Throwable) {
+        wipe(vaultKey)
+        throw t
+    }
 }
 
 /**
@@ -113,19 +132,27 @@ fun tryPassphrase(
     deriver: KeyDeriver = argon2idDeriver(ops),
 ): VaultUnlock? {
     var found: VaultUnlock? = null
-    for (i in slots.indices) {
-        val slot = slots[i]
-        val masterKey = deriver(passphrase, slot.salt)
-        try {
-            val vaultKey = ops.aeadDecrypt(masterKey, slot.wrapped, SLOT_AD)
-            if (vaultKey != null) {
-                // Record the first match but DO NOT break — every slot is
-                // always derived and tried.
-                if (found == null) found = VaultUnlock(vaultKey, i) else wipe(vaultKey)
+    try {
+        for (i in slots.indices) {
+            val slot = slots[i]
+            val masterKey = deriver(passphrase, slot.salt)
+            try {
+                val vaultKey = ops.aeadDecrypt(masterKey, slot.wrapped, SLOT_AD)
+                if (vaultKey != null) {
+                    // Record the first match but DO NOT break — every slot is
+                    // always derived and tried.
+                    if (found == null) found = VaultUnlock(vaultKey, i) else wipe(vaultKey)
+                }
+            } finally {
+                wipe(masterKey)
             }
-        } finally {
-            wipe(masterKey)
         }
+    } catch (t: Throwable) {
+        // A later derivation failing (e.g. OOM under memory pressure) must not
+        // abandon an already-matched vault key in heap — the caller never
+        // received it to wipe.
+        found?.let { wipe(it.vaultKey) }
+        throw t
     }
     return found
 }

@@ -95,14 +95,17 @@ fun createImage(
     deriver: KeyDeriver = argon2idDeriver(ops),
 ): ByteArray {
     val created = createVaultSlots(passphrase, ops, deriver)
-    val payloads = ArrayList<ByteArray>(SLOT_COUNT)
-    for (i in 0 until SLOT_COUNT) payloads.add(randomPayload(ops))
+    // The key is ephemeral here (the returned image holds the SEALED payload, not
+    // the raw key), so wipe it on every exit — including if randomPayload or
+    // encodeImage throws between generation and use.
     try {
+        val payloads = ArrayList<ByteArray>(SLOT_COUNT)
+        for (i in 0 until SLOT_COUNT) payloads.add(randomPayload(ops))
         payloads[created.slotIndex] = sealPayload(created.vaultKey, payloadPlaintext, ops)
+        return encodeImage(VaultImage(created.slots, payloads))
     } finally {
         wipe(created.vaultKey)
     }
-    return encodeImage(VaultImage(created.slots, payloads))
 }
 
 /**
@@ -113,6 +116,16 @@ fun createImage(
  *
  * CPU-HEAVY with the production deriver (SLOT_COUNT × 64 MiB Argon2id); the
  * future integration layer MUST call this off the main thread.
+ *
+ * TIMING NOTE (deliberate, accepted): the SLOT_COUNT-way slot loop is
+ * content-independent, so it gives the required cross-slot parity (matching slot
+ * A, slot B, or nothing takes identical work). A SUCCESSFUL unlock additionally
+ * opens one fixed-size payload; a wrong passphrase does not. So success and
+ * failure are NOT equal-time — but this leaks nothing an observer doesn't
+ * already have: the app visibly unlocks (or doesn't) the instant it happens, so
+ * the payload-open duration reveals no extra bit. The web reference has the same
+ * property. The router (P1b) MUST NOT introduce a NEW timing branch that varies
+ * with which slot matched or whether a second vault exists.
  */
 fun unlockImage(
     passphrase: String,
@@ -122,9 +135,15 @@ fun unlockImage(
 ): VaultOpen? {
     val decoded = decodeImage(image)
     val unlock = tryPassphrase(passphrase, decoded.slots, ops, deriver) ?: return null
-    val plaintext = openPayload(unlock.vaultKey, decoded.payloads[unlock.slotIndex], ops)
+    // On success the caller owns unlock.vaultKey; on ANY failure (payload returns
+    // null OR openPayload throws on corrupt padding/version) wipe it here.
+    val plaintext = try {
+        openPayload(unlock.vaultKey, decoded.payloads[unlock.slotIndex], ops)
+    } catch (t: Throwable) {
+        wipe(unlock.vaultKey)
+        throw t
+    }
     if (plaintext == null) {
-        // Unlocked but the payload won't open — do not leave the key live.
         wipe(unlock.vaultKey)
         return null
     }
@@ -151,11 +170,13 @@ fun addVaultToImage(
 ): ByteArray {
     val decoded = decodeImage(image)
     val added = addVaultSlot(decoded.slots, occupied, passphrase, ops, deriver)
-    val payloads = decoded.payloads.toMutableList()
+    // Ephemeral key (the returned image holds the sealed payload) — wipe on every
+    // exit, incl. if the list copy or encodeImage throws.
     try {
+        val payloads = decoded.payloads.toMutableList()
         payloads[added.slotIndex] = sealPayload(added.vaultKey, payloadPlaintext, ops)
+        return encodeImage(VaultImage(added.slots, payloads))
     } finally {
         wipe(added.vaultKey)
     }
-    return encodeImage(VaultImage(added.slots, payloads))
 }
