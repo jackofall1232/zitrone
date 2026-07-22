@@ -508,4 +508,37 @@ class VaultSessionTest {
             )
         }
     }
+
+    // A persist that reentrantly triggers another flush on the same thread must not
+    // recurse (the reentrant flushLock would otherwise StackOverflow). The reentrancy
+    // guard makes the nested doFlush a no-op, so persist is invoked exactly once.
+    @Test
+    fun `a persist that reentrantly flushes does not recurse`() = runTest {
+        val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
+        val open = unlockImage(passphrase, image, ops, fast)!!
+        val persisted = mutableListOf<ByteArray>()
+        lateinit var session: VaultSession
+        var depth = 0
+        session = VaultSession(
+            scope = backgroundScope,
+            ops = ops,
+            initialImage = image,
+            initialPayload = open.payloadPlaintext,
+            initialVaultKey = open.vaultKey,
+            slotIndex = open.slotIndex,
+            persist = { img ->
+                persisted.add(img.copyOf())
+                // Reentrant flush from inside persist. Bounded so a broken guard fails
+                // as an assertion mismatch (persisted.size == 4) rather than a crash.
+                if (depth++ < 3) session.flushNow()
+            },
+            clock = { currentTime },
+            cooldownMs = 2_000L,
+            flushContext = EmptyCoroutineContext,
+        )
+
+        session.update("x".toByteArray())
+        session.flushNow() // must return without recursing
+        assertEquals("reentrant flushNow was a guarded no-op, so persist ran once", 1, persisted.size)
+    }
 }
