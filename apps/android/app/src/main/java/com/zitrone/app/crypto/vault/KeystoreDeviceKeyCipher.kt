@@ -11,6 +11,7 @@ package com.zitrone.app.crypto.vault
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.security.keystore.StrongBoxUnavailableException
 import java.security.GeneralSecurityException
 import java.security.KeyStore
 import java.security.ProviderException
@@ -109,8 +110,13 @@ class KeystoreDeviceKeyCipher(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             try {
                 return generate(strongBox = true)
-            } catch (e: Exception) {
-                // StrongBox unavailable on this device — fall through to the standard key.
+            } catch (e: StrongBoxUnavailableException) {
+                // This device genuinely has no StrongBox — the ONLY reason to permanently
+                // downgrade to the standard hardware-backed key. Catch ONLY this: any OTHER
+                // exception (a transient TEE / provider error, e.g. a ProviderException) must
+                // PROPAGATE so it surfaces / retries, never silently and permanently wrapping
+                // the DEK under a weaker non-StrongBox key. The block is SDK_INT >= P guarded,
+                // so this class (API 28+) always resolves here.
             }
         }
         return generate(strongBox = false)

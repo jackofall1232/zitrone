@@ -60,7 +60,46 @@ sealed class VaultImageException(message: String) : Exception(message) {
      * — it MUST NOT recreate, which would destroy every real vault behind this image.
      */
     class CorruptImage : VaultImageException("vault image is unreadable")
+
+    /**
+     * A payload write's bytes ARE on disk (the atomic rename — the commit point —
+     * landed and its content was fsynced), but the directory-entry fsync that would
+     * make the rename itself crash-durable failed with a real storage error (EIO on an
+     * opened directory channel). The in-memory [VaultImageStore.canonical] has been
+     * ADVANCED to match disk (so no later splice works from stale state), yet the write
+     * is NOT confirmed durable — so it is thrown, never returned: a flush-before-ack
+     * caller must NOT ack. The session stays dirty and retries; a retry whose dir-fsync
+     * succeeds then acks. Distinct from [CorruptImage] — nothing is unreadable; only the
+     * rename's durability is unconfirmed.
+     */
+    class NotDurable : VaultImageException("vault image write not confirmed durable")
 }
+
+/**
+ * The exact on-disk size of `vault.bin`: the [IMAGE_BYTES] inner image plus the outer
+ * AES-256-GCM envelope's [NONCE_BYTES] nonce and [AEAD_TAG_BYTES] tag. A present
+ * `vault.bin` of any OTHER length is corruption (a tampered / truncated / inflated
+ * file), not a valid image — [VaultImageStore.open] length-checks against this constant
+ * BEFORE reading, so an inflated file can never force a giant allocation. `internal` so
+ * the storage tests can craft an off-size file to assert on.
+ */
+internal const val OUTER_IMAGE_BYTES: Int = IMAGE_BYTES + NONCE_BYTES + AEAD_TAG_BYTES
+
+/**
+ * The three durability outcomes of the post-rename directory fsync (see
+ * [VaultImageStore] `defaultFsyncDir`). The rename is the COMMIT point — the new image
+ * is already on disk and its content already fsynced before the dir-fsync runs — so this
+ * result reports only whether the rename's DIRECTORY ENTRY is confirmed crash-durable,
+ * never whether the write happened.
+ *  - [DURABLE]: the directory channel opened AND `force(true)` succeeded — fully durable.
+ *  - [BEST_EFFORT]: the directory channel could not be opened (a platform / filesystem
+ *    that refuses a directory [java.nio.channels.FileChannel]). NOT an error: the content
+ *    is already fsynced and the rename is journaled, so this is durable-enough and accepted.
+ *  - [NOT_DURABLE]: the directory channel opened but `force(true)` threw [IOException] — a
+ *    REAL storage error (EIO). The rename's durability is unconfirmed; the caller must not ack.
+ * `internal` so the storage tests can inject a forced result to drive each branch.
+ */
+internal enum class DirSyncResult { DURABLE, BEST_EFFORT, NOT_DURABLE }
 
 /**
  * The device-level storage layer for the plausible-deniability vault image. Owns
@@ -113,11 +152,22 @@ sealed class VaultImageException(message: String) : Exception(message) {
  * @param baseDir directory the two image files live in (production: `context.filesDir`).
  *   Taken as a bare [File] — no Context dependency — so it is host-unit-testable.
  */
-class VaultImageStore(
+class VaultImageStore internal constructor(
     private val baseDir: File,
     private val ops: VaultSodiumOps,
     private val deviceCipher: DeviceKeyCipher,
     private val deriver: KeyDeriver = argon2idDeriver(ops),
+    // Injectable for tests (the package's inject-for-tests convention, as with [ops] /
+    // [deriver]): the post-rename directory fsync, factored out so both new durability
+    // branches (BEST_EFFORT / NOT_DURABLE) are host-testable without a real EIO. Production
+    // uses [defaultFsyncDir]; tests pass a lambda returning a forced [DirSyncResult].
+    //
+    // The constructor is `internal` (not the public default) because this last parameter's
+    // type mentions the `internal` [DirSyncResult]: rather than leak that durability-only
+    // implementation type into the public API, construction is kept module-internal — which
+    // is where every caller already lives (the `:app` module's tests and, later, its app
+    // container). The class type itself stays public.
+    private val dirSync: (File?) -> DirSyncResult = ::defaultFsyncDir,
 ) {
     /** Serializes every read/write of the on-disk image and the in-memory canonical. */
     private val imageLock = ReentrantLock()
@@ -164,13 +214,20 @@ class VaultImageStore(
      * can retry a read that may succeed later. Only a file that VANISHED between the
      * existence check and the read (a TOCTOU race) is mapped into the taxonomy — a gone
      * image reads as MissingImage, a gone DEK as CorruptImage.
+     *
+     * A FAILED open — including a failed RE-open of an already-open store — leaves the
+     * store fully CLOSED: the DEK is wiped, the cached [canonical] is dropped, and the
+     * single-instance registration is released. The previously cached image is NEVER
+     * served again once the disk has gone Missing/Corrupt, so a later persist can never
+     * overwrite a bad on-disk image with stale in-memory data (masking corruption / a
+     * rollback). A SUCCESSFUL re-open is unaffected — it is idempotent and re-installs
+     * [canonical] from disk.
      */
     fun open() {
         imageLock.withLock {
             // Claim the single-instance registration BEFORE any work so two instances
             // racing on the same dir cannot both proceed. A re-open of THIS instance is
             // idempotent (register() no-ops when we already hold the path).
-            val newlyRegistered = registeredPath == null
             register()
             try {
                 // A leftover temp is an incomplete write; the main file is authoritative.
@@ -182,9 +239,18 @@ class VaultImageStore(
                 if (!binFile.exists()) throw VaultImageException.MissingImage()
                 if (!dekFile.exists()) throw VaultImageException.CorruptImage()
 
-                // Map a file that vanished between exists() and read into the taxonomy (a gone
-                // DEK is CorruptImage, a gone image is MissingImage); any OTHER IOException is a
-                // transient read error and propagates raw for the caller to retry (see kdoc).
+                // A PRESENT file of the wrong length is corruption (tampered / truncated /
+                // inflated), not "missing" — and length-checking BEFORE readBytes bounds the
+                // allocation so an inflated bin can never OOM the process.
+                if (dekFile.length() != WRAPPED_KEY_BYTES.toLong()) throw VaultImageException.CorruptImage()
+                if (binFile.length() != OUTER_IMAGE_BYTES.toLong()) throw VaultImageException.CorruptImage()
+
+                // Map a file that vanished OR became unreadable between the checks and the read
+                // into the taxonomy; any OTHER IOException is a transient read error and
+                // propagates raw for the caller to retry (see kdoc). A FileNotFoundException is
+                // ambiguous — absent OR present-but-unreadable (a directory / a permission
+                // fault) — so recheck existence: a still-present dek/bin is Corrupt, a truly
+                // gone bin is Missing (a gone dek is always Corrupt, bin already passed exists).
                 val dekBlob = try {
                     dekFile.readBytes()
                 } catch (e: FileNotFoundException) {
@@ -193,7 +259,8 @@ class VaultImageStore(
                 val binBytes = try {
                     binFile.readBytes()
                 } catch (e: FileNotFoundException) {
-                    throw VaultImageException.MissingImage()
+                    if (binFile.exists()) throw VaultImageException.CorruptImage()
+                    else throw VaultImageException.MissingImage()
                 }
 
                 val unwrapped = deviceCipher.unwrapDek(dekBlob) ?: throw VaultImageException.CorruptImage()
@@ -218,10 +285,16 @@ class VaultImageStore(
                 dek = unwrapped
                 canonical = inner
             } catch (t: Throwable) {
-                // A failed open must not leave a stale registration behind — but only
-                // release what THIS call acquired (an idempotent re-open of an already-open
-                // instance keeps the instance's ownership).
-                if (newlyRegistered) unregister()
+                // A failed open — including a failed RE-open of an already-open store — must
+                // FULLY invalidate, not just release a freshly-acquired registration. If a
+                // re-open finds the disk Missing/Corrupt, retaining the stale canonical would
+                // let a later persist overwrite the now-bad image with cached data (masking
+                // corruption / a rollback). So drop the DEK + canonical and release the
+                // registration UNCONDITIONALLY: the store is left CLOSED and re-openable.
+                dek?.let { wipe(it) }
+                dek = null
+                canonical = null
+                unregister()
                 throw t
             }
         }
@@ -273,7 +346,12 @@ class VaultImageStore(
                     // durable write below throws, wipe it so no vault key / plaintext is abandoned
                     // on the heap — the wipe-on-every-failure discipline the package keeps.
                     try {
-                        // DEK first, then image (see kdoc).
+                        // DEK first, then image (see kdoc). create() is one-time onboarding,
+                        // NOT on the flush-before-ack durability path, so it IGNORES the
+                        // DirSyncResult: a brand-new vault whose dir-fsync is only BEST_EFFORT
+                        // or NOT_DURABLE is fully re-onboardable and must NOT abort or become
+                        // non-retryable. atomicWrite now only THROWS pre-rename (nothing
+                        // committed, fully retryable), so there is no both-files-then-throw window.
                         atomicWrite(dekFile, wrappedDek)
                         atomicWrite(binFile, outer)
                     } catch (t: Throwable) {
@@ -354,10 +432,20 @@ class VaultImageStore(
      * (every other region byte-unchanged), outer-encrypts the result with a fresh
      * nonce, atomically writes it, and ONLY THEN swaps [canonical] to the new image.
      *
-     * Requires the store is open. Returns only once the bytes are durable. On ANY
-     * throw (not open, wrong size, encrypt / IO failure) [canonical] is left
-     * UNCHANGED and the on-disk image still opens to the PREVIOUS state, so the
-     * session stays dirty and retries — a flush-before-ack caller must NOT ack.
+     * Requires the store is open. On ANY throw a flush-before-ack caller must NOT ack —
+     * a throw ALWAYS means "not confirmed durable". There are two throw shapes, kept
+     * distinct because they leave DIFFERENT state:
+     *  - PRE-rename failure (not open, wrong size, encrypt / tmp-write / rename / content-fsync
+     *    IO failure): nothing was committed — [canonical] AND the on-disk image are both left at
+     *    the PREVIOUS state (the atomic rename replaces or not at all). Session stays dirty, no ack.
+     *  - POST-rename dir-fsync EIO ([DirSyncResult.NOT_DURABLE]): the new bytes ARE on disk (the
+     *    rename — the commit point — landed and its content was fsynced) but the rename's own
+     *    durability is unconfirmed. [canonical] is ADVANCED to match disk (so no later splice
+     *    works from stale state), and a [VaultImageException.NotDurable] is thrown so the caller
+     *    still does NOT ack. The session stays dirty and retries; a retry whose dir-fsync succeeds
+     *    then acks. A [DirSyncResult.BEST_EFFORT] (platform can't open a dir channel; content
+     *    already fsynced) is durable-enough and returns normally.
+     *
      * Never logs, and does identical work regardless of which slot is written.
      */
     fun writeSealedPayload(slotIndex: Int, sealedPayload: ByteArray) {
@@ -369,10 +457,18 @@ class VaultImageStore(
             // is untouched, so nothing below can corrupt the live canonical.
             val spliced = spliceImagePayload(current, slotIndex, sealedPayload)
             val outer = ops.aeadEncrypt(activeDek, spliced, VAULT_IMAGE_OUTER_AD)
-            atomicWrite(binFile, outer)
-            // Durable: commit the new canonical. Reached only if every step above
-            // succeeded, so a partial write never advances in-memory state.
+            // atomicWrite throws ONLY pre-rename (nothing committed, canonical untouched); a
+            // RETURN means the rename landed, with the result telling the rename's durability.
+            val sync = atomicWrite(binFile, outer)
+            // The rename committed → in-memory canonical now matches disk. Advance it BEFORE the
+            // NOT_DURABLE check so a later splice never works from stale state even on that throw.
             canonical = spliced
+            if (sync == DirSyncResult.NOT_DURABLE) {
+                // On disk but durability unconfirmed (real dir-fsync EIO): throw so a
+                // flush-before-ack caller does NOT ack. canonical is already advanced (above),
+                // so the session simply stays dirty and retries — a retry that dir-fsyncs acks.
+                throw VaultImageException.NotDurable()
+            }
         }
     }
 
@@ -425,14 +521,19 @@ class VaultImageStore(
     /**
      * Durable atomic write: write [bytes] to `<name>.tmp` in the SAME directory,
      * `FileChannel.force(true)` (fsync file content + metadata), atomically rename
-     * over the target (same-dir rename is atomic on ext4/f2fs), then best-effort
-     * fsync the directory so the rename itself survives a crash.
+     * over the target (same-dir rename is atomic on ext4/f2fs), then fsync the
+     * directory so the rename itself survives a crash.
      *
-     * On failure the target (previous durable file) is left intact — a same-dir
-     * rename replaces atomically or not at all — so a throw here never advances the
-     * on-disk state. Only the DIRECTORY fsync failure is swallowed (see [fsyncDir]).
+     * THROW vs RETURN is the durability contract. This THROWS on any PRE-rename failure
+     * (ensure-parent, tmp write, content-fsync, or a refused rename), with best-effort
+     * `.tmp` cleanup — the target (previous durable file) is untouched (a same-dir rename
+     * replaces atomically or not at all), so a THROW means NOTHING was committed (disk +
+     * memory unchanged, fully retryable). After a SUCCESSFUL rename it RETURNS the
+     * [dirSync] result for the directory: the rename is the commit point, so a RETURN means
+     * the new bytes ARE on disk and the [DirSyncResult] only reports the rename's own
+     * durability ([DirSyncResult.DURABLE] / [DirSyncResult.BEST_EFFORT] / [DirSyncResult.NOT_DURABLE]).
      */
-    private fun atomicWrite(target: File, bytes: ByteArray) {
+    private fun atomicWrite(target: File, bytes: ByteArray): DirSyncResult {
         // Defensive: production baseDir = filesDir always exists, so this is a no-op there,
         // but it covers a caller passing a fresh subdir that has not been created yet.
         target.parentFile?.let { if (!it.exists()) it.mkdirs() }
@@ -448,47 +549,16 @@ class VaultImageStore(
                 throw IOException("atomic rename failed for ${target.name}")
             }
         } catch (t: Throwable) {
-            // ANY failure (an ENOSPC mid-write, a refused rename, …) must not leave a
-            // variable-size `.tmp` lingering next to the constant-size files — best-effort
+            // ANY pre-rename failure (an ENOSPC mid-write, a refused rename, …) must not leave
+            // a variable-size `.tmp` lingering next to the constant-size files — best-effort
             // delete it, then propagate. The target (previous durable file) is untouched: a
             // same-dir rename replaces atomically or not at all.
             tmp.delete()
             throw t
         }
-        fsyncDir(target.parentFile)
-    }
-
-    /**
-     * Directory fsync so a completed rename is itself durable. Directory fsync works on
-     * Android/Linux via a read-only [java.nio.channels.FileChannel] over the directory.
-     *
-     * Two failures are treated DIFFERENTLY, so a real storage error is never swallowed:
-     *  - FAILING TO OPEN the directory channel is the best-effort "platform genuinely
-     *    can't" case — some filesystems refuse a directory FileChannel. The rename's file
-     *    CONTENT is already fsynced in [atomicWrite], so directory-entry durability is
-     *    best-effort here; this open failure is SWALLOWED and we return.
-     *  - `force(true)` FAILING on a SUCCESSFULLY-OPENED directory channel is a real I/O
-     *    error (EIO): it PROPAGATES, so [writeSealedPayload] does not report the write
-     *    durable when the rename is not, keeping the session dirty / unacked. Swallowing
-     *    it here would break flush-before-ack.
-     *
-     * The swallow is therefore ONLY the cannot-open case, NEVER a write/force error.
-     */
-    private fun fsyncDir(dir: File?) {
-        if (dir == null) return
-        val channel = try {
-            java.nio.channels.FileChannel.open(dir.toPath(), java.nio.file.StandardOpenOption.READ)
-        } catch (e: IOException) {
-            // Could not OPEN a directory channel on this platform — the rename's file
-            // CONTENT is already fsynced (atomicWrite), so directory-entry durability is
-            // best-effort here. This is the "platform genuinely can't", NOT a write error.
-            return
-        } catch (e: UnsupportedOperationException) {
-            return
-        }
-        // force() failing on an opened dir channel is a REAL storage error (EIO): propagate
-        // so writeSealedPayload does not report durable and the session stays dirty / unacked.
-        channel.use { it.force(true) }
+        // Rename committed. Report the directory-entry durability (never throws — see
+        // [defaultFsyncDir]); the caller decides how to act on a NOT_DURABLE result.
+        return dirSync(target.parentFile)
     }
 
     /** Delete an incomplete-write temp for [target], if any. Best-effort. */
@@ -511,5 +581,43 @@ class VaultImageStore(
 
         /** The data-encryption key is a 32-byte AES-256-GCM key (== [MASTER_KEY_BYTES]). */
         const val DEK_BYTES = MASTER_KEY_BYTES
+    }
+}
+
+/**
+ * The production directory-fsync used by [VaultImageStore]: makes a completed rename
+ * itself crash-durable via a read-only [java.nio.channels.FileChannel] over the directory
+ * (the Android/Linux idiom). NEVER throws — it maps every outcome onto a [DirSyncResult]
+ * so [VaultImageStore.writeSealedPayload] can distinguish "durable-enough" from a real
+ * storage error without a control-flow exception:
+ *  - could not OPEN the directory channel (some filesystems refuse a directory FileChannel):
+ *    [DirSyncResult.BEST_EFFORT]. NOT an error — the rename's file CONTENT is already fsynced
+ *    in [VaultImageStore] `atomicWrite`, so directory-entry durability is best-effort here.
+ *  - `force(true)` FAILING on a SUCCESSFULLY-OPENED channel: [DirSyncResult.NOT_DURABLE] — a
+ *    real I/O error (EIO). The caller must not report the write durable / must not ack.
+ *  - both succeed: [DirSyncResult.DURABLE].
+ *
+ * A null [dir] is [DirSyncResult.BEST_EFFORT] (no directory to sync).
+ */
+private fun defaultFsyncDir(dir: File?): DirSyncResult {
+    if (dir == null) return DirSyncResult.BEST_EFFORT
+    val channel = try {
+        // java.nio.file requires API 26; minSdk is 26 (build.gradle.kts), so this is always
+        // linkable — no LinkageError guard needed.
+        java.nio.channels.FileChannel.open(dir.toPath(), java.nio.file.StandardOpenOption.READ)
+    } catch (e: IOException) {
+        // Could not OPEN a directory channel on this platform — the rename's file CONTENT is
+        // already fsynced (atomicWrite). Best-effort, NOT a write error.
+        return DirSyncResult.BEST_EFFORT
+    } catch (e: UnsupportedOperationException) {
+        return DirSyncResult.BEST_EFFORT
+    }
+    return try {
+        channel.use { it.force(true) }
+        DirSyncResult.DURABLE
+    } catch (e: IOException) {
+        // force() failing on an OPENED dir channel is a REAL storage error (EIO): the rename's
+        // durability is unconfirmed. Signal NOT_DURABLE so the caller does not ack.
+        DirSyncResult.NOT_DURABLE
     }
 }

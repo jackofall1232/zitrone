@@ -8,12 +8,14 @@ package com.zitrone.app
 import com.goterl.lazysodium.SodiumJava
 import com.zitrone.app.crypto.vault.AEAD_TAG_BYTES
 import com.zitrone.app.crypto.vault.DeviceKeyCipher
+import com.zitrone.app.crypto.vault.DirSyncResult
 import com.zitrone.app.crypto.vault.IMAGE_BYTES
 import com.zitrone.app.crypto.vault.IMAGE_VERSION
 import com.zitrone.app.crypto.vault.KeyDeriver
 import com.zitrone.app.crypto.vault.LibsodiumVaultOps
 import com.zitrone.app.crypto.vault.MASTER_KEY_BYTES
 import com.zitrone.app.crypto.vault.NONCE_BYTES
+import com.zitrone.app.crypto.vault.OUTER_IMAGE_BYTES
 import com.zitrone.app.crypto.vault.SLOT_COUNT
 import com.zitrone.app.crypto.vault.SLOT_PAYLOAD_BYTES
 import com.zitrone.app.crypto.vault.VAULT_IMAGE_OUTER_AD
@@ -89,6 +91,12 @@ class VaultImageStoreTest {
     private val passphrase = "correct horse battery staple"
 
     private fun newStore(dir: File) = VaultImageStore(dir, ops, cipher, fast)
+
+    /** A store whose post-rename directory fsync is REPLACED by an injected [dirSync], so the
+     *  BEST_EFFORT / NOT_DURABLE durability branches are driven deterministically without a
+     *  real EIO. Mirrors the package's inject-for-tests convention (ops / deriver / clock). */
+    private fun newStore(dir: File, dirSync: (File?) -> DirSyncResult) =
+        VaultImageStore(dir, ops, cipher, fast, dirSync)
 
     /** Decrypt the on-disk envelope back to the inner image bytes — for asserting on
      *  inner regions the outer layer would otherwise hide behind a fresh nonce. */
@@ -617,6 +625,141 @@ class VaultImageStoreTest {
         b.open()
         assertArrayEquals("genesis".toByteArray(Charsets.UTF_8), b.unlock(passphrase)!!.payloadPlaintext)
         b.close()
+    }
+
+    // ── 17. Dir-fsync NOT_DURABLE: throws NotDurable but RECONCILES canonical to disk ─────
+
+    @Test
+    fun writeSealedPayload_dirSyncNotDurable_throwsNotDurableButReconcilesCanonicalToDisk() {
+        val dir = tmp.newFolder()
+        // create() ignores the DirSyncResult, so it succeeds even under a NOT_DURABLE dir-fsync.
+        val store = newStore(dir) { DirSyncResult.NOT_DURABLE }
+        val open = store.create(passphrase, "genesis".toByteArray(Charsets.UTF_8))
+
+        val updated = "durability-uncertain payload".toByteArray(Charsets.UTF_8)
+        // A real dir-fsync EIO: the rename (the commit point) landed and its content was
+        // fsynced, but the rename's durability is unconfirmed → writeSealedPayload THROWS
+        // NotDurable so a flush-before-ack caller does NOT ack (a THROW, never a return).
+        assertThrows(VaultImageException.NotDurable::class.java) {
+            store.writeSealedPayload(open.slotIndex, sealPayload(open.vaultKey, updated, ops))
+        }
+        store.close() // one store per dir: release before a fresh store reads from disk
+
+        // RECONCILED, not desynced: a FRESH store with the REAL dirSync opens the same dir and
+        // unlocks to the NEW payload — the write DID land on disk and canonical was advanced to
+        // match it, so no later splice can ever work from stale state.
+        val reopenStore = newStore(dir)
+        val reopened = reopenStore.unlock(passphrase)
+        assertNotNull(reopened)
+        assertArrayEquals(updated, reopened!!.payloadPlaintext)
+        reopenStore.close() // one store per dir: release before the durable-retry store opens
+
+        // A retry whose dir-fsync now SUCCEEDS returns normally (the caller may ack).
+        val durable = "confirmed-durable payload".toByteArray(Charsets.UTF_8)
+        val store2 = newStore(dir) { DirSyncResult.DURABLE }
+        store2.open()
+        store2.writeSealedPayload(open.slotIndex, sealPayload(open.vaultKey, durable, ops)) // no throw
+        store2.close()
+        assertArrayEquals(durable, newStore(dir).unlock(passphrase)!!.payloadPlaintext)
+    }
+
+    // ── 18. Dir-fsync BEST_EFFORT is durable-enough: returns normally, disk has the write ─
+
+    @Test
+    fun writeSealedPayload_dirSyncBestEffort_returnsNormally_diskHasNewPayload() {
+        val dir = tmp.newFolder()
+        val store = newStore(dir) { DirSyncResult.BEST_EFFORT }
+        val open = store.create(passphrase, "genesis".toByteArray(Charsets.UTF_8))
+
+        val updated = "best-effort-durable payload".toByteArray(Charsets.UTF_8)
+        // BEST_EFFORT (the platform cannot open a directory channel; the content is already
+        // fsynced) is durable-enough — writeSealedPayload returns WITHOUT throwing.
+        store.writeSealedPayload(open.slotIndex, sealPayload(open.vaultKey, updated, ops))
+        store.close()
+
+        assertArrayEquals(updated, newStore(dir).unlock(passphrase)!!.payloadPlaintext)
+    }
+
+    // ── 19. create() under NOT_DURABLE dir-fsync still succeeds — not aborted / bricked ───
+
+    @Test
+    fun create_dirSyncNotDurableOnBothWrites_succeeds_notAbortedOrBricked() {
+        val dir = tmp.newFolder()
+        // Both of create()'s atomic writes report NOT_DURABLE. create() is one-time onboarding,
+        // NOT on the flush-before-ack path, so it IGNORES the DirSyncResult and must NOT abort
+        // or brick — a brand-new vault is fully re-onboardable.
+        val store = newStore(dir) { DirSyncResult.NOT_DURABLE }
+        val content = "onboarding under a flaky dir-fsync".toByteArray(Charsets.UTF_8)
+        val open = store.create(passphrase, content)
+        assertArrayEquals("create returns a live open", content, open.payloadPlaintext)
+        assertTrue("the vault landed on disk despite NOT_DURABLE dir-fsync", store.exists())
+        store.close()
+
+        // The vault is on disk and open()+unlock() work — create was not aborted / bricked.
+        val fresh = newStore(dir)
+        fresh.open()
+        assertArrayEquals(content, fresh.unlock(passphrase)!!.payloadPlaintext)
+    }
+
+    // ── 20. A failed RE-open invalidates cached state — never serves it after the disk goes bad ─
+
+    @Test
+    fun failedReopen_invalidatesCachedState_neverServesStaleAfterDiskWentBad() {
+        val dir = tmp.newFolder()
+        val store = newStore(dir)
+        val original = "content before corruption".toByteArray(Charsets.UTF_8)
+        val open = store.create(passphrase, original)
+        // The store is open with `original` cached in memory as canonical.
+        assertArrayEquals(original, store.unlock(passphrase)!!.payloadPlaintext)
+
+        // Corrupt vault.bin on disk UNDER the live store (flip a byte), then RE-open the same
+        // instance: the on-disk image is now unreadable.
+        val bin = File(dir, "vault.bin")
+        val bytes = bin.readBytes()
+        bytes[bytes.size / 2] = (bytes[bytes.size / 2].toInt() xor 0x01).toByte()
+        bin.writeBytes(bytes)
+        assertThrows(VaultImageException.CorruptImage::class.java) { store.open() }
+
+        // The failed re-open FULLY invalidated the cached state: the store no longer serves the
+        // pre-corruption payload. unlock() now behaves as a COLD store — it re-opens from disk
+        // and hits CorruptImage, never returning the stale in-memory image.
+        assertThrows(VaultImageException.CorruptImage::class.java) { store.unlock(passphrase) }
+        // A direct write is likewise refused as not-open, rather than silently overwriting the
+        // corrupt vault.bin with cached data (which would mask the corruption / roll it back).
+        assertThrows(IllegalStateException::class.java) {
+            store.writeSealedPayload(open.slotIndex, sealPayload(open.vaultKey, "x".toByteArray(Charsets.UTF_8), ops))
+        }
+    }
+
+    // ── 21. An oversized vault.bin is CorruptImage — rejected fast, no OOM read ────────────
+
+    @Test
+    fun oversizedBin_isCorruptImage_withoutOom() {
+        val dir = tmp.newFolder()
+        val first = newStore(dir)
+        first.create(passphrase, "v".toByteArray(Charsets.UTF_8))
+        first.close() // release the dir so a fresh store can attempt the tampered open
+
+        // A tampered, hugely-inflated vault.bin (the valid-size dek is left untouched): the
+        // length precheck rejects it as CorruptImage BEFORE any readBytes, so a malicious file
+        // can never force a giant allocation. The assert returns fast — the garbage is never read.
+        File(dir, "vault.bin").writeBytes(ByteArray(OUTER_IMAGE_BYTES + 10_000) { 0x7e })
+        assertThrows(VaultImageException.CorruptImage::class.java) { newStore(dir).open() }
+    }
+
+    // ── 22. A wrong-size vault.dek is CorruptImage (present-but-wrong, not missing) ────────
+
+    @Test
+    fun wrongSizeDek_isCorruptImage() {
+        val dir = tmp.newFolder()
+        val first = newStore(dir)
+        first.create(passphrase, "v".toByteArray(Charsets.UTF_8))
+        first.close() // release the dir so a fresh store can attempt the tampered open
+
+        // A present vault.dek of the wrong length (61, one over WRAPPED_KEY_BYTES) is corruption,
+        // not "missing": the length precheck rejects it as CorruptImage before any unwrap.
+        File(dir, "vault.dek").writeBytes(ByteArray(WRAPPED_KEY_BYTES + 1) { 0x33 })
+        assertThrows(VaultImageException.CorruptImage::class.java) { newStore(dir).open() }
     }
 
     /**
