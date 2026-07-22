@@ -158,7 +158,11 @@ internal enum class DirSyncResult { DURABLE, NOT_DURABLE }
  * coordinator, DI graph, or migration — that is a later sub-phase.
  *
  * @param baseDir directory the two image files live in (production: `context.filesDir`).
- *   Taken as a bare [File] — no Context dependency — so it is host-unit-testable.
+ *   Taken as a bare [File] — no Context dependency — so it is host-unit-testable. baseDir MUST
+ *   be app-internal storage (production: `context.filesDir` — ext4/f2fs, where directory fsync is
+ *   supported). External/removable storage (FAT32/exFAT) is unsupported BY DESIGN: on filesystems
+ *   that cannot fsync a directory the store fails CLOSED (every write reads NOT_DURABLE) rather than
+ *   silently weakening the flush-before-ack durability guarantee.
  */
 class VaultImageStore internal constructor(
     private val baseDir: File,
@@ -417,16 +421,21 @@ class VaultImageStore internal constructor(
                             // delete is needed.
                             throw VaultImageException.NotDurable()
                         }
+                        // Install in-memory state INSIDE the liveOpen-wipe scope so EVERY throw point
+                        // before the return — including the 32-byte newDek.copyOf() (an OOM at this
+                        // allocation) — wipes liveOpen.vaultKey / liveOpen.payloadPlaintext rather than
+                        // abandoning live key material + plaintext on the heap. The on-disk barrier has
+                        // already landed above, so this cannot desync disk from memory; it only advances
+                        // the in-memory canonical/dek to match the just-confirmed image.
+                        dek?.let { wipe(it) }
+                        dek = newDek.copyOf()
+                        canonical = image
+                        return liveOpen
                     } catch (t: Throwable) {
                         wipe(liveOpen.vaultKey)
                         wipe(liveOpen.payloadPlaintext)
                         throw t
                     }
-
-                    dek?.let { wipe(it) }
-                    dek = newDek.copyOf()
-                    canonical = image
-                    return liveOpen
                 } finally {
                     wipe(newDek)
                 }
@@ -686,7 +695,8 @@ class VaultImageStore internal constructor(
 /**
  * The production directory-fsync used by [VaultImageStore]: makes a completed rename
  * itself crash-durable via a read-only [java.nio.channels.FileChannel] over the directory
- * (the Android/Linux idiom). NEVER throws — it maps every outcome onto a [DirSyncResult] so
+ * (the Android/Linux idiom). Never throws (Exception-broad by design; Errors still propagate) — it
+ * maps every outcome onto a [DirSyncResult] so
  * [VaultImageStore.writeSealedPayload] can act on it without a control-flow exception. Only a
  * CONFIRMED successful directory fsync is [DirSyncResult.DURABLE]; every other outcome is
  * [DirSyncResult.NOT_DURABLE] so the vault FAILS CLOSED (a write never falsely reports durable)
@@ -709,20 +719,26 @@ private fun defaultFsyncDir(dir: File?): DirSyncResult {
         // java.nio.file requires API 26; minSdk is 26 (build.gradle.kts), so this is always
         // linkable — no LinkageError guard needed.
         java.nio.channels.FileChannel.open(dir.toPath(), java.nio.file.StandardOpenOption.READ)
-    } catch (e: IOException) {
+    } catch (e: Exception) {
         // Could not OPEN a directory channel — the rename's file CONTENT is already fsynced
         // (atomicWrite), but a fsynced content does NOT make the rename's directory entry durable.
         // Not reachable on minSdk-26 Android/ext4/f2fs; if it were, fail CLOSED rather than ack.
-        return DirSyncResult.NOT_DURABLE
-    } catch (e: UnsupportedOperationException) {
+        // Exception-broad (was IOException / UnsupportedOperationException): any unexpected runtime
+        // exception (InvalidPathException, SecurityException) also reads as NOT_DURABLE — fail
+        // closed, never throw. A throw here would propagate through atomicWrite BEFORE its caller
+        // advances canonical, desyncing the in-memory canonical from disk (the exact hazard the
+        // DirSyncResult model exists to prevent). Errors (e.g. OOM) still propagate.
         return DirSyncResult.NOT_DURABLE
     }
     return try {
         channel.use { it.force(true) }
         DirSyncResult.DURABLE
-    } catch (e: IOException) {
+    } catch (e: Exception) {
         // force() failing on an OPENED dir channel is a REAL storage error (EIO): the rename's
-        // durability is unconfirmed. Signal NOT_DURABLE so the caller does not ack.
+        // durability is unconfirmed. Signal NOT_DURABLE so the caller does not ack. Exception-broad
+        // (was IOException): any unexpected runtime exception here also reads as NOT_DURABLE — fail
+        // closed, never throw. A throw here would propagate through atomicWrite BEFORE its caller
+        // advances canonical, desyncing the in-memory canonical from disk. Errors still propagate.
         DirSyncResult.NOT_DURABLE
     }
 }
