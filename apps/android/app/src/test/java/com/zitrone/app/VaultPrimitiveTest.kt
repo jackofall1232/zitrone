@@ -25,6 +25,7 @@ import com.zitrone.app.crypto.vault.randomPayload
 import com.zitrone.app.crypto.vault.randomSlot
 import com.zitrone.app.crypto.vault.sealPayload
 import com.zitrone.app.crypto.vault.sealSlot
+import com.zitrone.app.crypto.vault.spliceImagePayload
 import com.zitrone.app.crypto.vault.tryPassphrase
 import com.zitrone.app.crypto.vault.unlockImage
 import org.junit.Assert.assertArrayEquals
@@ -176,6 +177,70 @@ class VaultPrimitiveTest {
             assertArrayEquals(d0.slots[i].salt, d1.slots[i].salt)
             assertArrayEquals(d0.slots[i].wrapped, d1.slots[i].wrapped)
             assertArrayEquals(d0.payloads[i], d1.payloads[i])
+        }
+    }
+
+    // ── splice one payload region ───────────────────────────────────────────────
+
+    // spliceImagePayload replaces exactly ONE slot's payload region with an already-
+    // sealed payload and carries every other byte through untouched. Its only prior
+    // coverage was transitive (through VaultSession's reseal); pinned directly here now
+    // that the session no longer calls it — the storage layer does. `internal`, but the
+    // test is in the same module, so it resolves.
+    @Test
+    fun spliceImagePayload_replacesOneRegion_everyOtherByteUnchanged() {
+        val image = createImage("splice-pass", "the original keystore".toByteArray(Charsets.UTF_8), ops, fast)
+        val open = unlockImage("splice-pass", image, ops, fast)!!
+        val slotIndex = open.slotIndex
+
+        // Seal a NEW payload under the same slot key and splice it into this slot.
+        val updated = "resealed ratchet state, quite different".toByteArray(Charsets.UTF_8)
+        val sealed = sealPayload(open.vaultKey, updated, ops)
+        val spliced = spliceImagePayload(image, slotIndex, sealed)
+
+        // (1) constant length.
+        assertEquals(IMAGE_BYTES, spliced.size)
+
+        // (2) the spliced image opens under the same passphrase to the NEW payload.
+        val reopened = unlockImage("splice-pass", spliced, ops, fast)
+        assertNotNull(reopened)
+        assertArrayEquals(updated, reopened!!.payloadPlaintext)
+
+        // (3) every byte OUTSIDE this slot's payload region — the version byte, the whole
+        // slot table, and every OTHER payload region — is byte-identical to the original.
+        // The payload section begins IMAGE_BYTES - SLOT_COUNT * SLOT_PAYLOAD_BYTES in
+        // (public constants only; mirrors encodeImage's layout without its private offsets).
+        val regionStart = IMAGE_BYTES - SLOT_COUNT * SLOT_PAYLOAD_BYTES + slotIndex * SLOT_PAYLOAD_BYTES
+        val regionEnd = regionStart + SLOT_PAYLOAD_BYTES
+        assertArrayEquals(
+            "version byte, slot table, and earlier payload regions carried through byte-for-byte",
+            image.copyOfRange(0, regionStart), spliced.copyOfRange(0, regionStart),
+        )
+        assertArrayEquals(
+            "later payload regions carried through byte-for-byte",
+            image.copyOfRange(regionEnd, IMAGE_BYTES), spliced.copyOfRange(regionEnd, IMAGE_BYTES),
+        )
+        // ...and the target region is exactly the sealed bytes — pins the offset math.
+        assertArrayEquals(sealed, spliced.copyOfRange(regionStart, regionEnd))
+
+        // (4) require-failures: wrong sealed size, bad slot index, malformed image length.
+        try {
+            spliceImagePayload(image, slotIndex, ByteArray(SLOT_PAYLOAD_BYTES - 1))
+            fail("expected a wrong-size sealed payload to throw")
+        } catch (e: IllegalArgumentException) {
+            // expected — the region is fixed-length.
+        }
+        try {
+            spliceImagePayload(image, SLOT_COUNT, sealed)
+            fail("expected an out-of-range slot index to throw")
+        } catch (e: IllegalArgumentException) {
+            // expected
+        }
+        try {
+            spliceImagePayload(ByteArray(IMAGE_BYTES - 1), slotIndex, sealed)
+            fail("expected a malformed image length to throw")
+        } catch (e: IllegalArgumentException) {
+            // expected
         }
     }
 

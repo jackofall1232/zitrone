@@ -24,7 +24,11 @@ import kotlin.coroutines.CoroutineContext
  * inside the vault image (there is deliberately no on-disk evidence of a second
  * vault, so the whole keystore is a single opaque region, never a growing file).
  * While unlocked it lives here in memory as the current plaintext payload, and it
- * is re-sealed as a WHOLE payload and spliced back into the image on flush.
+ * is re-sealed as a WHOLE payload on flush and handed, with the slot index, to the
+ * storage layer, which splices it into the current image under the storage lock.
+ * The session itself does NOT know about the image: it owns only the plaintext
+ * payload and the slot key, seals a fresh ciphertext region, and hands that region
+ * off — the canonical image is owned entirely by the storage layer.
  *
  * The flush policy bounds how much Double Ratchet state a crash can lose:
  *
@@ -52,19 +56,21 @@ import kotlin.coroutines.CoroutineContext
  * construction (it keeps private copies). This is deliberate — the VaultOpen the
  * caller discards must not leave live key material or plaintext behind — but
  * mutating constructor arguments is surprising for Kotlin/Java, so a caller MUST
- * NOT read or reuse those two arrays after constructing a session. [initialImage]
- * is ciphertext and is left intact.
+ * NOT read or reuse those two arrays after constructing a session.
  *
  * THREADING. All public methods are thread-safe. Two monitors:
  *
- *  - [stateLock] guards the in-memory state (payload, image, dirty flags, the
- *    dirty [version], [pending], [closed]). It is held ONLY for fast, non-blocking
+ *  - [stateLock] guards the in-memory state (payload, dirty flags, the dirty
+ *    [version], [pending], [closed]). It is held ONLY for fast, non-blocking
  *    transitions — a cheap payload + key snapshot and version capture — NEVER
  *    across the reseal, [persist], or a suspension.
  *  - [flushLock] serializes a whole reseal → persist → commit cycle so two flushes
- *    cannot interleave their disk writes (which could land a stale image and lose
- *    an update). Lock ordering is ALWAYS [flushLock] then [stateLock], never the
- *    reverse.
+ *    cannot deliver their sealed regions to the sink OUT OF ORDER — without it an
+ *    older sealed payload could reach the sink after a newer one, and the storage
+ *    layer would durably splice stale ratchet state that may already have been acked.
+ *    This is NOT redundant with the storage layer's image-mutation lock: that lock
+ *    serializes the splices themselves but cannot know their generation order. Lock
+ *    ordering is ALWAYS [flushLock] then [stateLock], never the reverse.
  *
  * Both the AES-GCM reseal (CPU-heavy, ~256 KiB) and [persist] (a blocking,
  * caller-provided alien sink) run OUTSIDE [stateLock] — under [flushLock], on
@@ -82,23 +88,39 @@ import kotlin.coroutines.CoroutineContext
 class VaultSession(
     private val scope: CoroutineScope,
     private val ops: VaultSodiumOps,
-    initialImage: ByteArray,
     initialPayload: ByteArray,
     initialVaultKey: ByteArray,
     private val slotIndex: Int,
     /**
-     * Durable, atomic sink for a resealed WHOLE image. Must write atomically (e.g.
-     * write-temp + fsync + rename) so a crash mid-write cannot corrupt the vault.
+     * Durable sink for a freshly resealed payload region. Called with this session's
+     * [slotIndex] and the newly resealed payload — exactly [SLOT_PAYLOAD_BYTES] of
+     * ciphertext for this one slot, NOT a whole image.
      *
-     * ⚠️ The session splices its slot's payload into the image SNAPSHOT it was opened
-     * with; it does NOT re-read storage. The caller MUST therefore guarantee the
-     * on-disk image is not mutated by anything else (adding / destroying another
-     * slot) while this session is live — otherwise the next flush reverts that
-     * mutation. The single-live-session + teardown-on-switch model provides this; a
-     * future wiring that permits concurrent image mutation must instead splice into a
-     * freshly-read image under the storage lock (tracked for P1b-2).
+     * The sink MUST splice that region into the CURRENT on-disk image (at [slotIndex],
+     * every other region byte-unchanged) and write the result atomically (e.g.
+     * write-temp + fsync + rename), all under the storage layer's image-mutation lock,
+     * and MUST return only once the bytes are durable. A throw propagates: it leaves
+     * the session dirty, so a flush-before-ack caller must NOT ack.
+     *
+     * Because the sink re-reads / holds the canonical image under its own lock, a
+     * concurrent mutation of ANOTHER slot's regions (another vault being added or
+     * destroyed) now composes correctly with a live session — the old "session splices
+     * into a stale snapshot, so the next flush reverts that mutation" hazard (tracked as
+     * the P1b-2 persist-API decision) is resolved by construction, because the session
+     * no longer holds any image snapshot. The sealedPayload is ciphertext (not secret);
+     * the sink may retain it.
+     *
+     * A mutation of THIS slot's own material is a different obligation the sink CANNOT
+     * cover: destroying this vault, resealing it under a new passphrase, or overwriting
+     * this slot's own table entry or payload region still REQUIRES closing this session
+     * first. Otherwise a pending flush can hand the sink a stale sealed region for this
+     * slot and clobber the mutation — e.g. destroy-then-recreate at this index would
+     * have the new vault's payload region overwritten by the old session's late flush,
+     * leaving the new vault permanently unopenable. Relatedly, at most ONE live session
+     * per slot: two sessions on the same slot are unsupported (last-writer-wins would
+     * silently roll back the other's ratchet state).
      */
-    private val persist: (ByteArray) -> Unit,
+    private val persist: (slotIndex: Int, sealedPayload: ByteArray) -> Unit,
     /**
      * Time source for the coalescing ceiling. It measures ELAPSED durations only,
      * so it must be MONOTONIC. The default is `System.nanoTime()` (in ms), which is
@@ -148,12 +170,6 @@ class VaultSession(
     private var payload: ByteArray
 
     /**
-     * The last image we know is on disk. Only THIS slot's payload region ever
-     * changes between reseals; every other region is spliced through unchanged.
-     */
-    private var image: ByteArray
-
-    /**
      * The Argon2id-derived slot key that seals this payload. A private COPY: the
      * session owns its key material and wipes it on [close]. Copying means a caller
      * that wipes its own VaultOpen after construction cannot zero the key out from
@@ -197,22 +213,19 @@ class VaultSession(
 
     init {
         // Fail fast on an integration error (wrong key size, over-capacity payload,
-        // bad slot index, malformed image) at CONSTRUCTION — rather than letting the
-        // first flush throw and be swallowed by the background job, which would leave
-        // the session permanently dirty and unflushable. Validated BEFORE any copy or
-        // wipe, so a rejected construction allocates no sensitive copy and leaves the
-        // caller's arrays intact to handle.
-        require(initialImage.size == IMAGE_BYTES) { "malformed vault image" }
+        // bad slot index) at CONSTRUCTION — rather than letting the first flush throw
+        // and be swallowed by the background job, which would leave the session
+        // permanently dirty and unflushable. Validated BEFORE any copy or wipe, so a
+        // rejected construction allocates no sensitive copy and leaves the caller's
+        // arrays intact to handle.
         require(slotIndex in 0 until SLOT_COUNT) { "slot index out of range" }
         require(initialVaultKey.size == VAULT_KEY_BYTES) { "vault key must be $VAULT_KEY_BYTES bytes" }
         require(initialPayload.size <= MAX_PAYLOAD_CONTENT_BYTES) { "content exceeds vault slot capacity" }
 
         // Copy into our owned buffers, then take ownership by wiping the caller's
         // originals. The VaultOpen the caller discards after construction then holds
-        // no live key or plaintext. initialImage is ciphertext (the sealed image) and
-        // not secret — left intact.
+        // no live key or plaintext.
         payload = initialPayload.copyOf()
-        image = initialImage.copyOf()
         vaultKey = initialVaultKey.copyOf()
         wipe(initialVaultKey)
         wipe(initialPayload)
@@ -267,11 +280,11 @@ class VaultSession(
     }
 
     /**
-     * SYNCHRONOUS, durable reseal. If dirty, seals the current payload, splices it
-     * into the image at this slot (every other region byte-unchanged), and hands
-     * the new image to [persist] — returning only after [persist] returns. Then
-     * cancels the pending debounce job so it cannot fire a redundant reseal. If
-     * [persist] throws, the session stays dirty and the throw propagates (a
+     * SYNCHRONOUS, durable reseal. If dirty, seals the current payload and hands it,
+     * with this slot's index, to [persist] — which splices it into the current image
+     * and writes durably under the storage lock — returning only after [persist]
+     * returns. Then cancels the pending debounce job so it cannot fire a redundant
+     * reseal. If [persist] throws, the session stays dirty and the throw propagates (a
      * flush-before-ack caller must NOT ack). Idempotent: a no-op when clean/closed.
      */
     fun flushNow() {
@@ -293,9 +306,8 @@ class VaultSession(
     /**
      * Force a final reseal, cancel any pending work, then wipe the vault key and
      * the in-memory payload — the wipes run even if the final reseal throws, so
-     * teardown never leaks key material. The ciphertext image is left intact (a
-     * retaining persist sink shares that array). After this, [update] / [flushNow]
-     * are no-ops and [read] throws. Idempotent.
+     * teardown never leaks key material. After this, [update] / [flushNow] are
+     * no-ops and [read] throws. Idempotent.
      */
     override fun close() {
         synchronized(stateLock) {
@@ -321,8 +333,6 @@ class VaultSession(
                 closed = true
                 wipe(vaultKey)
                 wipe(payload)
-                // Do NOT wipe [image]: it is ciphertext already handed to [persist],
-                // and a sink retaining that array would be corrupted.
             }
         }
     }
@@ -393,17 +403,14 @@ class VaultSession(
             var payloadCopy: ByteArray? = null
             var vaultKeyCopy: ByteArray? = null
             try {
-                val imageRef: ByteArray
                 val sealedVersion: Long
                 synchronized(stateLock) {
                     if (closed || !dirty) return
                     flushingThread = Thread.currentThread()
-                    // Only a cheap snapshot under the lock: copy the plaintext + key, grab
-                    // the current image reference and dirty version. The heavy seal runs
-                    // below, OUTSIDE the lock.
+                    // Only a cheap snapshot under the lock: copy the plaintext + key and
+                    // grab the dirty version. The heavy seal runs below, OUTSIDE the lock.
                     payloadCopy = payload.copyOf()
                     vaultKeyCopy = vaultKey.copyOf()
-                    imageRef = image
                     sealedVersion = version
                     // Clear the ceiling anchor now (this batch is being flushed). Any
                     // update() that lands mid-flush then sees firstDirtyAt == null and
@@ -411,22 +418,19 @@ class VaultSession(
                     // from the real mutation time — never a stale one that would hot-loop.
                     firstDirtyAt = null
                 }
-                // Heavy AES-GCM reseal (256 KiB) + splice OUTSIDE stateLock, on private
-                // copies, so a concurrent read()/update() never blocks on crypto (no
-                // main-thread stutter / ANR).
-                // Non-null by construction: both were assigned in the snapshot block
-                // above, which returns early otherwise. checkNotNull documents that
-                // invariant (and fails loudly rather than with a bare NPE).
-                val next = spliceImagePayload(
-                    imageRef, slotIndex,
-                    sealPayload(checkNotNull(vaultKeyCopy), checkNotNull(payloadCopy), ops),
-                )
-                // Blocking disk write, still no stateLock held: a reentrant update()
-                // from the sink just bumps `version`, detected at commit below.
-                persist(next)
+                // Heavy AES-GCM reseal (256 KiB) OUTSIDE stateLock, on private copies,
+                // so a concurrent read()/update() never blocks on crypto (no main-thread
+                // stutter / ANR). The freshly sealed region + this slot's index go to the
+                // blocking sink, which splices it into the CURRENT on-disk image and writes
+                // durably under the storage lock — the session holds no image to splice
+                // into. Still no stateLock held: a reentrant update() from the sink just
+                // bumps `version`, detected at commit below.
+                // Non-null by construction: both copies were assigned in the snapshot block
+                // above, which returns early otherwise. checkNotNull documents that invariant
+                // (and fails loudly rather than with a bare NPE).
+                persist(slotIndex, sealPayload(checkNotNull(vaultKeyCopy), checkNotNull(payloadCopy), ops))
                 synchronized(stateLock) {
                     if (closed) return
-                    image = next
                     if (version == sealedVersion) {
                         // Nothing changed during seal+persist — the whole dirty batch is
                         // now durable. firstDirtyAt was already reset to null at snapshot.

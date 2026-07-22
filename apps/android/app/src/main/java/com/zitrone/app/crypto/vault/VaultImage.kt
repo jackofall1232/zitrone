@@ -114,7 +114,9 @@ fun createImage(
  * slot table, and every OTHER payload region) carried over byte-for-byte
  * unchanged. The result is always the same constant [IMAGE_BYTES] length.
  *
- * This is the reseal splice the in-memory session needs: it re-encrypts the vault
+ * This is the reseal splice the STORAGE LAYER (the vault image store, a later
+ * sub-phase) performs when a live session hands it a (slotIndex, sealedPayload)
+ * pair — the session itself no longer touches the image. It re-encrypts the vault
  * key's OWN keystore payload in place, unlike [addVaultToImage], which seals a
  * NEW vault under a new passphrase into a free slot. It is deliberately
  * slot-agnostic and constant-length — it takes a caller-supplied [sealedPayload]
