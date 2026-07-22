@@ -426,12 +426,13 @@ class VaultSessionTest {
         assertArrayEquals("reentrant".toByteArray(), reopened.payloadPlaintext)
     }
 
-    // A failed BACKGROUND flush must (1) surface the error to onFlushError and (2)
-    // drop the ceiling anchor — even when a mutation landed mid-flush and anchored it
-    // in the past — so a much-later update opens a FRESH cooldown window instead of
-    // firing immediately off the stale anchor (the persistent-error hot-loop).
+    // A BARE failed background flush (no mutation landed mid-flush) must (1) surface
+    // the error to onFlushError and (2) drop the ceiling anchor, so a much-later
+    // update opens a FRESH cooldown window instead of firing immediately off a stale
+    // anchor (the persistent-error hot-loop). The mid-flush-during-failure case is a
+    // separate test — there the anchor is refreshed, not dropped, so the update flushes.
     @Test
-    fun `a failed background flush reports the error and drops the ceiling anchor`() = runTest {
+    fun `a bare failed background flush reports the error and drops the ceiling anchor`() = runTest {
         val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
         val open = unlockImage(passphrase, image, ops, fast)!!
         val persisted = mutableListOf<ByteArray>()
@@ -446,11 +447,7 @@ class VaultSessionTest {
             initialVaultKey = open.vaultKey,
             slotIndex = open.slotIndex,
             persist = { img ->
-                if (failNext) {
-                    failNext = false
-                    session.update("mid-flush".toByteArray()) // lands mid-flush, anchors firstDirtyAt in the past
-                    throw java.io.IOException("disk full")
-                }
+                if (failNext) { failNext = false; throw java.io.IOException("disk full") } // bare: no mid-flush update
                 persisted.add(img.copyOf())
             },
             clock = { currentTime },
@@ -460,13 +457,13 @@ class VaultSessionTest {
         )
 
         session.update("a".toByteArray()) // arms the ceiling at t=2000
-        advanceTimeBy(2_001)              // timer fires at 2000: reentrant mid-flush update, then persist FAILS
+        advanceTimeBy(2_001)              // timer fires at 2000: persist FAILS (bare)
         assertEquals("nothing persisted (the flush failed)", 0, persisted.size)
         assertEquals("background flush failure surfaced to onFlushError", 1, flushErrors.size)
         assertTrue("the reported error is the IOException", flushErrors[0] is java.io.IOException)
 
-        // Long past the stale mid-flush anchor: a fresh update must open a NEW window,
-        // not fire immediately (without the on-failure reset this would hot-loop).
+        // A bare failure dropped the anchor and did not re-arm; a fresh update must
+        // open a NEW window, not fire immediately off a stale anchor (no hot-loop).
         advanceTimeBy(3_000) // t=5001
         session.update("c".toByteArray())
         runCurrent()
@@ -643,5 +640,48 @@ class VaultSessionTest {
         session.use { it.update("in-use".toByteArray()) }
         assertEquals("use{} exit called close(), flushing the dirty payload", 1, sink.count)
         assertThrows(IllegalStateException::class.java) { session.read() }
+    }
+
+    // An update() that lands DURING a failing persist (before doFlush's catch runs)
+    // must not be stranded: the catch used to null firstDirtyAt unconditionally,
+    // wiping the mid-flush update's anchor so the timer never re-armed. It must
+    // instead re-anchor to the failure time and reschedule the update.
+    @Test
+    fun `a mid-flush update during a failing persist is re-armed not stranded`() = runTest {
+        val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
+        val open = unlockImage(passphrase, image, ops, fast)!!
+        val persisted = mutableListOf<ByteArray>()
+        lateinit var session: VaultSession
+        var failNext = true
+        session = VaultSession(
+            scope = backgroundScope,
+            ops = ops,
+            initialImage = image,
+            initialPayload = open.payloadPlaintext,
+            initialVaultKey = open.vaultKey,
+            slotIndex = open.slotIndex,
+            persist = { img ->
+                if (failNext) {
+                    failNext = false
+                    session.update("mid-flush".toByteArray()) // lands DURING persist, sets firstDirtyAt
+                    throw java.io.IOException("disk full")     // then the write fails
+                }
+                persisted.add(img.copyOf())
+            },
+            clock = { currentTime },
+            cooldownMs = 2_000L,
+            flushContext = EmptyCoroutineContext,
+        )
+
+        session.update("first".toByteArray()) // arms the ceiling at t=2000
+        advanceTimeBy(2_001)                   // timer fires: mid-flush update lands, then persist FAILS
+        assertEquals("the failing flush persisted nothing", 0, persisted.size)
+
+        // The mid-flush update must have been re-armed (anchor refreshed to the failure
+        // time), not stranded. It flushes a full cooldown after the failure (~t=4000).
+        advanceTimeBy(2_001)
+        assertEquals("the mid-flush update was re-armed and flushed", 1, persisted.size)
+        val reopened = unlockImage(passphrase, persisted.last(), ops, fast)!!
+        assertArrayEquals("mid-flush".toByteArray(), reopened.payloadPlaintext)
     }
 }

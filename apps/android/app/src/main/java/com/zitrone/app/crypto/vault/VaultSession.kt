@@ -414,7 +414,13 @@ class VaultSession(
                 // Heavy AES-GCM reseal (256 KiB) + splice OUTSIDE stateLock, on private
                 // copies, so a concurrent read()/update() never blocks on crypto (no
                 // main-thread stutter / ANR).
-                val next = spliceImagePayload(imageRef, slotIndex, sealPayload(vaultKeyCopy!!, payloadCopy!!, ops))
+                // Non-null by construction: both were assigned in the snapshot block
+                // above, which returns early otherwise. checkNotNull documents that
+                // invariant (and fails loudly rather than with a bare NPE).
+                val next = spliceImagePayload(
+                    imageRef, slotIndex,
+                    sealPayload(checkNotNull(vaultKeyCopy), checkNotNull(payloadCopy), ops),
+                )
                 // Blocking disk write, still no stateLock held: a reentrant update()
                 // from the sink just bumps `version`, detected at commit below.
                 persist(next)
@@ -435,11 +441,16 @@ class VaultSession(
             } catch (t: Throwable) {
                 synchronized(stateLock) {
                     // The batch did not reach disk (dirty stays true — data is still in
-                    // memory). Drop the ceiling anchor so the NEXT update() opens a fresh
-                    // cooldown window instead of an immediate, hot-looping retry off a
-                    // stale timestamp that a mid-flush update may have set. Covers BOTH
-                    // the background timer and a synchronous flushNow() that throws.
-                    if (!closed) firstDirtyAt = null
+                    // memory). Two cases, distinguished by whether an update() landed
+                    // mid-flush (which, seeing the snapshot's firstDirtyAt == null, set it
+                    // to its OWN timestamp):
+                    //   - No mid-flush update  -> firstDirtyAt is still null: leave it, so
+                    //     a BARE failure does not re-arm and never hot-loops a failing disk.
+                    //   - A mid-flush update    -> firstDirtyAt is non-null: RE-ANCHOR to now
+                    //     (not null!) so that update is rescheduled a full cooldown out and
+                    //     is not stranded dirty-but-unscheduled. Covers both the background
+                    //     timer and a synchronous flushNow() that throws.
+                    if (!closed && firstDirtyAt != null) firstDirtyAt = clock()
                 }
                 throw t
             } finally {
