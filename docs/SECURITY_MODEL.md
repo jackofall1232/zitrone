@@ -172,11 +172,14 @@ cross-device channel for one to leak through.)
   the plausible-deniability section below for the on-disk layout). Each vault's keystore is padded
   to a constant payload size and encrypted with AES-256-GCM under that vault's random key; the
   vault key is unwrapped from a key slot whose per-slot master key is derived from the user's
-  passphrase via Argon2id (memory 65536 KB, iterations 3). Note: `libsodium.js` uses an
-  internal Argon2id parallelism of 1 and exposes no lane parameter, so the web client cannot honor
-  the spec's `parallelism: 4` literally; the value is applied consistently across all web
-  derivations, and native clients use the spec value. Keys exist in plaintext only in memory while
-  the app is unlocked.
+  passphrase via Argon2id (memory 65536 KB, iterations 3, **parallelism 1**). Note on
+  parallelism: libsodium's `crypto_pwhash` fixes Argon2id parallelism at 1 internally and exposes
+  no lane parameter. Both the web/desktop client (`libsodium.js`) and the Android client (the same
+  libsodium via `lazysodium`, from 0.9.1's vault primitive) therefore derive at parallelism 1 —
+  identical, bit-for-bit auditable Argon2id across every platform. (An earlier draft of this doc
+  claimed a native `parallelism: 4`; that was never actually achieved on any platform and has been
+  corrected here to match the shipping code.) Keys exist in plaintext only in memory while the app
+  is unlocked.
 - **iOS:** Identity key in the Secure Enclave where available; all key material in the Keychain,
   biometric-protected (Face ID / Touch ID).
 - **Android:** Android Keystore System, hardware-backed where the device supports it; remaining

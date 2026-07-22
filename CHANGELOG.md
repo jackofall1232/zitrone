@@ -9,6 +9,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Android: plausible-deniability key-slot vault primitive (isolated, not yet
+  wired).** A self-contained Kotlin port of the web reference
+  (`packages/crypto/src/vault.ts` + the `apps/web` storage payload/image codec):
+  fixed SLOT_COUNT key slots, one real slot at a random index with the rest
+  uniformly-random filler, Argon2id (64 MiB / 3 iterations) slot wrapping and
+  fixed-size AES-256-GCM payload regions, and a no-early-exit `tryPassphrase`
+  that derives and attempts every slot for wall-clock timing parity. New files
+  under `crypto/vault/` plus tests only — deliberately NOT connected to any
+  store or unlock flow; that integration is a later phase.
 - **iOS: full contact deletion (cryptographic teardown, not soft-delete).**
   Long-press / context-menu on a conversation → confirm to burn known local
   messages (best-effort peer burn), destroy the Double Ratchet session and
