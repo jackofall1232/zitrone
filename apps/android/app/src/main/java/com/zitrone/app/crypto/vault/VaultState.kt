@@ -341,16 +341,27 @@ object VaultStateCodec {
         // otherwise force a multi-GB HashMap allocation (OOM) before the entry loop's Reader
         // bounds checks — which reject any count larger than the body supports — get to run.
         val map = HashMap<String, ByteArray>(minOf(count, 1024) * 2)
-        repeat(count) {
-            val keyLen = r.u16()
-            val key = String(r.bytes(keyLen), Charsets.UTF_8)
-            val valLen = r.i32()
-            require(valLen >= 0) { "negative signal value length" }
-            // Copy the value OUT of the (soon-wiped) body into an independent array.
-            map[key] = r.bytes(valLen)
+        try {
+            repeat(count) {
+                val keyLen = r.u16()
+                val key = String(r.bytes(keyLen), Charsets.UTF_8)
+                val valLen = r.i32()
+                require(valLen >= 0) { "negative signal value length" }
+                // Copy the value OUT of the (soon-wiped) body into an independent array.
+                map[key] = r.bytes(valLen)
+            }
+            require(!r.hasRemaining()) { "trailing bytes in signal section" }
+            return map
+        } catch (t: Throwable) {
+            // A truncated/invalid later entry (or trailing-bytes check) throws BEFORE we return,
+            // so parsePlaintext never assigns `signal` and its outer catch cannot reach these
+            // arrays. Zero every record value accumulated so far, then rethrow — no partial key
+            // material strands un-wiped in heap. Complementary to parsePlaintext's outer catch,
+            // which covers the case where decodeSignal SUCCEEDS but a LATER section throws.
+            for (v in map.values) wipe(v)
+            map.clear()
+            throw t
         }
-        require(!r.hasRemaining()) { "trailing bytes in signal section" }
-        return map
     }
 
     // ── 0x04 settings (fixed 9 bytes) ───────────────────────────────────────────
@@ -433,7 +444,16 @@ object VaultStateCodec {
         val len = r.i32()
         if (len == NULL_LEN) return null
         require(len >= 0) { "invalid nullable-string length: $len" }
-        return String(r.bytes(len), Charsets.UTF_8)
+        // `bytes` is a fresh copy of decoded secret material (account id / access / refresh token);
+        // the String constructor copies it out, so zero this transient in `finally` rather than
+        // abandon it un-wiped. (Roster/tombstones Strings decode from `body`, already wiped in
+        // parsePlaintext's finally — this covers the only OTHER decoded-secret-to-String path.)
+        val bytes = r.bytes(len)
+        try {
+            return String(bytes, Charsets.UTF_8)
+        } finally {
+            wipe(bytes)
+        }
     }
 
     // ── section framing helpers ──────────────────────────────────────────────────

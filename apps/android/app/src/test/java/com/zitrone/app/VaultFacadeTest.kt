@@ -114,14 +114,32 @@ class VaultFacadeTest {
     }
 
     @Test
-    fun `destroyContactCrypto returns false when the durable flush fails`() {
+    fun `destroyContactCrypto rolls back and returns false when the durable flush fails`() {
+        // Atomicity: a transient flush failure must ROLL BACK the removal (all-or-nothing, like the
+        // legacy commit()), so `false` means nothing was persisted AND the contact's crypto survives
+        // intact — never a retained contact whose session/identity vanished.
         val runtime = runtimeOf(persist = { _, _ -> throw IOException("disk full") })
-        runtime.mutate { it.signalRecords["session:bob-account:1"] = byteArrayOf(1) }
+        runtime.mutate { state ->
+            // Seed all three contact-scoped families for bob, plus an unrelated contact + own prekey.
+            state.signalRecords["session:bob-account:1"] = byteArrayOf(1, 2, 3)
+            state.signalRecords["remote_identity:bob-account:1"] = byteArrayOf(4, 5)
+            state.signalRecords["sender_key:bob-account:1:uuid-b"] = byteArrayOf(6, 7, 8, 9)
+            state.signalRecords["session:carol-account:1"] = byteArrayOf(10)
+            state.signalRecords["prekey:5"] = byteArrayOf(11)
+        }
         val signalStore = VaultSignalProtocolStore(runtime)
 
         assertFalse("a failed durable flush returns false", signalStore.destroyContactCrypto("bob-account"))
-        // The removal still happened in memory.
-        assertFalse(runtime.read { it.signalRecords.containsKey("session:bob-account:1") })
+
+        // ROLLBACK verified: every removed record is restored with its EXACT original bytes, and the
+        // untouched records are unchanged — the map is byte-for-byte what it was before the destroy.
+        runtime.read { state ->
+            assertArrayEquals("bob session restored", byteArrayOf(1, 2, 3), state.signalRecords["session:bob-account:1"])
+            assertArrayEquals("bob identity restored", byteArrayOf(4, 5), state.signalRecords["remote_identity:bob-account:1"])
+            assertArrayEquals("bob sender key restored", byteArrayOf(6, 7, 8, 9), state.signalRecords["sender_key:bob-account:1:uuid-b"])
+            assertArrayEquals("carol untouched", byteArrayOf(10), state.signalRecords["session:carol-account:1"])
+            assertArrayEquals("own prekey untouched", byteArrayOf(11), state.signalRecords["prekey:5"])
+        }
     }
 
     // ── signal scalar fidelity (load-bearing for the PR-E verbatim migration) ─────

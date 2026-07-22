@@ -161,8 +161,16 @@ class VaultSignalProtocolStore(
 
     override fun loadExistingSessions(
         addresses: List<SignalProtocolAddress>,
-    ): List<SessionRecord> = addresses.map { address ->
-        loadSession(address) ?: throw NoSessionException("No session for $address")
+    ): List<SessionRecord> = runtime.read { state ->
+        // ONE lock acquisition for the whole batch (not N via per-address loadSession). Each
+        // SessionRecord is CONSTRUCTED INSIDE the block (the round-3 under-lock invariant), so no
+        // live map array escapes to be parsed after the lock releases. Behaviour is preserved
+        // exactly: throw NoSessionException on the FIRST missing address (libsignal's contract),
+        // otherwise a record per address in order.
+        addresses.map { address ->
+            state.signalRecords[sessionKey(address)]?.let { bytes -> SessionRecord(bytes) }
+                ?: throw NoSessionException("No session for $address")
+        }
     }
 
     override fun getSubDeviceSessions(name: String): List<Int> = runtime.read { state ->
@@ -197,24 +205,52 @@ class VaultSignalProtocolStore(
      * session (root/chain/skipped keys live inside the SessionRecord), the remote identity
      * record (all device ids — so a re-add re-runs X3DH against a fresh bundle, never
      * inheriting a prior TOFU pin), and any group sender keys, then forces a flush-before-ack.
-     * Does NOT touch local identity or our own prekeys. Irreversible.
+     * Does NOT touch local identity or our own prekeys. Irreversible ONCE it returns `true`.
      *
-     * @return `false` if the durable flush threw (the removal did NOT reach disk) — mirrors
-     *         the legacy `commit()` boolean. The caller must NOT report the contact deleted
-     *         on `false`, or orphaned session/identity state can reappear on restart and be
-     *         reused instead of forcing a fresh X3DH.
+     * ATOMIC (all-or-nothing), mirroring the legacy `commit()` semantics. The removal is
+     * applied to the live map (which arms the session's coalescing flush timer), then a durable
+     * flush is forced. If that flush throws, the removal is ROLLED BACK — every removed record is
+     * restored — so a `false` return means NOTHING was persisted: the contact and its crypto both
+     * survive, consistent with the caller keeping its roster entry + messages on `false`. Without
+     * the rollback the armed timer would still persist the removal later, stranding a retained
+     * contact whose crypto had vanished (inconsistent, unusable). The restore re-arms the timer,
+     * which durably persists the RESTORED state.
+     *
+     * BOUNDED RESIDUAL. [VaultRuntime.flushBeforeAck] fails fast on a transient error, so the
+     * ~2s coalescing timer does not fire before the rollback runs; a crash inside that sub-ms
+     * window is the same accepted durability bound documented elsewhere in the runtime.
+     *
+     * @return `false` if the durable flush threw (the removal was rolled back and did NOT reach
+     *         disk) — mirrors the legacy `commit()` boolean. The caller must NOT report the
+     *         contact deleted on `false`, or orphaned session/identity state can reappear on
+     *         restart and be reused instead of forcing a fresh X3DH.
      */
     fun destroyContactCrypto(name: String): Boolean {
         val prefixes = listOf(KEY_SESSION, KEY_REMOTE_IDENTITY, KEY_SENDER_KEY)
-        runtime.mutate { state ->
-            state.signalRecords.keys
+        // Capture COPIES of every to-be-removed record BEFORE removal (removeRecord wipes the
+        // map's arrays, so copies are the only way to roll back). The key filter is materialized
+        // (.toList()) before removal, so iterating it while removing cannot ConcurrentModify.
+        val saved = runtime.mutate { state ->
+            val keys = state.signalRecords.keys
                 .filter { key -> prefixes.any { key.startsWith("$it$name:") } }
-                .forEach { removeRecord(state, it) }
+                .toList()
+            val copies = keys.associateWith { state.signalRecords.getValue(it).copyOf() }
+            keys.forEach { removeRecord(state, it) }
+            copies
         }
         return try {
             runtime.flushBeforeAck()
+            // Durable success: the copies are no longer needed — wipe them (the map holds none of
+            // these keys now, so the copies are the only remaining reference).
+            saved.values.forEach { wipe(it) }
             true
         } catch (t: Throwable) {
+            // ROLLBACK so `false` means nothing persisted (atomic, like the legacy commit()).
+            // putRecord takes OWNERSHIP of each copy — the map is empty at these keys (they were
+            // just removed), so there is no displaced array to wipe, and the copies are never both
+            // wiped and owned. The restore re-arms the timer, which durably persists the RESTORED
+            // state (contact + crypto both survive).
+            runtime.mutate { state -> saved.forEach { (k, v) -> putRecord(state, k, v) } }
             false
         }
     }
@@ -382,6 +418,9 @@ internal fun knownRemoteContactsOf(records: Map<String, ByteArray>): List<Pair<S
         .distinct()
         .map { accountId ->
             val b64 = records["$prefix$accountId:${VaultSignalProtocolStore.DEFAULT_DEVICE_ID}"]
+                // java.util.Base64 requires API 26; minSdk is 26, so always linkable. The Basic
+                // encoder (standard alphabet, padded, no line breaks) is byte-for-byte identical
+                // to the legacy store's android.util.Base64.NO_WRAP output — roster-repair fidelity.
                 ?.let { Base64.getEncoder().encodeToString(it) }
             accountId to b64
         }

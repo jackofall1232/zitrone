@@ -228,6 +228,29 @@ class VaultStateCodecTest {
         assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(plain)) }
     }
 
+    @Test
+    fun `a signal section with a valid record then a truncated second entry is rejected (decodeSignal partial-wipe path)`() {
+        // decodeSignal copies the first record into its local map, then the SECOND entry's key
+        // overruns the (truncated) section body → decodeSignal itself throws mid-parse, BEFORE it
+        // returns, so parsePlaintext never assigns `signal`. decodeSignal's own catch must wipe the
+        // partial map and rethrow. From here we can only observe the throw (the wiped map is
+        // discarded internally) — asserting the throw is the contract for the partial-wipe path.
+        val plain = byteArrayOf(
+            1, //                                          version
+            0x01, 0, 0, 0, 0x1B, //                        TAG_SIGNAL, section len = 27
+            0, 0, 0, 2, //                                 signal count = 2
+            // entry 1 (valid): keyLen=8 "prekey:1", valLen=3, [1,2,3]
+            0, 8,
+            0x70, 0x72, 0x65, 0x6b, 0x65, 0x79, 0x3a, 0x31, // "prekey:1"
+            0, 0, 0, 3,
+            1, 2, 3,
+            // entry 2 (truncated): keyLen=8 but only 4 key bytes follow — key read overruns
+            0, 8,
+            0x70, 0x72, 0x65, 0x6b, //                     "prek" (section body ends here)
+        )
+        assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(plain)) }
+    }
+
     // ── capacity boundary ────────────────────────────────────────────────────────
 
     @Test
