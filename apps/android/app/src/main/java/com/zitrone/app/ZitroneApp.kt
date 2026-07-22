@@ -96,7 +96,7 @@ class AppContainer(private val app: Application) {
      * fields that gate unlock and choose the transport. No data moves; see
      * [DeviceSettings].
      */
-    val deviceSettings = DeviceSettings(keyStoreManager, settingsRepository)
+    val deviceSettings = DeviceSettings(settingsRepository)
 
     // @Volatile so the transport apply-loop (running on Dispatchers.Default) and
     // the construction thread publish/read the current client consistently.

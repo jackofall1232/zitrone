@@ -5,7 +5,6 @@
 
 package com.zitrone.app.data
 
-import com.zitrone.app.crypto.KeyStoreManager
 import com.zitrone.app.net.TransportResolver
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -18,26 +17,25 @@ import kotlinx.coroutines.flow.map
  * device-wide, not per-vault. D1 keeps them EXACTLY where they live today: the
  * legacy `zitrone_settings` EncryptedSharedPreferences behind
  * [SettingsRepository]. This class is only a typed view over that device-level
- * subset, so NO DATA MOVES — every accessor reads the very same key/value
- * [SettingsRepository] already reads.
+ * subset, delegating every accessor to [SettingsRepository]'s already-loaded,
+ * in-memory `settings` StateFlow — so NO DATA MOVES, no new storage is created,
+ * and no additional decryption happens (it reads the same values
+ * [SettingsRepository] already loaded).
  *
  * The vault-scoped fields (ttl / burn-on-read / read-receipts /
  * lemon-drop-compose / unread-reminder) are deliberately NOT surfaced here and
  * stay on [SettingsRepository]; D2/D5 move those into the vault.
  *
- * The one genuinely new field, [autoLockTimeoutSeconds], has no legacy key and
- * simply defaults to [DEFAULT_AUTO_LOCK_SECONDS] until written. It is UNUSED in
- * D1 (D3 wires the auto-lock timer to it).
+ * The idle auto-lock timeout is NOT here yet: it is a genuinely new,
+ * device-level, writable setting with no legacy value, and its correct model
+ * (async-loaded, reactive, with a live-updating setter — NOT a blocking
+ * main-thread read at startup) is inseparable from its D3 consumer. D3 adds it
+ * to a device-level reactive settings source, separate from the vault-scoped
+ * [SettingsRepository].
  */
 class DeviceSettings(
-    keyStoreManager: KeyStoreManager,
     private val source: SettingsRepository,
 ) {
-    // The SAME encrypted store SettingsRepository uses. The autolock key (which
-    // SettingsRepository does not know about) lives here too, so nothing new is
-    // created and no existing value moves.
-    private val prefs = keyStoreManager.prefs(KeyStoreManager.PREFS_SETTINGS)
-
     /** Onboarding completed. Backed by SettingsRepository's `onboarding_done`. */
     val onboardingDone: Boolean get() = source.settings.value.onboardingDone
 
@@ -65,23 +63,4 @@ class DeviceSettings(
     /** Snapshot of [transportInputs] for the eager `stateIn` seed. */
     val transportInputsSnapshot: TransportResolver.Inputs
         get() = source.settings.value.let { TransportResolver.Inputs(it.i2pEnabled, it.torEnabled) }
-
-    /**
-     * Idle auto-lock timeout, in seconds (default 5 min). NEW in D1 with no
-     * legacy value — it defaults until written. UNUSED in D1; D3 consumes it.
-     *
-     * Read ONCE at construction rather than a per-access getter: reading
-     * EncryptedSharedPreferences decrypts on every call, which must not sit on a
-     * hot/UI-thread getter. ⚠️ D3 NOTE: this snapshot does NOT reflect a later
-     * write — when D3 adds the setter it MUST replace this with a re-reading /
-     * StateFlow model (mirroring SettingsRepository) so a changed timeout takes
-     * effect without a process restart.
-     */
-    val autoLockTimeoutSeconds: Int =
-        prefs.getInt(KEY_AUTO_LOCK_TIMEOUT, DEFAULT_AUTO_LOCK_SECONDS)
-
-    companion object {
-        const val DEFAULT_AUTO_LOCK_SECONDS = 300
-        private const val KEY_AUTO_LOCK_TIMEOUT = "auto_lock_timeout_seconds"
-    }
 }
