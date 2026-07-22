@@ -115,7 +115,7 @@ class AppContainer(private val app: Application) {
             .stateIn(
                 scope,
                 SharingStarted.Eagerly,
-                deviceSettings.transportInputsSnapshot(),
+                deviceSettings.transportInputsSnapshot,
             )
 
     val transportResolver = TransportResolver(
@@ -148,7 +148,7 @@ class AppContainer(private val app: Application) {
         keyStoreManager = keyStoreManager,
         bootDiagnostics = bootDiagnostics,
         settings = settingsRepository,
-        httpClient = { httpClient },
+        httpClient = httpClient,
         apiBaseUrl = API_BASE_URL,
         wsUrl = WS_URL,
     )
@@ -324,20 +324,23 @@ class SessionContainer(
     keyStoreManager: KeyStoreManager,
     bootDiagnostics: BootDiagnostics,
     settings: SettingsRepository,
-    httpClient: () -> OkHttpClient,
+    // The CURRENT transport client at build time. Passed by value (not a `() ->`
+    // accessor): apiClient/wsClient capture it once here, and later transport swaps
+    // are pushed through updateTransport(), so the session never re-reads it.
+    httpClient: OkHttpClient,
     apiBaseUrl: String,
     wsUrl: String,
 ) {
     val signalStore = EncryptedSignalProtocolStore(keyStoreManager)
     val signalManager = SignalProtocolManager(signalStore, keyStoreManager)
 
-    val apiClient = ApiClient(apiBaseUrl, httpClient(), keyStoreManager)
+    val apiClient = ApiClient(apiBaseUrl, httpClient, keyStoreManager)
 
     // WsClient shares the coordinator's diagnostic channel (logcat tag +
     // on-device log) so socket-lifecycle failures land in Settings →
     // Diagnostics next to the boot-stage lines. Privacy-safe by the same
     // rule: fixed markers + exception metadata only.
-    val wsClient = WsClient(wsUrl, httpClient(), scope) { line ->
+    val wsClient = WsClient(wsUrl, httpClient, scope) { line ->
         Log.w("ZitroneBoot", line)
         bootDiagnostics.record(line)
     }

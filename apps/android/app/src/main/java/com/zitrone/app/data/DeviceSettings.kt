@@ -63,15 +63,22 @@ class DeviceSettings(
         source.settings.map { TransportResolver.Inputs(it.i2pEnabled, it.torEnabled) }
 
     /** Snapshot of [transportInputs] for the eager `stateIn` seed. */
-    fun transportInputsSnapshot(): TransportResolver.Inputs =
-        source.settings.value.let { TransportResolver.Inputs(it.i2pEnabled, it.torEnabled) }
+    val transportInputsSnapshot: TransportResolver.Inputs
+        get() = source.settings.value.let { TransportResolver.Inputs(it.i2pEnabled, it.torEnabled) }
 
     /**
      * Idle auto-lock timeout, in seconds (default 5 min). NEW in D1 with no
      * legacy value — it defaults until written. UNUSED in D1; D3 consumes it.
+     *
+     * Read ONCE at construction rather than a per-access getter: reading
+     * EncryptedSharedPreferences decrypts on every call, which must not sit on a
+     * hot/UI-thread getter. ⚠️ D3 NOTE: this snapshot does NOT reflect a later
+     * write — when D3 adds the setter it MUST replace this with a re-reading /
+     * StateFlow model (mirroring SettingsRepository) so a changed timeout takes
+     * effect without a process restart.
      */
-    val autoLockTimeoutSeconds: Int
-        get() = prefs.getInt(KEY_AUTO_LOCK_TIMEOUT, DEFAULT_AUTO_LOCK_SECONDS)
+    val autoLockTimeoutSeconds: Int =
+        prefs.getInt(KEY_AUTO_LOCK_TIMEOUT, DEFAULT_AUTO_LOCK_SECONDS)
 
     companion object {
         const val DEFAULT_AUTO_LOCK_SECONDS = 300
