@@ -118,6 +118,10 @@ class VaultImageStoreTest {
         assertArrayEquals("create returns a live open", content, created.payloadPlaintext)
         assertTrue("image exists after create", store.exists())
 
+        // Close first: only ONE store per dir may be live at once, so a fresh store reading
+        // from disk models a process restart (the old process is gone).
+        store.close()
+
         // A fresh store, reading only from disk, opens and unlocks.
         val fresh = newStore(dir)
         fresh.open()
@@ -160,7 +164,9 @@ class VaultImageStoreTest {
                 assertArrayEquals("other payload region unchanged", before.payloads[i], after.payloads[i])
             }
         }
-        // Fresh store from disk unlocks to the updated payload, at the same slot.
+        // Fresh store from disk unlocks to the updated payload, at the same slot. Close the
+        // first store: one store per dir, so this models the old process being gone.
+        store.close()
         val reopened = newStore(dir).unlock(passphrase)!!
         assertArrayEquals(updated, reopened.payloadPlaintext)
         assertEquals(slotIndex, reopened.slotIndex)
@@ -203,7 +209,11 @@ class VaultImageStoreTest {
     fun open_ignoresAndCleansALeftoverTmp_mainFileIntact() {
         val dir = tmp.newFolder()
         val content = "state before crash".toByteArray(Charsets.UTF_8)
-        newStore(dir).create(passphrase, content)
+        // A real crash ends the process and releases the single-instance registration; in one
+        // JVM we emulate that by close()ing the crashed store before reopening.
+        val crashed = newStore(dir)
+        crashed.create(passphrase, content)
+        crashed.close()
 
         // Half-finished writes leave temp files next to the durable originals.
         File(dir, "vault.bin.tmp").writeBytes(ByteArray(123) { 0x7e })
@@ -243,6 +253,7 @@ class VaultImageStoreTest {
         // files. A FRESH store from disk still opens to the ORIGINAL — the durable bin file
         // was never advanced.
         assertFalse("atomicWrite cleans its .tmp on any failure", blocker.exists())
+        store.close() // one store per dir: release before a fresh store reads from disk
         assertArrayEquals(original, newStore(dir).unlock(passphrase)!!.payloadPlaintext)
     }
 
@@ -253,7 +264,9 @@ class VaultImageStoreTest {
         // A flipped byte in vault.bin → the outer GCM tag fails → CorruptImage.
         run {
             val dir = tmp.newFolder()
-            newStore(dir).create(passphrase, "v".toByteArray(Charsets.UTF_8))
+            val first = newStore(dir)
+            first.create(passphrase, "v".toByteArray(Charsets.UTF_8))
+            first.close() // release the dir so a fresh store can attempt the corrupt open
             val bin = File(dir, "vault.bin")
             val bytes = bin.readBytes()
             bytes[bytes.size / 2] = (bytes[bytes.size / 2].toInt() xor 0x01).toByte()
@@ -265,7 +278,9 @@ class VaultImageStoreTest {
         // A missing vault.dek with an existing vault.bin → CorruptImage.
         run {
             val dir = tmp.newFolder()
-            newStore(dir).create(passphrase, "v".toByteArray(Charsets.UTF_8))
+            val first = newStore(dir)
+            first.create(passphrase, "v".toByteArray(Charsets.UTF_8))
+            first.close() // release the dir so a fresh store can attempt the corrupt open
             assertTrue(File(dir, "vault.dek").delete())
             assertThrows(VaultImageException.CorruptImage::class.java) { newStore(dir).open() }
         }
@@ -324,6 +339,7 @@ class VaultImageStoreTest {
         session.update(updated)
         session.flushNow() // synchronous, durable persist through store.writeSealedPayload
         session.close()
+        store.close() // one store per dir: release before the fresh store reads from disk
 
         // A fresh store instance, reading ONLY from disk, unlocks to the UPDATED payload.
         val reopened = newStore(dir).unlock(passphrase)
@@ -351,6 +367,7 @@ class VaultImageStoreTest {
         // No torn write: the on-disk image is the constant size and a fresh store opens
         // to ONE complete, valid payload (never a byte-spliced mix of the two).
         assertEquals(IMAGE_BYTES + 28, File(dir, "vault.bin").length().toInt())
+        store.close() // one store per dir: release before the fresh store reads from disk
         val reopened = newStore(dir).unlock(passphrase)!!.payloadPlaintext
         assertTrue(
             "final region is one intact payload, not a torn mix",
@@ -371,8 +388,10 @@ class VaultImageStoreTest {
 
         // create() overwrites the stray DEK and produces a working vault.
         val content = "genesis after a stray dek".toByteArray(Charsets.UTF_8)
-        val open = newStore(dir).create(passphrase, content)
+        val creator = newStore(dir)
+        val open = creator.create(passphrase, content)
         assertArrayEquals(content, open.payloadPlaintext)
+        creator.close() // one store per dir: release before the fresh store reads from disk
 
         val reopened = newStore(dir).unlock(passphrase)
         assertNotNull("fresh store unlocks after recovery", reopened)
@@ -399,6 +418,7 @@ class VaultImageStoreTest {
         File(dir, "vault.bin.tmp").writeBytes(staleButValidBin)
         assertEquals("leftover tmp is a full-size image", IMAGE_BYTES + 28, File(dir, "vault.bin.tmp").length().toInt())
 
+        store.close() // one store per dir: release before the fresh store reads from disk
         val fresh = newStore(dir)
         fresh.open()
         assertFalse("complete leftover tmp discarded on open", File(dir, "vault.bin.tmp").exists())
@@ -468,7 +488,9 @@ class VaultImageStoreTest {
         // (a) a flipped byte in vault.dek → the DEK unwrap fails → CorruptImage.
         run {
             val dir = tmp.newFolder()
-            newStore(dir).create(passphrase, "v".toByteArray(Charsets.UTF_8))
+            val first = newStore(dir)
+            first.create(passphrase, "v".toByteArray(Charsets.UTF_8))
+            first.close() // release the dir so a fresh store can attempt the corrupt open
             val dek = File(dir, "vault.dek")
             val bytes = dek.readBytes()
             bytes[bytes.size / 2] = (bytes[bytes.size / 2].toInt() xor 0x01).toByte()
@@ -478,14 +500,18 @@ class VaultImageStoreTest {
         // (b) a VALID outer layer over a WRONG-SIZED inner → CorruptImage (size check).
         run {
             val dir = tmp.newFolder()
-            newStore(dir).create(passphrase, "v".toByteArray(Charsets.UTF_8))
+            val first = newStore(dir)
+            first.create(passphrase, "v".toByteArray(Charsets.UTF_8))
+            first.close() // release the dir so a fresh store can attempt the corrupt open
             rewriteBinWithInner(dir, ByteArray(IMAGE_BYTES - 1) { 0x02 })
             assertThrows(VaultImageException.CorruptImage::class.java) { newStore(dir).open() }
         }
         // (c) a valid, right-sized inner whose VERSION byte is unknown → CorruptImage.
         run {
             val dir = tmp.newFolder()
-            newStore(dir).create(passphrase, "v".toByteArray(Charsets.UTF_8))
+            val first = newStore(dir)
+            first.create(passphrase, "v".toByteArray(Charsets.UTF_8))
+            first.close() // release the dir so a fresh store can attempt the corrupt open
             val inner = decodeOnDiskInner(dir)
             inner[0] = (IMAGE_VERSION + 1).toByte() // an unknown future version for THIS build
             rewriteBinWithInner(dir, inner)
@@ -509,6 +535,7 @@ class VaultImageStoreTest {
         // Canonical untouched: the same store still unlocks to the ORIGINAL, and a fresh
         // store from disk does too (nothing was written).
         assertArrayEquals(original, store.unlock(passphrase)!!.payloadPlaintext)
+        store.close() // one store per dir: release before the fresh store reads from disk
         assertArrayEquals(original, newStore(dir).unlock(passphrase)!!.payloadPlaintext)
     }
 
@@ -536,6 +563,7 @@ class VaultImageStoreTest {
 
         // Fresh store from disk: slot k unlocks to its update, AND slot j's region is exactly
         // the bytes we wrote — no reversion of the other slot.
+        store.close() // one store per dir: release before the fresh store reads from disk
         val fresh = newStore(dir)
         fresh.open()
         assertArrayEquals("slot k unlocks to its update", updatedK, fresh.unlock(passphrase)!!.payloadPlaintext)
@@ -564,6 +592,31 @@ class VaultImageStoreTest {
         assertFalse("no vault.dek after a rejected create", File(dir, "vault.dek").exists())
         assertFalse("no vault.bin.tmp after a rejected create", File(dir, "vault.bin.tmp").exists())
         assertFalse("no vault.dek.tmp after a rejected create", File(dir, "vault.dek.tmp").exists())
+    }
+
+    // ── 16. Single instance per baseDir: a second live store on the same dir throws ───
+
+    @Test
+    fun twoLiveStoresOnSameDir_secondThrowsUntilFirstCloses() {
+        val dir = tmp.newFolder()
+        val a = newStore(dir)
+        a.create(passphrase, "genesis".toByteArray(Charsets.UTF_8))
+
+        // A second store on the SAME directory while A is live must refuse to open/create —
+        // two independent canonical snapshots would silently revert each other's writes.
+        val b = newStore(dir)
+        assertThrows(IllegalStateException::class.java) { b.open() }
+        assertThrows(IllegalStateException::class.java) {
+            b.create(passphrase, "second".toByteArray(Charsets.UTF_8))
+        }
+        // A's failed-B attempts left A's registration intact: A still works.
+        assertArrayEquals("genesis".toByteArray(Charsets.UTF_8), a.unlock(passphrase)!!.payloadPlaintext)
+
+        // After A releases the directory (a real process restart ends A), B may open it.
+        a.close()
+        b.open()
+        assertArrayEquals("genesis".toByteArray(Charsets.UTF_8), b.unlock(passphrase)!!.payloadPlaintext)
+        b.close()
     }
 
     /**

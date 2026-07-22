@@ -51,7 +51,10 @@ class KeystoreDeviceKeyCipher(
         // The Keystore drew a fresh random 12-byte IV (setRandomizedEncryptionRequired);
         // read it back and prefix it so the blob is self-describing. JCE GCM appends the
         // 16-byte tag to the ciphertext, giving nonce(12) ‖ ct(32) ‖ tag(16) = 60 bytes.
-        val nonce = cipher.iv
+        // `cipher.iv` is a platform type (ByteArray!); init ran with randomized encryption
+        // so an IV is present, but null-guard it before touching nonce.size rather than risk
+        // an opaque NPE — a missing IV is a Keystore contract violation, fail LOUDLY.
+        val nonce = cipher.iv ?: throw GeneralSecurityException("Keystore cipher returned no IV")
         val ct = cipher.doFinal(dek)
         val out = ByteArray(nonce.size + ct.size)
         nonce.copyInto(out, 0)

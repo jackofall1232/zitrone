@@ -79,6 +79,16 @@ sealed class VaultImageException(message: String) : Exception(message) {
  * backend, so the hardware-gated Keystore crypto only ever touches the DEK's 32
  * bytes (once per open/create), never the per-flush hot path.
  *
+ * SINGLE INSTANCE PER baseDir (load-bearing). AT MOST ONE VaultImageStore per baseDir
+ * per process. The [imageLock] serializes calls WITHIN an instance; cross-instance
+ * safety is provided by this single-instance rule, which the owner (the app container)
+ * guarantees by constructing exactly one store per directory. A second instance opening
+ * the SAME directory throws [IllegalStateException] — without this, two stores would
+ * hold independent [canonical] snapshots and silently revert each other's writes (the
+ * same stale-snapshot hazard the PR-A/PR-B redesign exists to kill), mirroring the
+ * 'at most one live session per slot' contract on [VaultSession]. The registration is
+ * released by [close], so a new instance may open the directory afterwards.
+ *
  * LOCK-ORDER INVARIANT (load-bearing). When composed with [VaultSession] the order
  * is ALWAYS VaultSession.flushLock → [imageLock]: a flush seals under the session's
  * flushLock and only THEN hands the region to [writeSealedPayload], which takes
@@ -124,6 +134,14 @@ class VaultImageStore(
      *  failure path that unwraps it. */
     private var dek: ByteArray? = null
 
+    /**
+     * The canonical directory path this instance has registered in [OPEN_PATHS], or null
+     * when it holds no registration. Set by [register] on the first [open] / [create],
+     * cleared by [unregister] on [close]. Accessed only under [imageLock]. Enforces the
+     * single-instance-per-baseDir contract (see class kdoc).
+     */
+    private var registeredPath: String? = null
+
     private val binFile: File get() = File(baseDir, IMAGE_FILE)
     private val dekFile: File get() = File(baseDir, DEK_FILE)
 
@@ -149,50 +167,63 @@ class VaultImageStore(
      */
     fun open() {
         imageLock.withLock {
-            // A leftover temp is an incomplete write; the main file is authoritative.
-            deleteLeftoverTmp(binFile)
-            deleteLeftoverTmp(dekFile)
-
-            // Key on the image file: a stray DEK with no image is the fresh-install /
-            // crash-between-writes state (MissingImage), not corruption.
-            if (!binFile.exists()) throw VaultImageException.MissingImage()
-            if (!dekFile.exists()) throw VaultImageException.CorruptImage()
-
-            // Map a file that vanished between exists() and read into the taxonomy (a gone
-            // DEK is CorruptImage, a gone image is MissingImage); any OTHER IOException is a
-            // transient read error and propagates raw for the caller to retry (see kdoc).
-            val dekBlob = try {
-                dekFile.readBytes()
-            } catch (e: FileNotFoundException) {
-                throw VaultImageException.CorruptImage()
-            }
-            val binBytes = try {
-                binFile.readBytes()
-            } catch (e: FileNotFoundException) {
-                throw VaultImageException.MissingImage()
-            }
-
-            val unwrapped = deviceCipher.unwrapDek(dekBlob) ?: throw VaultImageException.CorruptImage()
-            // From here `unwrapped` is live key material: wipe it on EVERY failure path,
-            // and keep it ONLY on the success path (mirrors tryPassphrase's discipline).
-            val inner: ByteArray
+            // Claim the single-instance registration BEFORE any work so two instances
+            // racing on the same dir cannot both proceed. A re-open of THIS instance is
+            // idempotent (register() no-ops when we already hold the path).
+            val newlyRegistered = registeredPath == null
+            register()
             try {
-                inner = ops.aeadDecrypt(unwrapped, binBytes, VAULT_IMAGE_OUTER_AD)
-                    ?: throw VaultImageException.CorruptImage()
-                if (inner.size != IMAGE_BYTES) throw VaultImageException.CorruptImage()
-                // Validate the inner VERSION too, not just the size: an unknown version reads
-                // as CorruptImage for THIS build. A future format bump MUST add its migration
-                // path here BEFORE [IMAGE_VERSION] changes, or existing images stop opening.
-                if (inner[0].toInt() and 0xff != IMAGE_VERSION) throw VaultImageException.CorruptImage()
+                // A leftover temp is an incomplete write; the main file is authoritative.
+                deleteLeftoverTmp(binFile)
+                deleteLeftoverTmp(dekFile)
+
+                // Key on the image file: a stray DEK with no image is the fresh-install /
+                // crash-between-writes state (MissingImage), not corruption.
+                if (!binFile.exists()) throw VaultImageException.MissingImage()
+                if (!dekFile.exists()) throw VaultImageException.CorruptImage()
+
+                // Map a file that vanished between exists() and read into the taxonomy (a gone
+                // DEK is CorruptImage, a gone image is MissingImage); any OTHER IOException is a
+                // transient read error and propagates raw for the caller to retry (see kdoc).
+                val dekBlob = try {
+                    dekFile.readBytes()
+                } catch (e: FileNotFoundException) {
+                    throw VaultImageException.CorruptImage()
+                }
+                val binBytes = try {
+                    binFile.readBytes()
+                } catch (e: FileNotFoundException) {
+                    throw VaultImageException.MissingImage()
+                }
+
+                val unwrapped = deviceCipher.unwrapDek(dekBlob) ?: throw VaultImageException.CorruptImage()
+                // From here `unwrapped` is live key material: wipe it on EVERY failure path,
+                // and keep it ONLY on the success path (mirrors tryPassphrase's discipline).
+                val inner: ByteArray
+                try {
+                    inner = ops.aeadDecrypt(unwrapped, binBytes, VAULT_IMAGE_OUTER_AD)
+                        ?: throw VaultImageException.CorruptImage()
+                    if (inner.size != IMAGE_BYTES) throw VaultImageException.CorruptImage()
+                    // Validate the inner VERSION too, not just the size: an unknown version reads
+                    // as CorruptImage for THIS build. A future format bump MUST add its migration
+                    // path here BEFORE [IMAGE_VERSION] changes, or existing images stop opening.
+                    if (inner[0].toInt() and 0xff != IMAGE_VERSION) throw VaultImageException.CorruptImage()
+                } catch (t: Throwable) {
+                    wipe(unwrapped)
+                    throw t
+                }
+
+                // Success: install canonical + DEK, wiping any DEK we already held.
+                dek?.let { wipe(it) }
+                dek = unwrapped
+                canonical = inner
             } catch (t: Throwable) {
-                wipe(unwrapped)
+                // A failed open must not leave a stale registration behind — but only
+                // release what THIS call acquired (an idempotent re-open of an already-open
+                // instance keeps the instance's ownership).
+                if (newlyRegistered) unregister()
                 throw t
             }
-
-            // Success: install canonical + DEK, wiping any DEK we already held.
-            dek?.let { wipe(it) }
-            dek = unwrapped
-            canonical = inner
         }
     }
 
@@ -215,43 +246,54 @@ class VaultImageStore(
      */
     fun create(passphrase: String, initialPayload: ByteArray): VaultOpen {
         imageLock.withLock {
-            require(!binFile.exists()) { "vault image already exists" }
-            val newDek = ops.randomBytes(DEK_BYTES)
-            // Ephemeral here: the persisted copy lives in `dek`. Wipe the local on EVERY
-            // exit, incl. if createImage / encrypt / wrap / verify / write throws mid-way.
+            // Claim the single-instance registration BEFORE any work (mirrors open()); a
+            // failed create releases only what THIS call acquired so a retry can proceed.
+            val newlyRegistered = registeredPath == null
+            register()
             try {
-                val image = createImage(passphrase, initialPayload, ops, deriver)
-                val outer = ops.aeadEncrypt(newDek, image, VAULT_IMAGE_OUTER_AD)
-                val wrappedDek = deviceCipher.wrapDek(newDek)
-                // Store-level constant-blob check: reject a malformed wrapped key from ANY
-                // DeviceKeyCipher impl BEFORE any write, so a bad blob fails create() loudly
-                // instead of persisting and bricking the next open().
-                check(wrappedDek.size == WRAPPED_KEY_BYTES) { "malformed wrapped key" }
-
-                // Verify BEFORE writing: unlockImage operates on the in-memory image only, so
-                // proving the fresh image opens before any disk write keeps a failed create()
-                // fully retryable (disk untouched).
-                val liveOpen = unlockImage(passphrase, image, ops, deriver)
-                    ?: throw IllegalStateException("freshly created image failed to open")
-                // liveOpen now holds live key material (an independent vault-key copy). If a
-                // durable write below throws, wipe it so no vault key / plaintext is abandoned
-                // on the heap — the wipe-on-every-failure discipline the package keeps.
+                require(!binFile.exists()) { "vault image already exists" }
+                val newDek = ops.randomBytes(DEK_BYTES)
+                // Ephemeral here: the persisted copy lives in `dek`. Wipe the local on EVERY
+                // exit, incl. if createImage / encrypt / wrap / verify / write throws mid-way.
                 try {
-                    // DEK first, then image (see kdoc).
-                    atomicWrite(dekFile, wrappedDek)
-                    atomicWrite(binFile, outer)
-                } catch (t: Throwable) {
-                    wipe(liveOpen.vaultKey)
-                    wipe(liveOpen.payloadPlaintext)
-                    throw t
-                }
+                    val image = createImage(passphrase, initialPayload, ops, deriver)
+                    val outer = ops.aeadEncrypt(newDek, image, VAULT_IMAGE_OUTER_AD)
+                    val wrappedDek = deviceCipher.wrapDek(newDek)
+                    // Store-level constant-blob check: reject a malformed wrapped key from ANY
+                    // DeviceKeyCipher impl BEFORE any write, so a bad blob fails create() loudly
+                    // instead of persisting and bricking the next open().
+                    check(wrappedDek.size == WRAPPED_KEY_BYTES) { "malformed wrapped key" }
 
-                dek?.let { wipe(it) }
-                dek = newDek.copyOf()
-                canonical = image
-                return liveOpen
-            } finally {
-                wipe(newDek)
+                    // Verify BEFORE writing: unlockImage operates on the in-memory image only, so
+                    // proving the fresh image opens before any disk write keeps a failed create()
+                    // fully retryable (disk untouched).
+                    val liveOpen = unlockImage(passphrase, image, ops, deriver)
+                        ?: throw IllegalStateException("freshly created image failed to open")
+                    // liveOpen now holds live key material (an independent vault-key copy). If a
+                    // durable write below throws, wipe it so no vault key / plaintext is abandoned
+                    // on the heap — the wipe-on-every-failure discipline the package keeps.
+                    try {
+                        // DEK first, then image (see kdoc).
+                        atomicWrite(dekFile, wrappedDek)
+                        atomicWrite(binFile, outer)
+                    } catch (t: Throwable) {
+                        wipe(liveOpen.vaultKey)
+                        wipe(liveOpen.payloadPlaintext)
+                        throw t
+                    }
+
+                    dek?.let { wipe(it) }
+                    dek = newDek.copyOf()
+                    canonical = image
+                    return liveOpen
+                } finally {
+                    wipe(newDek)
+                }
+            } catch (t: Throwable) {
+                // A failed create must not leave a stale registration — release only what
+                // THIS call acquired (an already-registered instance keeps its ownership).
+                if (newlyRegistered) unregister()
+                throw t
             }
         }
     }
@@ -339,13 +381,45 @@ class VaultImageStore(
      * and independent of any vault's lock — the outer layer is not a slot's secret,
      * so keeping the store open across vault locks is fine; this exists for tests /
      * teardown. Idempotent.
+     *
+     * Also RELEASES this instance's single-instance registration (see class kdoc), so a
+     * new VaultImageStore may open the same directory afterwards. A real process restart
+     * ends the old process and drops the registration implicitly; a test simulating a
+     * restart within one JVM MUST close() the old instance first before constructing the
+     * next one on the same baseDir.
      */
     fun close() {
         imageLock.withLock {
             dek?.let { wipe(it) }
             dek = null
             canonical = null
+            unregister()
         }
+    }
+
+    /**
+     * Claim the single-instance registration for [baseDir] (see class kdoc). Idempotent
+     * for THIS instance (a re-open no-ops); throws [IllegalStateException] if a DIFFERENT
+     * instance already holds the directory. The compound check-then-add is atomic under
+     * the [OPEN_PATHS] monitor so two instances racing on the same directory cannot both
+     * acquire it. Always called under [imageLock].
+     */
+    private fun register() {
+        val path = baseDir.canonicalFile.path
+        synchronized(OPEN_PATHS) {
+            if (registeredPath == path) return // idempotent: this instance already owns it
+            check(path !in OPEN_PATHS) { "a VaultImageStore is already open for this directory" }
+            OPEN_PATHS.add(path)
+            registeredPath = path
+        }
+    }
+
+    /** Release this instance's single-instance registration, if any. Idempotent; always
+     *  called under [imageLock]. */
+    private fun unregister() {
+        val path = registeredPath ?: return
+        OPEN_PATHS.remove(path)
+        registeredPath = null
     }
 
     /**
@@ -359,6 +433,9 @@ class VaultImageStore(
      * on-disk state. Only the DIRECTORY fsync failure is swallowed (see [fsyncDir]).
      */
     private fun atomicWrite(target: File, bytes: ByteArray) {
+        // Defensive: production baseDir = filesDir always exists, so this is a no-op there,
+        // but it covers a caller passing a fresh subdir that has not been created yet.
+        target.parentFile?.let { if (!it.exists()) it.mkdirs() }
         val tmp = File(target.parentFile, "${target.name}$TMP_SUFFIX")
         try {
             FileOutputStream(tmp).use { fos ->
@@ -382,21 +459,36 @@ class VaultImageStore(
     }
 
     /**
-     * Best-effort directory fsync so a completed rename is itself durable. Directory
-     * fsync works on Android/Linux via a read-only [java.nio.channels.FileChannel] over
-     * the directory; the [IOException] swallow remains ONLY for exotic platforms that
-     * genuinely refuse to fsync a directory fd. The file CONTENT is already fsynced in
-     * [atomicWrite] regardless, so on Android's ext4/f2fs defaults rename durability is
-     * best-effort-plus.
+     * Directory fsync so a completed rename is itself durable. Directory fsync works on
+     * Android/Linux via a read-only [java.nio.channels.FileChannel] over the directory.
+     *
+     * Two failures are treated DIFFERENTLY, so a real storage error is never swallowed:
+     *  - FAILING TO OPEN the directory channel is the best-effort "platform genuinely
+     *    can't" case — some filesystems refuse a directory FileChannel. The rename's file
+     *    CONTENT is already fsynced in [atomicWrite], so directory-entry durability is
+     *    best-effort here; this open failure is SWALLOWED and we return.
+     *  - `force(true)` FAILING on a SUCCESSFULLY-OPENED directory channel is a real I/O
+     *    error (EIO): it PROPAGATES, so [writeSealedPayload] does not report the write
+     *    durable when the rename is not, keeping the session dirty / unacked. Swallowing
+     *    it here would break flush-before-ack.
+     *
+     * The swallow is therefore ONLY the cannot-open case, NEVER a write/force error.
      */
     private fun fsyncDir(dir: File?) {
         if (dir == null) return
-        try {
+        val channel = try {
             java.nio.channels.FileChannel.open(dir.toPath(), java.nio.file.StandardOpenOption.READ)
-                .use { it.force(true) }
         } catch (e: IOException) {
-            // Directory fsync genuinely refused on this platform — see kdoc. Swallowed.
+            // Could not OPEN a directory channel on this platform — the rename's file
+            // CONTENT is already fsynced (atomicWrite), so directory-entry durability is
+            // best-effort here. This is the "platform genuinely can't", NOT a write error.
+            return
+        } catch (e: UnsupportedOperationException) {
+            return
         }
+        // force() failing on an opened dir channel is a REAL storage error (EIO): propagate
+        // so writeSealedPayload does not report durable and the session stays dirty / unacked.
+        channel.use { it.force(true) }
     }
 
     /** Delete an incomplete-write temp for [target], if any. Best-effort. */
@@ -408,6 +500,14 @@ class VaultImageStore(
         const val IMAGE_FILE = "vault.bin"
         const val DEK_FILE = "vault.dek"
         const val TMP_SUFFIX = ".tmp"
+
+        /**
+         * Process-wide set of canonical baseDir paths with a live VaultImageStore, enforcing
+         * the single-instance-per-baseDir contract (see class kdoc). Synchronized so
+         * [register] / [unregister] are safe across threads; compound check-then-add is done
+         * under the set's own monitor.
+         */
+        private val OPEN_PATHS = java.util.Collections.synchronizedSet(HashSet<String>())
 
         /** The data-encryption key is a 32-byte AES-256-GCM key (== [MASTER_KEY_BYTES]). */
         const val DEK_BYTES = MASTER_KEY_BYTES
