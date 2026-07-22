@@ -15,6 +15,8 @@ import com.zitrone.app.crypto.vault.VaultState
 import com.zitrone.app.crypto.vault.VaultStateCodec
 import com.zitrone.app.data.VaultAuthStore
 import com.zitrone.app.data.VaultRosterStore
+import com.zitrone.app.data.VaultScopedSettings
+import com.zitrone.app.data.VaultSettingsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -152,6 +154,72 @@ class VaultFacadeTest {
         assertEquals(0x0102030405060708L, reStore.signedPreKeyCreatedAt())
         assertEquals(0x2a10, reStore.getLocalRegistrationId())
         assertArrayEquals("kyber-used flag survives", byteArrayOf(1), decoded.signalRecords.getValue("kyber_prekey_used:7"))
+    }
+
+    // ── kyber-used marker: fresh array per write (no shared-constant aliasing) ────
+
+    @Test
+    fun `a wiped kyber-used marker never aliases a later marker to a zero byte`() {
+        // Old bug: every marker shared ONE static byteArrayOf(1); a close()/wipe() zeroed that
+        // shared array in place, so every SUBSEQUENT marker silently encoded byteArrayOf(0).
+        val first = runtimeOf()
+        val store1 = VaultSignalProtocolStore(first)
+        store1.markKyberPreKeyUsed(1)
+        store1.markKyberPreKeyUsed(2)
+        first.read { assertArrayEquals(byteArrayOf(1), it.signalRecords.getValue("kyber_prekey_used:1")) }
+        first.close() // wipes the state — would have zeroed a shared marker array in place
+
+        // A brand-new runtime + store writes another marker; with per-write fresh arrays it is 1.
+        val second = runtimeOf()
+        val store2 = VaultSignalProtocolStore(second)
+        store2.markKyberPreKeyUsed(3)
+        second.read {
+            assertArrayEquals(
+                "fresh marker is 1, not aliased to a wiped 0",
+                byteArrayOf(1),
+                it.signalRecords.getValue("kyber_prekey_used:3"),
+            )
+        }
+        second.close()
+    }
+
+    @Test
+    fun `overwriting a record zeroes the superseded backing array and keeps the new value`() {
+        // Deterministic proof of the superseded-record wipe: the counter setter's bytes are fully
+        // controlled, so we can capture the stored array and assert putRecord zeroed it on replace.
+        val runtime = runtimeOf()
+        val store = VaultSignalProtocolStore(runtime)
+        store.setNextPreKeyId(0x01020304)
+        val supersededArray = runtime.read { it.signalRecords.getValue("next_prekey_id") }
+        assertArrayEquals(byteArrayOf(1, 2, 3, 4), supersededArray)
+
+        store.setNextPreKeyId(0x05060708) // replaces the record → putRecord wipes the old array
+        assertArrayEquals(
+            "new value is stored and reads back",
+            byteArrayOf(5, 6, 7, 8),
+            runtime.read { it.signalRecords.getValue("next_prekey_id") },
+        )
+        assertArrayEquals("superseded record bytes were zeroed in place", byteArrayOf(0, 0, 0, 0), supersededArray)
+        assertEquals(0x05060708, store.nextPreKeyId())
+        runtime.close()
+    }
+
+    // ── VaultSettingsStore StateFlow publication ─────────────────────────────────
+
+    @Test
+    fun `a settings setter updates the StateFlow to the new value`() {
+        val runtime = runtimeOf()
+        val settingsStore = VaultSettingsStore(runtime)
+        assertEquals("seeded from the vault's current (default) settings", VaultScopedSettings(), settingsStore.settings.value)
+
+        settingsStore.setDefaultTtlSeconds(3600)
+        assertEquals("setter re-emits the updated ttl", 3600, settingsStore.settings.value.defaultTtlSeconds)
+        settingsStore.setReadReceipts(false)
+        assertFalse("setter re-emits the updated boolean", settingsStore.settings.value.readReceipts)
+
+        // Flow value equals the sealed state — publication is ordered under the same runtime lock.
+        assertEquals(runtime.read { it.settings }, settingsStore.settings.value)
+        runtime.close()
     }
 
     // ── VaultRosterStore.writeTombstonesBlob (always durable) ────────────────────

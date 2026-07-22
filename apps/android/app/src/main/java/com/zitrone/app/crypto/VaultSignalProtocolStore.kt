@@ -9,6 +9,8 @@
 package com.zitrone.app.crypto
 
 import com.zitrone.app.crypto.vault.VaultRuntime
+import com.zitrone.app.crypto.vault.VaultState
+import com.zitrone.app.crypto.vault.wipe
 import org.signal.libsignal.protocol.IdentityKey
 import org.signal.libsignal.protocol.IdentityKeyPair
 import org.signal.libsignal.protocol.InvalidKeyIdException
@@ -65,8 +67,8 @@ class VaultSignalProtocolStore(
 
     fun setLocalIdentity(identityKeyPair: IdentityKeyPair, registrationId: Int) {
         runtime.mutate {
-            it.signalRecords[KEY_IDENTITY] = identityKeyPair.serialize()
-            it.signalRecords[KEY_REGISTRATION_ID] = registrationId.toBeBytes()
+            putRecord(it, KEY_IDENTITY, identityKeyPair.serialize())
+            putRecord(it, KEY_REGISTRATION_ID, registrationId.toBeBytes())
         }
     }
 
@@ -88,9 +90,11 @@ class VaultSignalProtocolStore(
         // Read-existing + write in ONE mutate so the "identity changed?" answer is atomic.
         return runtime.mutate {
             val existing = it.signalRecords[key]
-            it.signalRecords[key] = serialized
-            // true == replaced a DIFFERENT pre-existing identity (key change!)
-            existing != null && !existing.contentEquals(serialized)
+            // true == replaced a DIFFERENT pre-existing identity (key change!). Compute this
+            // BEFORE putRecord, which wipes `existing`'s backing array (the superseded record).
+            val changed = existing != null && !existing.contentEquals(serialized)
+            putRecord(it, key, serialized)
+            changed
         }
     }
 
@@ -116,7 +120,7 @@ class VaultSignalProtocolStore(
     }
 
     override fun storePreKey(preKeyId: Int, record: PreKeyRecord) {
-        runtime.mutate { it.signalRecords["$KEY_PREKEY$preKeyId"] = record.serialize() }
+        runtime.mutate { putRecord(it, "$KEY_PREKEY$preKeyId", record.serialize()) }
     }
 
     override fun containsPreKey(preKeyId: Int): Boolean =
@@ -124,7 +128,7 @@ class VaultSignalProtocolStore(
 
     /** One-time prekeys are single-use by design — consumed, then deleted. */
     override fun removePreKey(preKeyId: Int) {
-        runtime.mutate { it.signalRecords.remove("$KEY_PREKEY$preKeyId") }
+        runtime.mutate { removeRecord(it, "$KEY_PREKEY$preKeyId") }
     }
 
     // -- signed prekeys -----------------------------------------------------
@@ -143,14 +147,14 @@ class VaultSignalProtocolStore(
     }
 
     override fun storeSignedPreKey(signedPreKeyId: Int, record: SignedPreKeyRecord) {
-        runtime.mutate { it.signalRecords["$KEY_SIGNED_PREKEY$signedPreKeyId"] = record.serialize() }
+        runtime.mutate { putRecord(it, "$KEY_SIGNED_PREKEY$signedPreKeyId", record.serialize()) }
     }
 
     override fun containsSignedPreKey(signedPreKeyId: Int): Boolean =
         runtime.read { it.signalRecords.containsKey("$KEY_SIGNED_PREKEY$signedPreKeyId") }
 
     override fun removeSignedPreKey(signedPreKeyId: Int) {
-        runtime.mutate { it.signalRecords.remove("$KEY_SIGNED_PREKEY$signedPreKeyId") }
+        runtime.mutate { removeRecord(it, "$KEY_SIGNED_PREKEY$signedPreKeyId") }
     }
 
     // -- sessions -------------------------------------------------------------
@@ -172,21 +176,21 @@ class VaultSignalProtocolStore(
     }
 
     override fun storeSession(address: SignalProtocolAddress, record: SessionRecord) {
-        runtime.mutate { it.signalRecords[sessionKey(address)] = record.serialize() }
+        runtime.mutate { putRecord(it, sessionKey(address), record.serialize()) }
     }
 
     override fun containsSession(address: SignalProtocolAddress): Boolean =
         runtime.read { it.signalRecords.containsKey(sessionKey(address)) }
 
     override fun deleteSession(address: SignalProtocolAddress) {
-        runtime.mutate { it.signalRecords.remove(sessionKey(address)) }
+        runtime.mutate { removeRecord(it, sessionKey(address)) }
     }
 
     override fun deleteAllSessions(name: String) {
         runtime.mutate { state ->
             state.signalRecords.keys
                 .filter { it.startsWith("$KEY_SESSION$name:") }
-                .forEach { state.signalRecords.remove(it) }
+                .forEach { removeRecord(state, it) }
         }
     }
 
@@ -208,7 +212,7 @@ class VaultSignalProtocolStore(
         runtime.mutate { state ->
             state.signalRecords.keys
                 .filter { key -> prefixes.any { key.startsWith("$it$name:") } }
-                .forEach { state.signalRecords.remove(it) }
+                .forEach { removeRecord(state, it) }
         }
         return try {
             runtime.flushBeforeAck()
@@ -236,14 +240,17 @@ class VaultSignalProtocolStore(
     }
 
     override fun storeKyberPreKey(kyberPreKeyId: Int, record: KyberPreKeyRecord) {
-        runtime.mutate { it.signalRecords["$KEY_KYBER_PREKEY$kyberPreKeyId"] = record.serialize() }
+        runtime.mutate { putRecord(it, "$KEY_KYBER_PREKEY$kyberPreKeyId", record.serialize()) }
     }
 
     override fun containsKyberPreKey(kyberPreKeyId: Int): Boolean =
         runtime.read { it.signalRecords.containsKey("$KEY_KYBER_PREKEY$kyberPreKeyId") }
 
     override fun markKyberPreKeyUsed(kyberPreKeyId: Int) {
-        runtime.mutate { it.signalRecords["$KEY_KYBER_USED$kyberPreKeyId"] = BOOLEAN_TRUE }
+        // A FRESH one-byte marker per write — never a shared constant. VaultState.wipe() zeroes
+        // every map value, so a shared array would be zeroed in place and alias every later
+        // marker (and any live copy) to byteArrayOf(0). The read side tests presence, not value.
+        runtime.mutate { putRecord(it, "$KEY_KYBER_USED$kyberPreKeyId", byteArrayOf(1)) }
     }
 
     // -- sender keys (groups — phase 2; interface requires the methods) -------
@@ -253,7 +260,7 @@ class VaultSignalProtocolStore(
         distributionId: UUID,
         record: SenderKeyRecord,
     ) {
-        runtime.mutate { it.signalRecords[senderKeyKey(sender, distributionId)] = record.serialize() }
+        runtime.mutate { putRecord(it, senderKeyKey(sender, distributionId), record.serialize()) }
     }
 
     override fun loadSenderKey(
@@ -273,7 +280,7 @@ class VaultSignalProtocolStore(
     fun nextPreKeyId(): Int = runtime.read { it.signalRecords[KEY_NEXT_PREKEY_ID] }?.toInt() ?: 1
 
     fun setNextPreKeyId(value: Int) {
-        runtime.mutate { it.signalRecords[KEY_NEXT_PREKEY_ID] = value.toBeBytes() }
+        runtime.mutate { putRecord(it, KEY_NEXT_PREKEY_ID, value.toBeBytes()) }
     }
 
     /** The next signed-prekey id, default 1 (see [nextPreKeyId]). */
@@ -281,7 +288,7 @@ class VaultSignalProtocolStore(
         runtime.read { it.signalRecords[KEY_NEXT_SIGNED_PREKEY_ID] }?.toInt() ?: 1
 
     fun setNextSignedPreKeyId(value: Int) {
-        runtime.mutate { it.signalRecords[KEY_NEXT_SIGNED_PREKEY_ID] = value.toBeBytes() }
+        runtime.mutate { putRecord(it, KEY_NEXT_SIGNED_PREKEY_ID, value.toBeBytes()) }
     }
 
     /** The current signed prekey's creation timestamp (ms), default 0 (never rotated). */
@@ -289,7 +296,7 @@ class VaultSignalProtocolStore(
         runtime.read { it.signalRecords[KEY_SIGNED_PREKEY_CREATED_AT] }?.toLong() ?: 0L
 
     fun setSignedPreKeyCreatedAt(value: Long) {
-        runtime.mutate { it.signalRecords[KEY_SIGNED_PREKEY_CREATED_AT] = value.toBeBytes() }
+        runtime.mutate { putRecord(it, KEY_SIGNED_PREKEY_CREATED_AT, value.toBeBytes()) }
     }
 
     // -- misc -----------------------------------------------------------------
@@ -311,6 +318,22 @@ class VaultSignalProtocolStore(
     /** Full local wipe — account deletion. Irreversible by design (mirrors legacy `wipe`). */
     fun wipe() {
         runtime.mutate { it.wipe() }
+    }
+
+    /**
+     * Store [value] under [key], ZEROING the superseded record it replaces. Every write here
+     * carries raw key material (identity, ratchet SessionRecord, prekeys, sender keys); the old
+     * serialized array must not linger un-wiped in heap once a newer record supplants it. The
+     * caller must hand a FRESH [value] (serialize()/toBeBytes() return fresh arrays), never one
+     * aliased elsewhere in the live map — putRecord wipes only the DISPLACED array.
+     */
+    private fun putRecord(state: VaultState, key: String, value: ByteArray) {
+        state.signalRecords.put(key, value)?.let { wipe(it) }
+    }
+
+    /** Remove [key], ZEROING the removed record's bytes (a dropped session/prekey is still secret). */
+    private fun removeRecord(state: VaultState, key: String) {
+        state.signalRecords.remove(key)?.let { wipe(it) }
     }
 
     private fun remoteIdentityKey(address: SignalProtocolAddress) =
@@ -340,9 +363,6 @@ class VaultSignalProtocolStore(
         private const val KEY_NEXT_PREKEY_ID = "next_prekey_id"
         private const val KEY_NEXT_SIGNED_PREKEY_ID = "next_signed_prekey_id"
         private const val KEY_SIGNED_PREKEY_CREATED_AT = "signed_prekey_created_at"
-
-        /** The single byte a `true` boolean flag stores (kyber-used markers only write true). */
-        private val BOOLEAN_TRUE = byteArrayOf(1)
     }
 }
 

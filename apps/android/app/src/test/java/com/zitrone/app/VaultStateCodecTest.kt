@@ -193,6 +193,41 @@ class VaultStateCodecTest {
         assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(plain)) }
     }
 
+    // ── mandatory-section rejection (signal / settings / auth always emitted in v1) ──
+
+    @Test
+    fun `a payload with only the version byte is rejected as missing mandatory sections`() {
+        // Valid deflate + valid version but ZERO sections. v1 always emits signal+settings+auth,
+        // so a truncated body carrying none of them is corruption — must throw, not default them.
+        assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(byteArrayOf(1))) }
+    }
+
+    @Test
+    fun `a payload with a valid signal section but no settings or auth is rejected`() {
+        // version(1) ‖ TAG_SIGNAL(0x01) len 4 ‖ count=0 — an empty-but-valid signal section and
+        // nothing else. settings/auth are mandatory, so decode must reject rather than default them.
+        val plain = byteArrayOf(1, 0x01, 0, 0, 0, 4, 0, 0, 0, 0)
+        assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(plain)) }
+    }
+
+    @Test
+    fun `a valid signal section followed by an unknown tag is rejected (decode-failure wipe path)`() {
+        // decodeSignal copies a record into the signal map, THEN the unknown tag throws;
+        // parsePlaintext must wipe the partial map and rethrow. From here we can only observe the
+        // throw (the wiped map is discarded internally) — asserting the throw is the contract.
+        val plain = byteArrayOf(
+            1, //                                          version
+            0x01, 0, 0, 0, 0x15, //                        TAG_SIGNAL, section len = 21
+            0, 0, 0, 1, //                                 signal count = 1
+            0, 8, //                                       keyLen = 8
+            0x70, 0x72, 0x65, 0x6b, 0x65, 0x79, 0x3a, 0x31, // "prekey:1"
+            0, 0, 0, 3, //                                 valLen = 3
+            1, 2, 3, //                                    value
+            0x09, 0, 0, 0, 0, //                           unknown tag 0x09, len 0
+        )
+        assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(plain)) }
+    }
+
     // ── capacity boundary ────────────────────────────────────────────────────────
 
     @Test

@@ -63,10 +63,15 @@ class VaultState(
      *
      * Zeroes each [signalRecords] value (raw key material — identity / ratchet
      * bytes) then clears the map. [rosterJson] / [tombstonesJson] and the [auth]
-     * token strings are JVM `String`s — immutable and un-wipeable, so they can
-     * linger in heap until GC. That is the SAME accepted, documented tradeoff the
-     * passphrase path carries (see KeySlot.kt's `KeyDeriver` note); the derived,
-     * high-value secrets (the Signal records) ARE wiped.
+     * token strings are JVM `String`s — immutable and un-zeroable, so their BYTES
+     * cannot be scrubbed; but this now DROPS our references to them (nulls the two
+     * blobs, swaps in a fresh empty [AuthState] / [VaultScopedSettings]) so they are
+     * GC-eligible instead of pinned reachable through this state, which [VaultRuntime]
+     * still holds as a private field after close. Un-pinning an un-zeroable `String`
+     * is the best available on the JVM — the SAME accepted tradeoff the passphrase
+     * path carries (see KeySlot.kt's `KeyDeriver` note) — an honest improvement over
+     * leaving them strongly reachable; the derived, high-value secrets (the Signal
+     * records) ARE zeroed.
      *
      * SCOPE. This zeroes the LIVE map only. Record bytes also pass transiently
      * through [VaultStateCodec] on every encode/decode; that codec zeroes each of
@@ -78,6 +83,12 @@ class VaultState(
     fun wipe() {
         for (value in signalRecords.values) wipe(value)
         signalRecords.clear()
+        // Drop references to the un-zeroable String-backed secrets so GC can reclaim them,
+        // rather than leaving them pinned reachable through this still-held state after close.
+        rosterJson = null
+        tombstonesJson = null
+        auth = AuthState()
+        settings = VaultScopedSettings()
     }
 
     companion object {
@@ -248,35 +259,55 @@ object VaultStateCodec {
         var settings: VaultScopedSettings? = null
         var auth: AuthState? = null
 
-        while (r.hasRemaining()) {
-            val tag = r.u8()
-            val len = r.i32()
-            require(len >= 0) { "negative section length" }
-            val body = r.bytes(len)
-            try {
-                when (tag) {
-                    TAG_SIGNAL -> signal = decodeSignal(body)
-                    TAG_ROSTER -> rosterJson = String(body, Charsets.UTF_8)
-                    TAG_TOMBSTONES -> tombstonesJson = String(body, Charsets.UTF_8)
-                    TAG_SETTINGS -> settings = decodeSettings(body)
-                    TAG_AUTH -> auth = decodeAuth(body)
-                    // Strict v1: an unknown tag is corruption / a wrong version, never skipped.
-                    else -> throw IllegalArgumentException("unknown vault state section tag: $tag")
+        try {
+            while (r.hasRemaining()) {
+                val tag = r.u8()
+                val len = r.i32()
+                require(len >= 0) { "negative section length" }
+                val body = r.bytes(len)
+                try {
+                    when (tag) {
+                        TAG_SIGNAL -> signal = decodeSignal(body)
+                        TAG_ROSTER -> rosterJson = String(body, Charsets.UTF_8)
+                        TAG_TOMBSTONES -> tombstonesJson = String(body, Charsets.UTF_8)
+                        TAG_SETTINGS -> settings = decodeSettings(body)
+                        TAG_AUTH -> auth = decodeAuth(body)
+                        // Strict v1: an unknown tag is corruption / a wrong version, never skipped.
+                        else -> throw IllegalArgumentException("unknown vault state section tag: $tag")
+                    }
+                } finally {
+                    // Each section body is a copy of sensitive plaintext — wipe it once parsed
+                    // (record values were copied OUT into the map; the strings are immutable copies).
+                    wipe(body)
                 }
-            } finally {
-                // Each section body is a copy of sensitive plaintext — wipe it once parsed
-                // (record values were copied OUT into the map; the strings are immutable copies).
-                wipe(body)
             }
-        }
 
-        return VaultState(
-            signalRecords = signal ?: HashMap(),
-            rosterJson = rosterJson,
-            tombstonesJson = tombstonesJson,
-            settings = settings ?: VaultScopedSettings(),
-            auth = auth ?: AuthState(),
-        )
+            // v1 ALWAYS emits signal, settings, auth (only roster/tombstones are nullable/omitted).
+            // A truncated-but-valid-deflate payload missing any of them is corruption, NOT a
+            // partial-default state — reject rather than silently fall back to empty holders.
+            // requireNotNull throws IllegalArgumentException INSIDE the try, so the catch below
+            // also wipes any partial signal map decoded before the missing section was noticed.
+            val decodedSignal = requireNotNull(signal) { "missing signal section" }
+            val decodedSettings = requireNotNull(settings) { "missing settings section" }
+            val decodedAuth = requireNotNull(auth) { "missing auth section" }
+
+            return VaultState(
+                signalRecords = decodedSignal,
+                rosterJson = rosterJson,
+                tombstonesJson = tombstonesJson,
+                settings = decodedSettings,
+                auth = decodedAuth,
+            )
+        } catch (t: Throwable) {
+            // A malformed/unknown later section (or a missing-mandatory require) can throw AFTER
+            // decodeSignal already copied raw key material into `signal`. Zero those record bytes
+            // before the throw escapes so a decode failure strands nothing un-wiped in heap.
+            signal?.let { partial ->
+                for (value in partial.values) wipe(value)
+                partial.clear()
+            }
+            throw t
+        }
     }
 
     // ── 0x01 signal ─────────────────────────────────────────────────────────────

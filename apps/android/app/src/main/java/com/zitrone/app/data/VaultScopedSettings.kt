@@ -72,12 +72,15 @@ class VaultSettingsStore(
     fun setUnreadReminderEnabled(enabled: Boolean) =
         update { it.copy(unreadReminderEnabled = enabled) }
 
-    /** Apply [transform] to the settings inside a mutate, then re-emit the new value. */
+    /** Apply [transform] to the settings inside a mutate, publishing the new value UNDER the lock. */
     private fun update(transform: (VaultScopedSettings) -> VaultScopedSettings) {
-        val updated = runtime.mutate { state ->
+        runtime.mutate { state ->
             state.settings = transform(state.settings)
-            state.settings
+            // Publish INSIDE the mutate (under the runtime lock) so the StateFlow is ordered with
+            // the mutation: two concurrent setters serialize here and can't publish out of order,
+            // so the flow never ends stale vs the vault state. The StateFlow assignment is a cheap
+            // non-blocking store that never re-enters the runtime, so it is lock-safe.
+            _settings.value = state.settings
         }
-        _settings.value = updated
     }
 }
