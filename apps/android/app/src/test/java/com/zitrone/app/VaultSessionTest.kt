@@ -541,4 +541,83 @@ class VaultSessionTest {
         session.flushNow() // must return without recursing
         assertEquals("reentrant flushNow was a guarded no-op, so persist ran once", 1, persisted.size)
     }
+
+    // An update() that lands in the failure/onFlushError window (while the failing
+    // timer job is still active, so it can't arm a new timer) must still be re-armed
+    // by the timer's cleanup — otherwise it sits dirty-but-unscheduled indefinitely.
+    @Test
+    fun `an update in the onFlushError window is re-armed and flushed`() = runTest {
+        val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
+        val open = unlockImage(passphrase, image, ops, fast)!!
+        val persisted = mutableListOf<ByteArray>()
+        lateinit var session: VaultSession
+        var failNext = true
+        session = VaultSession(
+            scope = backgroundScope,
+            ops = ops,
+            initialImage = image,
+            initialPayload = open.payloadPlaintext,
+            initialVaultKey = open.vaultKey,
+            slotIndex = open.slotIndex,
+            persist = { img ->
+                if (failNext) { failNext = false; throw java.io.IOException("disk full") }
+                persisted.add(img.copyOf())
+            },
+            clock = { currentTime },
+            cooldownMs = 2_000L,
+            flushContext = EmptyCoroutineContext,
+            // Fires in the failure window while the failing job is still active.
+            onFlushError = { session.update("after-failure".toByteArray()) },
+        )
+
+        session.update("first".toByteArray()) // arms the ceiling at t=2000
+        advanceTimeBy(2_001)                   // timer fires, persist FAILS, onFlushError updates
+        assertEquals("the failing flush persisted nothing", 0, persisted.size)
+
+        // The onFlushError-window update must have been re-armed; its ceiling flushes it.
+        advanceTimeBy(2_001)
+        assertEquals("the onFlushError-window update was re-armed and flushed", 1, persisted.size)
+        val reopened = unlockImage(passphrase, persisted.last(), ops, fast)!!
+        assertArrayEquals("after-failure".toByteArray(), reopened.payloadPlaintext)
+    }
+
+    // close() must stop accepting updates BEFORE its final flush, so a mutation racing
+    // in (here a reentrant one from the persist sink) is rejected — not executed and
+    // then wiped unflushed. Proved with an OVER-CAPACITY racing update: without the
+    // `closing` gate it would run, throw, and propagate out of close().
+    @Test
+    fun `close rejects an update racing its final flush`() = runTest {
+        val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
+        val open = unlockImage(passphrase, image, ops, fast)!!
+        val persisted = mutableListOf<ByteArray>()
+        lateinit var session: VaultSession
+        var raced = false
+        session = VaultSession(
+            scope = backgroundScope,
+            ops = ops,
+            initialImage = image,
+            initialPayload = open.payloadPlaintext,
+            initialVaultKey = open.vaultKey,
+            slotIndex = open.slotIndex,
+            persist = { img ->
+                persisted.add(img.copyOf())
+                if (!raced) {
+                    raced = true
+                    // Rejected as a no-op once `closing`; if it ran, this over-capacity
+                    // payload would throw IllegalArgumentException out of close().
+                    session.update(ByteArray(PAYLOAD_PLAINTEXT_BYTES))
+                }
+            },
+            clock = { currentTime },
+            cooldownMs = 2_000L,
+            flushContext = EmptyCoroutineContext,
+        )
+
+        session.update("final".toByteArray())
+        session.close() // must NOT throw — the racing over-capacity update is a no-op
+        assertTrue("the racing update was attempted", raced)
+        assertEquals("close flushed the pre-close state exactly once", 1, persisted.size)
+        val reopened = unlockImage(passphrase, persisted.last(), ops, fast)!!
+        assertArrayEquals("close persisted the state as of teardown", "final".toByteArray(), reopened.payloadPlaintext)
+    }
 }

@@ -86,6 +86,18 @@ class VaultSession(
     initialPayload: ByteArray,
     initialVaultKey: ByteArray,
     private val slotIndex: Int,
+    /**
+     * Durable, atomic sink for a resealed WHOLE image. Must write atomically (e.g.
+     * write-temp + fsync + rename) so a crash mid-write cannot corrupt the vault.
+     *
+     * ⚠️ The session splices its slot's payload into the image SNAPSHOT it was opened
+     * with; it does NOT re-read storage. The caller MUST therefore guarantee the
+     * on-disk image is not mutated by anything else (adding / destroying another
+     * slot) while this session is live — otherwise the next flush reverts that
+     * mutation. The single-live-session + teardown-on-switch model provides this; a
+     * future wiring that permits concurrent image mutation must instead splice into a
+     * freshly-read image under the storage lock (tracked for P1b-2).
+     */
     private val persist: (ByteArray) -> Unit,
     /**
      * Time source for the coalescing ceiling. It measures ELAPSED durations only,
@@ -162,6 +174,13 @@ class VaultSession(
     private var closed: Boolean = false
 
     /**
+     * Set at the START of [close], before its final flush. From that point [update]
+     * is a no-op, so no mutation can race INTO the teardown flush and then be wiped
+     * unflushed — [close] flushes exactly the state that existed when teardown began.
+     */
+    private var closing: Boolean = false
+
+    /**
      * The thread currently inside [doFlush], or null. Guards against a reentrant
      * flush on the same thread (an alien [persist] that synchronously re-flushes)
      * recursing through the reentrant [flushLock] into a StackOverflowError.
@@ -212,10 +231,12 @@ class VaultSession(
      */
     fun update(newPayload: ByteArray) {
         synchronized(stateLock) {
-            // A closed session is inert — no-op even for an over-capacity input
-            // (checked after the closed-gate so close() makes EVERY update a
-            // silent no-op, never a throw).
-            if (closed) return
+            // A closed OR closing session is inert — no-op even for an over-capacity
+            // input (checked before the capacity require so teardown makes EVERY update
+            // a silent no-op, never a throw). Rejecting once `closing` is set is what
+            // stops an update from racing into close()'s final flush and being wiped
+            // unflushed.
+            if (closed || closing) return
             // Reject before touching state: the same bound sealPayload enforces
             // (a 4-byte big-endian length prefix precedes the content inside the
             // fixed plaintext capacity). Checked here so a rejected update leaves
@@ -269,24 +290,31 @@ class VaultSession(
      * are no-ops and [read] throws. Idempotent.
      */
     fun close() {
+        synchronized(stateLock) {
+            // Idempotent, and — critically — STOP accepting updates before the final
+            // flush. Otherwise an update() racing in (another thread, or a reentrant
+            // persist sink) during the flush would be left dirty and then wiped below
+            // without ever being persisted, breaking close()'s "final flush" promise.
+            if (closed || closing) return
+            closing = true
+        }
         try {
-            // Best-effort final reseal. If it throws (persist failure) we still fall
-            // through to wipe every secret — teardown must never leak key material,
-            // even when the last write could not land. doFlush() takes flushLock
-            // then stateLock internally and fully releases both before the finally
-            // runs, so the finally's stateLock acquisition never nests under either.
+            // Best-effort final reseal of the state as of teardown. No update can land
+            // now (update() no-ops once `closing`), so this flush captures everything.
+            // If it throws (persist failure) we still fall through to wipe every secret
+            // — teardown must never leak key material, even when the last write could
+            // not land. doFlush() takes flushLock then stateLock internally and fully
+            // releases both before the finally runs, so the finally never nests locks.
             doFlush()
         } finally {
             synchronized(stateLock) {
-                if (!closed) {
-                    pending?.cancel()
-                    pending = null
-                    closed = true
-                    wipe(vaultKey)
-                    wipe(payload)
-                    // Do NOT wipe [image]: it is ciphertext already handed to
-                    // [persist], and a sink retaining that array would be corrupted.
-                }
+                pending?.cancel()
+                pending = null
+                closed = true
+                wipe(vaultKey)
+                wipe(payload)
+                // Do NOT wipe [image]: it is ciphertext already handed to [persist],
+                // and a sink retaining that array would be corrupted.
             }
         }
     }
@@ -313,12 +341,15 @@ class VaultSession(
             result.exceptionOrNull()?.let { err -> runCatching { onFlushError(err) } }
             synchronized(stateLock) {
                 // Deregister self (identity-checked, so a newer job is never cleared),
-                // and re-arm ONLY on a SUCCESSFUL flush that left us dirty — a mutation
-                // that landed mid-flush. Never re-arm after a failure: a blind re-arm of
-                // a failing disk would hot-loop. On failure the next update()/flushNow()
-                // retries instead.
+                // then re-arm iff there is fresh dirty data with a LIVE anchor. This
+                // covers a mutation that landed mid-flush (success) AND one that landed
+                // in the failure / onFlushError window — which couldn't arm because this
+                // job was still active, and would otherwise be stranded dirty-but-
+                // unscheduled. A BARE failure left firstDirtyAt null (doFlush's catch
+                // reset it), so we do NOT re-arm and never hot-loop a failing disk; the
+                // next update()/flushNow() retries instead.
                 if (pending === coroutineContext[Job]) {
-                    if (result.isSuccess && dirty && !closed) armLocked() else pending = null
+                    if (!closed && dirty && firstDirtyAt != null) armLocked() else pending = null
                 }
             }
         }
