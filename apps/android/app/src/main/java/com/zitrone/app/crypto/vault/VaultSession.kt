@@ -9,9 +9,11 @@
 package com.zitrone.app.crypto.vault
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.coroutines.CoroutineContext
 
 /**
  * The in-memory runtime for a single unlocked slot.
@@ -85,6 +87,15 @@ class VaultSession(
      */
     private val clock: () -> Long = { System.nanoTime() / 1_000_000L },
     private val cooldownMs: Long = 2_000L,
+    /**
+     * Dispatcher the background (ceiling) flush runs on. Defaults to
+     * [Dispatchers.IO] so the CPU-heavy reseal and blocking [persist] NEVER touch
+     * whatever thread [scope] is bound to — a main-thread scope (lifecycleScope /
+     * viewModelScope) would otherwise stutter / ANR. Tests inject a virtual-time
+     * context. The forced [flushNow] / [close] paths run synchronously on the
+     * CALLER's thread by design (the receive path already runs off-main).
+     */
+    private val flushContext: CoroutineContext = Dispatchers.IO,
 ) {
     /** Monitor for the in-memory state. Held only for fast transitions; never across I/O. */
     private val stateLock = Any()
@@ -241,7 +252,9 @@ class VaultSession(
     /** Arm exactly one debounce job at the first-dirty ceiling. Caller holds [stateLock]. */
     private fun armLocked() {
         val target = (firstDirtyAt ?: clock()) + cooldownMs
-        val job = scope.launch {
+        // Run on [flushContext] (default Dispatchers.IO), NOT the caller's scope
+        // dispatcher, so the reseal + persist never block a main-thread-bound scope.
+        val job = scope.launch(flushContext) {
             // Residual-delay pattern (mirrors MessageRepository.scheduleTtl): the
             // wait is computed from the clock so the ceiling stays anchored to
             // firstDirtyAt no matter when this body is first dispatched.
@@ -308,11 +321,17 @@ class VaultSession(
                         // is now durable.
                         dirty = false
                         firstDirtyAt = null
+                    } else {
+                        // A mutation landed mid-flush (incl. a reentrant update from the
+                        // sink). Stay dirty so it is not lost, and RE-ANCHOR the ceiling
+                        // to now: leaving firstDirtyAt in the past would make the caller's
+                        // re-arm compute wait <= 0 and, under a steady update stream,
+                        // hot-loop immediate flushes with no coalescing. The caller
+                        // (flushNow / the timer body) re-arms from this fresh anchor.
+                        // Cannot occur under single-worker confinement, where update and
+                        // flush never overlap.
+                        firstDirtyAt = clock()
                     }
-                    // else: a mutation landed mid-flush (incl. a reentrant update from
-                    // the sink). Stay dirty so it is not lost; the caller (flushNow /
-                    // the timer body) re-arms the ceiling for it. Cannot occur under
-                    // single-worker confinement, where update/flush never overlap.
                 }
             } finally {
                 wipe(payloadCopy)

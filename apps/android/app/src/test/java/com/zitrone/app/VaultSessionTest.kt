@@ -25,6 +25,7 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.security.MessageDigest
+import kotlin.coroutines.EmptyCoroutineContext
 
 /**
  * VaultSession flush-policy tests. Virtual time throughout (the 2s coalescing
@@ -83,6 +84,7 @@ class VaultSessionTest {
             persist = sink::persist,
             clock = { currentTime },
             cooldownMs = cooldownMs,
+            flushContext = EmptyCoroutineContext, // keep the timer in virtual time
         )
         // The session takes ownership and wipes open.payloadPlaintext at construction,
         // so snapshot the pre-seal content instead for later equality checks.
@@ -177,6 +179,7 @@ class VaultSessionTest {
             persist = sink::persist,
             clock = { currentTime },
             cooldownMs = 2_000L,
+            flushContext = EmptyCoroutineContext, // keep the timer in virtual time
         )
 
         // Ownership taken at construction: the caller's originals are already wiped,
@@ -261,6 +264,7 @@ class VaultSessionTest {
             },
             clock = { currentTime },
             cooldownMs = 2_000L,
+            flushContext = EmptyCoroutineContext, // keep the timer in virtual time
         )
 
         val updated = "ratchet-after-receive".toByteArray()
@@ -291,6 +295,7 @@ class VaultSessionTest {
             persist = { throw java.io.IOException("disk full on teardown") },
             clock = { currentTime },
             cooldownMs = 2_000L,
+            flushContext = EmptyCoroutineContext, // keep the timer in virtual time
         )
 
         session.update("dirty".toByteArray())
@@ -325,6 +330,7 @@ class VaultSessionTest {
             },
             clock = { currentTime },
             cooldownMs = 2_000L,
+            flushContext = EmptyCoroutineContext, // keep the timer in virtual time
         )
 
         session.update("first".toByteArray())
@@ -362,6 +368,7 @@ class VaultSessionTest {
             },
             clock = { currentTime },
             cooldownMs = 2_000L,
+            flushContext = EmptyCoroutineContext, // keep the timer in virtual time
         )
 
         session.update("first".toByteArray()) // arms the ceiling at t=2000
@@ -372,6 +379,48 @@ class VaultSessionTest {
         // No second flushNow: the ceiling alone must fire and persist the reentrant update.
         advanceTimeBy(2_001)
         assertEquals("the ceiling flushed the mid-persist mutation on its own", 2, persisted.size)
+        val reopened = unlockImage(passphrase, persisted.last(), ops, fast)!!
+        assertArrayEquals("reentrant".toByteArray(), reopened.payloadPlaintext)
+    }
+
+    // When a mutation lands mid-flush, the re-armed ceiling must wait a FULL cooldown
+    // from now — not fire immediately off a stale first-dirty timestamp (which under a
+    // steady stream would hot-loop). The timer flushes at t=2000, the reentrant update
+    // lands mid-persist, and its re-armed ceiling must land at 2000+2000, not at 2000.
+    @Test
+    fun `a mid-flush mutation reschedules a full cooldown ahead, not immediately`() = runTest {
+        val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
+        val open = unlockImage(passphrase, image, ops, fast)!!
+        val persisted = mutableListOf<ByteArray>()
+        lateinit var session: VaultSession
+        var reentered = false
+        session = VaultSession(
+            scope = backgroundScope,
+            ops = ops,
+            initialImage = image,
+            initialPayload = open.payloadPlaintext,
+            initialVaultKey = open.vaultKey,
+            slotIndex = open.slotIndex,
+            persist = { img ->
+                persisted.add(img.copyOf())
+                if (!reentered) { reentered = true; session.update("reentrant".toByteArray()) }
+            },
+            clock = { currentTime },
+            cooldownMs = 2_000L,
+            flushContext = EmptyCoroutineContext, // keep the timer in virtual time
+        )
+
+        session.update("first".toByteArray()) // arms the ceiling at t=2000
+        advanceTimeBy(2_001)                   // timer fires at 2000: persists "first", reentrant update lands
+        assertTrue("reentrant update fired mid-flush", reentered)
+        assertEquals("only the first flush so far", 1, persisted.size)
+
+        // Without the firstDirtyAt reset the re-arm would fire immediately at ~2000.
+        // With it, the ceiling is re-anchored to 2000, so the next flush lands at 4000.
+        advanceTimeBy(1_998) // t=3999, just short of 2000+2000
+        assertEquals("re-armed ceiling did not fire early (no hot-loop)", 1, persisted.size)
+        advanceTimeBy(2)     // t=4001, cross the re-anchored ceiling
+        assertEquals("re-armed ceiling fires one full cooldown after the mid-flush mutation", 2, persisted.size)
         val reopened = unlockImage(passphrase, persisted.last(), ops, fast)!!
         assertArrayEquals("reentrant".toByteArray(), reopened.payloadPlaintext)
     }
