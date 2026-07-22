@@ -9,8 +9,10 @@ import com.goterl.lazysodium.SodiumJava
 import com.zitrone.app.crypto.vault.KeyDeriver
 import com.zitrone.app.crypto.vault.LibsodiumVaultOps
 import com.zitrone.app.crypto.vault.PAYLOAD_PLAINTEXT_BYTES
+import com.zitrone.app.crypto.vault.SLOT_PAYLOAD_BYTES
 import com.zitrone.app.crypto.vault.VaultSession
 import com.zitrone.app.crypto.vault.createImage
+import com.zitrone.app.crypto.vault.openPayload
 import com.zitrone.app.crypto.vault.unlockImage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -30,11 +32,12 @@ import kotlin.coroutines.EmptyCoroutineContext
 
 /**
  * VaultSession flush-policy tests. Virtual time throughout (the 2s coalescing
- * ceiling elapses instantly), a fake persist sink that records each resealed
- * image and the VIRTUAL time it fired at, and the REAL AEAD byte path
- * ([LibsodiumVaultOps] over SodiumJava) so a reseal actually re-encrypts and the
- * round-trip proves the slot still opens. Only the CPU-heavy Argon2id KDF is
- * swapped for a fast deterministic stand-in ([fast]) so setup is not slow.
+ * ceiling elapses instantly), a fake persist sink that records each
+ * (slotIndex, sealedPayload) pair it was handed and the VIRTUAL time it fired at,
+ * and the REAL AEAD byte path ([LibsodiumVaultOps] over SodiumJava) so a reseal
+ * actually re-encrypts and the round-trip (via [openPayload]) proves the resealed
+ * region still opens. Only the CPU-heavy Argon2id KDF is swapped for a fast
+ * deterministic stand-in ([fast]) so setup is not slow.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class VaultSessionTest {
@@ -51,20 +54,28 @@ class VaultSessionTest {
 
     private val passphrase = "correct horse battery staple"
 
-    /** Fake persist sink: captures each resealed image and its virtual fire time. */
+    /**
+     * Fake persist sink: captures each (slotIndex, sealedPayload) pair it was handed
+     * and the virtual time it fired at. The session hands off ONE resealed payload
+     * region (exactly [SLOT_PAYLOAD_BYTES]) per flush, never a whole image.
+     */
     private class FakeSink(private val clock: () -> Long) {
-        val images = mutableListOf<ByteArray>()
+        val slotIndices = mutableListOf<Int>()
+        val payloads = mutableListOf<ByteArray>()
         val fireTimes = mutableListOf<Long>()
-        val count: Int get() = images.size
-        fun persist(image: ByteArray) {
-            images.add(image)
+        val count: Int get() = payloads.size
+        fun persist(slotIndex: Int, sealedPayload: ByteArray) {
+            slotIndices.add(slotIndex)
+            payloads.add(sealedPayload)
             fireTimes.add(clock())
         }
     }
 
     /**
-     * Build a session bound to a freshly created, then opened, real image.
-     * Returns the session, the sink, and the initial (opened) payload plaintext.
+     * Build a session bound to a freshly created, then opened, real image. Returns
+     * the session, the sink, and the initial (opened) payload plaintext. Tests that
+     * must open a persisted region under the raw vault key build the session inline
+     * (copying open.vaultKey BEFORE construction wipes it) rather than via this helper.
      */
     private fun TestScope.newSession(
         scope: CoroutineScope,
@@ -78,7 +89,6 @@ class VaultSessionTest {
         val session = VaultSession(
             scope = scope,
             ops = ops,
-            initialImage = image,
             initialPayload = open!!.payloadPlaintext,
             initialVaultKey = open.vaultKey,
             slotIndex = open.slotIndex,
@@ -143,21 +153,41 @@ class VaultSessionTest {
         assertEquals("cancelled ceiling produces no second persist", 1, sink.count)
     }
 
-    // The resealed image round-trips: unlocking the persisted bytes yields the UPDATED payload.
+    // The resealed region round-trips: persist gets THIS slot's index and exactly one
+    // sealed payload region, and opening it under the slot key yields the UPDATED payload.
     @Test
     fun `resealed image opens to the updated payload`() = runTest {
-        val (session, sink, initial) = newSession(backgroundScope, "genesis".toByteArray())
+        val image = createImage(passphrase, "genesis".toByteArray(), ops, fast)
+        val open = unlockImage(passphrase, image, ops, fast)!!
+        val vaultKey = open.vaultKey.copyOf() // copy BEFORE construction wipes it
+        val slotIndex = open.slotIndex
+        val initial = "genesis".toByteArray()
+        val sink = FakeSink(clock = { currentTime })
+        val session = VaultSession(
+            scope = backgroundScope,
+            ops = ops,
+            initialPayload = open.payloadPlaintext,
+            initialVaultKey = open.vaultKey,
+            slotIndex = open.slotIndex,
+            persist = sink::persist,
+            clock = { currentTime },
+            cooldownMs = 2_000L,
+            flushContext = EmptyCoroutineContext, // keep the timer in virtual time
+        )
         val updated = "ratchet-state-after-receive".toByteArray()
 
         session.update(updated)
         session.flushNow()
         assertEquals(1, sink.count)
 
-        val reopened = unlockImage(passphrase, sink.images.last(), ops, fast)
-        assertNotNull("resealed slot must still open", reopened)
-        assertArrayEquals("opens to the updated payload", updated, reopened!!.payloadPlaintext)
+        // persist received the session's slot index and exactly one sealed payload region.
+        assertEquals("persist got the session's slot index", slotIndex, sink.slotIndices.last())
+        assertEquals("sealed payload is exactly one region", SLOT_PAYLOAD_BYTES, sink.payloads.last().size)
+        val opened = openPayload(vaultKey, sink.payloads.last(), ops)
+        assertNotNull("resealed region must still open", opened)
+        assertArrayEquals("opens to the updated payload", updated, opened)
         // Sanity: it is genuinely the new content, not the old.
-        assertTrue(!reopened.payloadPlaintext.contentEquals(initial))
+        assertTrue(!opened!!.contentEquals(initial))
     }
 
     // Construction takes ownership by wiping the caller's key + payload originals
@@ -173,7 +203,6 @@ class VaultSessionTest {
         val session = VaultSession(
             scope = backgroundScope,
             ops = ops,
-            initialImage = image,
             initialPayload = open.payloadPlaintext,
             initialVaultKey = open.vaultKey,
             slotIndex = open.slotIndex,
@@ -250,18 +279,18 @@ class VaultSessionTest {
     fun `failed persist keeps the session dirty and a retry re-persists`() = runTest {
         val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
         val open = unlockImage(passphrase, image, ops, fast)!!
+        val vaultKey = open.vaultKey.copyOf() // copy BEFORE construction wipes it
         var failNext = true
         val persisted = mutableListOf<ByteArray>()
         val session = VaultSession(
             scope = backgroundScope,
             ops = ops,
-            initialImage = image,
             initialPayload = open.payloadPlaintext,
             initialVaultKey = open.vaultKey,
             slotIndex = open.slotIndex,
-            persist = { img ->
+            persist = { _, sealed ->
                 if (failNext) { failNext = false; throw java.io.IOException("disk full") }
-                persisted.add(img)
+                persisted.add(sealed)
             },
             clock = { currentTime },
             cooldownMs = 2_000L,
@@ -276,8 +305,8 @@ class VaultSessionTest {
         // The session stayed dirty, so a retry genuinely re-writes (not a clean no-op).
         session.flushNow()
         assertEquals("retry after a failed persist re-writes", 1, persisted.size)
-        val reopened = unlockImage(passphrase, persisted.last(), ops, fast)!!
-        assertArrayEquals("the retry persisted the updated payload", updated, reopened.payloadPlaintext)
+        val reopened = openPayload(vaultKey, persisted.last(), ops)!!
+        assertArrayEquals("the retry persisted the updated payload", updated, reopened)
     }
 
     // Teardown must never leak: even when the final reseal's persist throws, close()
@@ -289,11 +318,10 @@ class VaultSessionTest {
         val session = VaultSession(
             scope = backgroundScope,
             ops = ops,
-            initialImage = image,
             initialPayload = open.payloadPlaintext,
             initialVaultKey = open.vaultKey,
             slotIndex = open.slotIndex,
-            persist = { throw java.io.IOException("disk full on teardown") },
+            persist = { _, _ -> throw java.io.IOException("disk full on teardown") },
             clock = { currentTime },
             cooldownMs = 2_000L,
             flushContext = EmptyCoroutineContext, // keep the timer in virtual time
@@ -314,18 +342,18 @@ class VaultSessionTest {
     fun `an update reentrantly triggered during persist is not lost`() = runTest {
         val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
         val open = unlockImage(passphrase, image, ops, fast)!!
+        val vaultKey = open.vaultKey.copyOf() // copy BEFORE construction wipes it
         val persisted = mutableListOf<ByteArray>()
         lateinit var session: VaultSession
         var reentered = false
         session = VaultSession(
             scope = backgroundScope,
             ops = ops,
-            initialImage = image,
             initialPayload = open.payloadPlaintext,
             initialVaultKey = open.vaultKey,
             slotIndex = open.slotIndex,
-            persist = { img ->
-                persisted.add(img.copyOf())
+            persist = { _, sealed ->
+                persisted.add(sealed.copyOf())
                 // Reentrant mutation while the first flush is mid-persist.
                 if (!reentered) { reentered = true; session.update("reentrant".toByteArray()) }
             },
@@ -339,10 +367,10 @@ class VaultSessionTest {
         assertTrue("reentrant update fired", reentered)
         // The reentrant update must still be pending, not swallowed by the commit.
         session.flushNow() // now persists "reentrant"
-        val reopened = unlockImage(passphrase, persisted.last(), ops, fast)!!
+        val reopened = openPayload(vaultKey, persisted.last(), ops)!!
         assertArrayEquals(
             "the reentrant update survived and reached disk",
-            "reentrant".toByteArray(), reopened.payloadPlaintext,
+            "reentrant".toByteArray(), reopened,
         )
     }
 
@@ -353,18 +381,18 @@ class VaultSessionTest {
     fun `a mutation landing mid-persist is flushed by the ceiling without a forced flush`() = runTest {
         val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
         val open = unlockImage(passphrase, image, ops, fast)!!
+        val vaultKey = open.vaultKey.copyOf() // copy BEFORE construction wipes it
         val persisted = mutableListOf<ByteArray>()
         lateinit var session: VaultSession
         var reentered = false
         session = VaultSession(
             scope = backgroundScope,
             ops = ops,
-            initialImage = image,
             initialPayload = open.payloadPlaintext,
             initialVaultKey = open.vaultKey,
             slotIndex = open.slotIndex,
-            persist = { img ->
-                persisted.add(img.copyOf())
+            persist = { _, sealed ->
+                persisted.add(sealed.copyOf())
                 if (!reentered) { reentered = true; session.update("reentrant".toByteArray()) }
             },
             clock = { currentTime },
@@ -380,8 +408,8 @@ class VaultSessionTest {
         // No second flushNow: the ceiling alone must fire and persist the reentrant update.
         advanceTimeBy(2_001)
         assertEquals("the ceiling flushed the mid-persist mutation on its own", 2, persisted.size)
-        val reopened = unlockImage(passphrase, persisted.last(), ops, fast)!!
-        assertArrayEquals("reentrant".toByteArray(), reopened.payloadPlaintext)
+        val reopened = openPayload(vaultKey, persisted.last(), ops)!!
+        assertArrayEquals("reentrant".toByteArray(), reopened)
     }
 
     // When a mutation lands mid-flush, the re-armed ceiling must wait a FULL cooldown
@@ -392,18 +420,18 @@ class VaultSessionTest {
     fun `a mid-flush mutation reschedules a full cooldown ahead, not immediately`() = runTest {
         val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
         val open = unlockImage(passphrase, image, ops, fast)!!
+        val vaultKey = open.vaultKey.copyOf() // copy BEFORE construction wipes it
         val persisted = mutableListOf<ByteArray>()
         lateinit var session: VaultSession
         var reentered = false
         session = VaultSession(
             scope = backgroundScope,
             ops = ops,
-            initialImage = image,
             initialPayload = open.payloadPlaintext,
             initialVaultKey = open.vaultKey,
             slotIndex = open.slotIndex,
-            persist = { img ->
-                persisted.add(img.copyOf())
+            persist = { _, sealed ->
+                persisted.add(sealed.copyOf())
                 if (!reentered) { reentered = true; session.update("reentrant".toByteArray()) }
             },
             clock = { currentTime },
@@ -422,8 +450,8 @@ class VaultSessionTest {
         assertEquals("re-armed ceiling did not fire early (no hot-loop)", 1, persisted.size)
         advanceTimeBy(2)     // t=4001, cross the re-anchored ceiling
         assertEquals("re-armed ceiling fires one full cooldown after the mid-flush mutation", 2, persisted.size)
-        val reopened = unlockImage(passphrase, persisted.last(), ops, fast)!!
-        assertArrayEquals("reentrant".toByteArray(), reopened.payloadPlaintext)
+        val reopened = openPayload(vaultKey, persisted.last(), ops)!!
+        assertArrayEquals("reentrant".toByteArray(), reopened)
     }
 
     // A BARE failed background flush (no mutation landed mid-flush) must (1) surface
@@ -442,13 +470,12 @@ class VaultSessionTest {
         session = VaultSession(
             scope = backgroundScope,
             ops = ops,
-            initialImage = image,
             initialPayload = open.payloadPlaintext,
             initialVaultKey = open.vaultKey,
             slotIndex = open.slotIndex,
-            persist = { img ->
+            persist = { _, sealed ->
                 if (failNext) { failNext = false; throw java.io.IOException("disk full") } // bare: no mid-flush update
-                persisted.add(img.copyOf())
+                persisted.add(sealed.copyOf())
             },
             clock = { currentTime },
             cooldownMs = 2_000L,
@@ -473,8 +500,9 @@ class VaultSessionTest {
     }
 
     // Fail-fast: the constructor rejects malformed arguments (wrong key size, bad slot
-    // index, malformed image) up front rather than failing on a later flush. Validation
-    // runs before the ownership wipes, so a rejected construction leaves inputs usable.
+    // index, over-capacity payload) up front rather than failing on a later flush.
+    // Validation runs before the ownership wipes, so a rejected construction leaves
+    // inputs usable — image-size validation is gone (the session no longer holds one).
     @Test
     fun `constructor rejects malformed arguments`() = runTest {
         val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
@@ -482,25 +510,25 @@ class VaultSessionTest {
 
         assertThrows("wrong vault key size", IllegalArgumentException::class.java) {
             VaultSession(
-                scope = backgroundScope, ops = ops, initialImage = image,
+                scope = backgroundScope, ops = ops,
                 initialPayload = open.payloadPlaintext, initialVaultKey = ByteArray(16),
-                slotIndex = open.slotIndex, persist = {}, clock = { currentTime },
+                slotIndex = open.slotIndex, persist = { _, _ -> }, clock = { currentTime },
                 cooldownMs = 2_000L, flushContext = EmptyCoroutineContext,
             )
         }
         assertThrows("out-of-range slot index", IllegalArgumentException::class.java) {
             VaultSession(
-                scope = backgroundScope, ops = ops, initialImage = image,
+                scope = backgroundScope, ops = ops,
                 initialPayload = open.payloadPlaintext, initialVaultKey = open.vaultKey,
-                slotIndex = 99, persist = {}, clock = { currentTime },
+                slotIndex = 99, persist = { _, _ -> }, clock = { currentTime },
                 cooldownMs = 2_000L, flushContext = EmptyCoroutineContext,
             )
         }
-        assertThrows("malformed image", IllegalArgumentException::class.java) {
+        assertThrows("over-capacity payload", IllegalArgumentException::class.java) {
             VaultSession(
-                scope = backgroundScope, ops = ops, initialImage = ByteArray(10),
-                initialPayload = open.payloadPlaintext, initialVaultKey = open.vaultKey,
-                slotIndex = open.slotIndex, persist = {}, clock = { currentTime },
+                scope = backgroundScope, ops = ops,
+                initialPayload = ByteArray(PAYLOAD_PLAINTEXT_BYTES), initialVaultKey = open.vaultKey,
+                slotIndex = open.slotIndex, persist = { _, _ -> }, clock = { currentTime },
                 cooldownMs = 2_000L, flushContext = EmptyCoroutineContext,
             )
         }
@@ -519,12 +547,11 @@ class VaultSessionTest {
         session = VaultSession(
             scope = backgroundScope,
             ops = ops,
-            initialImage = image,
             initialPayload = open.payloadPlaintext,
             initialVaultKey = open.vaultKey,
             slotIndex = open.slotIndex,
-            persist = { img ->
-                persisted.add(img.copyOf())
+            persist = { _, sealed ->
+                persisted.add(sealed.copyOf())
                 // Reentrant flush from inside persist. Bounded so a broken guard fails
                 // as an assertion mismatch (persisted.size == 4) rather than a crash.
                 if (depth++ < 3) session.flushNow()
@@ -546,19 +573,19 @@ class VaultSessionTest {
     fun `an update in the onFlushError window is re-armed and flushed`() = runTest {
         val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
         val open = unlockImage(passphrase, image, ops, fast)!!
+        val vaultKey = open.vaultKey.copyOf() // copy BEFORE construction wipes it
         val persisted = mutableListOf<ByteArray>()
         lateinit var session: VaultSession
         var failNext = true
         session = VaultSession(
             scope = backgroundScope,
             ops = ops,
-            initialImage = image,
             initialPayload = open.payloadPlaintext,
             initialVaultKey = open.vaultKey,
             slotIndex = open.slotIndex,
-            persist = { img ->
+            persist = { _, sealed ->
                 if (failNext) { failNext = false; throw java.io.IOException("disk full") }
-                persisted.add(img.copyOf())
+                persisted.add(sealed.copyOf())
             },
             clock = { currentTime },
             cooldownMs = 2_000L,
@@ -574,8 +601,8 @@ class VaultSessionTest {
         // The onFlushError-window update must have been re-armed; its ceiling flushes it.
         advanceTimeBy(2_001)
         assertEquals("the onFlushError-window update was re-armed and flushed", 1, persisted.size)
-        val reopened = unlockImage(passphrase, persisted.last(), ops, fast)!!
-        assertArrayEquals("after-failure".toByteArray(), reopened.payloadPlaintext)
+        val reopened = openPayload(vaultKey, persisted.last(), ops)!!
+        assertArrayEquals("after-failure".toByteArray(), reopened)
     }
 
     // close() must stop accepting updates BEFORE its final flush, so a mutation racing
@@ -586,18 +613,18 @@ class VaultSessionTest {
     fun `close rejects an update racing its final flush`() = runTest {
         val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
         val open = unlockImage(passphrase, image, ops, fast)!!
+        val vaultKey = open.vaultKey.copyOf() // copy BEFORE construction wipes it
         val persisted = mutableListOf<ByteArray>()
         lateinit var session: VaultSession
         var raced = false
         session = VaultSession(
             scope = backgroundScope,
             ops = ops,
-            initialImage = image,
             initialPayload = open.payloadPlaintext,
             initialVaultKey = open.vaultKey,
             slotIndex = open.slotIndex,
-            persist = { img ->
-                persisted.add(img.copyOf())
+            persist = { _, sealed ->
+                persisted.add(sealed.copyOf())
                 if (!raced) {
                     raced = true
                     // Rejected as a no-op once `closing`; if it ran, this over-capacity
@@ -614,8 +641,8 @@ class VaultSessionTest {
         session.close() // must NOT throw — the racing over-capacity update is a no-op
         assertTrue("the racing update was attempted", raced)
         assertEquals("close flushed the pre-close state exactly once", 1, persisted.size)
-        val reopened = unlockImage(passphrase, persisted.last(), ops, fast)!!
-        assertArrayEquals("close persisted the state as of teardown", "final".toByteArray(), reopened.payloadPlaintext)
+        val reopened = openPayload(vaultKey, persisted.last(), ops)!!
+        assertArrayEquals("close persisted the state as of teardown", "final".toByteArray(), reopened)
     }
 
     // VaultSession is Closeable, so `use {}` flushes + tears down deterministically.
@@ -627,7 +654,6 @@ class VaultSessionTest {
         val session = VaultSession(
             scope = backgroundScope,
             ops = ops,
-            initialImage = image,
             initialPayload = open.payloadPlaintext,
             initialVaultKey = open.vaultKey,
             slotIndex = open.slotIndex,
@@ -650,23 +676,23 @@ class VaultSessionTest {
     fun `a mid-flush update during a failing persist is re-armed not stranded`() = runTest {
         val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
         val open = unlockImage(passphrase, image, ops, fast)!!
+        val vaultKey = open.vaultKey.copyOf() // copy BEFORE construction wipes it
         val persisted = mutableListOf<ByteArray>()
         lateinit var session: VaultSession
         var failNext = true
         session = VaultSession(
             scope = backgroundScope,
             ops = ops,
-            initialImage = image,
             initialPayload = open.payloadPlaintext,
             initialVaultKey = open.vaultKey,
             slotIndex = open.slotIndex,
-            persist = { img ->
+            persist = { _, sealed ->
                 if (failNext) {
                     failNext = false
                     session.update("mid-flush".toByteArray()) // lands DURING persist, sets firstDirtyAt
                     throw java.io.IOException("disk full")     // then the write fails
                 }
-                persisted.add(img.copyOf())
+                persisted.add(sealed.copyOf())
             },
             clock = { currentTime },
             cooldownMs = 2_000L,
@@ -681,7 +707,7 @@ class VaultSessionTest {
         // time), not stranded. It flushes a full cooldown after the failure (~t=4000).
         advanceTimeBy(2_001)
         assertEquals("the mid-flush update was re-armed and flushed", 1, persisted.size)
-        val reopened = unlockImage(passphrase, persisted.last(), ops, fast)!!
-        assertArrayEquals("mid-flush".toByteArray(), reopened.payloadPlaintext)
+        val reopened = openPayload(vaultKey, persisted.last(), ops)!!
+        assertArrayEquals("mid-flush".toByteArray(), reopened)
     }
 }
