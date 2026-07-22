@@ -247,9 +247,29 @@ class VaultImageStore internal constructor(
 
                 // A PRESENT file of the wrong length is corruption (tampered / truncated /
                 // inflated), not "missing" — and length-checking BEFORE readBytes bounds the
-                // allocation so an inflated bin can never OOM the process.
-                if (dekFile.length() != WRAPPED_KEY_BYTES.toLong()) throw VaultImageException.CorruptImage()
-                if (binFile.length() != OUTER_IMAGE_BYTES.toLong()) throw VaultImageException.CorruptImage()
+                // allocation so an inflated bin can never OOM the process. Use Files.size (which
+                // THROWS on a stat failure) rather than File.length (which silently returns 0L on a
+                // transient stat error, misreading a valid file as wrong-size → a permanent-looking
+                // CorruptImage). A file that VANISHED between the existence check and the stat
+                // (NoSuchFileException) is mapped like the readBytes FNF path; any OTHER IOException
+                // is a transient stat error and PROPAGATES raw for the caller to retry (same policy
+                // as the readBytes IOException path). A size that reads successfully but != the
+                // expected constant is CorruptImage as before.
+                val dekSize = try {
+                    java.nio.file.Files.size(dekFile.toPath())
+                } catch (e: java.nio.file.NoSuchFileException) {
+                    // A gone dek is always Corrupt (bin already passed its existence check).
+                    throw VaultImageException.CorruptImage()
+                }
+                if (dekSize != WRAPPED_KEY_BYTES.toLong()) throw VaultImageException.CorruptImage()
+                val binSize = try {
+                    java.nio.file.Files.size(binFile.toPath())
+                } catch (e: java.nio.file.NoSuchFileException) {
+                    // A truly-gone bin is Missing (bin-keyed); a present-but-unstattable bin is Corrupt.
+                    if (binFile.exists()) throw VaultImageException.CorruptImage()
+                    else throw VaultImageException.MissingImage()
+                }
+                if (binSize != OUTER_IMAGE_BYTES.toLong()) throw VaultImageException.CorruptImage()
 
                 // Map a file that vanished OR became unreadable between the checks and the read
                 // into the taxonomy; any OTHER IOException is a transient read error and
@@ -316,18 +336,23 @@ class VaultImageStore internal constructor(
      * audited primitive rather than adding a new create-and-open surface — BEFORE touching
      * disk: [unlockImage] runs purely on the in-memory image and needs no disk state, so
      * verifying first makes ANY failure in create() (bad wrapped-key size, encrypt /
-     * verify / IO failure) leave the disk UNTOUCHED and the whole call retryable. Only
-     * then does it atomically write the DEK sidecar FIRST and REQUIRE its durability, then
-     * the image (whose rename-durability may be ignored). This dek-durable-before-bin
-     * ORDERING is load-bearing: create returns success only once the DEK is CONFIRMED
-     * durable and the image rename has landed. A DEK-durability failure THROWS
-     * [VaultImageException.NotDurable], leaving at most a stray `vault.dek` and NO
-     * `vault.bin` — which [open] reports as [VaultImageException.MissingImage] (bin-keyed),
-     * a fully retryable state (the next create overwrites the stray DEK), NEVER a bricked
-     * image-exists-but-unopenable state (a durable bin whose dek's rename was lost). Both
-     * durable writes land before any in-memory state is installed, so a mid-write throw
-     * leaves canonical / dek exactly as they were (null on a fresh store). CPU-heavy:
-     * caller MUST be off-main.
+     * verify / IO failure) leave the disk UNTOUCHED and the whole call retryable.
+     *
+     * Only then does it rename BOTH files into place (`vault.dek`, then `vault.bin`) and run a
+     * SINGLE trailing directory fsync covering both renames. create() returns success ONLY once
+     * that one fsync confirms BOTH renames durable — the IMAGE is fail-closed too, not silently
+     * trusted, because it may hold a just-migrated / freshly-generated identity that would be lost
+     * for good if a durable create() ack survived a crash that dropped `vault.bin`'s rename. A
+     * durability failure ROLLS BACK (deleting `vault.bin` FIRST, then `vault.dek`, best-effort) and
+     * THROWS [VaultImageException.NotDurable], leaving ONLY retryable on-disk states: both files
+     * gone (clean), a stray `vault.dek` alone ([open] = [VaultImageException.MissingImage] →
+     * retry), or — a crash before any delete ran — a COMPLETE, openable vault. A bricked
+     * [VaultImageException.CorruptImage] (bin present, dek absent) is IMPOSSIBLE because bin is
+     * always deleted before dek. CALLER CONTRACT: after a create() throw, re-run [open] — a
+     * complete-but-unconfirmed vault opens; otherwise [open] reads MissingImage and the caller
+     * retries create(). Both renames + the confirming fsync land before any in-memory state is
+     * installed, so a mid-write throw leaves canonical / dek exactly as they were (null on a fresh
+     * store). CPU-heavy: caller MUST be off-main.
      */
     fun create(passphrase: String, initialPayload: ByteArray): VaultOpen {
         imageLock.withLock {
@@ -355,25 +380,30 @@ class VaultImageStore internal constructor(
                     val liveOpen = unlockImage(passphrase, image, ops, deriver)
                         ?: throw IllegalStateException("freshly created image failed to open")
                     // liveOpen now holds live key material (an independent vault-key copy). If a
-                    // write below throws — including the new dek-durability throw — wipe it so no
+                    // write below throws — including the NotDurable rollback throw — wipe it so no
                     // vault key / plaintext is abandoned on the heap (the wipe-on-every-failure
                     // discipline the package keeps).
                     try {
-                        // DEK sidecar FIRST, and REQUIRE its durability. dek-durable-before-bin
-                        // ordering makes the bricking case (a durable bin whose dek's rename was
-                        // lost → next open() = CorruptImage AND create() rejects the retry because
-                        // bin exists) impossible by construction. Rationale for throwing here: a
-                        // thrown create leaves at most a stray vault.dek and NO vault.bin, which
-                        // open() reports as MissingImage (bin-keyed) — so a retry create() proceeds
-                        // and overwrites the stray dek: fully retryable, never bricked.
-                        if (atomicWrite(dekFile, wrappedDek) != DirSyncResult.DURABLE) {
+                        // Rename BOTH files into place with NO per-file directory fsync, then run ONE
+                        // trailing directory fsync that covers both renames. create() reports success
+                        // ONLY once that single fsync confirms both renames durable — the image is
+                        // fail-closed too, not silently trusted.
+                        renameIntoPlace(dekFile, wrappedDek)
+                        renameIntoPlace(binFile, outer)
+                        val sync = dirSync(baseDir)
+                        if (sync != DirSyncResult.DURABLE) {
+                            // Durability unconfirmed → ROLL BACK and throw NotDurable (retryable),
+                            // never leave a half-durable state. Delete vault.bin FIRST, then
+                            // vault.dek (best-effort; ignore delete failures). Ordering rationale:
+                            // deleting bin first guarantees EVERY crash-during-rollback on-disk state
+                            // is retryable — both gone (clean), or bin gone + a stray dek (open() =
+                            // MissingImage → retry), or (a crash before any delete ran) a COMPLETE
+                            // valid vault (open() succeeds). A CorruptImage brick (bin present, dek
+                            // absent) is impossible because bin is always deleted before dek.
+                            binFile.delete()
+                            dekFile.delete()
                             throw VaultImageException.NotDurable()
                         }
-                        // THEN the image; its dir-fsync result may be IGNORED. The DEK is already
-                        // confirmed durable, so if bin's rename is lost on a crash it's MissingImage
-                        // (retryable), and if bin survives it opens fine — the bricking case (bin
-                        // durable while dek is not) is now impossible.
-                        atomicWrite(binFile, outer)
                     } catch (t: Throwable) {
                         wipe(liveOpen.vaultKey)
                         wipe(liveOpen.payloadPlaintext)
@@ -542,21 +572,21 @@ class VaultImageStore internal constructor(
     }
 
     /**
-     * Durable atomic write: write [bytes] to `<name>.tmp` in the SAME directory,
-     * `FileChannel.force(true)` (fsync file content + metadata), atomically rename
-     * over the target (same-dir rename is atomic on ext4/f2fs), then fsync the
-     * directory so the rename itself survives a crash.
+     * Write [bytes] to `<name>.tmp` in the SAME directory, `FileChannel.force(true)` (fsync
+     * file content + metadata), and atomically rename over the target (same-dir rename is
+     * atomic on ext4/f2fs). Does EVERYTHING [atomicWrite] does EXCEPT the trailing directory
+     * fsync — so a caller can batch several renames under a SINGLE trailing [dirSync] (see
+     * [create], which renames both files then does one directory fsync covering both).
      *
-     * THROW vs RETURN is the durability contract. This THROWS on any PRE-rename failure
-     * (ensure-parent, tmp write, content-fsync, or a refused rename), with best-effort
-     * `.tmp` cleanup — the target (previous durable file) is untouched (a same-dir rename
-     * replaces atomically or not at all), so a THROW means NOTHING was committed (disk +
-     * memory unchanged, fully retryable). After a SUCCESSFUL rename it RETURNS the
-     * [dirSync] result for the directory: the rename is the commit point, so a RETURN means
-     * the new bytes ARE on disk and the [DirSyncResult] only reports the rename's own
-     * durability ([DirSyncResult.DURABLE] / [DirSyncResult.NOT_DURABLE]).
+     * THROWS on any PRE-rename failure (ensure-parent, tmp write, content-fsync, or a refused
+     * rename), best-effort deleting the `.tmp` first, then rethrowing — the target (previous
+     * durable file) is untouched (a same-dir rename replaces atomically or not at all), so a
+     * THROW means NOTHING was committed for this file. On a SUCCESSFUL rename it returns [Unit]:
+     * the new bytes ARE on disk, but the rename's directory-entry durability is NOT yet
+     * confirmed — the caller MUST still [dirSync] the parent before treating the rename as
+     * crash-durable.
      */
-    private fun atomicWrite(target: File, bytes: ByteArray): DirSyncResult {
+    private fun renameIntoPlace(target: File, bytes: ByteArray) {
         // Defensive: production baseDir = filesDir always exists, so this is a no-op there,
         // but it covers a caller passing a fresh subdir that has not been created yet.
         target.parentFile?.let { if (!it.exists()) it.mkdirs() }
@@ -579,6 +609,23 @@ class VaultImageStore internal constructor(
             tmp.delete()
             throw t
         }
+    }
+
+    /**
+     * Durable atomic write of a SINGLE file: [renameIntoPlace] then a directory fsync so the
+     * rename itself survives a crash.
+     *
+     * THROW vs RETURN is the durability contract. This THROWS on any PRE-rename failure (via
+     * [renameIntoPlace], with best-effort `.tmp` cleanup) — the target (previous durable file)
+     * is untouched, so a THROW means NOTHING was committed (disk + memory unchanged, fully
+     * retryable). After a SUCCESSFUL rename it RETURNS the [dirSync] result for the directory:
+     * the rename is the commit point, so a RETURN means the new bytes ARE on disk and the
+     * [DirSyncResult] only reports the rename's own durability ([DirSyncResult.DURABLE] /
+     * [DirSyncResult.NOT_DURABLE]). Used by [writeSealedPayload] (a single file, immediate
+     * durability).
+     */
+    private fun atomicWrite(target: File, bytes: ByteArray): DirSyncResult {
+        renameIntoPlace(target, bytes)
         // Rename committed. Report the directory-entry durability (never throws — see
         // [defaultFsyncDir]); the caller decides how to act on a NOT_DURABLE result.
         return dirSync(target.parentFile)

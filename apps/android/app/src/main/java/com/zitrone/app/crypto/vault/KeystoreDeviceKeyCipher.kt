@@ -46,6 +46,7 @@ class KeystoreDeviceKeyCipher(
 ) : DeviceKeyCipher {
 
     override fun wrapDek(dek: ByteArray): ByteArray {
+        require(dek.size == MASTER_KEY_BYTES) { "dek must be $MASTER_KEY_BYTES bytes" }
         val cipher = Cipher.getInstance(AES_GCM_TRANSFORM)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
         // The Keystore drew a fresh random 12-byte IV (setRandomizedEncryptionRequired);
@@ -94,11 +95,13 @@ class KeystoreDeviceKeyCipher(
         }
     }
 
-    private fun keyStore(): KeyStore =
-        KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+    // The loaded KeyStore is a thread-safe handle to the AndroidKeyStore system service, not a
+    // copy of key material, so caching it is safe and avoids re-`load(null)`ing on every
+    // existingKey / wrap / unwrap. Lazily loaded on first use (mirrors lazy key generation).
+    private val keyStore: KeyStore by lazy { KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) } }
 
     private fun existingKey(): SecretKey? =
-        (keyStore().getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.secretKey
+        (keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.secretKey
 
     private fun getOrCreateKey(): SecretKey = existingKey() ?: generateKey()
 
