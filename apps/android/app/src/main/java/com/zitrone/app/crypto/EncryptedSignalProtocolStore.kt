@@ -5,6 +5,7 @@
 
 package com.zitrone.app.crypto
 
+import android.content.SharedPreferences
 import android.util.Base64
 import org.signal.libsignal.protocol.IdentityKey
 import org.signal.libsignal.protocol.IdentityKeyPair
@@ -25,24 +26,35 @@ import java.util.UUID
  * (Android-Keystore-wrapped AES-256). Every record — identity key pair,
  * prekeys, signed prekeys, ratchet session state — is encrypted at rest;
  * nothing key-shaped ever touches disk in plaintext.
+ *
+ * The [prefs] constructor is the seam under test (mirroring [com.zitrone.app.data.EncryptedAuthStore]);
+ * the [KeyStoreManager] convenience constructor is what production wires, opening
+ * the SAME encrypted PREFS_SIGNAL_STORE file as always.
  */
-class EncryptedSignalProtocolStore(
-    private val keyStoreManager: KeyStoreManager,
-) : SignalProtocolStore {
+class EncryptedSignalProtocolStore internal constructor(
+    private val prefs: SharedPreferences,
+) : ZitroneSignalStore {
 
-    private val prefs = keyStoreManager.prefs(KeyStoreManager.PREFS_SIGNAL_STORE)
+    constructor(keyStoreManager: KeyStoreManager) :
+        this(keyStoreManager.prefs(KeyStoreManager.PREFS_SIGNAL_STORE))
 
     // -- local identity -----------------------------------------------------
 
-    fun hasLocalIdentity(): Boolean = prefs.contains(KEY_IDENTITY)
+    override fun hasLocalIdentity(): Boolean = prefs.contains(KEY_IDENTITY)
 
-    fun setLocalIdentity(identityKeyPair: IdentityKeyPair, registrationId: Int) {
-        keyStoreManager.putBytes(prefs, KEY_IDENTITY, identityKeyPair.serialize())
-        prefs.edit().putInt(KEY_REGISTRATION_ID, registrationId).apply()
+    override fun setLocalIdentity(identityKeyPair: IdentityKeyPair, registrationId: Int) {
+        // One transaction so the identity pair and registration id can never be
+        // torn apart by a crash between writes. The string form MUST stay
+        // byte-identical to what putBytes writes ([getIdentityKeyPair] reads it
+        // back through getBytes).
+        prefs.edit()
+            .putString(KEY_IDENTITY, Base64.encodeToString(identityKeyPair.serialize(), Base64.NO_WRAP))
+            .putInt(KEY_REGISTRATION_ID, registrationId)
+            .apply()
     }
 
     override fun getIdentityKeyPair(): IdentityKeyPair {
-        val bytes = keyStoreManager.getBytes(prefs, KEY_IDENTITY)
+        val bytes = getBytes(KEY_IDENTITY)
             ?: error("Identity key pair not yet generated")
         return IdentityKeyPair(bytes)
     }
@@ -54,8 +66,8 @@ class EncryptedSignalProtocolStore(
 
     override fun saveIdentity(address: SignalProtocolAddress, identityKey: IdentityKey): Boolean {
         val key = remoteIdentityKey(address)
-        val existing = keyStoreManager.getBytes(prefs, key)
-        keyStoreManager.putBytes(prefs, key, identityKey.serialize())
+        val existing = getBytes(key)
+        putBytes(key, identityKey.serialize())
         // true == replaced a DIFFERENT pre-existing identity (key change!)
         return existing != null && !existing.contentEquals(identityKey.serialize())
     }
@@ -65,24 +77,24 @@ class EncryptedSignalProtocolStore(
         identityKey: IdentityKey,
         direction: IdentityKeyStore.Direction,
     ): Boolean {
-        val existing = keyStoreManager.getBytes(prefs, remoteIdentityKey(address))
+        val existing = getBytes(remoteIdentityKey(address))
             ?: return true // trust-on-first-use; verification happens via safety numbers
         return existing.contentEquals(identityKey.serialize())
     }
 
     override fun getIdentity(address: SignalProtocolAddress): IdentityKey? =
-        keyStoreManager.getBytes(prefs, remoteIdentityKey(address))?.let { IdentityKey(it) }
+        getBytes(remoteIdentityKey(address))?.let { IdentityKey(it) }
 
     // -- one-time prekeys ---------------------------------------------------
 
     override fun loadPreKey(preKeyId: Int): PreKeyRecord {
-        val bytes = keyStoreManager.getBytes(prefs, "$KEY_PREKEY$preKeyId")
+        val bytes = getBytes("$KEY_PREKEY$preKeyId")
             ?: throw InvalidKeyIdException("No prekey with id $preKeyId")
         return PreKeyRecord(bytes)
     }
 
     override fun storePreKey(preKeyId: Int, record: PreKeyRecord) {
-        keyStoreManager.putBytes(prefs, "$KEY_PREKEY$preKeyId", record.serialize())
+        putBytes("$KEY_PREKEY$preKeyId", record.serialize())
     }
 
     override fun containsPreKey(preKeyId: Int): Boolean =
@@ -96,7 +108,7 @@ class EncryptedSignalProtocolStore(
     // -- signed prekeys -----------------------------------------------------
 
     override fun loadSignedPreKey(signedPreKeyId: Int): SignedPreKeyRecord {
-        val bytes = keyStoreManager.getBytes(prefs, "$KEY_SIGNED_PREKEY$signedPreKeyId")
+        val bytes = getBytes("$KEY_SIGNED_PREKEY$signedPreKeyId")
             ?: throw InvalidKeyIdException("No signed prekey with id $signedPreKeyId")
         return SignedPreKeyRecord(bytes)
     }
@@ -104,11 +116,11 @@ class EncryptedSignalProtocolStore(
     override fun loadSignedPreKeys(): List<SignedPreKeyRecord> =
         prefs.all.keys
             .filter { it.startsWith(KEY_SIGNED_PREKEY) }
-            .mapNotNull { keyStoreManager.getBytes(prefs, it) }
+            .mapNotNull { getBytes(it) }
             .map { SignedPreKeyRecord(it) }
 
     override fun storeSignedPreKey(signedPreKeyId: Int, record: SignedPreKeyRecord) {
-        keyStoreManager.putBytes(prefs, "$KEY_SIGNED_PREKEY$signedPreKeyId", record.serialize())
+        putBytes("$KEY_SIGNED_PREKEY$signedPreKeyId", record.serialize())
     }
 
     override fun containsSignedPreKey(signedPreKeyId: Int): Boolean =
@@ -121,7 +133,7 @@ class EncryptedSignalProtocolStore(
     // -- sessions -------------------------------------------------------------
 
     override fun loadSession(address: SignalProtocolAddress): SessionRecord? =
-        keyStoreManager.getBytes(prefs, sessionKey(address))?.let { SessionRecord(it) }
+        getBytes(sessionKey(address))?.let { SessionRecord(it) }
 
     override fun loadExistingSessions(
         addresses: List<SignalProtocolAddress>,
@@ -136,7 +148,7 @@ class EncryptedSignalProtocolStore(
             .filter { it != DEFAULT_DEVICE_ID }
 
     override fun storeSession(address: SignalProtocolAddress, record: SessionRecord) {
-        keyStoreManager.putBytes(prefs, sessionKey(address), record.serialize())
+        putBytes(sessionKey(address), record.serialize())
     }
 
     override fun containsSession(address: SignalProtocolAddress): Boolean =
@@ -174,7 +186,7 @@ class EncryptedSignalProtocolStore(
      *         `false`, or orphaned session/identity state can reappear on
      *         restart and be reused instead of forcing a fresh X3DH.
      */
-    fun destroyContactCrypto(name: String): Boolean {
+    override fun destroyContactCrypto(name: String): Boolean {
         val editor = prefs.edit()
         val prefixes = listOf(KEY_SESSION, KEY_REMOTE_IDENTITY, KEY_SENDER_KEY)
         prefs.all.keys
@@ -186,7 +198,7 @@ class EncryptedSignalProtocolStore(
     // -- Kyber prekeys (post-quantum, required by the store interface) --------
 
     override fun loadKyberPreKey(kyberPreKeyId: Int): KyberPreKeyRecord {
-        val bytes = keyStoreManager.getBytes(prefs, "$KEY_KYBER_PREKEY$kyberPreKeyId")
+        val bytes = getBytes("$KEY_KYBER_PREKEY$kyberPreKeyId")
             ?: throw InvalidKeyIdException("No kyber prekey with id $kyberPreKeyId")
         return KyberPreKeyRecord(bytes)
     }
@@ -194,11 +206,11 @@ class EncryptedSignalProtocolStore(
     override fun loadKyberPreKeys(): List<KyberPreKeyRecord> =
         prefs.all.keys
             .filter { it.startsWith(KEY_KYBER_PREKEY) }
-            .mapNotNull { keyStoreManager.getBytes(prefs, it) }
+            .mapNotNull { getBytes(it) }
             .map { KyberPreKeyRecord(it) }
 
     override fun storeKyberPreKey(kyberPreKeyId: Int, record: KyberPreKeyRecord) {
-        keyStoreManager.putBytes(prefs, "$KEY_KYBER_PREKEY$kyberPreKeyId", record.serialize())
+        putBytes("$KEY_KYBER_PREKEY$kyberPreKeyId", record.serialize())
     }
 
     override fun containsKyberPreKey(kyberPreKeyId: Int): Boolean =
@@ -215,19 +227,47 @@ class EncryptedSignalProtocolStore(
         distributionId: UUID,
         record: SenderKeyRecord,
     ) {
-        keyStoreManager.putBytes(prefs, senderKeyKey(sender, distributionId), record.serialize())
+        putBytes(senderKeyKey(sender, distributionId), record.serialize())
     }
 
     override fun loadSenderKey(
         sender: SignalProtocolAddress,
         distributionId: UUID,
     ): SenderKeyRecord? =
-        keyStoreManager.getBytes(prefs, senderKeyKey(sender, distributionId))
+        getBytes(senderKeyKey(sender, distributionId))
             ?.let { SenderKeyRecord(it) }
+
+    // -- counters (PR-D2a: moved out of SignalProtocolManager, SAME prefs keys/defaults) --
+
+    /**
+     * The next one-time-prekey id, default 1 — reproduces the legacy
+     * `SignalProtocolManager.nextId`'s `prefs.getInt("next_prekey_id", 1)` exactly.
+     * SignalProtocolManager keeps the wrap-and-increment logic and stores the
+     * result via [setNextPreKeyId], so the id sequence is byte-for-byte unchanged.
+     */
+    override fun nextPreKeyId(): Int = prefs.getInt(KEY_NEXT_PREKEY_ID, 1)
+
+    override fun setNextPreKeyId(value: Int) {
+        prefs.edit().putInt(KEY_NEXT_PREKEY_ID, value).apply()
+    }
+
+    /** The next signed-prekey id, default 1 (see [nextPreKeyId]). */
+    override fun nextSignedPreKeyId(): Int = prefs.getInt(KEY_NEXT_SIGNED_PREKEY_ID, 1)
+
+    override fun setNextSignedPreKeyId(value: Int) {
+        prefs.edit().putInt(KEY_NEXT_SIGNED_PREKEY_ID, value).apply()
+    }
+
+    /** The current signed prekey's creation timestamp (ms), default 0 (never rotated). */
+    override fun signedPreKeyCreatedAt(): Long = prefs.getLong(KEY_SIGNED_PREKEY_CREATED_AT, 0L)
+
+    override fun setSignedPreKeyCreatedAt(value: Long) {
+        prefs.edit().putLong(KEY_SIGNED_PREKEY_CREATED_AT, value).apply()
+    }
 
     // -- misc -----------------------------------------------------------------
 
-    fun countOneTimePreKeys(): Int =
+    override fun countOneTimePreKeys(): Int =
         prefs.all.keys.count { it.startsWith(KEY_PREKEY) }
 
     /**
@@ -244,7 +284,7 @@ class EncryptedSignalProtocolStore(
      * rebuilds a bare roster from them (display names are unrecoverable). Reuses
      * the same prefs.all.keys prefix-scan style as the prekey/session accessors.
      */
-    fun knownRemoteContacts(): List<Pair<String, String?>> =
+    override fun knownRemoteContacts(): List<Pair<String, String?>> =
         prefs.all.keys
             .filter { it.startsWith(KEY_REMOTE_IDENTITY) }
             .mapNotNull { key ->
@@ -254,16 +294,28 @@ class EncryptedSignalProtocolStore(
             }
             .distinct()
             .map { accountId ->
-                val b64 = keyStoreManager
-                    .getBytes(prefs, "$KEY_REMOTE_IDENTITY$accountId:$DEFAULT_DEVICE_ID")
-                    ?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
+                // The stored value already IS the NO_WRAP base64 putBytes wrote —
+                // read it directly instead of decode+re-encode round-tripping.
+                val b64 = prefs.getString("$KEY_REMOTE_IDENTITY$accountId:$DEFAULT_DEVICE_ID", null)
                 accountId to b64
             }
 
     /** Full local wipe — account deletion. Irreversible by design. */
-    fun wipe() {
+    override fun wipe() {
         prefs.edit().clear().apply()
     }
+
+    // Byte <-> string plumbing for the record values (moved verbatim from
+    // KeyStoreManager.putBytes/getBytes, whose only caller was this store).
+    // The prefs themselves are EncryptedSharedPreferences in production; the
+    // base64 here is just value transport, not protection.
+
+    private fun putBytes(key: String, value: ByteArray) {
+        prefs.edit().putString(key, Base64.encodeToString(value, Base64.NO_WRAP)).apply()
+    }
+
+    private fun getBytes(key: String): ByteArray? =
+        prefs.getString(key, null)?.let { Base64.decode(it, Base64.NO_WRAP) }
 
     private fun remoteIdentityKey(address: SignalProtocolAddress) =
         "$KEY_REMOTE_IDENTITY${address.name}:${address.deviceId}"
@@ -286,5 +338,13 @@ class EncryptedSignalProtocolStore(
         private const val KEY_KYBER_PREKEY = "kyber_prekey:"
         private const val KEY_KYBER_USED = "kyber_prekey_used:"
         private const val KEY_SENDER_KEY = "sender_key:"
+
+        // Prekey / signed-prekey id counters + the signed-prekey timestamp.
+        // Historically written by SignalProtocolManager directly into this same
+        // PREFS_SIGNAL_STORE file; PR-D2a moved the plumbing here under the
+        // IDENTICAL key strings so the on-disk values are byte-for-byte unchanged.
+        private const val KEY_NEXT_PREKEY_ID = "next_prekey_id"
+        private const val KEY_NEXT_SIGNED_PREKEY_ID = "next_signed_prekey_id"
+        private const val KEY_SIGNED_PREKEY_CREATED_AT = "signed_prekey_created_at"
     }
 }

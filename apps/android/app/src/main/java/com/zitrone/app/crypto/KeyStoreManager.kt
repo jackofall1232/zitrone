@@ -7,7 +7,6 @@ package com.zitrone.app.crypto
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Base64
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
@@ -50,13 +49,6 @@ class KeyStoreManager(private val context: Context) {
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
         )
     }
-
-    fun putBytes(prefs: SharedPreferences, key: String, value: ByteArray) {
-        prefs.edit().putString(key, Base64.encodeToString(value, Base64.NO_WRAP)).apply()
-    }
-
-    fun getBytes(prefs: SharedPreferences, key: String): ByteArray? =
-        prefs.getString(key, null)?.let { Base64.decode(it, Base64.NO_WRAP) }
 
     companion object {
         const val PREFS_SIGNAL_STORE = "zitrone_signal_store"

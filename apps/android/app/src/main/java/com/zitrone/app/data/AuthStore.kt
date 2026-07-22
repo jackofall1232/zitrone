@@ -8,6 +8,8 @@
 
 package com.zitrone.app.data
 
+import android.content.SharedPreferences
+import com.zitrone.app.crypto.KeyStoreManager
 import com.zitrone.app.crypto.vault.VaultRuntime
 
 /**
@@ -54,6 +56,67 @@ interface AuthStore {
 
     /** Drop the account id (full account deletion; caller also clears tokens). */
     fun clearAccount()
+}
+
+/**
+ * [AuthStore] over EncryptedSharedPreferences — the LEGACY persistence
+ * [com.zitrone.app.net.ApiClient] used inline before PR-D2a lifted it behind the
+ * interface. The read/write logic is verbatim the client's old `authPrefs`
+ * accessors: the SAME PREFS_AUTH file, the SAME `account_id` / `access_token` /
+ * `refresh_token` keys, the SAME `apply()` (non-forced) persistence and the SAME
+ * remove-on-clear semantics — so wiring this in [SessionContainer] is
+ * byte-for-byte identical to the pre-refactor behaviour.
+ *
+ * The [prefs] constructor is the seam under test; the [KeyStoreManager]
+ * convenience constructor is what production wires (matching the old
+ * `keyStoreManager.prefs(PREFS_AUTH)` handle exactly).
+ */
+class EncryptedAuthStore(private val prefs: SharedPreferences) : AuthStore {
+
+    constructor(keyStoreManager: KeyStoreManager) :
+        this(keyStoreManager.prefs(KeyStoreManager.PREFS_AUTH))
+
+    override var accountId: String?
+        get() = prefs.getString(KEY_ACCOUNT_ID, null)
+        set(value) {
+            // null means ABSENT: EncryptedSharedPreferences diverges from the
+            // platform putString(key, null)==remove contract by persisting an
+            // encrypted "__NULL__" sentinel (leaving contains() true), so remove
+            // explicitly. No production caller passes null today (register
+            // stores a non-null id; deletion goes through clearAccount()).
+            if (value == null) {
+                prefs.edit().remove(KEY_ACCOUNT_ID).apply()
+            } else {
+                prefs.edit().putString(KEY_ACCOUNT_ID, value).apply()
+            }
+        }
+
+    override val accessToken: String?
+        get() = prefs.getString(KEY_ACCESS_TOKEN, null)
+
+    override val refreshToken: String?
+        get() = prefs.getString(KEY_REFRESH_TOKEN, null)
+
+    override fun storeTokens(access: String, refresh: String) {
+        prefs.edit()
+            .putString(KEY_ACCESS_TOKEN, access)
+            .putString(KEY_REFRESH_TOKEN, refresh)
+            .apply()
+    }
+
+    override fun clearTokens() {
+        prefs.edit().remove(KEY_ACCESS_TOKEN).remove(KEY_REFRESH_TOKEN).apply()
+    }
+
+    override fun clearAccount() {
+        prefs.edit().remove(KEY_ACCOUNT_ID).apply()
+    }
+
+    companion object {
+        private const val KEY_ACCOUNT_ID = "account_id"
+        private const val KEY_ACCESS_TOKEN = "access_token"
+        private const val KEY_REFRESH_TOKEN = "refresh_token"
+    }
 }
 
 /**

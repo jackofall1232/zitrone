@@ -5,8 +5,8 @@
 
 package com.zitrone.app.net
 
-import com.zitrone.app.crypto.KeyStoreManager
 import com.zitrone.app.crypto.SignalProtocolManager
+import com.zitrone.app.data.AuthStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -38,7 +38,11 @@ import kotlin.coroutines.resumeWithException
 class ApiClient(
     baseUrl: String,
     client: OkHttpClient,
-    keyStoreManager: KeyStoreManager,
+    // Account id + session tokens behind the [AuthStore] seam (PR-D2a). The
+    // legacy path wires [com.zitrone.app.data.EncryptedAuthStore] over the SAME
+    // PREFS_AUTH keys, so token/account behaviour is byte-identical; PR-D2c can
+    // swap in the vault-backed store without touching this client.
+    private val authStore: AuthStore,
 ) {
 
     // client and baseUrl change together on a transport swap (from AppContainer's
@@ -56,13 +60,13 @@ class ApiClient(
     @Volatile
     private var transport: Transport = Transport(client, baseUrl)
 
-    private val authPrefs = keyStoreManager.prefs(KeyStoreManager.PREFS_AUTH)
-
     /**
      * Observable mirror of [accountId] so the UI updates the moment
      * registration lands, without depending on some other state re-emitting.
+     * Owned by ApiClient (NOT the AuthStore) — the same external surface
+     * MainActivity collects — and seeded from the store's current account id.
      */
-    private val _accountId = MutableStateFlow(authPrefs.getString(KEY_ACCOUNT_ID, null))
+    private val _accountId = MutableStateFlow(authStore.accountId)
     val accountIdFlow: StateFlow<String?> = _accountId.asStateFlow()
 
     /**
@@ -88,30 +92,27 @@ class ApiClient(
         transport = Transport(newClient, newBaseUrl)
     }
 
-    // -- token storage (EncryptedSharedPreferences — never plaintext) ---------
+    // -- token storage (behind the AuthStore seam — never plaintext) ----------
 
     var accountId: String?
-        get() = authPrefs.getString(KEY_ACCOUNT_ID, null)
+        get() = authStore.accountId
         private set(value) {
-            authPrefs.edit().putString(KEY_ACCOUNT_ID, value).apply()
+            authStore.accountId = value
             _accountId.value = value
         }
 
     val accessToken: String?
-        get() = authPrefs.getString(KEY_ACCESS_TOKEN, null)
+        get() = authStore.accessToken
 
     private val refreshToken: String?
-        get() = authPrefs.getString(KEY_REFRESH_TOKEN, null)
+        get() = authStore.refreshToken
 
     private fun storeTokens(tokens: SessionTokens) {
-        authPrefs.edit()
-            .putString(KEY_ACCESS_TOKEN, tokens.accessToken)
-            .putString(KEY_REFRESH_TOKEN, tokens.refreshToken)
-            .apply()
+        authStore.storeTokens(tokens.accessToken, tokens.refreshToken)
     }
 
     fun clearTokens() {
-        authPrefs.edit().remove(KEY_ACCESS_TOKEN).remove(KEY_REFRESH_TOKEN).apply()
+        authStore.clearTokens()
     }
 
     // -- endpoints --------------------------------------------------------------
@@ -331,7 +332,7 @@ class ApiClient(
             execute(request("/api/v1/account").delete().build())
         } finally {
             clearTokens()
-            authPrefs.edit().remove(KEY_ACCOUNT_ID).apply()
+            authStore.clearAccount()
             _accountId.value = null
         }
     }
@@ -423,10 +424,6 @@ class ApiClient(
 
         /** Bytes peeked from a non-2xx body — bounds memory before the char cap applies. */
         private const val MAX_ERROR_BODY_BYTES = 4096L
-
-        private const val KEY_ACCOUNT_ID = "account_id"
-        private const val KEY_ACCESS_TOKEN = "access_token"
-        private const val KEY_REFRESH_TOKEN = "refresh_token"
 
         /**
          * The login challenge string. Pure function — covered by unit tests

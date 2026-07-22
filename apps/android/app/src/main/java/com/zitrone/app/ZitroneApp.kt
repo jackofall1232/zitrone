@@ -14,6 +14,7 @@ import com.zitrone.app.crypto.LemonDropSodiumOps
 import com.zitrone.app.crypto.SignalProtocolManager
 import com.zitrone.app.data.ConversationRepository
 import com.zitrone.app.data.DeviceSettings
+import com.zitrone.app.data.EncryptedAuthStore
 import com.zitrone.app.data.EncryptedRosterStore
 import com.zitrone.app.data.LemonDropCreator
 import com.zitrone.app.data.LemonDropRedeemer
@@ -332,9 +333,11 @@ class SessionContainer(
     wsUrl: String,
 ) {
     val signalStore = EncryptedSignalProtocolStore(keyStoreManager)
-    val signalManager = SignalProtocolManager(signalStore, keyStoreManager)
+    val signalManager = SignalProtocolManager(signalStore)
 
-    val apiClient = ApiClient(apiBaseUrl, httpClient, keyStoreManager)
+    // Legacy auth persistence behind the AuthStore seam (PR-D2a) — same
+    // PREFS_AUTH keys, so ApiClient's token/account behaviour is unchanged.
+    val apiClient = ApiClient(apiBaseUrl, httpClient, EncryptedAuthStore(keyStoreManager))
 
     // WsClient shares the coordinator's diagnostic channel (logcat tag +
     // on-device log) so socket-lifecycle failures land in Settings →
