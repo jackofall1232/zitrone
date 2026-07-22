@@ -93,5 +93,14 @@ class VaultUnlock(
  *
  * NOTE: the production deriver runs SLOT_COUNT × 64 MiB Argon2id per unlock and
  * is CPU-heavy; see [tryPassphrase] and [argon2idDeriver].
+ *
+ * PASSPHRASE TYPE (deliberate): the passphrase is a `String`, mirroring the web
+ * reference (a JS string). A JVM `String` is immutable and unwipeable, so it can
+ * linger in heap until GC — a known, modest memory-forensics weakness. The
+ * *derived* secrets (master keys, vault keys, and the transient UTF-8 bytes) ARE
+ * wiped. Moving the whole passphrase path to `CharArray` for wipeability is an
+ * available hardening, but it is an API-wide change and is capped by Android's
+ * input stack (Compose `TextField` hands you a `String` regardless); that
+ * tradeoff is a P1b/router-layer decision, not made here.
  */
 typealias KeyDeriver = (passphrase: String, salt: ByteArray) -> ByteArray

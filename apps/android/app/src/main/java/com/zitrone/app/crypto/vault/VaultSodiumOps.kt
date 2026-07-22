@@ -111,10 +111,13 @@ class LibsodiumVaultOps(private val sodium: Sodium) : VaultSodiumOps {
             GCMParameterSpec(AEAD_TAG_BYTES * 8, nonce),
         )
         if (associatedData.isNotEmpty()) cipher.updateAAD(associatedData)
-        // JCE GCM appends the 16-byte tag to the ciphertext, so doFinal returns
-        // ciphertext || tag — matching aead.ts's WebCrypto layout exactly.
-        val cipherAndTag = cipher.doFinal(plaintext)
-        return nonce + cipherAndTag
+        // Write straight into one pre-sized nonce||ciphertext||tag buffer — avoids
+        // a second full-size copy on the 256 KiB payload path. JCE GCM appends the
+        // 16-byte tag to the ciphertext (matching aead.ts's WebCrypto layout).
+        val out = ByteArray(NONCE_BYTES + plaintext.size + AEAD_TAG_BYTES)
+        nonce.copyInto(out, 0)
+        cipher.doFinal(plaintext, 0, plaintext.size, out, NONCE_BYTES)
+        return out
     }
 
     override fun aeadDecrypt(
@@ -124,17 +127,17 @@ class LibsodiumVaultOps(private val sodium: Sodium) : VaultSodiumOps {
     ): ByteArray? {
         require(key.size == MASTER_KEY_BYTES) { "AES-256-GCM key must be $MASTER_KEY_BYTES bytes" }
         if (box.size < NONCE_BYTES + AEAD_TAG_BYTES) return null
-        val nonce = box.copyOfRange(0, NONCE_BYTES)
-        val cipherAndTag = box.copyOfRange(NONCE_BYTES, box.size)
         return try {
             val cipher = Cipher.getInstance(AES_GCM_TRANSFORM)
             cipher.init(
                 Cipher.DECRYPT_MODE,
                 SecretKeySpec(key, "AES"),
-                GCMParameterSpec(AEAD_TAG_BYTES * 8, nonce),
+                // Nonce is the first NONCE_BYTES of box.
+                GCMParameterSpec(AEAD_TAG_BYTES * 8, box, 0, NONCE_BYTES),
             )
             if (associatedData.isNotEmpty()) cipher.updateAAD(associatedData)
-            cipher.doFinal(cipherAndTag)
+            // Decrypt directly from box at the nonce offset — no 256 KiB copyOfRange.
+            cipher.doFinal(box, NONCE_BYTES, box.size - NONCE_BYTES)
         } catch (e: GeneralSecurityException) {
             // Tag failure: wrong key, a filler slot, or tampering — all reported
             // the same way, as "no match" (mirrors aead.ts aeadDecrypt throwing).
