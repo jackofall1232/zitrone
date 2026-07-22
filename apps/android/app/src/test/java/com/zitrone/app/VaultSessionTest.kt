@@ -338,4 +338,41 @@ class VaultSessionTest {
             "reentrant".toByteArray(), reopened.payloadPlaintext,
         )
     }
+
+    // A mutation that lands mid-persist must be re-armed and flushed by the ceiling
+    // on its own — without any second forced flush — or it would sit dirty in memory
+    // indefinitely. Proves flushNow() re-arms (does not cancel) when left dirty.
+    @Test
+    fun `a mutation landing mid-persist is flushed by the ceiling without a forced flush`() = runTest {
+        val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
+        val open = unlockImage(passphrase, image, ops, fast)!!
+        val persisted = mutableListOf<ByteArray>()
+        lateinit var session: VaultSession
+        var reentered = false
+        session = VaultSession(
+            scope = backgroundScope,
+            ops = ops,
+            initialImage = image,
+            initialPayload = open.payloadPlaintext,
+            initialVaultKey = open.vaultKey,
+            slotIndex = open.slotIndex,
+            persist = { img ->
+                persisted.add(img.copyOf())
+                if (!reentered) { reentered = true; session.update("reentrant".toByteArray()) }
+            },
+            clock = { currentTime },
+            cooldownMs = 2_000L,
+        )
+
+        session.update("first".toByteArray()) // arms the ceiling at t=2000
+        session.flushNow()                     // persists "first" at t=0; reentrant update -> stays dirty
+        assertTrue("reentrant update fired", reentered)
+        assertEquals("only the forced flush so far", 1, persisted.size)
+
+        // No second flushNow: the ceiling alone must fire and persist the reentrant update.
+        advanceTimeBy(2_001)
+        assertEquals("the ceiling flushed the mid-persist mutation on its own", 2, persisted.size)
+        val reopened = unlockImage(passphrase, persisted.last(), ops, fast)!!
+        assertArrayEquals("reentrant".toByteArray(), reopened.payloadPlaintext)
+    }
 }
