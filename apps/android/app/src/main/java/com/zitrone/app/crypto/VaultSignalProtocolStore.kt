@@ -200,57 +200,38 @@ class VaultSignalProtocolStore(
     }
 
     /**
-     * Full cryptographic teardown for one peer, then a DURABLE commit — the vault twin of
-     * [EncryptedSignalProtocolStore.destroyContactCrypto]. Removes the Double Ratchet
-     * session (root/chain/skipped keys live inside the SessionRecord), the remote identity
-     * record (all device ids — so a re-add re-runs X3DH against a fresh bundle, never
-     * inheriting a prior TOFU pin), and any group sender keys, then forces a flush-before-ack.
-     * Does NOT touch local identity or our own prekeys. Irreversible ONCE it returns `true`.
+     * Destroy a contact's crypto: remove its session, remote-identity, and sender-key
+     * records from the vault state and force a durable flush. Returns true when the
+     * removal was durably persisted synchronously, false when the durable flush failed.
      *
-     * ATOMIC (all-or-nothing), mirroring the legacy `commit()` semantics. The removal is
-     * applied to the live map (which arms the session's coalescing flush timer), then a durable
-     * flush is forced. If that flush throws, the removal is ROLLED BACK — every removed record is
-     * restored — so a `false` return means NOTHING was persisted: the contact and its crypto both
-     * survive, consistent with the caller keeping its roster entry + messages on `false`. Without
-     * the rollback the armed timer would still persist the removal later, stranding a retained
-     * contact whose crypto had vanished (inconsistent, unusable). The restore re-arms the timer,
-     * which durably persists the RESTORED state.
+     * ⚠️ The removal is ALWAYS applied in memory and will persist on the next successful
+     * flush REGARDLESS of the return value — it is deliberately NEVER rolled back:
+     *  - a deletion that reclaims space must not be undone (especially when the vault is
+     *    at capacity, where the pre-deletion state may itself be un-encodable), and
+     *  - the vault's coalescing flush policy already provides eventual durability.
+     * A false return therefore means only that the SYNCHRONOUS durable flush did not
+     * confirm; the contact's crypto is still gone from the live state.
      *
-     * BOUNDED RESIDUAL. [VaultRuntime.flushBeforeAck] fails fast on a transient error, so the
-     * ~2s coalescing timer does not fire before the rollback runs; a crash inside that sub-ms
-     * window is the same accepted durability bound documented elsewhere in the runtime.
-     *
-     * @return `false` if the durable flush threw (the removal was rolled back and did NOT reach
-     *         disk) — mirrors the legacy `commit()` boolean. The caller must NOT report the
-     *         contact deleted on `false`, or orphaned session/identity state can reappear on
-     *         restart and be reused instead of forcing a fresh X3DH.
+     * ATOMICITY WITH THE ROSTER IS A PR-D CONTRACT: because the roster JSON and these
+     * Signal records live in ONE sealed [VaultState], the wired app MUST delete a contact
+     * by removing the roster entry, its tombstone, AND these crypto records in a SINGLE
+     * [VaultRuntime.mutate] followed by one [flushBeforeAck] — so a flush failure retains
+     * (or persists) both together, never a roster entry whose crypto has vanished.
+     * destroyContactCrypto alone covers only the crypto records and does not coordinate
+     * roster state; do NOT call it as a standalone contact-delete in PR-D.
      */
     fun destroyContactCrypto(name: String): Boolean {
         val prefixes = listOf(KEY_SESSION, KEY_REMOTE_IDENTITY, KEY_SENDER_KEY)
-        // Capture COPIES of every to-be-removed record BEFORE removal (removeRecord wipes the
-        // map's arrays, so copies are the only way to roll back). The key filter is materialized
-        // (.toList()) before removal, so iterating it while removing cannot ConcurrentModify.
-        val saved = runtime.mutate { state ->
-            val keys = state.signalRecords.keys
+        runtime.mutate { state ->
+            state.signalRecords.keys
                 .filter { key -> prefixes.any { key.startsWith("$it$name:") } }
                 .toList()
-            val copies = keys.associateWith { state.signalRecords.getValue(it).copyOf() }
-            keys.forEach { removeRecord(state, it) }
-            copies
+                .forEach { removeRecord(state, it) }
         }
         return try {
             runtime.flushBeforeAck()
-            // Durable success: the copies are no longer needed — wipe them (the map holds none of
-            // these keys now, so the copies are the only remaining reference).
-            saved.values.forEach { wipe(it) }
             true
         } catch (t: Throwable) {
-            // ROLLBACK so `false` means nothing persisted (atomic, like the legacy commit()).
-            // putRecord takes OWNERSHIP of each copy — the map is empty at these keys (they were
-            // just removed), so there is no displaced array to wipe, and the copies are never both
-            // wiped and owned. The restore re-arms the timer, which durably persists the RESTORED
-            // state (contact + crypto both survive).
-            runtime.mutate { state -> saved.forEach { (k, v) -> putRecord(state, k, v) } }
             false
         }
     }
