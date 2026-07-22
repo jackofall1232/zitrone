@@ -220,7 +220,15 @@ class AppContainer(private val app: Application) {
      * locked, so a `/d/{id}` opened pre-unlock probes now.
      */
     private fun onSessionPublished() {
-        applyTransport(transportResolver.state.value)
+        // Read the CURRENT state inside the transport lock: the collector and
+        // this re-apply run on different threads, and applying a state captured
+        // BEFORE taking the lock could overwrite a newer apply that won the lock
+        // first, pinning the session on stale endpoints until the next resolver
+        // emission (which may never come). Reading under the lock makes the two
+        // callers converge on the same state regardless of interleaving.
+        synchronized(transportLock) {
+            applyTransportLocked(transportResolver.state.value)
+        }
         lemonDropVeilController.onUnlocked()
     }
 
@@ -234,29 +242,19 @@ class AppContainer(private val app: Application) {
         }
     }
 
-    /**
-     * The transport-state → (client, apiBase, wsUrl) mapping, shared by
-     * [applyTransport] and [buildSession] so a session built at unlock and a
-     * live-session transport swap resolve to the SAME endpoints. Builds a fresh
-     * pinned client per call, as the apply-loop always has.
-     */
-    private fun transportEndpoints(state: TransportState): Triple<OkHttpClient, String, String> =
-        when (state) {
-            TransportState.I2P -> Triple(
-                CertificatePinning.buildI2pClient(
-                    BuildConfig.I2P_PROXY_HOST,
-                    BuildConfig.RELAY_I2P_DEST,
-                ),
-                i2pApiBaseUrl,
-                i2pWsUrl,
-            )
-            TransportState.TOR ->
-                Triple(CertificatePinning.buildClient(torEnabled = true), API_BASE_URL, WS_URL)
-            // CLEARNET_FALLBACK — and OFFLINE, which the resolver never emits.
-            else -> Triple(CertificatePinning.buildClient(torEnabled = false), API_BASE_URL, WS_URL)
-        }
 
-    private fun applyTransport(state: TransportState) {
+    /**
+     * Serializes [applyTransportLocked] between its two callers — the resolver
+     * collector and [onSessionPublished] — which run on different threads. On
+     * main the collector was the sole caller, so applies could never interleave;
+     * the lock restores that invariant.
+     */
+    private val transportLock = Any()
+
+    private fun applyTransport(state: TransportState) =
+        synchronized(transportLock) { applyTransportLocked(state) }
+
+    private fun applyTransportLocked(state: TransportState) {
         val (client, apiBase, ws) = transportEndpoints(state)
         // Always reconcile the client so the NEXT connect dials the resolved
         // transport. With NO live session (pre-unlock) this swap is all there is
@@ -299,6 +297,30 @@ class AppContainer(private val app: Application) {
         // case the resolver never emits I2P so these are never dialed.
         private val i2pApiBaseUrl = "http://${BuildConfig.RELAY_I2P_DEST}"
         private val i2pWsUrl = "ws://${BuildConfig.RELAY_I2P_DEST}/ws"
+
+        /**
+         * The transport-state → (client, apiBase, wsUrl) mapping, shared by
+         * [AppContainer.applyTransportLocked] and [AppContainer.buildSession] so
+         * a session built at unlock and a live-session transport swap resolve to
+         * the SAME endpoints. Builds a fresh pinned client per call, as the
+         * apply-loop always has. Companion + internal so host tests can pin the
+         * mapping without an [AppContainer] (not host-constructible).
+         */
+        internal fun transportEndpoints(state: TransportState): Triple<OkHttpClient, String, String> =
+            when (state) {
+                TransportState.I2P -> Triple(
+                    CertificatePinning.buildI2pClient(
+                        BuildConfig.I2P_PROXY_HOST,
+                        BuildConfig.RELAY_I2P_DEST,
+                    ),
+                    i2pApiBaseUrl,
+                    i2pWsUrl,
+                )
+                TransportState.TOR ->
+                    Triple(CertificatePinning.buildClient(torEnabled = true), API_BASE_URL, WS_URL)
+                // CLEARNET_FALLBACK — and OFFLINE, which the resolver never emits.
+                else -> Triple(CertificatePinning.buildClient(torEnabled = false), API_BASE_URL, WS_URL)
+            }
     }
 }
 

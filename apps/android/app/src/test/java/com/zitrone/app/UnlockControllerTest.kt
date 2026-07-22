@@ -125,6 +125,28 @@ class UnlockControllerTest {
     }
 
     @Test
+    fun `each build reads the CURRENT external state, not a construction-time capture`() {
+        // AppContainer's factory derives endpoints from transportResolver.state.value
+        // AT BUILD TIME (spec §2). Pin the contract at this level: the factory
+        // lambda runs per unlock, so a transport change between cycles is seen
+        // by the next build.
+        var current = "clearnet"
+        val seen = mutableListOf<String>()
+        val controller = UnlockController<FakeSession>(
+            newSessionScope = { CoroutineScope(SupervisorJob() + Dispatchers.Unconfined) },
+            buildSession = { seen += current; FakeSession(seen.size) },
+            publish = {},
+            stopSession = {},
+            afterPublish = {},
+        )
+        controller.unlock()
+        controller.lock()
+        current = "i2p"
+        controller.unlock()
+        assertEquals(listOf("clearnet", "i2p"), seen)
+    }
+
+    @Test
     fun `an unlock in progress serializes a concurrent lock`() {
         val rig = Rig()
         rig.buildStarted = CountDownLatch(1)

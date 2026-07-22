@@ -417,6 +417,42 @@ private fun ZitroneRoot(
         }
     }
 
+    // The Locked veil must make the SAME decision Splash's routing makes — it
+    // short-circuits that routing, so re-derive it here. Never unlockable on a
+    // not-yet-onboarded install (an app-unlock there would skip onboarding,
+    // mint identity keys and register a relay account pre-consent), and never
+    // a prompt for a user whose gate is off (Splash unlocks those silently).
+    val veilLockedPreOnboarding =
+        lemonDropVeilState is LemonDropVeil.Locked && !settings.onboardingDone
+    val gateOff = settings.onboardingDone && !settings.biometricRequired
+    // Gate-off parity: with the veil short-circuiting routing, Splash's silent
+    // auto-unlock can never run while the veil is up — which would force an
+    // auth prompt the user disabled, or lose the queued scan on dismiss.
+    // Unlock silently NOW (same no-prompt semantics as Splash); the queued
+    // scan probes and the veil refines to its outcome with zero interaction,
+    // exactly as the pre-unlock probe behaved on main. Route is untouched:
+    // dismissing the veil lands on Splash, which routes as usual.
+    val veilLocked = lemonDropVeilState is LemonDropVeil.Locked
+    LaunchedEffect(veilLocked, gateOff) {
+        if (veilLocked && gateOff && !unlocked) {
+            unlocked = true
+            container.unlockController.unlock()
+        }
+    }
+    val unlockFromVeil: () -> Unit = {
+        when {
+            !settings.onboardingDone -> Unit // Locked veil is not composed pre-onboarding
+            settings.biometricRequired -> unlock()
+            else -> {
+                // Gate off: no prompt (backstop — the effect above normally
+                // beats the tap). Mirrors Splash's silent-unlock branch.
+                unlocked = true
+                route = Route.ChatList
+                container.unlockController.unlock()
+            }
+        }
+    }
+
     // Lemon-drop veil. It sits IN FRONT of everything, including the biometric
     // gate, and short-circuits the normal routing below: while it is up,
     // Splash/Locked/ChatList are not composed, so the gate never advances
@@ -426,16 +462,20 @@ private fun ZitroneRoot(
     // biometric success wired below (see LemonDropVeil's invariant). Dismiss
     // just drops the veil, revealing the app's real state underneath (still
     // locked if it was locked), untouched — and, pre-unlock, burns nothing.
-    lemonDropVeilState?.let { veil ->
+    // EXCEPTION: a Locked veil on a not-yet-onboarded install does NOT compose —
+    // normal routing (Splash → Onboarding) runs instead, with the scan still
+    // queued; the first real unlock after onboarding drains it. The veil offers
+    // an app-unlock CTA, and there is no legitimate app-unlock before onboarding.
+    lemonDropVeilState?.takeUnless { veilLockedPreOnboarding }?.let { veil ->
         BackHandler(enabled = true) { onLemonDropDismissed() }
         when (veil) {
-            // Scanned while the app is locked: the ordinary app-unlock CTA. On
+            // Scanned while the app is locked: the gate decision above. On
             // success the queued scan probes (AppContainer.onSessionPublished)
             // and this refines into Advocacy/AwaitUnlock — the same transitions a
             // live-session scan makes. No fingerprint yet (no session) — unmarked.
             LemonDropVeil.Locked ->
                 LemonDropUnlockScreen(
-                    onUnlock = unlock,
+                    onUnlock = unlockFromVeil,
                     onDismiss = onLemonDropDismissed,
                     identityFingerprint = identityFingerprint,
                 )
