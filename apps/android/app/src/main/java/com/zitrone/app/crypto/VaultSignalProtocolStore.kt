@@ -233,8 +233,9 @@ class VaultSignalProtocolStore(
         val prefixes = listOf(KEY_SESSION, KEY_REMOTE_IDENTITY, KEY_SENDER_KEY)
         runtime.mutate { state ->
             state.signalRecords.keys
+                // filter() already materializes a fresh ArrayList, detached from the map's
+                // key-set view, so it is safe to iterate while removeRecord mutates the map.
                 .filter { key -> prefixes.any { key.startsWith("$it$name:") } }
-                .toList()
                 .forEach { removeRecord(state, it) }
         }
         return try {

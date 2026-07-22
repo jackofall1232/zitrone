@@ -636,7 +636,11 @@ object VaultStateCodec {
         /** Copy the next [n] bytes into a fresh array. */
         fun bytes(n: Int): ByteArray {
             require(n >= 0) { "negative length: $n" }
-            require(pos + n <= a.size) { "unexpected end of vault state" }
+            // `n <= a.size - pos`, NOT `pos + n <= a.size`: `n` is read from the (untrusted)
+            // stream, so `pos + n` could overflow to a negative Int and pass the check; the
+            // right-hand form never overflows (pos <= a.size, so a.size - pos is a non-negative
+            // bound). Fixed-width reads (u8/u16/i32) use a constant N and cannot overflow.
+            require(n <= a.size - pos) { "unexpected end of vault state" }
             val out = a.copyOfRange(pos, pos + n)
             pos += n
             return out
