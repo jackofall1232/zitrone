@@ -126,11 +126,19 @@ internal fun spliceImagePayload(
     slotIndex: Int,
     sealedPayload: ByteArray,
 ): ByteArray {
+    require(image.size == IMAGE_BYTES) { "malformed vault image" }
+    require(slotIndex in 0 until SLOT_COUNT) { "slot index out of range" }
     require(sealedPayload.size == SLOT_PAYLOAD_BYTES) { "malformed payload region" }
-    val decoded = decodeImage(image)
-    val payloads = decoded.payloads.toMutableList()
-    payloads[slotIndex] = sealedPayload
-    return encodeImage(VaultImage(decoded.slots, payloads))
+    // Only THIS slot's payload region changes on a reseal; the version byte, the
+    // whole slot table, and every other slot's payload are carried through
+    // byte-identical. Copy the image and overwrite just the target region in place
+    // — no decode + re-encode, so a hot reseal path does not allocate and parse the
+    // full (multi-hundred-KiB) image on every flush. The target offset mirrors
+    // encodeImage()'s payload layout exactly.
+    val out = image.copyOf()
+    val payloadOffset = HEADER_BYTES + SLOT_TABLE_BYTES + slotIndex * SLOT_PAYLOAD_BYTES
+    sealedPayload.copyInto(out, payloadOffset)
+    return out
 }
 
 /**

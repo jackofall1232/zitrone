@@ -78,13 +78,15 @@ class VaultSessionTest {
             ops = ops,
             initialImage = image,
             initialPayload = open!!.payloadPlaintext,
-            vaultKey = open.vaultKey,
+            initialVaultKey = open.vaultKey,
             slotIndex = open.slotIndex,
             persist = sink::persist,
             clock = { currentTime },
             cooldownMs = cooldownMs,
         )
-        return Triple(session, sink, open.payloadPlaintext)
+        // The session takes ownership and wipes open.payloadPlaintext at construction,
+        // so snapshot the pre-seal content instead for later equality checks.
+        return Triple(session, sink, initialContent.copyOf())
     }
 
     // A burst of rapid updates coalesces into ONE flush, fired at first-dirty + 2s
@@ -155,38 +157,41 @@ class VaultSessionTest {
         assertTrue(!reopened.payloadPlaintext.contentEquals(initial))
     }
 
-    // close() flushes a dirty payload, wipes the vault key, and turns update() into a no-op.
+    // Construction takes ownership by wiping the caller's key + payload originals
+    // (the session holds private copies), so a discarded VaultOpen leaves no live
+    // secret. close() then flushes a dirty payload and turns update() into a no-op.
     @Test
-    fun `close flushes then wipes the key and rejects further updates`() = runTest {
-        val vaultKeyRef: ByteArray
-        run {
-            val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
-            val open = unlockImage(passphrase, image, ops, fast)!!
-            vaultKeyRef = open.vaultKey // hold the very array the session owns
-            val sink = FakeSink(clock = { currentTime })
-            val session = VaultSession(
-                scope = backgroundScope,
-                ops = ops,
-                initialImage = image,
-                initialPayload = open.payloadPlaintext,
-                vaultKey = open.vaultKey,
-                slotIndex = open.slotIndex,
-                persist = sink::persist,
-                clock = { currentTime },
-                cooldownMs = 2_000L,
-            )
+    fun `construction wipes caller secrets and close flushes then rejects updates`() = runTest {
+        val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
+        val open = unlockImage(passphrase, image, ops, fast)!!
+        val callerKey = open.vaultKey            // the very arrays handed to the constructor
+        val callerPayload = open.payloadPlaintext
+        val sink = FakeSink(clock = { currentTime })
+        val session = VaultSession(
+            scope = backgroundScope,
+            ops = ops,
+            initialImage = image,
+            initialPayload = open.payloadPlaintext,
+            initialVaultKey = open.vaultKey,
+            slotIndex = open.slotIndex,
+            persist = sink::persist,
+            clock = { currentTime },
+            cooldownMs = 2_000L,
+        )
 
-            session.update("dirty".toByteArray())
-            session.close()
-            assertEquals("close flushes the dirty payload", 1, sink.count)
+        // Ownership taken at construction: the caller's originals are already wiped,
+        // so the discarded VaultOpen holds no live key material or plaintext.
+        assertTrue("caller vault key wiped once the session takes ownership", callerKey.all { it == 0.toByte() })
+        assertTrue("caller payload wiped once the session takes ownership", callerPayload.all { it == 0.toByte() })
 
-            assertTrue("vault key wiped to zero on close", vaultKeyRef.all { it == 0.toByte() })
+        session.update("dirty".toByteArray())
+        session.close()
+        assertEquals("close flushes the dirty payload", 1, sink.count)
 
-            // Further update is a no-op: no new persist even after the old ceiling would elapse.
-            session.update("after-close".toByteArray())
-            advanceTimeBy(5_000)
-            assertEquals("update after close is a no-op", 1, sink.count)
-        }
+        // Further update is a no-op: no new persist even after the old ceiling would elapse.
+        session.update("after-close".toByteArray())
+        advanceTimeBy(5_000)
+        assertEquals("update after close is a no-op", 1, sink.count)
     }
 
     // An over-capacity update throws BEFORE mutating: state stays clean and unchanged.
@@ -232,5 +237,67 @@ class VaultSessionTest {
 
         val b = session.read()
         assertArrayEquals("session state is unaffected by mutating a read() result", initial, b)
+    }
+
+    // Durability contract (flush-before-ack): a persist that throws must leave the
+    // session DIRTY and propagate the exception, so a flush-before-ack caller never
+    // acks an unpersisted message and a retry actually re-writes.
+    @Test
+    fun `failed persist keeps the session dirty and a retry re-persists`() = runTest {
+        val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
+        val open = unlockImage(passphrase, image, ops, fast)!!
+        var failNext = true
+        val persisted = mutableListOf<ByteArray>()
+        val session = VaultSession(
+            scope = backgroundScope,
+            ops = ops,
+            initialImage = image,
+            initialPayload = open.payloadPlaintext,
+            initialVaultKey = open.vaultKey,
+            slotIndex = open.slotIndex,
+            persist = { img ->
+                if (failNext) { failNext = false; throw java.io.IOException("disk full") }
+                persisted.add(img)
+            },
+            clock = { currentTime },
+            cooldownMs = 2_000L,
+        )
+
+        val updated = "ratchet-after-receive".toByteArray()
+        session.update(updated)
+        // First flush hits the failing sink: it must propagate (caller would NOT ack).
+        assertThrows(java.io.IOException::class.java) { session.flushNow() }
+        assertEquals("a failed persist reaches the sink but is not counted as durable", 0, persisted.size)
+        // The session stayed dirty, so a retry genuinely re-writes (not a clean no-op).
+        session.flushNow()
+        assertEquals("retry after a failed persist re-writes", 1, persisted.size)
+        val reopened = unlockImage(passphrase, persisted.last(), ops, fast)!!
+        assertArrayEquals("the retry persisted the updated payload", updated, reopened.payloadPlaintext)
+    }
+
+    // Teardown must never leak: even when the final reseal's persist throws, close()
+    // still wipes the secrets and marks the session closed (read throws, update no-ops).
+    @Test
+    fun `close tears down even when the final flush persist fails`() = runTest {
+        val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
+        val open = unlockImage(passphrase, image, ops, fast)!!
+        val session = VaultSession(
+            scope = backgroundScope,
+            ops = ops,
+            initialImage = image,
+            initialPayload = open.payloadPlaintext,
+            initialVaultKey = open.vaultKey,
+            slotIndex = open.slotIndex,
+            persist = { throw java.io.IOException("disk full on teardown") },
+            clock = { currentTime },
+            cooldownMs = 2_000L,
+        )
+
+        session.update("dirty".toByteArray())
+        // The final reseal throws, but teardown must run to completion regardless.
+        assertThrows(java.io.IOException::class.java) { session.close() }
+        // Closed despite the failure: read() throws and a further update is inert.
+        assertThrows(IllegalStateException::class.java) { session.read() }
+        session.update("after-close".toByteArray()) // no-op, must not throw
     }
 }
