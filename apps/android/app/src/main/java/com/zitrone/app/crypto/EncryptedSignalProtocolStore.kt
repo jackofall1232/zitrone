@@ -28,15 +28,15 @@ import java.util.UUID
  */
 class EncryptedSignalProtocolStore(
     private val keyStoreManager: KeyStoreManager,
-) : SignalProtocolStore {
+) : ZitroneSignalStore {
 
     private val prefs = keyStoreManager.prefs(KeyStoreManager.PREFS_SIGNAL_STORE)
 
     // -- local identity -----------------------------------------------------
 
-    fun hasLocalIdentity(): Boolean = prefs.contains(KEY_IDENTITY)
+    override fun hasLocalIdentity(): Boolean = prefs.contains(KEY_IDENTITY)
 
-    fun setLocalIdentity(identityKeyPair: IdentityKeyPair, registrationId: Int) {
+    override fun setLocalIdentity(identityKeyPair: IdentityKeyPair, registrationId: Int) {
         keyStoreManager.putBytes(prefs, KEY_IDENTITY, identityKeyPair.serialize())
         prefs.edit().putInt(KEY_REGISTRATION_ID, registrationId).apply()
     }
@@ -174,7 +174,7 @@ class EncryptedSignalProtocolStore(
      *         `false`, or orphaned session/identity state can reappear on
      *         restart and be reused instead of forcing a fresh X3DH.
      */
-    fun destroyContactCrypto(name: String): Boolean {
+    override fun destroyContactCrypto(name: String): Boolean {
         val editor = prefs.edit()
         val prefixes = listOf(KEY_SESSION, KEY_REMOTE_IDENTITY, KEY_SENDER_KEY)
         prefs.all.keys
@@ -225,9 +225,37 @@ class EncryptedSignalProtocolStore(
         keyStoreManager.getBytes(prefs, senderKeyKey(sender, distributionId))
             ?.let { SenderKeyRecord(it) }
 
+    // -- counters (PR-D2a: moved out of SignalProtocolManager, SAME prefs keys/defaults) --
+
+    /**
+     * The next one-time-prekey id, default 1 — reproduces the legacy
+     * `SignalProtocolManager.nextId`'s `prefs.getInt("next_prekey_id", 1)` exactly.
+     * SignalProtocolManager keeps the wrap-and-increment logic and stores the
+     * result via [setNextPreKeyId], so the id sequence is byte-for-byte unchanged.
+     */
+    override fun nextPreKeyId(): Int = prefs.getInt(KEY_NEXT_PREKEY_ID, 1)
+
+    override fun setNextPreKeyId(value: Int) {
+        prefs.edit().putInt(KEY_NEXT_PREKEY_ID, value).apply()
+    }
+
+    /** The next signed-prekey id, default 1 (see [nextPreKeyId]). */
+    override fun nextSignedPreKeyId(): Int = prefs.getInt(KEY_NEXT_SIGNED_PREKEY_ID, 1)
+
+    override fun setNextSignedPreKeyId(value: Int) {
+        prefs.edit().putInt(KEY_NEXT_SIGNED_PREKEY_ID, value).apply()
+    }
+
+    /** The current signed prekey's creation timestamp (ms), default 0 (never rotated). */
+    override fun signedPreKeyCreatedAt(): Long = prefs.getLong(KEY_SIGNED_PREKEY_CREATED_AT, 0L)
+
+    override fun setSignedPreKeyCreatedAt(value: Long) {
+        prefs.edit().putLong(KEY_SIGNED_PREKEY_CREATED_AT, value).apply()
+    }
+
     // -- misc -----------------------------------------------------------------
 
-    fun countOneTimePreKeys(): Int =
+    override fun countOneTimePreKeys(): Int =
         prefs.all.keys.count { it.startsWith(KEY_PREKEY) }
 
     /**
@@ -244,7 +272,7 @@ class EncryptedSignalProtocolStore(
      * rebuilds a bare roster from them (display names are unrecoverable). Reuses
      * the same prefs.all.keys prefix-scan style as the prekey/session accessors.
      */
-    fun knownRemoteContacts(): List<Pair<String, String?>> =
+    override fun knownRemoteContacts(): List<Pair<String, String?>> =
         prefs.all.keys
             .filter { it.startsWith(KEY_REMOTE_IDENTITY) }
             .mapNotNull { key ->
@@ -261,7 +289,7 @@ class EncryptedSignalProtocolStore(
             }
 
     /** Full local wipe — account deletion. Irreversible by design. */
-    fun wipe() {
+    override fun wipe() {
         prefs.edit().clear().apply()
     }
 
@@ -286,5 +314,13 @@ class EncryptedSignalProtocolStore(
         private const val KEY_KYBER_PREKEY = "kyber_prekey:"
         private const val KEY_KYBER_USED = "kyber_prekey_used:"
         private const val KEY_SENDER_KEY = "sender_key:"
+
+        // Prekey / signed-prekey id counters + the signed-prekey timestamp.
+        // Historically written by SignalProtocolManager directly into this same
+        // PREFS_SIGNAL_STORE file; PR-D2a moved the plumbing here under the
+        // IDENTICAL key strings so the on-disk values are byte-for-byte unchanged.
+        private const val KEY_NEXT_PREKEY_ID = "next_prekey_id"
+        private const val KEY_NEXT_SIGNED_PREKEY_ID = "next_signed_prekey_id"
+        private const val KEY_SIGNED_PREKEY_CREATED_AT = "signed_prekey_created_at"
     }
 }

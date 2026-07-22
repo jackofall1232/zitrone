@@ -26,20 +26,24 @@ import java.security.SecureRandom
  * X3DH session establishment from a fetched prekey bundle, and per-message
  * Double Ratchet encrypt/decrypt.
  *
- * All key material is held by [EncryptedSignalProtocolStore] — encrypted at
- * rest behind the Android Keystore. Nothing here logs, and nothing here ever
+ * All key material is held by the [ZitroneSignalStore] — encrypted at rest
+ * (the legacy [EncryptedSignalProtocolStore] behind the Android Keystore, or,
+ * from PR-D2c, the vault facade). Nothing here logs, and nothing here ever
  * returns private key bytes to callers. (One deliberate, documented exception
  * exists OUTSIDE this class: LemonDropRedeemer's private key-bridge reads raw
  * scalars from the store for the isolated one-shot lemon-drop responder —
  * see its class doc. It must stay the only one.)
+ *
+ * PR-D2a made this store-agnostic: it takes the [ZitroneSignalStore] interface
+ * (not the concrete legacy store) and reads/writes the prekey / signed-prekey id
+ * counters and the signed-prekey timestamp THROUGH the store's counter accessors
+ * instead of reaching into `prefs(PREFS_SIGNAL_STORE)` itself. The manager keeps
+ * only the wrap-and-increment id logic; the byte-for-byte counter values and id
+ * sequences are unchanged.
  */
 class SignalProtocolManager(
-    private val store: EncryptedSignalProtocolStore,
-    keyStoreManager: KeyStoreManager,
+    private val store: ZitroneSignalStore,
 ) {
-
-    /** Counter bookkeeping shares the encrypted signal store file. */
-    private val prefs = keyStoreManager.prefs(KeyStoreManager.PREFS_SIGNAL_STORE)
 
     // -- DTOs (what crosses the network — PUBLIC keys only) ------------------
 
@@ -124,7 +128,7 @@ class SignalProtocolManager(
      * (security.encryption.key_types.signed_prekey).
      */
     fun generateSignedPreKey(): SignedPreKeyDto {
-        val id = nextId(KEY_NEXT_SIGNED_PREKEY_ID)
+        val id = allocateSignedPreKeyId()
         val keyPair = Curve.generateKeyPair()
         // Sign the standard libsignal serialize() form (33 bytes, DJB
         // type-prefixed), NOT the raw 32-byte wire form uploaded below.
@@ -143,7 +147,7 @@ class SignalProtocolManager(
         )
         val timestamp = System.currentTimeMillis()
         store.storeSignedPreKey(id, SignedPreKeyRecord(id, timestamp, keyPair, signature))
-        prefs.edit().putLong(KEY_SIGNED_PREKEY_CREATED_AT, timestamp).apply()
+        store.setSignedPreKeyCreatedAt(timestamp)
         return SignedPreKeyDto(
             id = id,
             publicKeyBase64 = encode(keyPair.publicKey.getPublicKeyBytes()),
@@ -154,7 +158,7 @@ class SignalProtocolManager(
 
     /** Returns a fresh signed prekey when the current one is older than 7 days. */
     fun rotateSignedPreKeyIfNeeded(): SignedPreKeyDto? {
-        val createdAt = prefs.getLong(KEY_SIGNED_PREKEY_CREATED_AT, 0L)
+        val createdAt = store.signedPreKeyCreatedAt()
         val age = System.currentTimeMillis() - createdAt
         return if (createdAt == 0L || age >= SIGNED_PREKEY_MAX_AGE_MS) generateSignedPreKey() else null
     }
@@ -166,7 +170,7 @@ class SignalProtocolManager(
      */
     fun generateOneTimePreKeys(count: Int = ONE_TIME_PREKEY_BATCH): List<OneTimePreKeyDto> =
         (0 until count).map {
-            val id = nextId(KEY_NEXT_PREKEY_ID)
+            val id = allocatePreKeyId()
             val keyPair = Curve.generateKeyPair()
             store.storePreKey(id, PreKeyRecord(id, keyPair))
             OneTimePreKeyDto(id = id, publicKeyBase64 = encode(keyPair.publicKey.getPublicKeyBytes()))
@@ -293,12 +297,26 @@ class SignalProtocolManager(
     private fun address(accountId: String) =
         SignalProtocolAddress(accountId, EncryptedSignalProtocolStore.DEFAULT_DEVICE_ID)
 
+    // The wrap-and-increment id logic stays HERE (byte-for-byte as the old
+    // `nextId`); only the raw counter read/write moved into the store. Kept
+    // @Synchronized so the read-modify-write of a counter is atomic on this
+    // manager instance, exactly as before — two allocations can never interleave.
+
     @Synchronized
-    private fun nextId(counterKey: String): Int {
-        val next = prefs.getInt(counterKey, 1)
+    private fun allocatePreKeyId(): Int {
+        val next = store.nextPreKeyId()
         // Wrap long before Integer.MAX_VALUE; ids only need short-term uniqueness.
         val following = if (next >= 0xFFFFFF) 1 else next + 1
-        prefs.edit().putInt(counterKey, following).apply()
+        store.setNextPreKeyId(following)
+        return next
+    }
+
+    @Synchronized
+    private fun allocateSignedPreKeyId(): Int {
+        val next = store.nextSignedPreKeyId()
+        // Wrap long before Integer.MAX_VALUE; ids only need short-term uniqueness.
+        val following = if (next >= 0xFFFFFF) 1 else next + 1
+        store.setNextSignedPreKeyId(following)
         return next
     }
 
@@ -316,9 +334,5 @@ class SignalProtocolManager(
 
         /** Signed prekey rotates every 7 days. */
         const val SIGNED_PREKEY_MAX_AGE_MS = 7L * 24 * 60 * 60 * 1000
-
-        private const val KEY_NEXT_PREKEY_ID = "next_prekey_id"
-        private const val KEY_NEXT_SIGNED_PREKEY_ID = "next_signed_prekey_id"
-        private const val KEY_SIGNED_PREKEY_CREATED_AT = "signed_prekey_created_at"
     }
 }

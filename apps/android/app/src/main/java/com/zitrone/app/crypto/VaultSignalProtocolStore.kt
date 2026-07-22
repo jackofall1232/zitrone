@@ -58,14 +58,14 @@ import java.util.UUID
  */
 class VaultSignalProtocolStore(
     private val runtime: VaultRuntime,
-) : SignalProtocolStore {
+) : ZitroneSignalStore {
 
     // -- local identity -----------------------------------------------------
 
     /** True once the long-term identity has been generated (mirrors legacy `hasLocalIdentity`). */
-    fun hasLocalIdentity(): Boolean = runtime.read { it.signalRecords.containsKey(KEY_IDENTITY) }
+    override fun hasLocalIdentity(): Boolean = runtime.read { it.signalRecords.containsKey(KEY_IDENTITY) }
 
-    fun setLocalIdentity(identityKeyPair: IdentityKeyPair, registrationId: Int) {
+    override fun setLocalIdentity(identityKeyPair: IdentityKeyPair, registrationId: Int) {
         runtime.mutate {
             putRecord(it, KEY_IDENTITY, identityKeyPair.serialize())
             putRecord(it, KEY_REGISTRATION_ID, registrationId.toBeBytes())
@@ -229,7 +229,7 @@ class VaultSignalProtocolStore(
      * destroyContactCrypto alone covers only the crypto records and does not coordinate
      * roster state; do NOT call it as a standalone contact-delete in PR-D.
      */
-    fun destroyContactCrypto(name: String): Boolean {
+    override fun destroyContactCrypto(name: String): Boolean {
         val prefixes = listOf(KEY_SESSION, KEY_REMOTE_IDENTITY, KEY_SENDER_KEY)
         runtime.mutate { state ->
             state.signalRecords.keys
@@ -301,31 +301,31 @@ class VaultSignalProtocolStore(
      * `prefs.getInt(counterKey, 1)`. SignalProtocolManager keeps its own
      * wrap-and-increment logic and just stores the result via [setNextPreKeyId].
      */
-    fun nextPreKeyId(): Int = runtime.read { it.signalRecords[KEY_NEXT_PREKEY_ID]?.toInt() } ?: 1
+    override fun nextPreKeyId(): Int = runtime.read { it.signalRecords[KEY_NEXT_PREKEY_ID]?.toInt() } ?: 1
 
-    fun setNextPreKeyId(value: Int) {
+    override fun setNextPreKeyId(value: Int) {
         runtime.mutate { putRecord(it, KEY_NEXT_PREKEY_ID, value.toBeBytes()) }
     }
 
     /** The next signed-prekey id, default 1 (see [nextPreKeyId]). */
-    fun nextSignedPreKeyId(): Int =
+    override fun nextSignedPreKeyId(): Int =
         runtime.read { it.signalRecords[KEY_NEXT_SIGNED_PREKEY_ID]?.toInt() } ?: 1
 
-    fun setNextSignedPreKeyId(value: Int) {
+    override fun setNextSignedPreKeyId(value: Int) {
         runtime.mutate { putRecord(it, KEY_NEXT_SIGNED_PREKEY_ID, value.toBeBytes()) }
     }
 
     /** The current signed prekey's creation timestamp (ms), default 0 (never rotated). */
-    fun signedPreKeyCreatedAt(): Long =
+    override fun signedPreKeyCreatedAt(): Long =
         runtime.read { it.signalRecords[KEY_SIGNED_PREKEY_CREATED_AT]?.toLong() } ?: 0L
 
-    fun setSignedPreKeyCreatedAt(value: Long) {
+    override fun setSignedPreKeyCreatedAt(value: Long) {
         runtime.mutate { putRecord(it, KEY_SIGNED_PREKEY_CREATED_AT, value.toBeBytes()) }
     }
 
     // -- misc -----------------------------------------------------------------
 
-    fun countOneTimePreKeys(): Int =
+    override fun countOneTimePreKeys(): Int =
         runtime.read { state -> state.signalRecords.keys.count { it.startsWith(KEY_PREKEY) } }
 
     /**
@@ -336,11 +336,11 @@ class VaultSignalProtocolStore(
      * base64 (== the legacy store's `NO_WRAP`), and `java.util.Base64` so the facade stays
      * host-JVM testable (no `android.util`).
      */
-    fun knownRemoteContacts(): List<Pair<String, String?>> =
+    override fun knownRemoteContacts(): List<Pair<String, String?>> =
         runtime.read { knownRemoteContactsOf(it.signalRecords) }
 
     /** Full local wipe — account deletion. Irreversible by design (mirrors legacy `wipe`). */
-    fun wipe() {
+    override fun wipe() {
         runtime.mutate { it.wipe() }
     }
 
