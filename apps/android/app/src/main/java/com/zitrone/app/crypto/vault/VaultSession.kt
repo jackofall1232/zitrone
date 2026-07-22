@@ -41,16 +41,25 @@ import kotlinx.coroutines.launch
  *     indefinitely under a steady stream of updates; the ceiling must hold from
  *     first-dirty.
  *
- *  3. On [close] (lock / teardown / background) force a synchronous [flushNow],
+ *  3. On [close] (lock / teardown / background) force a synchronous final reseal,
  *     then wipe the in-memory vault key and payload.
  *
- * THREADING. All public methods are thread-safe. [update] will run on a future
- * confined dispatcher; [flushNow] / [close] on the main/lock thread; the debounce
- * job on [scope]. They may race, so every state transition is atomic under a
- * private monitor ([lock]). The monitor is never held across a suspension: the
- * debounce delay happens OUTSIDE the lock, and only the (non-suspending) seal +
- * splice + persist run inside it. Cancelling the pending job inside a forced
- * flush is what prevents a double-persist.
+ * THREADING. All public methods are thread-safe. Two monitors:
+ *
+ *  - [stateLock] guards the in-memory state (payload, image, dirty flags, the
+ *    dirty [version], [pending], [closed]). It is held ONLY for fast, non-blocking
+ *    transitions — NEVER across [persist] or a suspension.
+ *  - [flushLock] serializes a whole reseal → persist → commit cycle so two flushes
+ *    cannot interleave their disk writes (which could land a stale image and lose
+ *    an update). Lock ordering is ALWAYS [flushLock] then [stateLock], never the
+ *    reverse.
+ *
+ * [persist] is a blocking, caller-provided (alien) sink; it runs OUTSIDE
+ * [stateLock], so a concurrent [read] / [update] never blocks on disk I/O (no
+ * main-thread stall / ANR) and a reentrant call back into the session cannot
+ * corrupt a flush in progress: a monotonically increasing [version] counter,
+ * captured at seal time, detects any mutation that landed during the persist and
+ * keeps the session dirty rather than falsely marking it clean.
  *
  * This is an isolated runtime unit: it is deliberately NOT wired into any real
  * store, unlock UI, or coordinator — that is a later sub-phase.
@@ -64,17 +73,20 @@ class VaultSession(
     private val slotIndex: Int,
     private val persist: (ByteArray) -> Unit,
     /**
-     * Time source for the coalescing ceiling. MUST be MONOTONIC in production —
-     * inject `SystemClock.elapsedRealtime()` (the wiring phase does). The default
-     * `System::currentTimeMillis` is wall-clock and can jump backward on an NTP /
-     * manual clock change, which would delay a scheduled reseal; it is a
-     * convenience default for this isolated, not-yet-wired unit only.
+     * Time source for the coalescing ceiling. It measures ELAPSED durations only,
+     * so it must be MONOTONIC. The default is `System.nanoTime()` (in ms), which is
+     * monotonic on both the JVM and Android and cannot jump backward on an NTP /
+     * manual clock change. Production may inject `SystemClock.elapsedRealtime()` to
+     * also advance across device deep-sleep; tests inject virtual time.
      */
-    private val clock: () -> Long = System::currentTimeMillis,
+    private val clock: () -> Long = { System.nanoTime() / 1_000_000L },
     private val cooldownMs: Long = 2_000L,
 ) {
-    /** Monitor guarding every field below. Never held across a suspension. */
-    private val lock = Any()
+    /** Monitor for the in-memory state. Held only for fast transitions; never across I/O. */
+    private val stateLock = Any()
+
+    /** Serializes whole reseal→persist→commit cycles. Outer lock (before [stateLock]). */
+    private val flushLock = Any()
 
     /** The current in-memory keystore plaintext. Owned here; wiped on replace/close. */
     private var payload: ByteArray = initialPayload.copyOf()
@@ -96,7 +108,15 @@ class VaultSession(
     /** True when [payload] has changed since the last successful persist. */
     private var dirty: Boolean = false
 
-    /** Wall-clock of the FIRST unflushed mutation — the coalescing ceiling's origin. */
+    /**
+     * Monotonically increasing on every [update]. A flush captures this at seal
+     * time; if it has advanced by the time the (outside-the-lock) persist returns,
+     * a mutation slipped in during the write, so the flush must NOT mark the session
+     * clean. This is what makes calling [persist] outside [stateLock] safe.
+     */
+    private var version: Long = 0
+
+    /** Elapsed-clock reading of the FIRST unflushed mutation — the ceiling's origin. */
     private var firstDirtyAt: Long? = null
 
     /** The single armed debounce job, or null when none is pending. */
@@ -118,15 +138,15 @@ class VaultSession(
      * A COPY of the current in-memory payload. Never hands out the live buffer, so
      * a caller mutating the result cannot corrupt session state. Throws once closed.
      */
-    fun read(): ByteArray = synchronized(lock) {
+    fun read(): ByteArray = synchronized(stateLock) {
         check(!closed) { "vault session is closed" }
         payload.copyOf()
     }
 
     /**
-     * Replace the in-memory payload, mark dirty, and — if none is already armed —
-     * schedule ONE reseal at `firstDirtyAt + cooldownMs`. Non-blocking. A no-op
-     * once closed.
+     * Replace the in-memory payload, mark dirty, and — unless one is already armed
+     * and still pending — schedule ONE reseal at `firstDirtyAt + cooldownMs`.
+     * Non-blocking. A no-op once closed.
      *
      * Rejects an over-capacity payload BEFORE mutating any state (the region never
      * grows — a larger real payload would leak that a vault lives here and how
@@ -134,7 +154,7 @@ class VaultSession(
      * payload buffer is wiped on replace.
      */
     fun update(newPayload: ByteArray) {
-        synchronized(lock) {
+        synchronized(stateLock) {
             // A closed session is inert — no-op even for an over-capacity input
             // (checked after the closed-gate so close() makes EVERY update a
             // silent no-op, never a throw).
@@ -151,23 +171,29 @@ class VaultSession(
             payload = newPayload.copyOf()
             wipe(previous)
             dirty = true
+            version++
             if (firstDirtyAt == null) firstDirtyAt = clock()
-            if (pending == null) armLocked()
+            // Re-arm when nothing is scheduled OR the last job already finished /
+            // was cancelled (e.g. its scope was torn down mid-delay) — a completed
+            // or cancelled job left in `pending` must not block the next ceiling.
+            if (pending?.isActive != true) armLocked()
         }
     }
 
     /**
-     * SYNCHRONOUS, durable reseal. Cancels the pending debounce job (so it cannot
-     * double-persist), then — if dirty — seals the current payload, splices it into
-     * the image at this slot (every other region byte-unchanged), and hands the new
-     * image to [persist], returning only after [persist] returns. If [persist]
-     * throws, the session stays dirty and the throw propagates (a flush-before-ack
-     * caller must NOT ack). Idempotent: a no-op when clean or closed.
+     * SYNCHRONOUS, durable reseal. If dirty, seals the current payload, splices it
+     * into the image at this slot (every other region byte-unchanged), and hands
+     * the new image to [persist] — returning only after [persist] returns. Then
+     * cancels the pending debounce job so it cannot fire a redundant reseal. If
+     * [persist] throws, the session stays dirty and the throw propagates (a
+     * flush-before-ack caller must NOT ack). Idempotent: a no-op when clean/closed.
      */
-    fun flushNow() = synchronized(lock) {
-        pending?.cancel()
-        pending = null
-        flushLocked()
+    fun flushNow() {
+        doFlush()
+        synchronized(stateLock) {
+            pending?.cancel()
+            pending = null
+        }
     }
 
     /**
@@ -177,70 +203,85 @@ class VaultSession(
      * retaining persist sink shares that array). After this, [update] / [flushNow]
      * are no-ops and [read] throws. Idempotent.
      */
-    fun close() = synchronized(lock) {
-        if (closed) return@synchronized
+    fun close() {
         try {
             // Best-effort final reseal. If it throws (persist failure) we still fall
             // through to wipe every secret — teardown must never leak key material,
-            // even when the last write could not land.
-            flushLocked()
+            // even when the last write could not land. doFlush() takes flushLock
+            // then stateLock internally and fully releases both before the finally
+            // runs, so the finally's stateLock acquisition never nests under either.
+            doFlush()
         } finally {
-            pending?.cancel()
-            pending = null
-            closed = true
-            wipe(vaultKey)
-            wipe(payload)
-            // Do NOT wipe [image]: it is ciphertext already handed to [persist], and
-            // a sink that retained the same array would be corrupted by zeroing it.
+            synchronized(stateLock) {
+                if (!closed) {
+                    pending?.cancel()
+                    pending = null
+                    closed = true
+                    wipe(vaultKey)
+                    wipe(payload)
+                    // Do NOT wipe [image]: it is ciphertext already handed to
+                    // [persist], and a sink retaining that array would be corrupted.
+                }
+            }
         }
     }
 
-    /** Arm exactly one debounce job at the first-dirty ceiling. Caller holds [lock]. */
+    /** Arm exactly one debounce job at the first-dirty ceiling. Caller holds [stateLock]. */
     private fun armLocked() {
         val target = (firstDirtyAt ?: clock()) + cooldownMs
-        val job = scope.launch {
+        pending = scope.launch {
             // Residual-delay pattern (mirrors MessageRepository.scheduleTtl): the
             // wait is computed from the clock so the ceiling stays anchored to
-            // firstDirtyAt no matter when this body is first dispatched. The delay
-            // is OUTSIDE the monitor — the lock is only taken for the atomic reseal.
+            // firstDirtyAt no matter when this body is first dispatched.
             val wait = target - clock()
             if (wait > 0) delay(wait)
-            synchronized(lock) {
-                // Deregister self first so the NEXT update re-arms a fresh ceiling,
-                // then reseal if still dirty. A persist failure here keeps dirty ==
-                // true (flushLocked re-throws) but must not crash the scope; the next
-                // forced flushNow / update retries, so swallow it in this timer path.
-                pending = null
-                if (!closed && dirty) runCatching { flushLocked() }
-            }
+            // Reseal OUTSIDE any lock this coroutine holds. A persist failure keeps
+            // the session dirty (doFlush re-throws) but must not crash the scope; the
+            // next forced flushNow / update retries, so swallow it in this timer path.
+            // A stale completed job left in `pending` is harmless — update() re-arms
+            // on `pending?.isActive != true`, and flushNow()/close() cancel it.
+            runCatching { doFlush() }
         }
-        // If an immediate dispatcher already ran the body to completion above (it
-        // set pending = null), do NOT overwrite that with the finished job — only a
-        // still-pending job is registered, so a later update always re-arms.
-        pending = job.takeIf { it.isActive }
     }
 
     /**
-     * Seal + splice + PERSIST, then clear dirty state — atomically, caller holds
-     * [lock]. Ordering is load-bearing for flush-before-ack: [persist] runs FIRST
-     * and the session is marked clean ONLY after it returns. If [persist] throws
-     * (disk full / IO error) the session stays dirty and the exception propagates,
-     * so a forced [flushNow] caller does NOT ack an inbound message whose ratchet
-     * state never reached disk. Does NOT touch [pending] — callers own that. A
-     * no-op when clean or closed.
+     * One reseal → persist → commit cycle, serialized by [flushLock]. Seals the
+     * current payload under [stateLock] and captures the dirty [version], releases
+     * [stateLock], calls the blocking [persist] OUTSIDE it, then re-takes
+     * [stateLock] to commit. Load-bearing for flush-before-ack: [persist] runs
+     * FIRST and the session is marked clean ONLY after it returns AND only if no
+     * mutation slipped in during the write (version unchanged); a [persist] throw
+     * leaves the session dirty and propagates, so a forced caller does not ack an
+     * inbound message whose ratchet state never reached disk. A no-op when
+     * clean/closed. Does NOT touch [pending] — callers own that.
      */
-    private fun flushLocked() {
-        if (closed || !dirty) return
-        val sealed = sealPayload(vaultKey, payload, ops)
-        val next = spliceImagePayload(image, slotIndex, sealed)
-        // Durable write FIRST. Only once the bytes are safely handed off do we
-        // adopt the new image and mark clean — a throw here leaves dirty == true.
-        // persist() is a plain (non-suspend) sink, so holding [lock] across it does
-        // not violate the never-suspend-under-lock invariant, and serializes writes.
-        persist(next)
-        image = next
-        dirty = false
-        firstDirtyAt = null
+    private fun doFlush() {
+        synchronized(flushLock) {
+            val next: ByteArray
+            val sealedVersion: Long
+            synchronized(stateLock) {
+                if (closed || !dirty) return
+                next = spliceImagePayload(image, slotIndex, sealPayload(vaultKey, payload, ops))
+                sealedVersion = version
+            }
+            // Blocking disk write, no lock held: read()/update() stay responsive,
+            // and a reentrant update() during persist just bumps `version`.
+            persist(next)
+            synchronized(stateLock) {
+                if (closed) return
+                image = next
+                if (version == sealedVersion) {
+                    // Nothing changed during the write — the whole dirty batch is now
+                    // durable.
+                    dirty = false
+                    firstDirtyAt = null
+                }
+                // else: a mutation landed mid-persist. Keep dirty == true so it is not
+                // lost; firstDirtyAt still anchors the ceiling (already in the past, so
+                // the next arm fires promptly). Cannot occur under single-worker
+                // confinement, where update/flush never run concurrently.
+            }
+        }
     }
 
     private companion object {

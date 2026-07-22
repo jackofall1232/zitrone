@@ -300,4 +300,42 @@ class VaultSessionTest {
         assertThrows(IllegalStateException::class.java) { session.read() }
         session.update("after-close".toByteArray()) // no-op, must not throw
     }
+
+    // persist() runs OUTSIDE the state lock, so a reentrant update() during the
+    // write is legal and must NOT be silently cleared by the flush's commit — the
+    // version counter detects it and keeps the session dirty until it flushes.
+    @Test
+    fun `an update reentrantly triggered during persist is not lost`() = runTest {
+        val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
+        val open = unlockImage(passphrase, image, ops, fast)!!
+        val persisted = mutableListOf<ByteArray>()
+        lateinit var session: VaultSession
+        var reentered = false
+        session = VaultSession(
+            scope = backgroundScope,
+            ops = ops,
+            initialImage = image,
+            initialPayload = open.payloadPlaintext,
+            initialVaultKey = open.vaultKey,
+            slotIndex = open.slotIndex,
+            persist = { img ->
+                persisted.add(img.copyOf())
+                // Reentrant mutation while the first flush is mid-persist.
+                if (!reentered) { reentered = true; session.update("reentrant".toByteArray()) }
+            },
+            clock = { currentTime },
+            cooldownMs = 2_000L,
+        )
+
+        session.update("first".toByteArray())
+        session.flushNow() // persists "first"; during that write, reentrantly updates
+        assertTrue("reentrant update fired", reentered)
+        // The reentrant update must still be pending, not swallowed by the commit.
+        session.flushNow() // now persists "reentrant"
+        val reopened = unlockImage(passphrase, persisted.last(), ops, fast)!!
+        assertArrayEquals(
+            "the reentrant update survived and reached disk",
+            "reentrant".toByteArray(), reopened.payloadPlaintext,
+        )
+    }
 }
