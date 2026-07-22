@@ -9,6 +9,7 @@
 package com.zitrone.app.crypto.vault
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -254,7 +255,10 @@ class VaultSession(
         val target = (firstDirtyAt ?: clock()) + cooldownMs
         // Run on [flushContext] (default Dispatchers.IO), NOT the caller's scope
         // dispatcher, so the reseal + persist never block a main-thread-bound scope.
-        val job = scope.launch(flushContext) {
+        // LAZY + explicit start() guarantees `pending` is assigned BEFORE the body can
+        // run, so the identity check below is race-free even on an immediate/unconfined
+        // dispatcher (where launch would otherwise run the body before `pending = job`).
+        val job = scope.launch(flushContext, start = CoroutineStart.LAZY) {
             // Residual-delay pattern (mirrors MessageRepository.scheduleTtl): the
             // wait is computed from the clock so the ceiling stays anchored to
             // firstDirtyAt no matter when this body is first dispatched.
@@ -266,15 +270,16 @@ class VaultSession(
             synchronized(stateLock) {
                 // Deregister self (identity-checked, so a newer job is never cleared),
                 // and re-arm ONLY on a SUCCESSFUL flush that left us dirty — a mutation
-                // that landed mid-persist. Never re-arm after a failure: firstDirtyAt
-                // is in the past, so a blind re-arm would hot-loop retrying a failing
-                // disk. On failure the next update()/flushNow() retries instead.
+                // that landed mid-flush. Never re-arm after a failure: a blind re-arm of
+                // a failing disk would hot-loop. On failure the next update()/flushNow()
+                // retries instead.
                 if (pending === coroutineContext[Job]) {
                     if (result.isSuccess && dirty && !closed) armLocked() else pending = null
                 }
             }
         }
         pending = job
+        job.start()
     }
 
     /**
@@ -303,6 +308,11 @@ class VaultSession(
                 vaultKeyCopy = vaultKey.copyOf()
                 imageRef = image
                 sealedVersion = version
+                // Clear the ceiling anchor now (this batch is being flushed). Any
+                // update() that lands mid-flush then sees firstDirtyAt == null and
+                // re-anchors it to its OWN timestamp, so the next ceiling is measured
+                // from the real mutation time — never a stale one that would hot-loop.
+                firstDirtyAt = null
             }
             try {
                 // Heavy AES-GCM reseal (256 KiB) + splice OUTSIDE stateLock, on private
@@ -317,21 +327,15 @@ class VaultSession(
                     if (closed) return
                     image = next
                     if (version == sealedVersion) {
-                        // Nothing changed during seal+persist — the whole dirty batch
-                        // is now durable.
+                        // Nothing changed during seal+persist — the whole dirty batch is
+                        // now durable. firstDirtyAt was already reset to null at snapshot.
                         dirty = false
-                        firstDirtyAt = null
-                    } else {
-                        // A mutation landed mid-flush (incl. a reentrant update from the
-                        // sink). Stay dirty so it is not lost, and RE-ANCHOR the ceiling
-                        // to now: leaving firstDirtyAt in the past would make the caller's
-                        // re-arm compute wait <= 0 and, under a steady update stream,
-                        // hot-loop immediate flushes with no coalescing. The caller
-                        // (flushNow / the timer body) re-arms from this fresh anchor.
-                        // Cannot occur under single-worker confinement, where update and
-                        // flush never overlap.
-                        firstDirtyAt = clock()
                     }
+                    // else: a mutation landed mid-flush (incl. a reentrant update from the
+                    // sink). It re-anchored firstDirtyAt to its own timestamp (the snapshot
+                    // reset it to null), so the caller (flushNow / the timer body) re-arms
+                    // a full cooldown from the real mutation time — no lost update, no
+                    // hot-loop. Cannot occur under single-worker confinement anyway.
                 }
             } finally {
                 wipe(payloadCopy)
