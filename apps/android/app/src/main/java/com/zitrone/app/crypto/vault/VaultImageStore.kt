@@ -12,6 +12,8 @@ import java.io.File
 import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -573,18 +575,24 @@ class VaultImageStore internal constructor(
 
     /**
      * Write [bytes] to `<name>.tmp` in the SAME directory, `FileChannel.force(true)` (fsync
-     * file content + metadata), and atomically rename over the target (same-dir rename is
-     * atomic on ext4/f2fs). Does EVERYTHING [atomicWrite] does EXCEPT the trailing directory
-     * fsync — so a caller can batch several renames under a SINGLE trailing [dirSync] (see
-     * [create], which renames both files then does one directory fsync covering both).
+     * file content + metadata), and atomically move it over the target via [Files.move] with
+     * [StandardCopyOption.ATOMIC_MOVE] (a same-dir atomic rename on ext4/f2fs). Does EVERYTHING
+     * [atomicWrite] does EXCEPT the trailing directory fsync — so a caller can batch several
+     * renames under a SINGLE trailing [dirSync] (see [create], which renames both files then
+     * does one directory fsync covering both).
      *
-     * THROWS on any PRE-rename failure (ensure-parent, tmp write, content-fsync, or a refused
-     * rename), best-effort deleting the `.tmp` first, then rethrowing — the target (previous
-     * durable file) is untouched (a same-dir rename replaces atomically or not at all), so a
-     * THROW means NOTHING was committed for this file. On a SUCCESSFUL rename it returns [Unit]:
-     * the new bytes ARE on disk, but the rename's directory-entry durability is NOT yet
-     * confirmed — the caller MUST still [dirSync] the parent before treating the rename as
-     * crash-durable.
+     * THROWS on any PRE-rename failure (ensure-parent, tmp write, content-fsync, or the move
+     * itself), best-effort deleting the `.tmp` first, then rethrowing. The move is
+     * ATOMIC-OR-THROWS: [Files.move] with ATOMIC_MOVE either fully replaces the target or throws
+     * — never a torn/half state — so a THROW leaves the target (previous durable file) UNTOUCHED
+     * and means NOTHING was committed for this file. A platform that cannot perform an atomic move
+     * throws [java.nio.file.AtomicMoveNotSupportedException] (an [IOException] subclass), which
+     * propagates as a pre-rename failure (retryable, target intact); we deliberately do NOT fall
+     * back to a non-atomic move — that would break the atomic-replace guarantee the whole
+     * durability model rests on. On a SUCCESSFUL move it returns [Unit]: the new bytes ARE on disk
+     * and the rename is atomic, but the rename's directory-entry DURABILITY is NOT yet confirmed —
+     * the caller MUST still [dirSync] the parent before treating the rename as crash-durable
+     * (ATOMIC_MOVE guarantees atomicity of the rename, never durability of the directory entry).
      */
     private fun renameIntoPlace(target: File, bytes: ByteArray) {
         // Defensive: production baseDir = filesDir always exists, so this is a no-op there,
@@ -598,14 +606,24 @@ class VaultImageStore internal constructor(
                 // name can never point at a not-yet-durable inode.
                 fos.channel.force(true)
             }
-            if (!tmp.renameTo(target)) {
-                throw IOException("atomic rename failed for ${target.name}")
-            }
+            // Atomic-or-throws replace: ATOMIC_MOVE either fully swaps tmp over target or throws
+            // (never a torn state), REPLACE_EXISTING allows overwriting the previous durable file.
+            // Files.move THROWS on failure (unlike File.renameTo's false return) — the catch below
+            // cleans up tmp and rethrows, leaving the target at its previous state. A platform
+            // without atomic-move support throws AtomicMoveNotSupportedException (an IOException):
+            // we let it propagate as a pre-rename failure and do NOT fall back to a non-atomic
+            // move, which would forfeit the atomic-replace guarantee.
+            Files.move(
+                tmp.toPath(),
+                target.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING,
+            )
         } catch (t: Throwable) {
-            // ANY pre-rename failure (an ENOSPC mid-write, a refused rename, …) must not leave
+            // ANY pre-rename failure (an ENOSPC mid-write, a Files.move throw, …) must not leave
             // a variable-size `.tmp` lingering next to the constant-size files — best-effort
-            // delete it, then propagate. The target (previous durable file) is untouched: a
-            // same-dir rename replaces atomically or not at all.
+            // delete it, then propagate. The target (previous durable file) is untouched: an
+            // ATOMIC_MOVE replaces atomically or throws, never a torn state.
             tmp.delete()
             throw t
         }

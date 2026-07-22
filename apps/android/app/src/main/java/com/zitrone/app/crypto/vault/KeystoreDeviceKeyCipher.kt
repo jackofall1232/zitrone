@@ -13,7 +13,6 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.security.GeneralSecurityException
 import java.security.KeyStore
-import java.security.ProviderException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -69,6 +68,8 @@ class KeystoreDeviceKeyCipher(
     }
 
     override fun unwrapDek(blob: ByteArray): ByteArray? {
+        // A wrong-size blob is a clean "no" — kept OUTSIDE the try so it stays a plain null,
+        // never routed through the exception path below.
         if (blob.size != WRAPPED_KEY_BYTES) return null
         return try {
             val key = existingKey() ?: return null
@@ -80,17 +81,17 @@ class KeystoreDeviceKeyCipher(
                 GCMParameterSpec(AEAD_TAG_BYTES * 8, blob, 0, NONCE_BYTES),
             )
             cipher.doFinal(blob, NONCE_BYTES, blob.size - NONCE_BYTES)
-        } catch (e: GeneralSecurityException) {
-            // Tag failure / tampered blob / a key the hardware can no longer honor —
-            // all reported the same way, as "no" (mirrors aeadDecrypt). The caller
-            // treats null as a corrupt image and never silently recreates.
-            null
-        } catch (e: ProviderException) {
-            // Android Keystore RUNTIME failure — incl. android.security.KeyStoreException,
-            // which subclasses ProviderException: the TEE / StrongBox is momentarily
-            // unavailable or the provider errored. Reported the same "no". Unlike a tag
-            // failure this MAY be transient, so the resulting CorruptImage need not be
-            // permanent (a retry / reboot can succeed); the caller escalates regardless.
+        } catch (e: Exception) {
+            // ANY Keystore failure is reported as null (mirrors aeadDecrypt's "null means no"),
+            // honoring unwrapDek's null-on-ANY-failure contract: an auth failure, a tampered
+            // blob, or a key the hardware can no longer honor (GeneralSecurityException); the
+            // TEE / StrongBox momentarily unavailable or a provider error (ProviderException,
+            // incl. android.security.KeyStoreException); OR a keystore-daemon RUNTIME error that
+            // surfaces as a generic NullPointerException / IllegalStateException. Catching every
+            // Exception keeps such a daemon crash from ESCAPING and crashing open() — the caller
+            // maps null to CorruptImage (which its kdoc documents MAY be transient — a retry /
+            // reboot can succeed — and is NEVER auto-repaired). Only Exception is caught, never
+            // Error/Throwable, so a LinkageError / OutOfMemoryError still propagates.
             null
         }
     }
