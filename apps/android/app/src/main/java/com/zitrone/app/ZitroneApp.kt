@@ -40,6 +40,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
@@ -69,15 +70,16 @@ class ZitroneApp : Application() {
  *  - `AppContainer` is the DEVICE half — process-lifetime, readable pre-unlock:
  *    the scope, keystore, [DeviceSettings], the transport stack, boot
  *    diagnostics and the lemon-drop veil.
- *  - [SessionContainer] is the SESSION half — the messaging objects that (from
- *    D2 onward) live only while a vault is unlocked.
+ *  - [SessionContainer] is the SESSION half — the messaging objects that live
+ *    only while unlocked.
  *
- * D1 is a PURE STRUCTURAL refactor: there is no unlock gate yet, so exactly ONE
- * [SessionContainer] is built EAGERLY at construction and every object is
- * created at the same moment, in the same order, as before the split — the app
- * behaves identically. Callers still reach session members through
- * `container.<member>` via the delegating accessors below. D2 makes the session
- * build on unlock over the vault facades.
+ * PR-D2b makes the session build ON UNLOCK, not eagerly: [session] is a nullable
+ * flow, null while locked, and [UnlockController] builds/tears it down per unlock
+ * cycle over the CURRENT transport. Consumers collect [session] and read members
+ * through the non-null value (there are no delegating accessors — the UI composes
+ * a session-scoped subtree only while it is non-null). This is a lifecycle change
+ * only: the object set and construction order are identical to the eager D1 build;
+ * D2c swaps the vault in behind the same seam.
  */
 class AppContainer(private val app: Application) {
 
@@ -133,105 +135,93 @@ class AppContainer(private val app: Application) {
     val bootDiagnostics = BootDiagnostics(app)
 
     /**
-     * The single session-scoped half of the graph. Built EAGERLY in D1 (no
-     * unlock gate yet) so [applyTransport] can reference `session.apiClient` /
-     * `session.wsClient` exactly as the pre-split code referenced the flat
-     * `apiClient` / `wsClient` fields — behaviour identical. The session reads
-     * the CURRENT transport client via the `{ httpClient }` accessor (invoked
-     * once, at construction, returning the initial client — same value the flat
-     * fields captured before the split). D2 makes this build on unlock over the
-     * vault facades and must then handle the "no session yet" pre-unlock
-     * transport apply (OUT OF SCOPE for D1 — the eager build sidesteps it).
+     * The single session-scoped half of the graph — nullable and built ON UNLOCK
+     * (PR-D2b), not eagerly. Null while locked; a live [SessionContainer] once
+     * [UnlockController.unlock] builds it over the current transport. Every
+     * consumer collects this flow and reads members through the non-null value it
+     * yields (there are no delegating accessors any more — the UI composes a
+     * session-scoped subtree only while this is non-null). D2c swaps the vault in
+     * behind the same lifecycle without touching flow order again.
      */
-    val session = SessionContainer(
-        app = app,
+    private val _session = MutableStateFlow<SessionContainer?>(null)
+    val session: StateFlow<SessionContainer?> = _session.asStateFlow()
+
+    /**
+     * Lemon-drop bridge (device half, process lifetime). Owns the veil a `/d/{id}`
+     * scan raises and the scan orchestration — including D2b's re-gate: a scan
+     * while locked is queued, not fetched, until unlock. See
+     * [LemonDropVeilController]. The veil itself is exposed for the two direct
+     * writes the Activity still owns (the plaintext [LemonDropVeil.Delivered] set
+     * at biometric success, and the advocacy-outcome restore from saved state).
+     */
+    private val lemonDropVeilController = LemonDropVeilController(
         scope = scope,
-        keyStoreManager = keyStoreManager,
-        bootDiagnostics = bootDiagnostics,
-        settings = settingsRepository,
-        httpClient = httpClient,
-        apiBaseUrl = API_BASE_URL,
-        wsUrl = WS_URL,
+        isUnlocked = { _session.value != null },
+        // Reads the live session at probe time; a session torn down mid-probe
+        // (rare — a forced logout while the veil is up) falls to an honest UNKNOWN.
+        probe = { qrId ->
+            _session.value?.lemonDropRedeemer?.probe(qrId)
+                ?: LemonDropRedeemer.ProbeResult.Advocacy(LemonDropScanOutcome.UNKNOWN)
+        },
     )
 
-    // ── Delegating accessors ────────────────────────────────────────────────
-    // Callers keep using `container.<member>` unchanged; each resolves to the
-    // eagerly-built session's member. Only the members reached from outside
-    // AppContainer are re-exposed here.
-    val signalStore get() = session.signalStore
-    val signalManager get() = session.signalManager
-    val apiClient get() = session.apiClient
-    val messageRepository get() = session.messageRepository
-    val conversationRepository get() = session.conversationRepository
-    val coordinator get() = session.coordinator
-    val lemonDropRedeemer get() = session.lemonDropRedeemer
-    val lemonDropCreator get() = session.lemonDropCreator
+    val lemonDropVeil: MutableStateFlow<LemonDropVeil?> get() = lemonDropVeilController.veil
+
+    /** Handle a scanned `/d/{id}` — see [LemonDropVeilController.onScan]. */
+    fun onLemonDropLink(qrId: String) = lemonDropVeilController.onScan(qrId)
+
+    /** Dismiss the veil and invalidate any in-flight/queued scan. */
+    fun dismissLemonDropVeil() = lemonDropVeilController.dismiss()
+
+    /** Drop a plaintext-bearing [LemonDropVeil.Delivered] when the Activity stops. */
+    fun clearDeliveredLemonDropVeil() = lemonDropVeilController.clearDelivered()
 
     /**
-     * Lemon-drop bridge: the veil state a `/d/{id}` scan renders. The veil lives
-     * HERE on the DEVICE half (process lifetime, not Activity) so a configuration
-     * change keeps a decrypted-but-unrendered drop in memory without plaintext
-     * ever touching saved state — see LemonDropVeil's security invariant. The
-     * orchestration below owns the veil and delegates the probe/deliver work to
-     * the session's redeemer.
+     * The session-per-unlock lifecycle. Builds a fresh [SessionContainer] over the
+     * CURRENT transport on unlock (each with its own scope, cancelled on lock so
+     * the coordinator's process-long collectors don't leak per cycle), and tears
+     * it down on lock. See [UnlockController].
      */
-    val lemonDropVeil = MutableStateFlow<LemonDropVeil?>(null)
-
-    private val lemonDropLock = Any()
+    val unlockController = UnlockController(
+        newSessionScope = { CoroutineScope(SupervisorJob() + Dispatchers.Default) },
+        buildSession = ::buildSession,
+        publish = { _session.value = it },
+        stopSession = { it.coordinator.stop() },
+        afterPublish = ::onSessionPublished,
+    )
 
     /**
-     * Monotonic id of the most recent scan. A probe launched for an earlier
-     * scan must not overwrite a newer scan's veil once superseded — two
-     * `Advocacy(UNKNOWN)` values are structurally equal, so a compare-and-set
-     * on the value alone would let a stale probe clobber the current scan
-     * (Codex PR #4). Dismissal also bumps this so a late probe cannot resurrect
-     * a screen the user already closed.
+     * Build the session against the transport resolved RIGHT NOW — not the
+     * process-start snapshot. [transportEndpoints] is the single source shared
+     * with [applyTransport], so a session built at unlock and a later live-session
+     * transport swap always agree on (client, apiBase, wsUrl).
      */
-    private var lemonDropScanToken = 0L
-
-    /**
-     * Handle a scanned `/d/{id}`: raise the veil, then run the single fetch +
-     * isolated open in the PROCESS scope (not an Activity scope) so a
-     * configuration change mid-probe neither cancels it nor strands the veil at
-     * UNKNOWN. The refine applies only while this remains the current scan.
-     */
-    fun onLemonDropLink(qrId: String) {
-        val token = synchronized(lemonDropLock) {
-            lemonDropVeil.value = LemonDropVeil.Advocacy(LemonDropScanOutcome.UNKNOWN)
-            ++lemonDropScanToken
-        }
-        scope.launch(Dispatchers.IO) {
-            val refined = when (val probe = session.lemonDropRedeemer.probe(qrId)) {
-                is LemonDropRedeemer.ProbeResult.Advocacy -> LemonDropVeil.Advocacy(probe.outcome)
-                is LemonDropRedeemer.ProbeResult.ReadyToOpen -> LemonDropVeil.AwaitUnlock(probe.pending)
-            }
-            synchronized(lemonDropLock) {
-                if (lemonDropScanToken == token) lemonDropVeil.value = refined
-            }
-        }
-    }
-
-    /** Dismiss the veil and invalidate any in-flight probe for it. */
-    fun dismissLemonDropVeil() {
-        synchronized(lemonDropLock) {
-            ++lemonDropScanToken
-            lemonDropVeil.value = null
-        }
+    private fun buildSession(sessionScope: CoroutineScope): SessionContainer {
+        val (client, apiBase, ws) = transportEndpoints(transportResolver.state.value)
+        httpClient = client
+        return SessionContainer(
+            app = app,
+            scope = sessionScope,
+            keyStoreManager = keyStoreManager,
+            bootDiagnostics = bootDiagnostics,
+            settings = settingsRepository,
+            httpClient = httpClient,
+            apiBaseUrl = apiBase,
+            wsUrl = ws,
+        )
     }
 
     /**
-     * Drop a plaintext-bearing [LemonDropVeil.Delivered] when the Activity
-     * stops. The veil is process-scoped, so without this an opened drop would
-     * re-render on a later Activity recreation with no fresh biometric unlock
-     * (Codex PR #4). Advocacy/AwaitUnlock render no plaintext and are kept —
-     * AwaitUnlock still forces a biometric before anything is shown. A one-shot
-     * drop that's already been delivered is gone regardless, so losing the
-     * on-screen copy here costs nothing.
+     * Runs once the session is live (from [UnlockController.unlock], inside its
+     * lock). Re-applies the transport so a change that landed between the
+     * factory's read and publish — which [applyTransport] dropped because it saw a
+     * null session — is reconciled onto the now-live session (idempotent:
+     * updateTransport just swaps a holder). Then drains any scan queued while
+     * locked, so a `/d/{id}` opened pre-unlock probes now.
      */
-    fun clearDeliveredLemonDropVeil() {
-        synchronized(lemonDropLock) {
-            if (lemonDropVeil.value is LemonDropVeil.Delivered) lemonDropVeil.value = null
-        }
+    private fun onSessionPublished() {
+        applyTransport(transportResolver.state.value)
+        lemonDropVeilController.onUnlocked()
     }
 
     init {
@@ -244,8 +234,14 @@ class AppContainer(private val app: Application) {
         }
     }
 
-    private fun applyTransport(state: TransportState) {
-        val (client, apiBase, ws) = when (state) {
+    /**
+     * The transport-state → (client, apiBase, wsUrl) mapping, shared by
+     * [applyTransport] and [buildSession] so a session built at unlock and a
+     * live-session transport swap resolve to the SAME endpoints. Builds a fresh
+     * pinned client per call, as the apply-loop always has.
+     */
+    private fun transportEndpoints(state: TransportState): Triple<OkHttpClient, String, String> =
+        when (state) {
             TransportState.I2P -> Triple(
                 CertificatePinning.buildI2pClient(
                     BuildConfig.I2P_PROXY_HOST,
@@ -259,17 +255,22 @@ class AppContainer(private val app: Application) {
             // CLEARNET_FALLBACK — and OFFLINE, which the resolver never emits.
             else -> Triple(CertificatePinning.buildClient(torEnabled = false), API_BASE_URL, WS_URL)
         }
-        // Always reconcile the client + endpoint URLs so the NEXT connect dials
-        // the resolved transport — this is what the post-unlock coordinator.start()
-        // picks up.
+
+    private fun applyTransport(state: TransportState) {
+        val (client, apiBase, ws) = transportEndpoints(state)
+        // Always reconcile the client so the NEXT connect dials the resolved
+        // transport. With NO live session (pre-unlock) this swap is all there is
+        // to do — the session is later built against the current transport by
+        // [buildSession] and re-reconciled by [onSessionPublished].
         httpClient = client
-        session.apiClient.updateTransport(httpClient, apiBase)
-        session.wsClient.updateTransport(httpClient, ws)
+        val live = _session.value
+        live?.apiClient?.updateTransport(httpClient, apiBase)
+        live?.wsClient?.updateTransport(httpClient, ws)
         // Side effect of choosing Tor kept here (not in the Context-free
         // resolver): ask Orbot to start, exactly as applyTorSetting did. This is
         // a broadcast to Orbot, not a connection of ours — safe pre-unlock, and
-        // it must fire even while our socket is down so Orbot is already up when
-        // the post-unlock connect dials through its proxy.
+        // it must fire even while our socket is down (no session yet) so Orbot is
+        // already up when the post-unlock connect dials through its proxy.
         if (state == TransportState.TOR) TorIntegration.requestOrbotStart(app)
         // Only migrate a LIVE session (connected or mid-handshake) to the new
         // transport. When the socket is disconnected — notably pre-unlock, before
@@ -278,9 +279,11 @@ class AppContainer(private val app: Application) {
         // so an eager connect would breach it. This preserves the old collector's
         // drop(1) semantics while still migrating a running session when a
         // background probe promotes clearnet/Tor to I2P.
-        if (session.wsClient.connectionState.value != WsClient.ConnectionState.DISCONNECTED) {
-            session.wsClient.disconnect()
-            session.apiClient.accessToken?.let(session.wsClient::connect)
+        if (live != null &&
+            live.wsClient.connectionState.value != WsClient.ConnectionState.DISCONNECTED
+        ) {
+            live.wsClient.disconnect()
+            live.apiClient.accessToken?.let(live.wsClient::connect)
         }
     }
 
@@ -300,12 +303,12 @@ class AppContainer(private val app: Application) {
 }
 
 /**
- * Session-scoped half of the object graph — the messaging objects that (from D2
- * onward) live only while a vault is unlocked. In D1 there is no unlock gate:
- * [AppContainer] builds exactly ONE of these EAGERLY at process start, so every
- * object is constructed at the same moment, and in the same order, as before the
- * split — the app behaves identically. D2 rebuilds this per unlocked slot over
- * the vault facades; D1 only carves the seam.
+ * Session-scoped half of the object graph — the messaging objects that live only
+ * while unlocked. PR-D2b builds one of these per unlock ([UnlockController]),
+ * against the transport resolved at that moment ([AppContainer.buildSession]),
+ * each on its OWN scope that is cancelled on lock; D2c swaps the vault in behind
+ * the same lifecycle. The object set, and its construction order, are unchanged
+ * from the eager D1 build — only WHEN it is built moved.
  *
  * Construction ORDER is load-bearing and preserved from the pre-split
  * AppContainer: signalStore → signalManager → apiClient → wsClient →
@@ -314,10 +317,9 @@ class AppContainer(private val app: Application) {
  * coordinator that owns it; conversationRepository BEFORE the lemon-drop objects
  * and the coordinator that use it).
  *
- * @param httpClient accessor for the CURRENT transport client. Invoked once here,
- *   at construction, to seed [apiClient]/[wsClient] with the initial client —
- *   exactly the value the flat fields captured before the split; thereafter
- *   [AppContainer.applyTransport] swaps the client via `updateTransport`, as today.
+ * @param httpClient the CURRENT transport client at build time. Passed by value:
+ *   [apiClient]/[wsClient] capture it once here; thereafter
+ *   [AppContainer.applyTransport] swaps the client via `updateTransport`.
  */
 class SessionContainer(
     app: Application,

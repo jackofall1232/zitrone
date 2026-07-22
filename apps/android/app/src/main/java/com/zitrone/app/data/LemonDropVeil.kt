@@ -21,6 +21,17 @@ package com.zitrone.app.data
  */
 sealed interface LemonDropVeil {
 
+    /**
+     * A `/d/{id}` was scanned while the APP itself is still locked (no live
+     * session). The drop is deliberately NOT fetched or decrypted in this state
+     * — the probe waits for the app to unlock (see AppContainer.onLemonDropLink)
+     * — so it carries no drop content and is safe in front of the gate for the
+     * same reason [Advocacy] is. Its unlock CTA drives the ORDINARY app biometric
+     * gate; once a session is live the queued scan probes and this refines into
+     * [Advocacy]/[AwaitUnlock] exactly as a live-session scan does.
+     */
+    data object Locked : LemonDropVeil
+
     /** No message to show — the warm advocacy screen, copy per [outcome]. */
     data class Advocacy(val outcome: LemonDropScanOutcome) : LemonDropVeil
 
