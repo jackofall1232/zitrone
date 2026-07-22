@@ -179,6 +179,20 @@ class VaultStateCodecTest {
         assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(plain)) }
     }
 
+    @Test
+    fun `a corrupt huge signal record count is rejected cleanly, not with OutOfMemoryError`() {
+        // version(1) ‖ signal section (tag 0x01, len 4) whose body is JUST a count of
+        // 0x3FFFFFFF and no entries. decode must reject via the Reader's bounds check when
+        // it reaches for the (absent) first entry — NOT try to pre-size a ~2-billion-entry
+        // HashMap from the raw count and OOM.
+        val plain = byteArrayOf(
+            1, // version
+            0x01, 0, 0, 0, 4, // TAG_SIGNAL, len = 4
+            0x3F, 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), // count = 0x3FFFFFFF, no entries
+        )
+        assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(plain)) }
+    }
+
     // ── capacity boundary ────────────────────────────────────────────────────────
 
     @Test

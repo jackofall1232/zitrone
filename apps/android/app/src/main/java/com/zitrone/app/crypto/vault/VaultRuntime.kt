@@ -127,10 +127,25 @@ class VaultRuntime(
      *
      * The `closed` check runs under [stateLock]; `flushNow` runs OUTSIDE it (it is disk-bound)
      * so a durable reseal never blocks concurrent reads/mutates (see the lock-order note).
+     *
+     * CLOSE-DURING-FLUSH. After `flushNow` returns, this RE-ACQUIRES [stateLock] and RE-CHECKS
+     * `closed`, throwing if the runtime closed meanwhile. This matters because `flushNow` on an
+     * already-closed session is a SILENT no-op: were a [close] to interleave during the flush —
+     * and its own final reseal to FAIL — `flushNow` here would do nothing, yet return normally,
+     * and the caller would ack a message whose ratchet advance never reached disk (permanent
+     * loss). The post-flush recheck makes flushBeforeAck NEVER return normally once the runtime
+     * has closed, so an ack always implies durability. A close whose final flush SUCCEEDED and
+     * still races in also makes this throw — conservatively safe: the caller does not ack, the
+     * relay redelivers, and the ratchet drops the duplicate.
      */
     fun flushBeforeAck() {
         stateLock.withLock { check(!closed) { "vault runtime is closed" } }
         session.flushNow()
+        // Post-flush recheck (see kdoc): flushNow no-ops silently on a closed session, so a
+        // close that interleaved the flush must NOT let this report false durability.
+        stateLock.withLock {
+            if (closed) throw IllegalStateException("vault runtime closed during flush")
+        }
     }
 
     /**

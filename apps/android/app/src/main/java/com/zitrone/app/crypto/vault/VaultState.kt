@@ -10,7 +10,6 @@ package com.zitrone.app.crypto.vault
 
 import com.zitrone.app.data.AuthState
 import com.zitrone.app.data.VaultScopedSettings
-import java.io.ByteArrayOutputStream
 import java.util.zip.DataFormatException
 import java.util.zip.Deflater
 import java.util.zip.Inflater
@@ -68,6 +67,13 @@ class VaultState(
      * linger in heap until GC. That is the SAME accepted, documented tradeoff the
      * passphrase path carries (see KeySlot.kt's `KeyDeriver` note); the derived,
      * high-value secrets (the Signal records) ARE wiped.
+     *
+     * SCOPE. This zeroes the LIVE map only. Record bytes also pass transiently
+     * through [VaultStateCodec] on every encode/decode; that codec zeroes each of
+     * its own intermediate buffers in `finally` (see its class kdoc), leaving only
+     * the Deflater/Inflater internal native state as a bounded, documented residual.
+     * So "the Signal records ARE wiped" is a claim about THIS map, not a promise
+     * that no compression-engine copy ever existed.
      */
     fun wipe() {
         for (value in signalRecords.values) wipe(value)
@@ -123,8 +129,16 @@ class VaultCapacityException(message: String) : IllegalStateException(message)
  * [MAX_PAYLOAD_CONTENT_BYTES] — the exact bound [VaultSession.update] enforces, so the
  * typed capacity throw always fires BEFORE the session's generic size `require`.
  *
- * WIPE DISCIPLINE. Both directions zero the intermediate plaintext buffer (which holds
- * raw records) in a `finally`, on every path.
+ * WIPE DISCIPLINE. The codec accumulates every secret-bearing intermediate — the whole
+ * plaintext, each section body, the deflate/inflate output — in a [WipeableBuffer] whose
+ * backing array it zeroes in a `finally` on EVERY path (including growth: a grow wipes the
+ * array it outgrew before discarding it). It deliberately does NOT use
+ * [java.io.ByteArrayOutputStream], whose internal `buf` holds un-reachable copies of raw key
+ * material that no `wipe()` can zero. The ONE residual it cannot reach is the Deflater /
+ * Inflater's internal native state (input + sliding window): `end()` frees it but does not
+ * zero it, so a bounded transient lingers there until the allocator reuses the memory — the
+ * same accepted, documented tradeoff as the un-wipeable `String` fields, NOT a claim that
+ * nothing lingers.
  */
 object VaultStateCodec {
 
@@ -151,13 +165,24 @@ object VaultStateCodec {
     private const val INFLATE_CAP: Int = PAYLOAD_PLAINTEXT_BYTES * 8
 
     /**
-     * Serialize [state] to the sealed-region bytes. Throws [VaultCapacityException]
-     * when the compressed result exceeds [MAX_PAYLOAD_CONTENT_BYTES]. The intermediate
-     * plaintext (raw records) is wiped in `finally`.
+     * Serialize [state] to the sealed-region bytes. Throws [VaultCapacityException] when the
+     * plaintext exceeds [INFLATE_CAP] or the compressed result exceeds
+     * [MAX_PAYLOAD_CONTENT_BYTES]. Every intermediate (plaintext, section bodies, deflate
+     * output — all raw records) is accumulated in a [WipeableBuffer] and zeroed in `finally`;
+     * only the Deflater's internal native state is an un-zeroable residual (see class kdoc).
      */
     fun encode(state: VaultState): ByteArray {
         val plain = buildPlaintext(state)
         try {
+            // encode and decode share the INFLATE_CAP plaintext bound so the two are symmetric:
+            // a plaintext this large would fail decode's INFLATE_CAP inflate guard, so reject it
+            // HERE rather than persist a state that could never be reloaded. (Unreachable for
+            // real state — ~8KB per the PR-D benchmark — but closes the encode/decode asymmetry.)
+            if (plain.size > INFLATE_CAP) {
+                throw VaultCapacityException(
+                    "vault state plaintext exceeds inflate cap (${plain.size} > $INFLATE_CAP)",
+                )
+            }
             val deflated = deflate(plain)
             if (deflated.size > MAX_PAYLOAD_CONTENT_BYTES) {
                 // The compressed blob no longer fits the fixed region. Wipe it too — it
@@ -177,7 +202,9 @@ object VaultStateCodec {
      * Parse sealed-region [bytes] back into a [VaultState]. Inflates (bounded by
      * [INFLATE_CAP]) then parses the TLV. Throws [IllegalArgumentException] on garbage,
      * truncation, an unknown tag, or a section that overruns its length. The inflated
-     * intermediate plaintext is wiped in `finally`.
+     * plaintext and each parsed section body are accumulated/held in wipeable buffers and
+     * zeroed in `finally`; only the Inflater's internal native state is an un-zeroable
+     * residual (see class kdoc).
      */
     fun decode(bytes: ByteArray): VaultState {
         val plain = inflate(bytes)
@@ -191,17 +218,23 @@ object VaultStateCodec {
     // ── plaintext (TLV) ───────────────────────────────────────────────────────────
 
     private fun buildPlaintext(state: VaultState): ByteArray {
-        val out = ByteArrayOutputStream()
-        out.write(VERSION)
-        // 0x01 signal — always present (count 0 when the map is empty).
-        writeSection(out, TAG_SIGNAL, encodeSignal(state.signalRecords))
-        // 0x02 / 0x03 — nullable: tag omitted entirely when null.
-        state.rosterJson?.let { writeSection(out, TAG_ROSTER, it.toByteArray(Charsets.UTF_8)) }
-        state.tombstonesJson?.let { writeSection(out, TAG_TOMBSTONES, it.toByteArray(Charsets.UTF_8)) }
-        // 0x04 / 0x05 — always present objects.
-        writeSection(out, TAG_SETTINGS, encodeSettings(state.settings))
-        writeSection(out, TAG_AUTH, encodeAuth(state.auth))
-        return out.toByteArray()
+        val out = WipeableBuffer()
+        try {
+            out.write(VERSION)
+            // 0x01 signal — always present (count 0 when the map is empty).
+            writeSection(out, TAG_SIGNAL, encodeSignal(state.signalRecords))
+            // 0x02 / 0x03 — nullable: tag omitted entirely when null.
+            state.rosterJson?.let { writeSection(out, TAG_ROSTER, it.toByteArray(Charsets.UTF_8)) }
+            state.tombstonesJson?.let { writeSection(out, TAG_TOMBSTONES, it.toByteArray(Charsets.UTF_8)) }
+            // 0x04 / 0x05 — always present objects.
+            writeSection(out, TAG_SETTINGS, encodeSettings(state.settings))
+            writeSection(out, TAG_AUTH, encodeAuth(state.auth))
+            return out.toByteArray()
+        } finally {
+            // The whole plaintext (raw records) lived here — zero it. The exact-size result
+            // is the caller's `plain`, wiped in encode's finally.
+            out.wipe()
+        }
     }
 
     private fun parsePlaintext(plain: ByteArray): VaultState {
@@ -249,25 +282,34 @@ object VaultStateCodec {
     // ── 0x01 signal ─────────────────────────────────────────────────────────────
 
     private fun encodeSignal(records: Map<String, ByteArray>): ByteArray {
-        val out = ByteArrayOutputStream()
-        writeInt(out, records.size)
-        // Sorted so equal state encodes to identical bytes (determinism; see class kdoc).
-        for (key in records.keys.sorted()) {
-            val value = records.getValue(key)
-            val keyBytes = key.toByteArray(Charsets.UTF_8)
-            writeShort(out, keyBytes.size)
-            out.write(keyBytes)
-            writeInt(out, value.size)
-            out.write(value)
+        val out = WipeableBuffer()
+        try {
+            writeInt(out, records.size)
+            // Sorted so equal state encodes to identical bytes (determinism; see class kdoc).
+            for (key in records.keys.sorted()) {
+                val value = records.getValue(key)
+                val keyBytes = key.toByteArray(Charsets.UTF_8) // key ("prekey:5" …) is not secret
+                writeShort(out, keyBytes.size)
+                out.write(keyBytes)
+                writeInt(out, value.size)
+                out.write(value) // copied INTO out; `value` is the live map's array, never wiped here
+            }
+            return out.toByteArray()
+        } finally {
+            // out held every record value — zero it. The exact-size result is the signal
+            // section body, wiped by writeSection once folded into the plaintext.
+            out.wipe()
         }
-        return out.toByteArray()
     }
 
     private fun decodeSignal(body: ByteArray): MutableMap<String, ByteArray> {
         val r = Reader(body)
         val count = r.i32()
         require(count >= 0) { "negative signal record count" }
-        val map = HashMap<String, ByteArray>(count * 2)
+        // Pre-size BOUNDED, never from the raw (untrusted) count: a corrupt huge count would
+        // otherwise force a multi-GB HashMap allocation (OOM) before the entry loop's Reader
+        // bounds checks — which reject any count larger than the body supports — get to run.
+        val map = HashMap<String, ByteArray>(minOf(count, 1024) * 2)
         repeat(count) {
             val keyLen = r.u16()
             val key = String(r.bytes(keyLen), Charsets.UTF_8)
@@ -285,15 +327,19 @@ object VaultStateCodec {
     private fun encodeSettings(s: VaultScopedSettings): ByteArray {
         // ttl: present-flag(1) ‖ int(4 BE) | burnOnRead(1) | readReceipts(1) |
         // lemonDropCompose(1) | unreadReminder(1)  → 9 bytes, fixed order.
-        val out = ByteArrayOutputStream(9)
-        val ttl = s.defaultTtlSeconds
-        out.write(if (ttl == null) 0 else 1)
-        writeInt(out, ttl ?: 0)
-        out.write(if (s.burnOnReadDefault) 1 else 0)
-        out.write(if (s.readReceipts) 1 else 0)
-        out.write(if (s.lemonDropComposeEnabled) 1 else 0)
-        out.write(if (s.unreadReminderEnabled) 1 else 0)
-        return out.toByteArray()
+        val out = WipeableBuffer(9)
+        try {
+            val ttl = s.defaultTtlSeconds
+            out.write(if (ttl == null) 0 else 1)
+            writeInt(out, ttl ?: 0)
+            out.write(if (s.burnOnReadDefault) 1 else 0)
+            out.write(if (s.readReceipts) 1 else 0)
+            out.write(if (s.lemonDropComposeEnabled) 1 else 0)
+            out.write(if (s.unreadReminderEnabled) 1 else 0)
+            return out.toByteArray()
+        } finally {
+            out.wipe()
+        }
     }
 
     private fun decodeSettings(body: ByteArray): VaultScopedSettings {
@@ -314,11 +360,17 @@ object VaultStateCodec {
     // ── 0x05 auth (3 length-prefixed nullable strings) ──────────────────────────
 
     private fun encodeAuth(a: AuthState): ByteArray {
-        val out = ByteArrayOutputStream()
-        writeNullableString(out, a.accountId)
-        writeNullableString(out, a.accessToken)
-        writeNullableString(out, a.refreshToken)
-        return out.toByteArray()
+        val out = WipeableBuffer()
+        try {
+            writeNullableString(out, a.accountId)
+            writeNullableString(out, a.accessToken)
+            writeNullableString(out, a.refreshToken)
+            return out.toByteArray()
+        } finally {
+            // out held the token bytes — zero it. The exact-size result is the auth section
+            // body, wiped by writeSection.
+            out.wipe()
+        }
     }
 
     private fun decodeAuth(body: ByteArray): AuthState {
@@ -333,13 +385,16 @@ object VaultStateCodec {
     }
 
     /** A nullable string as `len(4 BE)`; [NULL_LEN] (-1) means null, else utf8 bytes follow. */
-    private fun writeNullableString(out: ByteArrayOutputStream, s: String?) {
+    private fun writeNullableString(out: WipeableBuffer, s: String?) {
         if (s == null) {
             writeInt(out, NULL_LEN)
         } else {
             val bytes = s.toByteArray(Charsets.UTF_8)
             writeInt(out, bytes.size)
             out.write(bytes)
+            // `bytes` is a fresh copy of token material (the source String is itself
+            // un-wipeable) — zero this transient now that it is folded into `out`.
+            wipe(bytes)
         }
     }
 
@@ -352,7 +407,7 @@ object VaultStateCodec {
 
     // ── section framing helpers ──────────────────────────────────────────────────
 
-    private fun writeSection(out: ByteArrayOutputStream, tag: Int, body: ByteArray) {
+    private fun writeSection(out: WipeableBuffer, tag: Int, body: ByteArray) {
         out.write(tag)
         writeInt(out, body.size)
         out.write(body)
@@ -360,14 +415,14 @@ object VaultStateCodec {
         wipe(body)
     }
 
-    private fun writeInt(out: ByteArrayOutputStream, value: Int) {
+    private fun writeInt(out: WipeableBuffer, value: Int) {
         out.write((value ushr 24) and 0xff)
         out.write((value ushr 16) and 0xff)
         out.write((value ushr 8) and 0xff)
         out.write(value and 0xff)
     }
 
-    private fun writeShort(out: ByteArrayOutputStream, value: Int) {
+    private fun writeShort(out: WipeableBuffer, value: Int) {
         require(value in 0..0xffff) { "value out of 16-bit range: $value" }
         out.write((value ushr 8) and 0xff)
         out.write(value and 0xff)
@@ -378,27 +433,28 @@ object VaultStateCodec {
     private fun deflate(input: ByteArray): ByteArray {
         val deflater = Deflater(Deflater.BEST_COMPRESSION)
         val chunk = ByteArray(8192)
+        val out = WipeableBuffer(input.size / 2 + 32)
         try {
             deflater.setInput(input)
             deflater.finish()
-            val out = ByteArrayOutputStream(input.size / 2 + 32)
             while (!deflater.finished()) {
                 val n = deflater.deflate(chunk)
                 out.write(chunk, 0, n)
             }
             return out.toByteArray()
         } finally {
-            deflater.end()
+            deflater.end() // frees native input+window state (not zeroed — see class kdoc)
             wipe(chunk)
+            out.wipe() // held the compressed secrets
         }
     }
 
     private fun inflate(input: ByteArray): ByteArray {
         val inflater = Inflater()
         val chunk = ByteArray(8192)
+        val out = WipeableBuffer(input.size * 2 + 32)
         try {
             inflater.setInput(input)
-            val out = ByteArrayOutputStream(input.size * 2 + 32)
             while (!inflater.finished()) {
                 val n = inflater.inflate(chunk)
                 if (n == 0) {
@@ -409,10 +465,9 @@ object VaultStateCodec {
                     if (inflater.needsInput()) throw IllegalArgumentException("truncated vault state")
                 }
                 out.write(chunk, 0, n)
-                // Belt-and-braces zip-bomb guard (input is authenticated ciphertext).
+                // Belt-and-braces zip-bomb guard (input is authenticated ciphertext). The
+                // `finally` wipes `out` on this throw path too, so no partial plaintext lingers.
                 if (out.size() > INFLATE_CAP) {
-                    val partial = out.toByteArray()
-                    wipe(partial)
                     throw IllegalArgumentException("inflated vault state exceeds cap ($INFLATE_CAP)")
                 }
             }
@@ -421,8 +476,59 @@ object VaultStateCodec {
         } catch (e: DataFormatException) {
             throw IllegalArgumentException("corrupt vault state (inflate failed)", e)
         } finally {
-            inflater.end()
+            inflater.end() // frees native input+window state (not zeroed — see class kdoc)
             wipe(chunk)
+            out.wipe() // held the inflated plaintext
+        }
+    }
+
+    /**
+     * A minimal growable byte sink whose backing array is ZEROABLE — the codec's stand-in
+     * for [java.io.ByteArrayOutputStream], whose internal `buf` holds copies of raw key
+     * material no `wipe()` can reach. Every grow copies into a larger array and then WIPES
+     * the array it outgrew, so a secret copy is never orphaned mid-encode; [wipe] zeroes the
+     * live array. NOT thread-safe — the codec runs single-threaded under the runtime lock.
+     * [toByteArray] returns an exact-size copy the caller owns (and wipes per its discipline).
+     */
+    private class WipeableBuffer(initial: Int = 64) {
+        private var buf: ByteArray = ByteArray(if (initial < 1) 1 else initial)
+        private var len: Int = 0
+
+        fun size(): Int = len
+
+        /** Append the low byte of [b] (matching [java.io.ByteArrayOutputStream.write]`(int)`). */
+        fun write(b: Int) {
+            ensure(1)
+            buf[len++] = b.toByte()
+        }
+
+        fun write(bytes: ByteArray) = write(bytes, 0, bytes.size)
+
+        fun write(bytes: ByteArray, off: Int, n: Int) {
+            if (n <= 0) return
+            ensure(n)
+            System.arraycopy(bytes, off, buf, len, n)
+            len += n
+        }
+
+        /** An exact-size copy of the written bytes; ownership (and wiping) passes to the caller. */
+        fun toByteArray(): ByteArray = buf.copyOf(len)
+
+        /** Zero the backing array and reset the length — call in `finally` on every path. */
+        fun wipe() {
+            buf.fill(0)
+            len = 0
+        }
+
+        /** Grow to fit [extra] more bytes, WIPING the outgrown array so no secret copy lingers. */
+        private fun ensure(extra: Int) {
+            if (len + extra <= buf.size) return
+            var newCap = buf.size * 2
+            while (newCap < len + extra) newCap *= 2
+            val bigger = ByteArray(newCap)
+            System.arraycopy(buf, 0, bigger, 0, len)
+            wipe(buf) // zero the old backing array before it becomes unreachable garbage
+            buf = bigger
         }
     }
 

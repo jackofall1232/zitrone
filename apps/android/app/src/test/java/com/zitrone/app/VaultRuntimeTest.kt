@@ -100,6 +100,18 @@ class VaultRuntimeTest {
     }
 
     @Test
+    fun `flushBeforeAck throws once the runtime is closed`() {
+        // The post-close throw contract the close-during-flush recheck guarantees: once closed,
+        // flushBeforeAck NEVER returns normally, so a caller can never ack state a failed
+        // teardown-flush did not persist. (The concurrent close-DURING-flush race is not
+        // deterministically forceable in a unit test; this pins the closed-state contract.)
+        val runtime = runtimeOf()
+        runtime.mutate { it.rosterJson = "x" }
+        runtime.close()
+        assertThrows(IllegalStateException::class.java) { runtime.flushBeforeAck() }
+    }
+
+    @Test
     fun `close wipes records and rejects further access - close is idempotent`() {
         val state = VaultState.empty()
         state.signalRecords["identity_keypair"] = byteArrayOf(1, 2, 3, 4, 5)

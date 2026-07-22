@@ -20,6 +20,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -117,6 +118,40 @@ class VaultFacadeTest {
         assertFalse("a failed durable flush returns false", signalStore.destroyContactCrypto("bob-account"))
         // The removal still happened in memory.
         assertFalse(runtime.read { it.signalRecords.containsKey("session:bob-account:1") })
+    }
+
+    // ── signal scalar fidelity (load-bearing for the PR-E verbatim migration) ─────
+
+    @Test
+    fun `signal scalar records keep fixed BE widths and survive a codec round-trip exactly`() {
+        val runtime = runtimeOf()
+        val store = VaultSignalProtocolStore(runtime)
+        // Counters are written by the facade's fixed-width encoders.
+        store.setNextPreKeyId(0x0A0B0C0D)
+        store.setNextSignedPreKeyId(42)
+        store.setSignedPreKeyCreatedAt(0x0102030405060708L)
+        store.markKyberPreKeyUsed(7)
+        // registration_id is written alongside the identity by setLocalIdentity; seed its raw
+        // 4-byte BE form directly (its writer shares the same encoder the counters exercise).
+        runtime.mutate { it.signalRecords["registration_id"] = byteArrayOf(0, 0, 0x2a, 0x10) }
+
+        // Byte-level widths — the migration copies these verbatim under identical keys.
+        runtime.read { s ->
+            assertArrayEquals("next_prekey_id is 4-byte BE", byteArrayOf(0x0A, 0x0B, 0x0C, 0x0D), s.signalRecords.getValue("next_prekey_id"))
+            assertArrayEquals("next_signed_prekey_id is 4-byte BE", byteArrayOf(0, 0, 0, 42), s.signalRecords.getValue("next_signed_prekey_id"))
+            assertArrayEquals("signed_prekey_created_at is 8-byte BE", byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8), s.signalRecords.getValue("signed_prekey_created_at"))
+            assertArrayEquals("registration_id is 4-byte BE", byteArrayOf(0, 0, 0x2a, 0x10), s.signalRecords.getValue("registration_id"))
+            assertArrayEquals("kyber_prekey_used is a 1-byte flag", byteArrayOf(1), s.signalRecords.getValue("kyber_prekey_used:7"))
+        }
+
+        // Round-trip the whole state through the codec and re-read via a fresh store: exact.
+        val decoded = VaultStateCodec.decode(runtime.read { VaultStateCodec.encode(it) })
+        val reStore = VaultSignalProtocolStore(runtimeOf(decoded))
+        assertEquals(0x0A0B0C0D, reStore.nextPreKeyId())
+        assertEquals(42, reStore.nextSignedPreKeyId())
+        assertEquals(0x0102030405060708L, reStore.signedPreKeyCreatedAt())
+        assertEquals(0x2a10, reStore.getLocalRegistrationId())
+        assertArrayEquals("kyber-used flag survives", byteArrayOf(1), decoded.signalRecords.getValue("kyber_prekey_used:7"))
     }
 
     // ── VaultRosterStore.writeTombstonesBlob (always durable) ────────────────────
