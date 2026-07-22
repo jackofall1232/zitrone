@@ -5,6 +5,7 @@
 
 package com.zitrone.app.crypto
 
+import android.content.SharedPreferences
 import android.util.Base64
 import org.signal.libsignal.protocol.IdentityKey
 import org.signal.libsignal.protocol.IdentityKeyPair
@@ -25,24 +26,29 @@ import java.util.UUID
  * (Android-Keystore-wrapped AES-256). Every record — identity key pair,
  * prekeys, signed prekeys, ratchet session state — is encrypted at rest;
  * nothing key-shaped ever touches disk in plaintext.
+ *
+ * The [prefs] constructor is the seam under test (mirroring [com.zitrone.app.data.EncryptedAuthStore]);
+ * the [KeyStoreManager] convenience constructor is what production wires, opening
+ * the SAME encrypted PREFS_SIGNAL_STORE file as always.
  */
-class EncryptedSignalProtocolStore(
-    private val keyStoreManager: KeyStoreManager,
+class EncryptedSignalProtocolStore internal constructor(
+    private val prefs: SharedPreferences,
 ) : ZitroneSignalStore {
 
-    private val prefs = keyStoreManager.prefs(KeyStoreManager.PREFS_SIGNAL_STORE)
+    constructor(keyStoreManager: KeyStoreManager) :
+        this(keyStoreManager.prefs(KeyStoreManager.PREFS_SIGNAL_STORE))
 
     // -- local identity -----------------------------------------------------
 
     override fun hasLocalIdentity(): Boolean = prefs.contains(KEY_IDENTITY)
 
     override fun setLocalIdentity(identityKeyPair: IdentityKeyPair, registrationId: Int) {
-        keyStoreManager.putBytes(prefs, KEY_IDENTITY, identityKeyPair.serialize())
+        putBytes(KEY_IDENTITY, identityKeyPair.serialize())
         prefs.edit().putInt(KEY_REGISTRATION_ID, registrationId).apply()
     }
 
     override fun getIdentityKeyPair(): IdentityKeyPair {
-        val bytes = keyStoreManager.getBytes(prefs, KEY_IDENTITY)
+        val bytes = getBytes(KEY_IDENTITY)
             ?: error("Identity key pair not yet generated")
         return IdentityKeyPair(bytes)
     }
@@ -54,8 +60,8 @@ class EncryptedSignalProtocolStore(
 
     override fun saveIdentity(address: SignalProtocolAddress, identityKey: IdentityKey): Boolean {
         val key = remoteIdentityKey(address)
-        val existing = keyStoreManager.getBytes(prefs, key)
-        keyStoreManager.putBytes(prefs, key, identityKey.serialize())
+        val existing = getBytes(key)
+        putBytes(key, identityKey.serialize())
         // true == replaced a DIFFERENT pre-existing identity (key change!)
         return existing != null && !existing.contentEquals(identityKey.serialize())
     }
@@ -65,24 +71,24 @@ class EncryptedSignalProtocolStore(
         identityKey: IdentityKey,
         direction: IdentityKeyStore.Direction,
     ): Boolean {
-        val existing = keyStoreManager.getBytes(prefs, remoteIdentityKey(address))
+        val existing = getBytes(remoteIdentityKey(address))
             ?: return true // trust-on-first-use; verification happens via safety numbers
         return existing.contentEquals(identityKey.serialize())
     }
 
     override fun getIdentity(address: SignalProtocolAddress): IdentityKey? =
-        keyStoreManager.getBytes(prefs, remoteIdentityKey(address))?.let { IdentityKey(it) }
+        getBytes(remoteIdentityKey(address))?.let { IdentityKey(it) }
 
     // -- one-time prekeys ---------------------------------------------------
 
     override fun loadPreKey(preKeyId: Int): PreKeyRecord {
-        val bytes = keyStoreManager.getBytes(prefs, "$KEY_PREKEY$preKeyId")
+        val bytes = getBytes("$KEY_PREKEY$preKeyId")
             ?: throw InvalidKeyIdException("No prekey with id $preKeyId")
         return PreKeyRecord(bytes)
     }
 
     override fun storePreKey(preKeyId: Int, record: PreKeyRecord) {
-        keyStoreManager.putBytes(prefs, "$KEY_PREKEY$preKeyId", record.serialize())
+        putBytes("$KEY_PREKEY$preKeyId", record.serialize())
     }
 
     override fun containsPreKey(preKeyId: Int): Boolean =
@@ -96,7 +102,7 @@ class EncryptedSignalProtocolStore(
     // -- signed prekeys -----------------------------------------------------
 
     override fun loadSignedPreKey(signedPreKeyId: Int): SignedPreKeyRecord {
-        val bytes = keyStoreManager.getBytes(prefs, "$KEY_SIGNED_PREKEY$signedPreKeyId")
+        val bytes = getBytes("$KEY_SIGNED_PREKEY$signedPreKeyId")
             ?: throw InvalidKeyIdException("No signed prekey with id $signedPreKeyId")
         return SignedPreKeyRecord(bytes)
     }
@@ -104,11 +110,11 @@ class EncryptedSignalProtocolStore(
     override fun loadSignedPreKeys(): List<SignedPreKeyRecord> =
         prefs.all.keys
             .filter { it.startsWith(KEY_SIGNED_PREKEY) }
-            .mapNotNull { keyStoreManager.getBytes(prefs, it) }
+            .mapNotNull { getBytes(it) }
             .map { SignedPreKeyRecord(it) }
 
     override fun storeSignedPreKey(signedPreKeyId: Int, record: SignedPreKeyRecord) {
-        keyStoreManager.putBytes(prefs, "$KEY_SIGNED_PREKEY$signedPreKeyId", record.serialize())
+        putBytes("$KEY_SIGNED_PREKEY$signedPreKeyId", record.serialize())
     }
 
     override fun containsSignedPreKey(signedPreKeyId: Int): Boolean =
@@ -121,7 +127,7 @@ class EncryptedSignalProtocolStore(
     // -- sessions -------------------------------------------------------------
 
     override fun loadSession(address: SignalProtocolAddress): SessionRecord? =
-        keyStoreManager.getBytes(prefs, sessionKey(address))?.let { SessionRecord(it) }
+        getBytes(sessionKey(address))?.let { SessionRecord(it) }
 
     override fun loadExistingSessions(
         addresses: List<SignalProtocolAddress>,
@@ -136,7 +142,7 @@ class EncryptedSignalProtocolStore(
             .filter { it != DEFAULT_DEVICE_ID }
 
     override fun storeSession(address: SignalProtocolAddress, record: SessionRecord) {
-        keyStoreManager.putBytes(prefs, sessionKey(address), record.serialize())
+        putBytes(sessionKey(address), record.serialize())
     }
 
     override fun containsSession(address: SignalProtocolAddress): Boolean =
@@ -186,7 +192,7 @@ class EncryptedSignalProtocolStore(
     // -- Kyber prekeys (post-quantum, required by the store interface) --------
 
     override fun loadKyberPreKey(kyberPreKeyId: Int): KyberPreKeyRecord {
-        val bytes = keyStoreManager.getBytes(prefs, "$KEY_KYBER_PREKEY$kyberPreKeyId")
+        val bytes = getBytes("$KEY_KYBER_PREKEY$kyberPreKeyId")
             ?: throw InvalidKeyIdException("No kyber prekey with id $kyberPreKeyId")
         return KyberPreKeyRecord(bytes)
     }
@@ -194,11 +200,11 @@ class EncryptedSignalProtocolStore(
     override fun loadKyberPreKeys(): List<KyberPreKeyRecord> =
         prefs.all.keys
             .filter { it.startsWith(KEY_KYBER_PREKEY) }
-            .mapNotNull { keyStoreManager.getBytes(prefs, it) }
+            .mapNotNull { getBytes(it) }
             .map { KyberPreKeyRecord(it) }
 
     override fun storeKyberPreKey(kyberPreKeyId: Int, record: KyberPreKeyRecord) {
-        keyStoreManager.putBytes(prefs, "$KEY_KYBER_PREKEY$kyberPreKeyId", record.serialize())
+        putBytes("$KEY_KYBER_PREKEY$kyberPreKeyId", record.serialize())
     }
 
     override fun containsKyberPreKey(kyberPreKeyId: Int): Boolean =
@@ -215,14 +221,14 @@ class EncryptedSignalProtocolStore(
         distributionId: UUID,
         record: SenderKeyRecord,
     ) {
-        keyStoreManager.putBytes(prefs, senderKeyKey(sender, distributionId), record.serialize())
+        putBytes(senderKeyKey(sender, distributionId), record.serialize())
     }
 
     override fun loadSenderKey(
         sender: SignalProtocolAddress,
         distributionId: UUID,
     ): SenderKeyRecord? =
-        keyStoreManager.getBytes(prefs, senderKeyKey(sender, distributionId))
+        getBytes(senderKeyKey(sender, distributionId))
             ?.let { SenderKeyRecord(it) }
 
     // -- counters (PR-D2a: moved out of SignalProtocolManager, SAME prefs keys/defaults) --
@@ -282,8 +288,7 @@ class EncryptedSignalProtocolStore(
             }
             .distinct()
             .map { accountId ->
-                val b64 = keyStoreManager
-                    .getBytes(prefs, "$KEY_REMOTE_IDENTITY$accountId:$DEFAULT_DEVICE_ID")
+                val b64 = getBytes("$KEY_REMOTE_IDENTITY$accountId:$DEFAULT_DEVICE_ID")
                     ?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
                 accountId to b64
             }
@@ -292,6 +297,18 @@ class EncryptedSignalProtocolStore(
     override fun wipe() {
         prefs.edit().clear().apply()
     }
+
+    // Byte <-> string plumbing for the record values (moved verbatim from
+    // KeyStoreManager.putBytes/getBytes, whose only caller was this store).
+    // The prefs themselves are EncryptedSharedPreferences in production; the
+    // base64 here is just value transport, not protection.
+
+    private fun putBytes(key: String, value: ByteArray) {
+        prefs.edit().putString(key, Base64.encodeToString(value, Base64.NO_WRAP)).apply()
+    }
+
+    private fun getBytes(key: String): ByteArray? =
+        prefs.getString(key, null)?.let { Base64.decode(it, Base64.NO_WRAP) }
 
     private fun remoteIdentityKey(address: SignalProtocolAddress) =
         "$KEY_REMOTE_IDENTITY${address.name}:${address.deviceId}"
