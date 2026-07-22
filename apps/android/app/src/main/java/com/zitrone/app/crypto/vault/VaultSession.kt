@@ -159,6 +159,15 @@ class VaultSession(
     private var closed: Boolean = false
 
     init {
+        // Fail fast on an integration error (wrong key size, over-capacity payload,
+        // bad slot index, malformed image) at CONSTRUCTION — rather than letting the
+        // first flush throw and be swallowed by the background job, which would leave
+        // the session permanently dirty and unflushable. Checked before the wipes so
+        // a rejected construction leaves the caller's arrays intact to handle.
+        require(initialImage.size == IMAGE_BYTES) { "malformed vault image" }
+        require(slotIndex in 0 until SLOT_COUNT) { "slot index out of range" }
+        require(initialVaultKey.size == VAULT_KEY_BYTES) { "vault key must be $VAULT_KEY_BYTES bytes" }
+        require(initialPayload.size <= MAX_PAYLOAD_CONTENT_BYTES) { "content exceeds vault slot capacity" }
         // Take ownership of the unlocked secrets: the copies above are ours, so
         // wipe the caller's originals now. The VaultOpen the caller discards after
         // construction then holds no live key or plaintext. initialImage is

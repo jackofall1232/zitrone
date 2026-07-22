@@ -474,4 +474,38 @@ class VaultSessionTest {
         advanceTimeBy(2_001) // reach the fresh ceiling (~5001 + 2000)
         assertEquals("the fresh cooldown window flushed once", 1, persisted.size)
     }
+
+    // Fail-fast: the constructor rejects malformed arguments (wrong key size, bad slot
+    // index, malformed image) up front rather than failing on a later flush. Validation
+    // runs before the ownership wipes, so a rejected construction leaves inputs usable.
+    @Test
+    fun `constructor rejects malformed arguments`() = runTest {
+        val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
+        val open = unlockImage(passphrase, image, ops, fast)!!
+
+        assertThrows("wrong vault key size", IllegalArgumentException::class.java) {
+            VaultSession(
+                scope = backgroundScope, ops = ops, initialImage = image,
+                initialPayload = open.payloadPlaintext, initialVaultKey = ByteArray(16),
+                slotIndex = open.slotIndex, persist = {}, clock = { currentTime },
+                cooldownMs = 2_000L, flushContext = EmptyCoroutineContext,
+            )
+        }
+        assertThrows("out-of-range slot index", IllegalArgumentException::class.java) {
+            VaultSession(
+                scope = backgroundScope, ops = ops, initialImage = image,
+                initialPayload = open.payloadPlaintext, initialVaultKey = open.vaultKey,
+                slotIndex = 99, persist = {}, clock = { currentTime },
+                cooldownMs = 2_000L, flushContext = EmptyCoroutineContext,
+            )
+        }
+        assertThrows("malformed image", IllegalArgumentException::class.java) {
+            VaultSession(
+                scope = backgroundScope, ops = ops, initialImage = ByteArray(10),
+                initialPayload = open.payloadPlaintext, initialVaultKey = open.vaultKey,
+                slotIndex = open.slotIndex, persist = {}, clock = { currentTime },
+                cooldownMs = 2_000L, flushContext = EmptyCoroutineContext,
+            )
+        }
+    }
 }
