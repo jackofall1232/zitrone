@@ -93,7 +93,7 @@ class VaultImageStoreTest {
     private fun newStore(dir: File) = VaultImageStore(dir, ops, cipher, fast)
 
     /** A store whose post-rename directory fsync is REPLACED by an injected [dirSync], so the
-     *  BEST_EFFORT / NOT_DURABLE durability branches are driven deterministically without a
+     *  DURABLE / NOT_DURABLE durability branches are driven deterministically without a
      *  real EIO. Mirrors the package's inject-for-tests convention (ops / deriver / clock). */
     private fun newStore(dir: File, dirSync: (File?) -> DirSyncResult) =
         VaultImageStore(dir, ops, cipher, fast, dirSync)
@@ -632,10 +632,13 @@ class VaultImageStoreTest {
     @Test
     fun writeSealedPayload_dirSyncNotDurable_throwsNotDurableButReconcilesCanonicalToDisk() {
         val dir = tmp.newFolder()
-        // create() ignores the DirSyncResult, so it succeeds even under a NOT_DURABLE dir-fsync.
-        val store = newStore(dir) { DirSyncResult.NOT_DURABLE }
+        // create() writes the DEK first and REQUIRES its durability, so onboarding must run under a
+        // DURABLE dir-fsync; flip to NOT_DURABLE only for the subsequent payload write.
+        var durableSync = true
+        val store = newStore(dir) { if (durableSync) DirSyncResult.DURABLE else DirSyncResult.NOT_DURABLE }
         val open = store.create(passphrase, "genesis".toByteArray(Charsets.UTF_8))
 
+        durableSync = false
         val updated = "durability-uncertain payload".toByteArray(Charsets.UTF_8)
         // A real dir-fsync EIO: the rename (the commit point) landed and its content was
         // fsynced, but the rename's durability is unconfirmed → writeSealedPayload THROWS
@@ -655,47 +658,60 @@ class VaultImageStoreTest {
         reopenStore.close() // one store per dir: release before the durable-retry store opens
 
         // A retry whose dir-fsync now SUCCEEDS returns normally (the caller may ack).
-        val durable = "confirmed-durable payload".toByteArray(Charsets.UTF_8)
+        val durablePayload = "confirmed-durable payload".toByteArray(Charsets.UTF_8)
         val store2 = newStore(dir) { DirSyncResult.DURABLE }
         store2.open()
-        store2.writeSealedPayload(open.slotIndex, sealPayload(open.vaultKey, durable, ops)) // no throw
+        store2.writeSealedPayload(open.slotIndex, sealPayload(open.vaultKey, durablePayload, ops)) // no throw
         store2.close()
-        assertArrayEquals(durable, newStore(dir).unlock(passphrase)!!.payloadPlaintext)
+        assertArrayEquals(durablePayload, newStore(dir).unlock(passphrase)!!.payloadPlaintext)
     }
 
-    // ── 18. Dir-fsync BEST_EFFORT is durable-enough: returns normally, disk has the write ─
+    // ── 18. create() DEK-write NOT_DURABLE fails CLOSED — throws, no vault.bin, retry succeeds ─
 
     @Test
-    fun writeSealedPayload_dirSyncBestEffort_returnsNormally_diskHasNewPayload() {
+    fun create_dekWriteNotDurable_throwsAndLeavesNoBin_retryWithDurableSyncSucceeds() {
         val dir = tmp.newFolder()
-        val store = newStore(dir) { DirSyncResult.BEST_EFFORT }
-        val open = store.create(passphrase, "genesis".toByteArray(Charsets.UTF_8))
-
-        val updated = "best-effort-durable payload".toByteArray(Charsets.UTF_8)
-        // BEST_EFFORT (the platform cannot open a directory channel; the content is already
-        // fsynced) is durable-enough — writeSealedPayload returns WITHOUT throwing.
-        store.writeSealedPayload(open.slotIndex, sealPayload(open.vaultKey, updated, ops))
-        store.close()
-
-        assertArrayEquals(updated, newStore(dir).unlock(passphrase)!!.payloadPlaintext)
-    }
-
-    // ── 19. create() under NOT_DURABLE dir-fsync still succeeds — not aborted / bricked ───
-
-    @Test
-    fun create_dirSyncNotDurableOnBothWrites_succeeds_notAbortedOrBricked() {
-        val dir = tmp.newFolder()
-        // Both of create()'s atomic writes report NOT_DURABLE. create() is one-time onboarding,
-        // NOT on the flush-before-ack path, so it IGNORES the DirSyncResult and must NOT abort
-        // or brick — a brand-new vault is fully re-onboardable.
+        // create() writes the DEK sidecar FIRST and REQUIRES its durability. Here the (first)
+        // dek write reports NOT_DURABLE, so create() must THROW rather than proceed to the bin
+        // write — a durable vault.bin whose dek's rename was lost is the bricking case, made
+        // impossible by this dek-durable-before-bin ordering.
         val store = newStore(dir) { DirSyncResult.NOT_DURABLE }
-        val content = "onboarding under a flaky dir-fsync".toByteArray(Charsets.UTF_8)
+        assertThrows(VaultImageException.NotDurable::class.java) {
+            store.create(passphrase, "genesis".toByteArray(Charsets.UTF_8))
+        }
+        // On disk: at most a stray vault.dek and NO vault.bin — open() reads MissingImage
+        // (bin-keyed), the fully-retryable state, never a bricked image-exists-but-unopenable one.
+        assertFalse("no vault.bin after a dek-durability failure", File(dir, "vault.bin").exists())
+        assertThrows(VaultImageException.MissingImage::class.java) { store.open() }
+        store.close() // the failed create released its registration; close() is idempotent
+
+        // A RETRY with a real/DURABLE dir-fsync SUCCEEDS and unlocks — proving retryable, not bricked.
+        val content = "genesis on retry".toByteArray(Charsets.UTF_8)
+        val retry = newStore(dir) { DirSyncResult.DURABLE }
+        val open = retry.create(passphrase, content)
+        assertArrayEquals("retry create returns a live open", content, open.payloadPlaintext)
+        retry.close()
+        assertArrayEquals(content, newStore(dir).unlock(passphrase)!!.payloadPlaintext)
+    }
+
+    // ── 19. create() DEK durable but bin NOT_DURABLE — succeeds; a bin-only miss is safe ─────
+
+    @Test
+    fun create_dekDurableButBinNotDurable_succeeds_opensAndUnlocks() {
+        val dir = tmp.newFolder()
+        // dek write (first dirSync call) → DURABLE, bin write (second) → NOT_DURABLE. Once the DEK
+        // is confirmed durable the image's rename durability may be IGNORED: if bin's rename is lost
+        // it's MissingImage (retryable), and if it survives it opens fine — a bin-only durability
+        // miss is safe, never a failure.
+        var calls = 0
+        val store = newStore(dir) { if (calls++ == 0) DirSyncResult.DURABLE else DirSyncResult.NOT_DURABLE }
+        val content = "dek durable, bin not".toByteArray(Charsets.UTF_8)
         val open = store.create(passphrase, content)
-        assertArrayEquals("create returns a live open", content, open.payloadPlaintext)
-        assertTrue("the vault landed on disk despite NOT_DURABLE dir-fsync", store.exists())
+        assertArrayEquals("create succeeds despite a bin-only durability miss", content, open.payloadPlaintext)
+        assertTrue("the vault landed on disk", store.exists())
         store.close()
 
-        // The vault is on disk and open()+unlock() work — create was not aborted / bricked.
+        // bin is on disk and the dek is durable → open()+unlock() work.
         val fresh = newStore(dir)
         fresh.open()
         assertArrayEquals(content, fresh.unlock(passphrase)!!.payloadPlaintext)

@@ -11,7 +11,6 @@ package com.zitrone.app.crypto.vault
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import android.security.keystore.StrongBoxUnavailableException
 import java.security.GeneralSecurityException
 import java.security.KeyStore
 import java.security.ProviderException
@@ -28,8 +27,8 @@ import javax.crypto.spec.GCMParameterSpec
  * fixed-key fake), so keep the logic small enough to trust by inspection.
  *
  * Key posture mirrors KeyStoreManager's MasterKey (crypto/KeyStoreManager.kt):
- *  - AES-256-GCM, StrongBox-preferred with an explicit fallback for the majority
- *    of devices without a StrongBox (API < 28 or a StrongBoxUnavailableException).
+ *  - AES-256-GCM, StrongBox-preferred with a broad explicit fallback for the majority
+ *    of devices without a working StrongBox (API < 28 or ANY key-generation failure).
  *  - `setUserAuthenticationRequired(false)` (D2: the device key is NOT auth-gated —
  *    a slot's own passphrase / biometric gates the slot; this key only makes the
  *    image undecryptable off-device).
@@ -104,19 +103,20 @@ class KeystoreDeviceKeyCipher(
     private fun getOrCreateKey(): SecretKey = existingKey() ?: generateKey()
 
     private fun generateKey(): SecretKey {
-        // Prefer StrongBox where the hardware has it (API 28+). Key generation throws
-        // on devices without it, so fall back to the standard hardware-backed Keystore
-        // explicitly — the same posture KeyStoreManager uses for its MasterKey.
+        // Prefer StrongBox where the hardware has it (API 28+), falling back to the standard
+        // hardware-backed Keystore on ANY failure.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             try {
                 return generate(strongBox = true)
-            } catch (e: StrongBoxUnavailableException) {
-                // This device genuinely has no StrongBox — the ONLY reason to permanently
-                // downgrade to the standard hardware-backed key. Catch ONLY this: any OTHER
-                // exception (a transient TEE / provider error, e.g. a ProviderException) must
-                // PROPAGATE so it surfaces / retries, never silently and permanently wrapping
-                // the DEK under a weaker non-StrongBox key. The block is SDK_INT >= P guarded,
-                // so this class (API 28+) always resolves here.
+            } catch (e: Exception) {
+                // Broad fallback DELIBERATELY mirrors KeyStoreManager's established master-key
+                // posture (crypto/KeyStoreManager.kt:33 — a broad `catch (e: Exception)`): device
+                // availability is preferred over StrongBox-strictness, so a persistently-buggy
+                // StrongBox that throws a generic ProviderException (not just
+                // StrongBoxUnavailableException) can never make key generation — and thus every
+                // vault on that device — fail forever. The one-time transient-error-downgrades-the-
+                // key risk is the SAME accepted, app-wide tradeoff already made for the master key
+                // that protects all existing app storage — not a new corner.
             }
         }
         return generate(strongBox = false)
