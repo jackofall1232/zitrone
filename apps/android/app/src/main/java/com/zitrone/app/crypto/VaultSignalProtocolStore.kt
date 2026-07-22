@@ -72,15 +72,15 @@ class VaultSignalProtocolStore(
         }
     }
 
-    override fun getIdentityKeyPair(): IdentityKeyPair {
-        val bytes = runtime.read { it.signalRecords[KEY_IDENTITY] }
+    override fun getIdentityKeyPair(): IdentityKeyPair =
+        // Parse UNDER the lock: the map array must never escape to be constructed after the
+        // lock is released, where a concurrent putRecord could wipe it mid-parse.
+        runtime.read { it.signalRecords[KEY_IDENTITY]?.let { bytes -> IdentityKeyPair(bytes) } }
             ?: error("Identity key pair not yet generated")
-        return IdentityKeyPair(bytes)
-    }
 
     /** Registration id, default 0 when never set — matches legacy `prefs.getInt(_, 0)`. */
     override fun getLocalRegistrationId(): Int =
-        runtime.read { it.signalRecords[KEY_REGISTRATION_ID] }?.toInt() ?: 0
+        runtime.read { it.signalRecords[KEY_REGISTRATION_ID]?.toInt() } ?: 0
 
     // -- remote identities --------------------------------------------------
 
@@ -109,15 +109,13 @@ class VaultSignalProtocolStore(
     }
 
     override fun getIdentity(address: SignalProtocolAddress): IdentityKey? =
-        runtime.read { it.signalRecords[remoteIdentityKey(address)] }?.let { IdentityKey(it) }
+        runtime.read { it.signalRecords[remoteIdentityKey(address)]?.let { bytes -> IdentityKey(bytes) } }
 
     // -- one-time prekeys ---------------------------------------------------
 
-    override fun loadPreKey(preKeyId: Int): PreKeyRecord {
-        val bytes = runtime.read { it.signalRecords["$KEY_PREKEY$preKeyId"] }
+    override fun loadPreKey(preKeyId: Int): PreKeyRecord =
+        runtime.read { it.signalRecords["$KEY_PREKEY$preKeyId"]?.let { bytes -> PreKeyRecord(bytes) } }
             ?: throw InvalidKeyIdException("No prekey with id $preKeyId")
-        return PreKeyRecord(bytes)
-    }
 
     override fun storePreKey(preKeyId: Int, record: PreKeyRecord) {
         runtime.mutate { putRecord(it, "$KEY_PREKEY$preKeyId", record.serialize()) }
@@ -133,11 +131,10 @@ class VaultSignalProtocolStore(
 
     // -- signed prekeys -----------------------------------------------------
 
-    override fun loadSignedPreKey(signedPreKeyId: Int): SignedPreKeyRecord {
-        val bytes = runtime.read { it.signalRecords["$KEY_SIGNED_PREKEY$signedPreKeyId"] }
-            ?: throw InvalidKeyIdException("No signed prekey with id $signedPreKeyId")
-        return SignedPreKeyRecord(bytes)
-    }
+    override fun loadSignedPreKey(signedPreKeyId: Int): SignedPreKeyRecord =
+        runtime.read {
+            it.signalRecords["$KEY_SIGNED_PREKEY$signedPreKeyId"]?.let { bytes -> SignedPreKeyRecord(bytes) }
+        } ?: throw InvalidKeyIdException("No signed prekey with id $signedPreKeyId")
 
     override fun loadSignedPreKeys(): List<SignedPreKeyRecord> = runtime.read { state ->
         state.signalRecords
@@ -160,7 +157,7 @@ class VaultSignalProtocolStore(
     // -- sessions -------------------------------------------------------------
 
     override fun loadSession(address: SignalProtocolAddress): SessionRecord? =
-        runtime.read { it.signalRecords[sessionKey(address)] }?.let { SessionRecord(it) }
+        runtime.read { it.signalRecords[sessionKey(address)]?.let { bytes -> SessionRecord(bytes) } }
 
     override fun loadExistingSessions(
         addresses: List<SignalProtocolAddress>,
@@ -224,11 +221,10 @@ class VaultSignalProtocolStore(
 
     // -- Kyber prekeys (post-quantum, required by the store interface) --------
 
-    override fun loadKyberPreKey(kyberPreKeyId: Int): KyberPreKeyRecord {
-        val bytes = runtime.read { it.signalRecords["$KEY_KYBER_PREKEY$kyberPreKeyId"] }
-            ?: throw InvalidKeyIdException("No kyber prekey with id $kyberPreKeyId")
-        return KyberPreKeyRecord(bytes)
-    }
+    override fun loadKyberPreKey(kyberPreKeyId: Int): KyberPreKeyRecord =
+        runtime.read {
+            it.signalRecords["$KEY_KYBER_PREKEY$kyberPreKeyId"]?.let { bytes -> KyberPreKeyRecord(bytes) }
+        } ?: throw InvalidKeyIdException("No kyber prekey with id $kyberPreKeyId")
 
     override fun loadKyberPreKeys(): List<KyberPreKeyRecord> = runtime.read { state ->
         // "kyber_prekey:" does NOT prefix-match "kyber_prekey_used:" (':' vs '_' at index 12),
@@ -267,8 +263,9 @@ class VaultSignalProtocolStore(
         sender: SignalProtocolAddress,
         distributionId: UUID,
     ): SenderKeyRecord? =
-        runtime.read { it.signalRecords[senderKeyKey(sender, distributionId)] }
-            ?.let { SenderKeyRecord(it) }
+        runtime.read {
+            it.signalRecords[senderKeyKey(sender, distributionId)]?.let { bytes -> SenderKeyRecord(bytes) }
+        }
 
     // -- counters (PR-D: SignalProtocolManager reads/writes these instead of prefs) --------
 
@@ -277,7 +274,7 @@ class VaultSignalProtocolStore(
      * `prefs.getInt(counterKey, 1)`. SignalProtocolManager keeps its own
      * wrap-and-increment logic and just stores the result via [setNextPreKeyId].
      */
-    fun nextPreKeyId(): Int = runtime.read { it.signalRecords[KEY_NEXT_PREKEY_ID] }?.toInt() ?: 1
+    fun nextPreKeyId(): Int = runtime.read { it.signalRecords[KEY_NEXT_PREKEY_ID]?.toInt() } ?: 1
 
     fun setNextPreKeyId(value: Int) {
         runtime.mutate { putRecord(it, KEY_NEXT_PREKEY_ID, value.toBeBytes()) }
@@ -285,7 +282,7 @@ class VaultSignalProtocolStore(
 
     /** The next signed-prekey id, default 1 (see [nextPreKeyId]). */
     fun nextSignedPreKeyId(): Int =
-        runtime.read { it.signalRecords[KEY_NEXT_SIGNED_PREKEY_ID] }?.toInt() ?: 1
+        runtime.read { it.signalRecords[KEY_NEXT_SIGNED_PREKEY_ID]?.toInt() } ?: 1
 
     fun setNextSignedPreKeyId(value: Int) {
         runtime.mutate { putRecord(it, KEY_NEXT_SIGNED_PREKEY_ID, value.toBeBytes()) }
@@ -293,7 +290,7 @@ class VaultSignalProtocolStore(
 
     /** The current signed prekey's creation timestamp (ms), default 0 (never rotated). */
     fun signedPreKeyCreatedAt(): Long =
-        runtime.read { it.signalRecords[KEY_SIGNED_PREKEY_CREATED_AT] }?.toLong() ?: 0L
+        runtime.read { it.signalRecords[KEY_SIGNED_PREKEY_CREATED_AT]?.toLong() } ?: 0L
 
     fun setSignedPreKeyCreatedAt(value: Long) {
         runtime.mutate { putRecord(it, KEY_SIGNED_PREKEY_CREATED_AT, value.toBeBytes()) }

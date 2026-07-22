@@ -28,6 +28,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.signal.libsignal.protocol.ecc.Curve
+import org.signal.libsignal.protocol.state.PreKeyRecord
 import java.io.IOException
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
@@ -201,6 +203,71 @@ class VaultFacadeTest {
         )
         assertArrayEquals("superseded record bytes were zeroed in place", byteArrayOf(0, 0, 0, 0), supersededArray)
         assertEquals(0x05060708, store.nextPreKeyId())
+        runtime.close()
+    }
+
+    // ── round-3: record reads parse UNDER the runtime lock (no raw map bytes escape) ──
+
+    @Test
+    fun `a loaded record is parsed under the lock and is independent of a later overwrite`() {
+        // Regression for the round-2 use-after-wipe: a read must CONSTRUCT the libsignal record
+        // INSIDE runtime.read, so the returned object owns fully-parsed state, not a live map
+        // array a later putRecord could zero mid-parse. Deterministic proxy for that contract:
+        // load R, overwrite the SAME key with a DIFFERENT record (putRecord wipes the displaced
+        // array), then assert R still deserializes to the ORIGINAL value.
+        val runtime = runtimeOf()
+        val store = VaultSignalProtocolStore(runtime)
+        val original = PreKeyRecord(7, Curve.generateKeyPair())
+        store.storePreKey(7, original)
+
+        val loaded = store.loadPreKey(7)
+
+        store.storePreKey(7, PreKeyRecord(7, Curve.generateKeyPair())) // wipes the displaced array
+
+        assertArrayEquals(
+            "the earlier read holds the original bytes, untouched by the overwrite's wipe",
+            original.serialize(),
+            loaded.serialize(),
+        )
+        assertEquals("original prekey id preserved", 7, loaded.id)
+        runtime.close()
+    }
+
+    @Test
+    fun `concurrent loads and overwrites of one record never observe a wiped array`() {
+        // With the record CONSTRUCTED under the lock, a loadPreKey either sees the intact old
+        // array or runs strictly after the store — never a half-wiped one (read and mutate are
+        // mutually exclusive on the runtime's single lock). Pre-fix, loadPreKey parsed the escaped
+        // array AFTER the lock, so a racing storePreKey could wipe it mid-parse (crash / torn record).
+        val runtime = runtimeOf()
+        val store = VaultSignalProtocolStore(runtime)
+        store.storePreKey(9, PreKeyRecord(9, Curve.generateKeyPair()))
+        val replacement = PreKeyRecord(9, Curve.generateKeyPair())
+
+        val errors = Collections.synchronizedList(mutableListOf<Throwable>())
+        val n = 3_000
+        val writer = Thread {
+            try {
+                repeat(n) { store.storePreKey(9, replacement) } // each store wipes the displaced array
+            } catch (t: Throwable) {
+                errors.add(t)
+            }
+        }
+        val reader = Thread {
+            try {
+                repeat(n) {
+                    val r = store.loadPreKey(9) // must never parse a wiped / torn array
+                    assertEquals("loaded record keeps its id", 9, r.id)
+                }
+            } catch (t: Throwable) {
+                errors.add(t)
+            }
+        }
+
+        writer.start(); reader.start()
+        writer.join(); reader.join()
+
+        assertTrue("no crash / torn parse across threads: $errors", errors.isEmpty())
         runtime.close()
     }
 
