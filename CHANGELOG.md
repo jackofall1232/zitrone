@@ -9,6 +9,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Android: in-memory vault session with a bounded reseal flush policy
+  (isolated, not yet wired).** `VaultSession` holds one unlocked slot's keystore
+  plaintext in memory and reseals it as a whole fixed-size payload back into the
+  vault image under a committed flush policy: a synchronous `flushNow()` for
+  flush-before-ack durability (window 0), a ≤2s coalescing ceiling measured from
+  the first unflushed mutation (a max-wait, not a trailing debounce), and a
+  final forced flush + key/payload wipe on close. Adds a slot-agnostic,
+  constant-length payload-splice helper to the image codec. New files under
+  `crypto/vault/` plus tests only — deliberately NOT connected to any store,
+  unlock UI, or coordinator; that integration is a later sub-phase.
 - **Android: plausible-deniability key-slot vault primitive (isolated, not yet
   wired).** A self-contained Kotlin port of the web reference
   (`packages/crypto/src/vault.ts` + the `apps/web` storage payload/image codec):

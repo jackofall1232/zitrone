@@ -109,6 +109,39 @@ fun createImage(
 }
 
 /**
+ * Replace ONE slot's payload region in [image] with an ALREADY-SEALED payload,
+ * re-encoding the fixed-size image with every other region (the header, the whole
+ * slot table, and every OTHER payload region) carried over byte-for-byte
+ * unchanged. The result is always the same constant [IMAGE_BYTES] length.
+ *
+ * This is the reseal splice the in-memory session needs: it re-encrypts the vault
+ * key's OWN keystore payload in place, unlike [addVaultToImage], which seals a
+ * NEW vault under a new passphrase into a free slot. It is deliberately
+ * slot-agnostic and constant-length — it takes a caller-supplied [sealedPayload]
+ * of exactly [SLOT_PAYLOAD_BYTES] and does not know or reveal whether the slot is
+ * real or filler.
+ */
+internal fun spliceImagePayload(
+    image: ByteArray,
+    slotIndex: Int,
+    sealedPayload: ByteArray,
+): ByteArray {
+    require(image.size == IMAGE_BYTES) { "malformed vault image" }
+    require(slotIndex in 0 until SLOT_COUNT) { "slot index out of range" }
+    require(sealedPayload.size == SLOT_PAYLOAD_BYTES) { "malformed payload region" }
+    // Only THIS slot's payload region changes on a reseal; the version byte, the
+    // whole slot table, and every other slot's payload are carried through
+    // byte-identical. Copy the image and overwrite just the target region in place
+    // — no decode + re-encode, so a hot reseal path does not allocate and parse the
+    // full (multi-hundred-KiB) image on every flush. The target offset mirrors
+    // encodeImage()'s payload layout exactly.
+    val out = image.copyOf()
+    val payloadOffset = HEADER_BYTES + SLOT_TABLE_BYTES + slotIndex * SLOT_PAYLOAD_BYTES
+    sealedPayload.copyInto(out, payloadOffset)
+    return out
+}
+
+/**
  * Attempt [passphrase] against [image]. Runs [tryPassphrase] over every slot
  * (no early exit — identical work regardless of which slot, if any, matches),
  * then opens the matched slot's payload. Returns null when no slot matches (a
