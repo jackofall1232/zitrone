@@ -13,6 +13,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.security.GeneralSecurityException
 import java.security.KeyStore
+import java.security.ProviderException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -55,6 +56,11 @@ class KeystoreDeviceKeyCipher(
         val out = ByteArray(nonce.size + ct.size)
         nonce.copyInto(out, 0)
         ct.copyInto(out, nonce.size)
+        // Enforce the constant blob shape at the source: a Keystore that returned an
+        // off-spec IV length or ciphertext size must fail LOUDLY here, never silently
+        // persist a variable-size blob that would brick the next unwrap or leak a size.
+        check(nonce.size == NONCE_BYTES) { "unexpected device-key nonce size" }
+        check(out.size == WRAPPED_KEY_BYTES) { "unexpected wrapped-key size" }
         return out
     }
 
@@ -74,6 +80,13 @@ class KeystoreDeviceKeyCipher(
             // Tag failure / tampered blob / a key the hardware can no longer honor —
             // all reported the same way, as "no" (mirrors aeadDecrypt). The caller
             // treats null as a corrupt image and never silently recreates.
+            null
+        } catch (e: ProviderException) {
+            // Android Keystore RUNTIME failure — incl. android.security.KeyStoreException,
+            // which subclasses ProviderException: the TEE / StrongBox is momentarily
+            // unavailable or the provider errored. Reported the same "no". Unlike a tag
+            // failure this MAY be transient, so the resulting CorruptImage need not be
+            // permanent (a retry / reboot can succeed); the caller escalates regardless.
             null
         }
     }

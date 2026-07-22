@@ -9,22 +9,23 @@
 package com.zitrone.app.crypto.vault
 
 import java.io.File
-import java.io.FileInputStream
+import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.io.IOException
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 /**
- * Associated data for the image's OUTER (device-key) layer. Deliberately EMPTY:
- * the outer layer's sole job is device-bound confidentiality + integrity, and the
- * inner image already self-authenticates every region (each slot's wrapped key and
- * payload carry their own AEAD tag under [SLOT_AD] / [PAYLOAD_AD]). No magic bytes,
- * no version byte, and no AD term is stored outside the ciphertext — the inner
- * image carries its own version. `internal` so the storage tests can decrypt the
- * on-disk blob to assert on inner regions without coupling to a private constant.
+ * Associated data for the image's OUTER (device-key) layer. A fixed purpose-binding
+ * label — the SAME convention as [SLOT_AD] / [PAYLOAD_AD] — that ties the outer
+ * ciphertext to its role so an outer blob can never be authenticated under, or
+ * reinterpreted as, a different layer's ciphertext. It is a generic, slot-agnostic
+ * constant: it names only the layer ("outer"), never a slot, a vault, or real-vs-decoy,
+ * so it is byte-identical for every install and reveals nothing. `internal` so the
+ * storage tests can decrypt the on-disk blob to assert on inner regions without coupling
+ * to a private constant.
  */
-internal val VAULT_IMAGE_OUTER_AD: ByteArray = ByteArray(0)
+internal val VAULT_IMAGE_OUTER_AD: ByteArray = "Zitrone-Vault-Outer-v1".toByteArray(Charsets.UTF_8)
 
 /**
  * The distinct, non-silently-repaired outcomes of reading the on-disk vault image.
@@ -84,10 +85,14 @@ sealed class VaultImageException(message: String) : Exception(message) {
  * imageLock. NEVER invoke a VaultSession method while holding [imageLock] — that
  * would nest the locks in the reverse order and can deadlock.
  *
- * THREADING. Every method takes [imageLock]; all are synchronous. [open], [create],
- * [unlock], and [unlockWithKey] are CPU-heavy with the production Argon2id deriver
- * (create / unlock run it up to SLOT_COUNT times), so callers on a UI thread MUST
- * run them off the main thread.
+ * THREADING. Every method takes [imageLock]; all are synchronous. The Argon2id-heavy
+ * methods are [create] — exactly SLOT_COUNT+1 derivations with the production deriver:
+ * one to seal the real slot, then SLOT_COUNT more for the verification [unlockImage] —
+ * and [unlock], exactly SLOT_COUNT (never fewer: the slot loop has no early exit). Both
+ * MUST run off a UI thread. [open] is NOT Argon2id-heavy (a single ~1 MiB AEAD decrypt of
+ * the outer layer) and [unlockWithKey] does NO Argon2id at all (it opens one payload with
+ * an already-derived key); still, run them off-main so the ~1 MiB decrypt never lands on
+ * the UI thread.
  *
  * SLOT-AGNOSTIC discipline: no logging, no strings that name slots / vaults / real /
  * decoy, constant-size writes, and no early exit keyed on slot identity.
@@ -132,8 +137,15 @@ class VaultImageStore(
      *
      * Throws [VaultImageException.MissingImage] when no image is present and
      * [VaultImageException.CorruptImage] when it is present but unreadable (outer
-     * auth failure, missing / unwrappable DEK, or wrong inner size). NEVER silently
-     * recreates on corruption — that would destroy real vaults; the caller escalates.
+     * auth failure, missing / unwrappable DEK, wrong inner size, or an unknown inner
+     * [IMAGE_VERSION]). NEVER silently recreates on corruption — that would destroy
+     * real vaults; the caller escalates.
+     *
+     * A raw [IOException] (a transient read error — a failing disk, an I/O fault) is
+     * deliberately NOT one of the sealed outcomes: it propagates unmapped so the caller
+     * can retry a read that may succeed later. Only a file that VANISHED between the
+     * existence check and the read (a TOCTOU race) is mapped into the taxonomy — a gone
+     * image reads as MissingImage, a gone DEK as CorruptImage.
      */
     fun open() {
         imageLock.withLock {
@@ -146,8 +158,19 @@ class VaultImageStore(
             if (!binFile.exists()) throw VaultImageException.MissingImage()
             if (!dekFile.exists()) throw VaultImageException.CorruptImage()
 
-            val dekBlob = dekFile.readBytes()
-            val binBytes = binFile.readBytes()
+            // Map a file that vanished between exists() and read into the taxonomy (a gone
+            // DEK is CorruptImage, a gone image is MissingImage); any OTHER IOException is a
+            // transient read error and propagates raw for the caller to retry (see kdoc).
+            val dekBlob = try {
+                dekFile.readBytes()
+            } catch (e: FileNotFoundException) {
+                throw VaultImageException.CorruptImage()
+            }
+            val binBytes = try {
+                binFile.readBytes()
+            } catch (e: FileNotFoundException) {
+                throw VaultImageException.MissingImage()
+            }
 
             val unwrapped = deviceCipher.unwrapDek(dekBlob) ?: throw VaultImageException.CorruptImage()
             // From here `unwrapped` is live key material: wipe it on EVERY failure path,
@@ -157,6 +180,10 @@ class VaultImageStore(
                 inner = ops.aeadDecrypt(unwrapped, binBytes, VAULT_IMAGE_OUTER_AD)
                     ?: throw VaultImageException.CorruptImage()
                 if (inner.size != IMAGE_BYTES) throw VaultImageException.CorruptImage()
+                // Validate the inner VERSION too, not just the size: an unknown version reads
+                // as CorruptImage for THIS build. A future format bump MUST add its migration
+                // path here BEFORE [IMAGE_VERSION] changes, or existing images stop opening.
+                if (inner[0].toInt() and 0xff != IMAGE_VERSION) throw VaultImageException.CorruptImage()
             } catch (t: Throwable) {
                 wipe(unwrapped)
                 throw t
@@ -173,32 +200,52 @@ class VaultImageStore(
      * Create a fresh vault image sealing [initialPayload] under [passphrase], write
      * it durably, and return a live [VaultOpen] for it. Requires no image exists yet.
      *
-     * Generates a random DEK, builds the image with the audited [createImage]
-     * primitive, outer-encrypts it, and atomically writes the DEK sidecar FIRST then
-     * the image (a crash between leaves a DEK with no image = [VaultImageException.MissingImage],
-     * the DEK overwritten on the next create). It then [unlockImage]s the fresh image
-     * to hand back a live open — one extra Argon2id×SLOT_COUNT, one-time at
-     * onboarding / migration, reusing the audited primitive rather than adding a new
-     * create-and-open surface. CPU-heavy: caller MUST be off-main.
+     * Generates a random DEK, builds the image with the audited [createImage] primitive,
+     * and outer-encrypts it. It then VERIFIES the fresh image by [unlockImage]ing it —
+     * one extra Argon2id×SLOT_COUNT, one-time at onboarding / migration, reusing the
+     * audited primitive rather than adding a new create-and-open surface — BEFORE touching
+     * disk: [unlockImage] runs purely on the in-memory image and needs no disk state, so
+     * verifying first makes ANY failure in create() (bad wrapped-key size, encrypt /
+     * verify / IO failure) leave the disk UNTOUCHED and the whole call retryable. Only
+     * then does it atomically write the DEK sidecar FIRST, then the image (a crash between
+     * leaves a DEK with no image = [VaultImageException.MissingImage], the DEK overwritten
+     * on the next create). Both durable writes land before any in-memory state is
+     * installed, so a mid-write throw leaves canonical / dek exactly as they were (null on
+     * a fresh store). CPU-heavy: caller MUST be off-main.
      */
     fun create(passphrase: String, initialPayload: ByteArray): VaultOpen {
         imageLock.withLock {
             require(!binFile.exists()) { "vault image already exists" }
             val newDek = ops.randomBytes(DEK_BYTES)
             // Ephemeral here: the persisted copy lives in `dek`. Wipe the local on EVERY
-            // exit, incl. if createImage / encrypt / wrap / write throws mid-way.
+            // exit, incl. if createImage / encrypt / wrap / verify / write throws mid-way.
             try {
                 val image = createImage(passphrase, initialPayload, ops, deriver)
                 val outer = ops.aeadEncrypt(newDek, image, VAULT_IMAGE_OUTER_AD)
                 val wrappedDek = deviceCipher.wrapDek(newDek)
-                // DEK first, then image (see kdoc): the durable writes must both land
-                // before any in-memory state is installed, so a mid-write throw leaves
-                // canonical / dek exactly as they were (null on a fresh store).
-                atomicWrite(dekFile, wrappedDek)
-                atomicWrite(binFile, outer)
+                // Store-level constant-blob check: reject a malformed wrapped key from ANY
+                // DeviceKeyCipher impl BEFORE any write, so a bad blob fails create() loudly
+                // instead of persisting and bricking the next open().
+                check(wrappedDek.size == WRAPPED_KEY_BYTES) { "malformed wrapped key" }
 
+                // Verify BEFORE writing: unlockImage operates on the in-memory image only, so
+                // proving the fresh image opens before any disk write keeps a failed create()
+                // fully retryable (disk untouched).
                 val liveOpen = unlockImage(passphrase, image, ops, deriver)
                     ?: throw IllegalStateException("freshly created image failed to open")
+                // liveOpen now holds live key material (an independent vault-key copy). If a
+                // durable write below throws, wipe it so no vault key / plaintext is abandoned
+                // on the heap — the wipe-on-every-failure discipline the package keeps.
+                try {
+                    // DEK first, then image (see kdoc).
+                    atomicWrite(dekFile, wrappedDek)
+                    atomicWrite(binFile, outer)
+                } catch (t: Throwable) {
+                    wipe(liveOpen.vaultKey)
+                    wipe(liveOpen.payloadPlaintext)
+                    throw t
+                }
+
                 dek?.let { wipe(it) }
                 dek = newDek.copyOf()
                 canonical = image
@@ -212,8 +259,13 @@ class VaultImageStore(
     /**
      * Attempt [passphrase] against the current image (opening from disk first if
      * needed). Returns a live [VaultOpen] on a match, or null on none — an
-     * indistinguishable wrong passphrase, identical work regardless of outcome
-     * (inherited from [tryPassphrase]). CPU-heavy: caller MUST be off-main.
+     * indistinguishable wrong passphrase. The per-slot Argon2id work is identical
+     * whichever slot (or none) matches — the plausible-deniability parity inherited
+     * from [unlockImage] / [tryPassphrase]. A SUCCESSFUL unlock additionally opens one
+     * fixed-size payload region, so success and failure are not equal-time; that is the
+     * same accepted, documented asymmetry as [unlockImage] (it leaks no bit an observer
+     * lacks — the app visibly unlocks or not the instant it happens). CPU-heavy: caller
+     * MUST be off-main.
      */
     fun unlock(passphrase: String): VaultOpen? {
         imageLock.withLock {
@@ -308,32 +360,42 @@ class VaultImageStore(
      */
     private fun atomicWrite(target: File, bytes: ByteArray) {
         val tmp = File(target.parentFile, "${target.name}$TMP_SUFFIX")
-        FileOutputStream(tmp).use { fos ->
-            fos.write(bytes)
-            // fsync the file's data + metadata to disk BEFORE the rename, so the renamed
-            // name can never point at a not-yet-durable inode.
-            fos.channel.force(true)
-        }
-        if (!tmp.renameTo(target)) {
-            // Rename failed: drop the temp and fail loud, leaving the target intact.
+        try {
+            FileOutputStream(tmp).use { fos ->
+                fos.write(bytes)
+                // fsync the file's data + metadata to disk BEFORE the rename, so the renamed
+                // name can never point at a not-yet-durable inode.
+                fos.channel.force(true)
+            }
+            if (!tmp.renameTo(target)) {
+                throw IOException("atomic rename failed for ${target.name}")
+            }
+        } catch (t: Throwable) {
+            // ANY failure (an ENOSPC mid-write, a refused rename, …) must not leave a
+            // variable-size `.tmp` lingering next to the constant-size files — best-effort
+            // delete it, then propagate. The target (previous durable file) is untouched: a
+            // same-dir rename replaces atomically or not at all.
             tmp.delete()
-            throw IOException("atomic rename failed for ${target.name}")
+            throw t
         }
         fsyncDir(target.parentFile)
     }
 
     /**
-     * Best-effort directory fsync so a completed rename is itself durable. Some
-     * platforms refuse to fsync a directory fd (IOException); that failure — and
-     * ONLY that failure — is swallowed: the file CONTENT is already fsynced above,
-     * so rename durability is best-effort-plus on Android's ext4/f2fs defaults.
+     * Best-effort directory fsync so a completed rename is itself durable. Directory
+     * fsync works on Android/Linux via a read-only [java.nio.channels.FileChannel] over
+     * the directory; the [IOException] swallow remains ONLY for exotic platforms that
+     * genuinely refuse to fsync a directory fd. The file CONTENT is already fsynced in
+     * [atomicWrite] regardless, so on Android's ext4/f2fs defaults rename durability is
+     * best-effort-plus.
      */
     private fun fsyncDir(dir: File?) {
         if (dir == null) return
         try {
-            FileInputStream(dir).use { it.fd.sync() }
+            java.nio.channels.FileChannel.open(dir.toPath(), java.nio.file.StandardOpenOption.READ)
+                .use { it.force(true) }
         } catch (e: IOException) {
-            // Directory fsync unsupported on this platform — see kdoc. Swallowed.
+            // Directory fsync genuinely refused on this platform — see kdoc. Swallowed.
         }
     }
 

@@ -44,12 +44,15 @@ interface DeviceKeyCipher {
     fun wrapDek(dek: ByteArray): ByteArray
 
     /**
-     * Unwrap a blob produced by [wrapDek], recovering the 32-byte DEK. Returns
-     * null on ANY authentication failure — a tampered blob, a truncated blob, or a
-     * key the hardware can no longer honor — mirroring [VaultSodiumOps.aeadDecrypt]'s
-     * "null means no" contract. The caller treats a null here as a corrupt image
-     * and NEVER silently recreates (that would destroy a real vault). The returned
-     * array is live key material the caller owns and MUST wipe.
+     * Unwrap a blob produced by [wrapDek], recovering the 32-byte DEK. Returns null on
+     * ANY authentication failure — a tampered blob, a truncated blob, or a key the
+     * hardware can no longer honor — AND on any Keystore PROVIDER failure (a transient
+     * TEE / StrongBox runtime error), mirroring [VaultSodiumOps.aeadDecrypt]'s "null means
+     * no" contract. The caller treats a null here as a corrupt image and NEVER silently
+     * recreates (that would destroy a real vault). Because a provider failure MAY be
+     * transient, a CorruptImage at open() is not necessarily PERMANENT — a later retry or
+     * a reboot can succeed — but the caller escalates without repairing either way. The
+     * returned array is live key material the caller owns and MUST wipe.
      */
     fun unwrapDek(blob: ByteArray): ByteArray?
 }
