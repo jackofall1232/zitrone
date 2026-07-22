@@ -55,14 +55,16 @@ class KeystoreDeviceKeyCipher(
         // so an IV is present, but null-guard it before touching nonce.size rather than risk
         // an opaque NPE — a missing IV is a Keystore contract violation, fail LOUDLY.
         val nonce = cipher.iv ?: throw GeneralSecurityException("Keystore cipher returned no IV")
+        // Enforce the constant blob shape at the source: a Keystore that returned an off-spec
+        // IV length must fail LOUDLY, never silently persist a variable-size blob that would
+        // brick the next unwrap or leak a size. Checked BEFORE the encrypt + allocation so an
+        // off-spec IV fails fast without doing the crypto work.
+        check(nonce.size == NONCE_BYTES) { "unexpected device-key nonce size" }
         val ct = cipher.doFinal(dek)
         val out = ByteArray(nonce.size + ct.size)
         nonce.copyInto(out, 0)
         ct.copyInto(out, nonce.size)
-        // Enforce the constant blob shape at the source: a Keystore that returned an
-        // off-spec IV length or ciphertext size must fail LOUDLY here, never silently
-        // persist a variable-size blob that would brick the next unwrap or leak a size.
-        check(nonce.size == NONCE_BYTES) { "unexpected device-key nonce size" }
+        // Same constant-shape enforcement for the assembled blob (off-spec ciphertext size).
         check(out.size == WRAPPED_KEY_BYTES) { "unexpected wrapped-key size" }
         return out
     }
