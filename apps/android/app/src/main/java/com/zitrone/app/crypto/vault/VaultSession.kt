@@ -110,16 +110,19 @@ class VaultSession(
      * payload buffer is wiped on replace.
      */
     fun update(newPayload: ByteArray) {
-        // Reject up-front, before touching state: the same bound sealPayload
-        // enforces (a 4-byte big-endian length prefix precedes the content inside
-        // the fixed plaintext capacity). Checked here so a rejected update leaves
-        // the payload unchanged and un-dirtied, never grows the region, and never
-        // defers the throw to a later flush.
-        require(newPayload.size <= MAX_PAYLOAD_CONTENT_BYTES) {
-            "content exceeds vault slot capacity"
-        }
         synchronized(lock) {
+            // A closed session is inert — no-op even for an over-capacity input
+            // (checked after the closed-gate so close() makes EVERY update a
+            // silent no-op, never a throw).
             if (closed) return
+            // Reject before touching state: the same bound sealPayload enforces
+            // (a 4-byte big-endian length prefix precedes the content inside the
+            // fixed plaintext capacity). Checked here so a rejected update leaves
+            // the payload unchanged and un-dirtied, never grows the region, and
+            // never defers the throw to a later flush.
+            require(newPayload.size <= MAX_PAYLOAD_CONTENT_BYTES) {
+                "content exceeds vault slot capacity"
+            }
             val previous = payload
             payload = newPayload.copyOf()
             wipe(previous)

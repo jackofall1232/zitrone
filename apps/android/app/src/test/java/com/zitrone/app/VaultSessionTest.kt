@@ -204,6 +204,23 @@ class VaultSessionTest {
         assertArrayEquals("payload unchanged after rejected update", initial, session.read())
     }
 
+    // The exact upper boundary: content of the largest accepted size (capacity
+    // minus the 4-byte length prefix) is accepted, flushes, and round-trips.
+    @Test
+    fun `update at max content capacity is accepted and round-trips`() = runTest {
+        val (session, sink, _) = newSession(backgroundScope, "small".toByteArray())
+        val maxContent = ByteArray(PAYLOAD_PLAINTEXT_BYTES - 4) { (it and 0x7f).toByte() }
+
+        session.update(maxContent) // must NOT throw
+        session.flushNow()
+        assertEquals(1, sink.count)
+        // One byte more is rejected — pins the boundary from both sides.
+        assertThrows(IllegalArgumentException::class.java) {
+            session.update(ByteArray(PAYLOAD_PLAINTEXT_BYTES - 3))
+        }
+        assertArrayEquals("max-size content round-trips through the reseal", maxContent, session.read())
+    }
+
     // read() hands out a copy, so mutating the result cannot corrupt session state.
     @Test
     fun `read returns a defensive copy`() = runTest {
