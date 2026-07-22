@@ -620,4 +620,28 @@ class VaultSessionTest {
         val reopened = unlockImage(passphrase, persisted.last(), ops, fast)!!
         assertArrayEquals("close persisted the state as of teardown", "final".toByteArray(), reopened.payloadPlaintext)
     }
+
+    // VaultSession is Closeable, so `use {}` flushes + tears down deterministically.
+    @Test
+    fun `use block flushes then closes`() = runTest {
+        val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
+        val open = unlockImage(passphrase, image, ops, fast)!!
+        val sink = FakeSink(clock = { currentTime })
+        val session = VaultSession(
+            scope = backgroundScope,
+            ops = ops,
+            initialImage = image,
+            initialPayload = open.payloadPlaintext,
+            initialVaultKey = open.vaultKey,
+            slotIndex = open.slotIndex,
+            persist = sink::persist,
+            clock = { currentTime },
+            cooldownMs = 2_000L,
+            flushContext = EmptyCoroutineContext,
+        )
+
+        session.use { it.update("in-use".toByteArray()) }
+        assertEquals("use{} exit called close(), flushing the dirty payload", 1, sink.count)
+        assertThrows(IllegalStateException::class.java) { session.read() }
+    }
 }

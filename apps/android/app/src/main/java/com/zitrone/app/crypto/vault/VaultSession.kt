@@ -128,7 +128,7 @@ class VaultSession(
      * a throw is caught and ignored so a broken sink cannot break the flush loop.
      */
     private val onFlushError: (Throwable) -> Unit = {},
-) {
+) : java.io.Closeable {
     /** Monitor for the in-memory state. Held only for fast transitions; never across I/O. */
     private val stateLock = Any()
 
@@ -289,7 +289,7 @@ class VaultSession(
      * retaining persist sink shares that array). After this, [update] / [flushNow]
      * are no-ops and [read] throws. Idempotent.
      */
-    fun close() {
+    override fun close() {
         synchronized(stateLock) {
             // Idempotent, and — critically — STOP accepting updates before the final
             // flush. Otherwise an update() racing in (another thread, or a reentrant
