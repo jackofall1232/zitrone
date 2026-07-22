@@ -340,21 +340,31 @@ class VaultImageStore internal constructor(
      * verifying first makes ANY failure in create() (bad wrapped-key size, encrypt /
      * verify / IO failure) leave the disk UNTOUCHED and the whole call retryable.
      *
-     * Only then does it rename BOTH files into place (`vault.dek`, then `vault.bin`) and run a
-     * SINGLE trailing directory fsync covering both renames. create() returns success ONLY once
-     * that one fsync confirms BOTH renames durable — the IMAGE is fail-closed too, not silently
-     * trusted, because it may hold a just-migrated / freshly-generated identity that would be lost
-     * for good if a durable create() ack survived a crash that dropped `vault.bin`'s rename. A
-     * durability failure ROLLS BACK (deleting `vault.bin` FIRST, then `vault.dek`, best-effort) and
-     * THROWS [VaultImageException.NotDurable], leaving ONLY retryable on-disk states: both files
-     * gone (clean), a stray `vault.dek` alone ([open] = [VaultImageException.MissingImage] →
-     * retry), or — a crash before any delete ran — a COMPLETE, openable vault. A bricked
-     * [VaultImageException.CorruptImage] (bin present, dek absent) is IMPOSSIBLE because bin is
-     * always deleted before dek. CALLER CONTRACT: after a create() throw, re-run [open] — a
-     * complete-but-unconfirmed vault opens; otherwise [open] reads MissingImage and the caller
-     * retries create(). Both renames + the confirming fsync land before any in-memory state is
-     * installed, so a mid-write throw leaves canonical / dek exactly as they were (null on a fresh
-     * store). CPU-heavy: caller MUST be off-main.
+     * Only then does it write to disk under a DEK-FIRST DURABILITY BARRIER: it renames `vault.dek`
+     * into place and CONFIRMS that rename crash-durable (a directory fsync) BEFORE `vault.bin` is
+     * ever written; only once the DEK is confirmed durable does it rename `vault.bin` into place and
+     * CONFIRM that rename durable too. Success is returned ONLY when BOTH renames are confirmed
+     * durable — the IMAGE is fail-closed too, not silently trusted, because it may hold a
+     * just-migrated / freshly-generated identity that would be lost for good if a durable create()
+     * ack survived a crash that dropped `vault.bin`'s rename. Either confirming fsync failing THROWS
+     * [VaultImageException.NotDurable]; there are NO rollback deletes.
+     *
+     * CRASH-STATE GUARANTEE (the load-bearing invariant). Because the DEK is confirmed durable
+     * BEFORE `vault.bin` is written, a crash at ANY point leaves one of only these states — all
+     * recoverable, and NEVER a {bin-present, dek-absent} [VaultImageException.CorruptImage] brick:
+     *  - no `vault.bin` (with or without a stray `vault.dek`) → [open] = [VaultImageException.MissingImage]
+     *    → retry create(), which overwrites any stray dek.
+     *  - both present → a COMPLETE, valid, openable vault (the DEK is durable, so it cannot have been
+     *    lost) → [open] succeeds.
+     * The {bin-present, dek-absent} state is UNREACHABLE by construction: the DEK is durable before
+     * `vault.bin` exists, so it can never be lost while `vault.bin` survives — which is exactly why
+     * no rollback delete is needed to avoid the brick.
+     *
+     * CALLER CONTRACT: after a create() throw, re-run [open]. A complete-but-unconfirmed vault opens
+     * normally; otherwise [open] reads [VaultImageException.MissingImage] and create() may be
+     * retried. create() NEVER leaves a bricked state. Both renames + their confirming fsyncs land
+     * before any in-memory state is installed, so a mid-write throw leaves canonical / dek exactly as
+     * they were (null on a fresh store). CPU-heavy: caller MUST be off-main.
      */
     fun create(passphrase: String, initialPayload: ByteArray): VaultOpen {
         imageLock.withLock {
@@ -386,24 +396,25 @@ class VaultImageStore internal constructor(
                     // vault key / plaintext is abandoned on the heap (the wipe-on-every-failure
                     // discipline the package keeps).
                     try {
-                        // Rename BOTH files into place with NO per-file directory fsync, then run ONE
-                        // trailing directory fsync that covers both renames. create() reports success
-                        // ONLY once that single fsync confirms both renames durable — the image is
-                        // fail-closed too, not silently trusted.
+                        // DEK-FIRST DURABILITY BARRIER. Write vault.dek and CONFIRM its rename
+                        // crash-durable BEFORE vault.bin is ever written; only then write vault.bin
+                        // and confirm ITS rename durable. This makes the {vault.bin present,
+                        // vault.dek absent} CorruptImage brick UNREACHABLE by construction: the DEK is
+                        // durable before the image exists, so it can never be lost while the image
+                        // survives. NO rollback deletes are needed (or performed).
                         renameIntoPlace(dekFile, wrappedDek)
+                        if (dirSync(baseDir) != DirSyncResult.DURABLE) {
+                            // The DEK's rename is not confirmed durable → throw BEFORE writing
+                            // vault.bin. At most a stray, possibly-not-durable vault.dek exists and NO
+                            // vault.bin → open() = MissingImage → a retried create() overwrites it.
+                            throw VaultImageException.NotDurable()
+                        }
                         renameIntoPlace(binFile, outer)
-                        val sync = dirSync(baseDir)
-                        if (sync != DirSyncResult.DURABLE) {
-                            // Durability unconfirmed → ROLL BACK and throw NotDurable (retryable),
-                            // never leave a half-durable state. Delete vault.bin FIRST, then
-                            // vault.dek (best-effort; ignore delete failures). Ordering rationale:
-                            // deleting bin first guarantees EVERY crash-during-rollback on-disk state
-                            // is retryable — both gone (clean), or bin gone + a stray dek (open() =
-                            // MissingImage → retry), or (a crash before any delete ran) a COMPLETE
-                            // valid vault (open() succeeds). A CorruptImage brick (bin present, dek
-                            // absent) is impossible because bin is always deleted before dek.
-                            binFile.delete()
-                            dekFile.delete()
+                        if (dirSync(baseDir) != DirSyncResult.DURABLE) {
+                            // vault.bin's rename is not confirmed durable → throw. The DEK is already
+                            // durable, so the on-disk state is either {no bin} (open() = MissingImage
+                            // → retry) or a COMPLETE, openable vault — never {bin, no-dek}. No rollback
+                            // delete is needed.
                             throw VaultImageException.NotDurable()
                         }
                     } catch (t: Throwable) {

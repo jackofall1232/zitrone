@@ -666,26 +666,27 @@ class VaultImageStoreTest {
         assertArrayEquals(durablePayload, newStore(dir).unlock(passphrase)!!.payloadPlaintext)
     }
 
-    // ── 18. create() dir-fsync NOT_DURABLE rolls back BOTH files and throws — retry succeeds ──
+    // ── 18. create() DEK-step NOT_DURABLE: no vault.bin is written; open() = MissingImage; retry OK ──
 
     @Test
-    fun create_dirSyncNotDurable_throwsAndRollsBackBothFiles_retryWithDurableSyncSucceeds() {
+    fun create_dekStepNotDurable_writesNoBin_opensMissing_retryWithDurableSyncSucceeds() {
         val dir = tmp.newFolder()
-        // create() renames BOTH files into place then runs a SINGLE trailing dir-fsync covering
-        // both. Here that fsync reports NOT_DURABLE, so create() must THROW and ROLL BACK — deleting
-        // vault.bin FIRST, then vault.dek — leaving only a retryable state, never a CorruptImage brick.
+        // DEK-FIRST BARRIER. create() renames vault.dek, then CONFIRMS that rename durable BEFORE it
+        // ever writes vault.bin. Here the FIRST (dek) dir-fsync reports NOT_DURABLE, so create() must
+        // THROW before vault.bin is written — proving no image is written until the dek is durable.
         val store = newStore(dir) { DirSyncResult.NOT_DURABLE }
         assertThrows(VaultImageException.NotDurable::class.java) {
             store.create(passphrase, "genesis".toByteArray(Charsets.UTF_8))
         }
-        // Rolled back: NEITHER vault.bin NOR vault.dek remains on disk — open() reads MissingImage,
-        // the fully-retryable fresh-install state, never a bricked image-exists-but-unopenable one.
-        assertFalse("no vault.bin after a durability rollback", File(dir, "vault.bin").exists())
-        assertFalse("no vault.dek after a durability rollback", File(dir, "vault.dek").exists())
+        // vault.bin was NEVER written (the barrier: no image until the dek is confirmed durable). A
+        // stray vault.dek may remain, but with no image → open() reads MissingImage, the retryable
+        // fresh-install state, never a bricked image-exists-but-unopenable one.
+        assertFalse("no vault.bin is written before the dek is confirmed durable", File(dir, "vault.bin").exists())
         assertThrows(VaultImageException.MissingImage::class.java) { store.open() }
-        store.close() // the failed create released its registration; close() is idempotent
+        store.close() // the failed create/open released the registration; close() is idempotent
 
-        // A RETRY with a real/DURABLE dir-fsync SUCCEEDS and unlocks — proving retryable, not bricked.
+        // A RETRY with a DURABLE dir-fsync SUCCEEDS (overwriting any stray dek) and unlocks — proving
+        // retryable, not bricked.
         val content = "genesis on retry".toByteArray(Charsets.UTF_8)
         val retry = newStore(dir) { DirSyncResult.DURABLE }
         val open = retry.create(passphrase, content)
@@ -694,7 +695,42 @@ class VaultImageStoreTest {
         assertArrayEquals(content, newStore(dir).unlock(passphrase)!!.payloadPlaintext)
     }
 
-    // ── 19. A failed RE-open invalidates cached state — never serves it after the disk goes bad ─
+    // ── 19. create() IMAGE-step NOT_DURABLE: NO rollback deletes; the complete vault opens (recovery) ─
+
+    @Test
+    fun create_imageStepNotDurable_keepsBothFilesNoRollback_openRecoversTheCompleteVault() {
+        val dir = tmp.newFolder()
+        // DEK durable (call #1 = DURABLE), IMAGE not durable (call #2 = NOT_DURABLE) — key off call
+        // ORDER, since both fsyncs target the SAME baseDir. create() must THROW NotDurable but perform
+        // NO rollback deletes: the dek was confirmed durable BEFORE the bin was written, so the
+        // {bin present, dek absent} brick is unreachable and no delete is needed.
+        var call = 0
+        val store = newStore(dir) {
+            call++
+            if (call == 1) DirSyncResult.DURABLE else DirSyncResult.NOT_DURABLE
+        }
+        val content = "genesis whose image fsync is unconfirmed".toByteArray(Charsets.UTF_8)
+        assertThrows(VaultImageException.NotDurable::class.java) { store.create(passphrase, content) }
+        assertEquals("both the dek fsync and the bin fsync ran", 2, call)
+
+        // NO rollback deletes: BOTH vault.dek and vault.bin remain on disk — a COMPLETE vault whose
+        // IMAGE rename is merely unconfirmed-durable, never a torn {bin, no-dek} state.
+        assertTrue("vault.dek kept — no rollback delete", File(dir, "vault.dek").exists())
+        assertTrue("vault.bin kept — no rollback delete", File(dir, "vault.bin").exists())
+        store.close() // one store per dir: release before the fresh store reads from disk
+
+        // The documented recovery: a subsequent open() SUCCEEDS and unlocks to the created payload —
+        // the complete-but-unconfirmed vault is fully openable (the dek is durable, so it can't be lost).
+        val reopened = newStore(dir)
+        reopened.open()
+        assertArrayEquals(
+            "complete-but-unconfirmed vault opens to the created payload",
+            content,
+            reopened.unlock(passphrase)!!.payloadPlaintext,
+        )
+    }
+
+    // ── 20. A failed RE-open invalidates cached state — never serves it after the disk goes bad ─
 
     @Test
     fun failedReopen_invalidatesCachedState_neverServesStaleAfterDiskWentBad() {
@@ -724,7 +760,7 @@ class VaultImageStoreTest {
         }
     }
 
-    // ── 20. An oversized vault.bin is CorruptImage — rejected fast, no OOM read ────────────
+    // ── 21. An oversized vault.bin is CorruptImage — rejected fast, no OOM read ────────────
 
     @Test
     fun oversizedBin_isCorruptImage_withoutOom() {
@@ -740,7 +776,7 @@ class VaultImageStoreTest {
         assertThrows(VaultImageException.CorruptImage::class.java) { newStore(dir).open() }
     }
 
-    // ── 21. A wrong-size vault.dek is CorruptImage (present-but-wrong, not missing) ────────
+    // ── 22. A wrong-size vault.dek is CorruptImage (present-but-wrong, not missing) ────────
 
     @Test
     fun wrongSizeDek_isCorruptImage() {
