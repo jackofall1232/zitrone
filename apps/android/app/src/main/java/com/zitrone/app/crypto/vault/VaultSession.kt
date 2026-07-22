@@ -126,6 +126,14 @@ class VaultSession(
      * so this is the one place a persistent write problem (disk full, permissions)
      * surfaces for logging / crash reporting. Defaults to a no-op. MUST NOT throw —
      * a throw is caught and ignored so a broken sink cannot break the flush loop.
+     *
+     * A bare background-flush failure is deliberately NOT auto-retried (the next
+     * [update] / [flushNow] / [close] retries instead) — an ACCEPTED policy, not an
+     * oversight: only coalesced, non-inbound state is exposed here (the critical
+     * inbound path is durable via flush-before-ack + relay redelivery), and adding
+     * retry/backoff machinery is not worth the complexity for this narrow edge.
+     * Revisit toward a bounded/cold retry only if real low-end-device testing shows
+     * transient write failures are common.
      */
     private val onFlushError: (Throwable) -> Unit = {},
 ) : java.io.Closeable {
