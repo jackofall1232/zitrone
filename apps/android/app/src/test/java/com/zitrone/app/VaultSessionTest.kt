@@ -17,6 +17,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.currentTime
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -423,5 +424,54 @@ class VaultSessionTest {
         assertEquals("re-armed ceiling fires one full cooldown after the mid-flush mutation", 2, persisted.size)
         val reopened = unlockImage(passphrase, persisted.last(), ops, fast)!!
         assertArrayEquals("reentrant".toByteArray(), reopened.payloadPlaintext)
+    }
+
+    // A failed BACKGROUND flush must (1) surface the error to onFlushError and (2)
+    // drop the ceiling anchor — even when a mutation landed mid-flush and anchored it
+    // in the past — so a much-later update opens a FRESH cooldown window instead of
+    // firing immediately off the stale anchor (the persistent-error hot-loop).
+    @Test
+    fun `a failed background flush reports the error and drops the ceiling anchor`() = runTest {
+        val image = createImage(passphrase, "v0".toByteArray(), ops, fast)
+        val open = unlockImage(passphrase, image, ops, fast)!!
+        val persisted = mutableListOf<ByteArray>()
+        val flushErrors = mutableListOf<Throwable>()
+        lateinit var session: VaultSession
+        var failNext = true
+        session = VaultSession(
+            scope = backgroundScope,
+            ops = ops,
+            initialImage = image,
+            initialPayload = open.payloadPlaintext,
+            initialVaultKey = open.vaultKey,
+            slotIndex = open.slotIndex,
+            persist = { img ->
+                if (failNext) {
+                    failNext = false
+                    session.update("mid-flush".toByteArray()) // lands mid-flush, anchors firstDirtyAt in the past
+                    throw java.io.IOException("disk full")
+                }
+                persisted.add(img.copyOf())
+            },
+            clock = { currentTime },
+            cooldownMs = 2_000L,
+            flushContext = EmptyCoroutineContext,
+            onFlushError = { flushErrors.add(it) },
+        )
+
+        session.update("a".toByteArray()) // arms the ceiling at t=2000
+        advanceTimeBy(2_001)              // timer fires at 2000: reentrant mid-flush update, then persist FAILS
+        assertEquals("nothing persisted (the flush failed)", 0, persisted.size)
+        assertEquals("background flush failure surfaced to onFlushError", 1, flushErrors.size)
+        assertTrue("the reported error is the IOException", flushErrors[0] is java.io.IOException)
+
+        // Long past the stale mid-flush anchor: a fresh update must open a NEW window,
+        // not fire immediately (without the on-failure reset this would hot-loop).
+        advanceTimeBy(3_000) // t=5001
+        session.update("c".toByteArray())
+        runCurrent()
+        assertEquals("no immediate hot-loop flush; a fresh cooldown window started", 0, persisted.size)
+        advanceTimeBy(2_001) // reach the fresh ceiling (~5001 + 2000)
+        assertEquals("the fresh cooldown window flushed once", 1, persisted.size)
     }
 }

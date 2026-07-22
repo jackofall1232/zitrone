@@ -47,6 +47,14 @@ import kotlin.coroutines.CoroutineContext
  *  3. On [close] (lock / teardown / background) force a synchronous final reseal,
  *     then wipe the in-memory vault key and payload.
  *
+ * ⚠️ OWNERSHIP. The constructor takes ownership of [initialPayload] and
+ * [initialVaultKey] and **destructively wipes both caller arrays** during
+ * construction (it keeps private copies). This is deliberate — the VaultOpen the
+ * caller discards must not leave live key material or plaintext behind — but
+ * mutating constructor arguments is surprising for Kotlin/Java, so a caller MUST
+ * NOT read or reuse those two arrays after constructing a session. [initialImage]
+ * is ciphertext and is left intact.
+ *
  * THREADING. All public methods are thread-safe. Two monitors:
  *
  *  - [stateLock] guards the in-memory state (payload, image, dirty flags, the
@@ -97,6 +105,15 @@ class VaultSession(
      * CALLER's thread by design (the receive path already runs off-main).
      */
     private val flushContext: CoroutineContext = Dispatchers.IO,
+    /**
+     * Invoked (off any lock) with the exception when a BACKGROUND (ceiling) flush
+     * fails. The forced [flushNow] / [close] paths propagate their failure to the
+     * caller directly; a background flush can only swallow it, so this is the one
+     * place a persistent write problem (disk full, permissions) surfaces for
+     * logging / crash reporting. Defaults to a no-op. MUST NOT throw — a throw is
+     * caught and ignored so a broken sink cannot break the flush loop.
+     */
+    private val onFlushError: (Throwable) -> Unit = {},
 ) {
     /** Monitor for the in-memory state. Held only for fast transitions; never across I/O. */
     private val stateLock = Any()
@@ -267,6 +284,9 @@ class VaultSession(
             // Reseal OUTSIDE any lock this coroutine holds. A persist failure must not
             // crash the scope, so capture it rather than let it propagate.
             val result = runCatching { doFlush() }
+            // Surface a swallowed background-flush failure for diagnosis (off any lock).
+            // Guarded so a broken diagnostic sink cannot break the flush loop.
+            result.exceptionOrNull()?.let { err -> runCatching { onFlushError(err) } }
             synchronized(stateLock) {
                 // Deregister self (identity-checked, so a newer job is never cleared),
                 // and re-arm ONLY on a SUCCESSFUL flush that left us dirty — a mutation
@@ -337,6 +357,16 @@ class VaultSession(
                     // a full cooldown from the real mutation time — no lost update, no
                     // hot-loop. Cannot occur under single-worker confinement anyway.
                 }
+            } catch (t: Throwable) {
+                synchronized(stateLock) {
+                    // The batch did not reach disk (dirty stays true — data is still in
+                    // memory). Drop the ceiling anchor so the NEXT update() opens a fresh
+                    // cooldown window instead of an immediate, hot-looping retry off a
+                    // stale timestamp that a mid-flush update may have set. Covers BOTH
+                    // the background timer and a synchronous flushNow() that throws.
+                    if (!closed) firstDirtyAt = null
+                }
+                throw t
             } finally {
                 wipe(payloadCopy)
                 wipe(vaultKeyCopy)
