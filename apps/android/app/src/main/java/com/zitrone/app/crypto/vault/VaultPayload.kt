@@ -63,6 +63,11 @@ fun openPayload(vaultKey: ByteArray, payload: ByteArray, ops: VaultSodiumOps): B
     val padded = ops.aeadDecrypt(vaultKey, payload, PAYLOAD_AD) ?: return null
     try {
         return unpad(padded)
+    } catch (e: IllegalArgumentException) {
+        // A corrupt length prefix makes unpad throw — honor this function's
+        // "returns null on corrupt padding" contract rather than propagating,
+        // so unlockImage treats it as an unopenable payload, not a crash.
+        return null
     } finally {
         wipe(padded)
     }
