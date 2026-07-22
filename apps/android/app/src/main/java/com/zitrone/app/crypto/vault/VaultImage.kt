@@ -109,6 +109,31 @@ fun createImage(
 }
 
 /**
+ * Replace ONE slot's payload region in [image] with an ALREADY-SEALED payload,
+ * re-encoding the fixed-size image with every other region (the header, the whole
+ * slot table, and every OTHER payload region) carried over byte-for-byte
+ * unchanged. The result is always the same constant [IMAGE_BYTES] length.
+ *
+ * This is the reseal splice the in-memory session needs: it re-encrypts the vault
+ * key's OWN keystore payload in place, unlike [addVaultToImage], which seals a
+ * NEW vault under a new passphrase into a free slot. It is deliberately
+ * slot-agnostic and constant-length — it takes a caller-supplied [sealedPayload]
+ * of exactly [SLOT_PAYLOAD_BYTES] and does not know or reveal whether the slot is
+ * real or filler.
+ */
+internal fun spliceImagePayload(
+    image: ByteArray,
+    slotIndex: Int,
+    sealedPayload: ByteArray,
+): ByteArray {
+    require(sealedPayload.size == SLOT_PAYLOAD_BYTES) { "malformed payload region" }
+    val decoded = decodeImage(image)
+    val payloads = decoded.payloads.toMutableList()
+    payloads[slotIndex] = sealedPayload
+    return encodeImage(VaultImage(decoded.slots, payloads))
+}
+
+/**
  * Attempt [passphrase] against [image]. Runs [tryPassphrase] over every slot
  * (no early exit — identical work regardless of which slot, if any, matches),
  * then opens the matched slot's payload. Returns null when no slot matches (a
