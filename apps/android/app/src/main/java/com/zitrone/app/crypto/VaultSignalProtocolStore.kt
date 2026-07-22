@@ -90,11 +90,20 @@ class VaultSignalProtocolStore(
         // Read-existing + write in ONE mutate so the "identity changed?" answer is atomic.
         return runtime.mutate {
             val existing = it.signalRecords[key]
-            // true == replaced a DIFFERENT pre-existing identity (key change!). Compute this
-            // BEFORE putRecord, which wipes `existing`'s backing array (the superseded record).
-            val changed = existing != null && !existing.contentEquals(serialized)
-            putRecord(it, key, serialized)
-            changed
+            if (existing != null && existing.contentEquals(serialized)) {
+                // Byte-identical to what is already stored: do NOT putRecord — that would wipe +
+                // replace the backing array with an identical copy for nothing. contentEquals runs
+                // on the LIVE `existing` before any putRecord could wipe it. An unchanged identity
+                // is not a key change → false.
+                false
+            } else {
+                // true == replaced a DIFFERENT pre-existing identity (a key change!). The bytes are
+                // known non-identical here, so `existing != null` alone means "changed". Compute it
+                // BEFORE putRecord, which wipes `existing`'s backing array (the superseded record).
+                val changed = existing != null
+                putRecord(it, key, serialized)
+                changed
+            }
         }
     }
 

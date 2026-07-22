@@ -161,6 +161,21 @@ class VaultStateCodecTest {
     }
 
     @Test
+    fun `a duplicate section tag is rejected`() {
+        // TWO TAG_SIGNAL sections (each an empty count=0 body). v1 emits each tag AT MOST once, so
+        // a repeat is a noncanonical/malformed payload: decode must reject it, not silently let the
+        // second section replace (and strand un-wiped) the first's decoded value.
+        val plain = byteArrayOf(
+            1, //                version
+            0x01, 0, 0, 0, 4, // TAG_SIGNAL, section len 4
+            0, 0, 0, 0, //       signal count = 0
+            0x01, 0, 0, 0, 4, // TAG_SIGNAL AGAIN (duplicate)
+            0, 0, 0, 0, //       signal count = 0
+        )
+        assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(plain)) }
+    }
+
+    @Test
     fun `garbage (non-deflate) input is rejected`() {
         val garbage = ByteArray(64) { 0xFF.toByte() }
         assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(garbage) }

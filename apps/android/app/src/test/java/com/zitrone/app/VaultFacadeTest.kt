@@ -26,8 +26,11 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.signal.libsignal.protocol.IdentityKey
+import org.signal.libsignal.protocol.SignalProtocolAddress
 import org.signal.libsignal.protocol.ecc.Curve
 import org.signal.libsignal.protocol.state.PreKeyRecord
 import java.io.IOException
@@ -142,6 +145,45 @@ class VaultFacadeTest {
             assertArrayEquals("carol untouched", byteArrayOf(10), state.signalRecords["session:carol-account:1"])
             assertArrayEquals("own prekey untouched", byteArrayOf(11), state.signalRecords["prekey:5"])
         }
+    }
+
+    // ── saveIdentity: skip a redundant byte-identical write ──────────────────────
+
+    @Test
+    fun `saveIdentity with an identical key returns false and does not re-store the record`() {
+        val runtime = runtimeOf()
+        val store = VaultSignalProtocolStore(runtime)
+        val address = SignalProtocolAddress("contact-account", 1)
+        val identityKey = IdentityKey(Curve.generateKeyPair().publicKey)
+        // Mirrors VaultSignalProtocolStore.remoteIdentityKey — a load-bearing, stable key scheme.
+        val storedKey = "remote_identity:contact-account:1"
+
+        // First save of a brand-new remote identity: no prior record → false (TOFU, not a change).
+        assertFalse("first save of a new identity is not a change", store.saveIdentity(address, identityKey))
+        val firstArray = runtime.read { it.signalRecords.getValue(storedKey) }
+
+        // Saving the BYTE-IDENTICAL key again returns false AND skips putRecord: the backing array
+        // is the SAME object (not wiped + replaced with an identical copy) — the "not dirtied" probe.
+        assertFalse("an identical re-save is not a change", store.saveIdentity(address, identityKey))
+        val secondArray = runtime.read { it.signalRecords.getValue(storedKey) }
+        assertSame("identical save skipped putRecord — same backing array", firstArray, secondArray)
+
+        // The identity is unchanged and still loads back.
+        assertArrayEquals(
+            "identity still loads unchanged",
+            identityKey.serialize(),
+            store.getIdentity(address)!!.serialize(),
+        )
+
+        // A DIFFERENT key DOES replace it and is reported as a change (true).
+        val changedKey = IdentityKey(Curve.generateKeyPair().publicKey)
+        assertTrue("a different identity is reported as a change", store.saveIdentity(address, changedKey))
+        assertArrayEquals(
+            "the changed identity is now stored",
+            changedKey.serialize(),
+            store.getIdentity(address)!!.serialize(),
+        )
+        runtime.close()
     }
 
     // ── signal scalar fidelity (load-bearing for the PR-E verbatim migration) ─────

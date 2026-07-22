@@ -259,6 +259,11 @@ object VaultStateCodec {
         var settings: VaultScopedSettings? = null
         var auth: AuthState? = null
 
+        // v1 emits each tag AT MOST once; a repeat is a noncanonical/malformed payload. Reject it
+        // — otherwise the second assignment silently replaces the first decoded value, and for
+        // TAG_SIGNAL the first map's key material becomes both unreachable AND un-wiped (the
+        // failure-wipe below only covers the FINAL `signal` local).
+        val seenTags = HashSet<Int>()
         try {
             while (r.hasRemaining()) {
                 val tag = r.u8()
@@ -266,6 +271,11 @@ object VaultStateCodec {
                 require(len >= 0) { "negative section length" }
                 val body = r.bytes(len)
                 try {
+                    // Reject a duplicate INSIDE this try, so `body` is wiped by the finally and the
+                    // outer catch wipes any already-decoded partial signal map before the rethrow.
+                    if (!seenTags.add(tag)) {
+                        throw IllegalArgumentException("duplicate section tag: $tag")
+                    }
                     when (tag) {
                         TAG_SIGNAL -> signal = decodeSignal(body)
                         TAG_ROSTER -> rosterJson = String(body, Charsets.UTF_8)
@@ -430,12 +440,16 @@ object VaultStateCodec {
     private fun writeNullableString(out: WipeableBuffer, s: String?) {
         if (s == null) {
             writeInt(out, NULL_LEN)
-        } else {
-            val bytes = s.toByteArray(Charsets.UTF_8)
+            return
+        }
+        // `bytes` is a fresh copy of token material (the source String is itself un-wipeable).
+        val bytes = s.toByteArray(Charsets.UTF_8)
+        try {
             writeInt(out, bytes.size)
             out.write(bytes)
-            // `bytes` is a fresh copy of token material (the source String is itself
-            // un-wipeable) — zero this transient now that it is folded into `out`.
+        } finally {
+            // Zero this transient on EVERY path — a throw mid-write (e.g. OOM while `out` grows)
+            // must not strand a token copy un-wiped.
             wipe(bytes)
         }
     }
@@ -459,11 +473,15 @@ object VaultStateCodec {
     // ── section framing helpers ──────────────────────────────────────────────────
 
     private fun writeSection(out: WipeableBuffer, tag: Int, body: ByteArray) {
-        out.write(tag)
-        writeInt(out, body.size)
-        out.write(body)
-        // The body carried a copy of section secrets into `out`; wipe the transient copy.
-        wipe(body)
+        // The body carried a copy of section secrets into `out`; wipe the transient copy on EVERY
+        // path — a throw mid-write (e.g. OOM while `out` grows) must not strand it un-wiped.
+        try {
+            out.write(tag)
+            writeInt(out, body.size)
+            out.write(body)
+        } finally {
+            wipe(body)
+        }
     }
 
     private fun writeInt(out: WipeableBuffer, value: Int) {

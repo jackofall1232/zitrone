@@ -32,19 +32,31 @@ import kotlin.concurrent.withLock
  * the block to the live state BEFORE it encodes, and it cannot generically UNDO an
  * arbitrary block. So when `encode` throws [VaultCapacityException] (the compressed state
  * no longer fits the fixed region), the in-memory state KEEPS the mutation but it is NOT
- * scheduled to disk, the throw propagates to the caller, and the runtime latches
- * [capacityExceeded] for PR-D to surface. This is a deliberate design choice over
+ * scheduled to disk (`session.update` is never reached) and the throw propagates. The
+ * runtime then holds an UNSCHEDULED live mutation: the live [VaultState] carries an advance
+ * the session's last-scheduled payload does not. [capacityExceeded] tracks exactly that
+ * condition — it is SET here and CLEARED on the next [mutate] whose `session.update`
+ * succeeds (that call schedules the WHOLE live state again — including any earlier overflowed
+ * mutation that now fits, e.g. after a delete). While it is set, [flushBeforeAck] REFUSES
+ * (throws) rather than confirm durability, so a capacity overflow can NEVER be acked as
+ * durable: the inbound message that drove the mutation stays un-acked and redelivers until
+ * capacity is resolved and the state re-scheduled. This is a deliberate design choice over
  * copy-on-write snapshots (which would cost a full state copy on EVERY write); the facade
  * write paths are all small deltas, so the realistic failure is a gradual approach to the
  * cap that PR-D's headroom check catches before it bites, not a single write that leaps
- * over it. A latched [capacityExceeded] means: at least one mutation is live in memory but
- * unpersisted — treat the vault as needing attention, and do NOT assume a later flush
- * captured it.
+ * over it. RESIDUAL: an overflow mutation that NEVER fits again is lost on [close] (the
+ * session persists only what was scheduled) — but flush-before-ack never acked it, so the
+ * inbound redelivers and no ACKED data is lost.
  *
- * FLUSH-BEFORE-ACK. [flushBeforeAck] delegates to [VaultSession.flushNow] and propagates
- * its throw VERBATIM (including [VaultImageException.NotDurable] and any IO error). A throw
- * means the state did NOT reach disk durably — the caller MUST NOT ack the inbound message
- * that triggered the mutation; the relay redelivers it, and a later flush that succeeds acks.
+ * FLUSH-BEFORE-ACK. [flushBeforeAck] first REFUSES (throws [IllegalStateException]) when
+ * [capacityExceeded] is set — the live state holds an unscheduled mutation, so the session's
+ * (older) scheduled payload does NOT reflect the advance a caller would be acking; flushing it
+ * and returning normally would ack an inbound ratchet advance that lives only in memory and is
+ * lost on close. Otherwise it delegates to [VaultSession.flushNow] and propagates its throw
+ * VERBATIM (including [VaultImageException.NotDurable] and any IO error). A throw — capacity or
+ * flush failure — means the state did NOT reach disk durably: the caller MUST NOT ack the
+ * inbound message that triggered the mutation; the relay redelivers it, and a later flush (once
+ * the state is under the cap and re-scheduled) that succeeds acks.
  *
  * LOCK-ORDER INVARIANT. [stateLock] is the OUTERMOST lock: [mutate] holds it across
  * `session.update` (which briefly takes the session's own locks), and the session NEVER
@@ -72,9 +84,14 @@ class VaultRuntime(
     private var closed = false
 
     /**
-     * Latched the first time a [mutate] encode overflows the region (see the capacity
-     * contract in the class kdoc). Never reset here — PR-D observes it and decides the UX.
-     * `@Volatile` so a reader on another thread sees the latch without taking [stateLock].
+     * True while the live state holds a mutation that FAILED to encode and is therefore NOT
+     * scheduled to the session (see the capacity contract in the class kdoc). SET when a
+     * [mutate] encode overflows the region; CLEARED on the next [mutate] whose `session.update`
+     * succeeds (that call schedules the ENTIRE live state — including any earlier overflowed
+     * mutation that now fits — so nothing is left unscheduled). [flushBeforeAck] REFUSES while
+     * it is set, so an overflow can never be acked as durable. `@Volatile` so a reader on
+     * another thread sees the current value without taking [stateLock]; transitions happen only
+     * under [stateLock] inside [mutate].
      */
     @Volatile
     var capacityExceeded: Boolean = false
@@ -92,10 +109,11 @@ class VaultRuntime(
 
     /**
      * Apply [block] to the live state, then encode the whole state and schedule a reseal
-     * via [VaultSession.update] — all under [stateLock]. Returns [block]'s result.
+     * via [VaultSession.update] — all under [stateLock]. Returns [block]'s result. A
+     * successful `update` CLEARS [capacityExceeded] (the whole live state is scheduled again).
      *
      * On [VaultCapacityException] from encode: the in-memory mutation is RETAINED but NOT
-     * persisted, [capacityExceeded] latches, and the exception propagates (see the class
+     * scheduled, [capacityExceeded] is SET, and the exception propagates (see the class
      * kdoc's capacity contract). Throws [IllegalStateException] once closed.
      */
     fun <T> mutate(block: (VaultState) -> T): T = stateLock.withLock {
@@ -105,13 +123,19 @@ class VaultRuntime(
             VaultStateCodec.encode(state)
         } catch (e: VaultCapacityException) {
             // The block already mutated the live state and we cannot generically revert it;
-            // latch the condition and propagate. State is dirty-in-memory but unpersisted.
+            // the live state now holds an UNSCHEDULED mutation. Set the flag and propagate so
+            // flushBeforeAck refuses to confirm durability until the state is re-scheduled.
             capacityExceeded = true
             throw e
         }
         try {
             // Non-blocking by session contract: it copies + schedules, no I/O here.
             session.update(encoded)
+            // A successful update scheduled the ENTIRE current live state, so no unscheduled
+            // mutation remains (this also covers an EARLIER overflow that now fits, e.g. after a
+            // delete). Clear only AFTER update returns; the capacity-throw above happens BEFORE
+            // this, so an overflowing mutate correctly leaves the flag set.
+            capacityExceeded = false
         } finally {
             // update() took its own copy, so this transient (compressed secrets) can go now.
             wipe(encoded)
@@ -123,7 +147,10 @@ class VaultRuntime(
      * Force a synchronous, durable reseal of the current state and return only once the
      * bytes are confirmed durable. Propagates [VaultSession.flushNow]'s throw verbatim
      * ([VaultImageException.NotDurable] / IO) — a THROW means DO NOT ACK. Throws
-     * [IllegalStateException] once closed.
+     * [IllegalStateException] once closed, and ALSO throws [IllegalStateException] BEFORE the
+     * flush when [capacityExceeded] is set: the live state holds an unscheduled mutation, so
+     * confirming durability of the (older) scheduled payload would ack an advance that never
+     * reached the session (see the class kdoc's capacity contract). Both throws mean DO NOT ACK.
      *
      * The `closed` check runs under [stateLock]; `flushNow` runs OUTSIDE it (it is disk-bound)
      * so a durable reseal never blocks concurrent reads/mutates (see the lock-order note).
@@ -139,7 +166,17 @@ class VaultRuntime(
      * relay redelivers, and the ratchet drops the duplicate.
      */
     fun flushBeforeAck() {
-        stateLock.withLock { check(!closed) { "vault runtime is closed" } }
+        stateLock.withLock {
+            check(!closed) { "vault runtime is closed" }
+            // Fail-closed on an unscheduled capacity overflow: the live state holds a mutation
+            // the session's scheduled payload does NOT carry, so flushing (which reseals only the
+            // scheduled payload) and returning normally would ack an inbound advance that lives
+            // only in memory and is lost on close. A throw means DO NOT ACK — the inbound stays
+            // un-acked and redelivers until the state is back under cap and re-scheduled.
+            check(!capacityExceeded) {
+                "vault state exceeds capacity; the live mutation is unscheduled — cannot confirm durability"
+            }
+        }
         session.flushNow()
         // Post-flush recheck (see kdoc): flushNow no-ops silently on a closed session, so a
         // close that interleaved the flush must NOT let this report false durability.

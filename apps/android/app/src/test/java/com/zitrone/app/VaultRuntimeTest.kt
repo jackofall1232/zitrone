@@ -131,7 +131,7 @@ class VaultRuntimeTest {
     }
 
     @Test
-    fun `an over-capacity mutate throws VaultCapacityException, latches the flag, retains in memory, does not persist`() {
+    fun `an over-capacity mutate sets the flag, retains in memory, does not persist, and makes flushBeforeAck refuse until re-scheduled`() {
         val persisted = AtomicInteger(0)
         val runtime = runtimeOf(persist = { _, _ -> persisted.incrementAndGet() })
 
@@ -147,17 +147,23 @@ class VaultRuntimeTest {
             runtime.mutate { it.signalRecords["huge"] = huge }
         }
 
-        // Latched, retained in memory, but NOT persisted (the session never saw the oversized payload).
-        assertTrue("capacity flag latched", runtime.capacityExceeded)
+        // Flag set, mutation retained in memory, but NOT scheduled (the session never saw the
+        // oversized payload — it still holds the last small one).
+        assertTrue("capacity flag set", runtime.capacityExceeded)
         assertTrue("the mutation is retained in memory", runtime.read { it.signalRecords.containsKey("huge") })
-        runtime.flushBeforeAck() // session is clean (still holds the last small payload)
+
+        // FLUSH-BEFORE-ACK REFUSES while the live mutation is unscheduled: a throw means DO NOT
+        // ACK, so the inbound redelivers rather than acking an advance that is lost on close. It
+        // throws BEFORE flushNow, so nothing is persisted.
+        assertThrows(IllegalStateException::class.java) { runtime.flushBeforeAck() }
         assertEquals("the oversized state was never persisted", 1, persisted.get())
 
-        // Recovery: removing the huge record encodes fine and persists again; the flag stays latched.
+        // Recovery: removing the huge record encodes fine, re-schedules the WHOLE live state, and
+        // CLEARS the flag on the successful session.update. flushBeforeAck now succeeds + persists.
         runtime.mutate { it.signalRecords.remove("huge") }
+        assertFalse("capacityExceeded cleared by the next successful mutate", runtime.capacityExceeded)
         runtime.flushBeforeAck()
         assertEquals("a small state persists after recovery", 2, persisted.get())
-        assertTrue("capacityExceeded stays latched (never reset here)", runtime.capacityExceeded)
     }
 
     @Test
