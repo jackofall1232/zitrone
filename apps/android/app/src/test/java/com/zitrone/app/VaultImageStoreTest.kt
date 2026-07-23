@@ -996,6 +996,34 @@ class VaultImageStoreTest {
     }
 
     @Test
+    fun hasDeleteIntentMarker_tracksTheIntentFileLifetime_evenPastConfirmed() {
+        val dir = tmp.newFolder()
+        val store = newStore(dir)
+        store.create(passphrase, "v".toByteArray(Charsets.UTF_8))
+
+        // Round 16 (R15-P2): the auth-protection signal follows the INTENT FILE, from its write
+        // until a confirmed destroy retires it.
+        assertFalse("no marker before any delete", store.hasDeleteIntentMarker())
+
+        store.markDeleteIntent()
+        assertTrue("present after intent write", store.hasDeleteIntentMarker())
+        assertTrue("deleteIntentPending too (confirmed absent)", store.deleteIntentPending())
+
+        // KEY DISTINCTION vs deleteIntentPending: once the confirmed marker exists, the intent is
+        // STILL present, so the auth guard stays true — but deleteIntentPending() (intent && !confirmed)
+        // goes false. Using deleteIntentPending for the guard would drop auth protection here, exactly
+        // the confirmed-not-durable-then-lost gap.
+        store.markServerDeleteConfirmed()
+        assertTrue("intent marker STILL present through the confirmed window", store.hasDeleteIntentMarker())
+        assertFalse("deleteIntentPending is now false (confirmed present)", store.deleteIntentPending())
+
+        // Retired only by a confirmed destroy.
+        store.destroy()
+        assertFalse("intent marker gone after destroy", store.hasDeleteIntentMarker())
+        assertFalse(File(dir, "vault.bin").exists())
+    }
+
+    @Test
     fun destroy_doesNotThrow_whenFilesAreAlreadyAbsent_idempotencyViaExistsNotDeleteBool() {
         val dir = tmp.newFolder()
         // The verify check is keyed on exists(), NOT the delete() bool: an already-absent file re-stats

@@ -132,6 +132,15 @@ class MessagingCoordinator(
      * [AppContainer.markServerDeleteConfirmed].
      */
     private val persistServerDeleteConfirmed: () -> Unit = {},
+    /**
+     * Whether the DURABLE delete-intent marker is present (production:
+     * [AppContainer.hasVaultDeleteIntentMarker]). This is the durable auth-protection signal that
+     * [onSessionRevoked] honors (round 16, R15-P2): its true-window equals the intent marker's
+     * on-disk lifetime — spanning not-confirmed exits AND process restart — which the process-local
+     * [deleteInFlight] flag alone could not. Reads a file stat under the image lock; called only on
+     * the rare revoke path.
+     */
+    private val intentMarkerPresent: () -> Boolean = { false },
 ) : WsClient.Listener {
 
     private val _typingPeers = MutableStateFlow<Set<String>>(emptySet())
@@ -189,12 +198,14 @@ class MessagingCoordinator(
     private var acceptingDeliveries = false
 
     /**
-     * True while [deleteAccountAndWipe]'s coroutine is running (round 15, R14-1): from the start of
-     * the delete flow through destroy(). While set, [onSessionRevoked] must NOT clear the
-     * vault-backed tokens or tear the session down — the delete flow owns teardown, and stripping
-     * auth in the intent→confirmed window would strand a completed-server-delete vault (the reconcile
-     * could no longer reach the idempotent 404). Written by the confined+NonCancellable delete
-     * coroutine, read on the socket-callback thread. @Volatile for cross-thread visibility.
+     * True only while [deleteAccountAndWipe]'s coroutine is RUNNING (round 15). It covers the
+     * narrow window BEFORE the intent marker is durable (coroutine start → intent write), which the
+     * durable [intentMarkerPresent] check cannot yet see. The full auth-protection guard is
+     * `deleteInFlight || intentMarkerPresent()` (round 16, R15-P2): the union spans coroutine-start
+     * through the intent marker's retire, so a revoke can never clear tokens across a not-confirmed
+     * exit or a restart while the marker persists — the guard's true-window now EQUALS the marker's
+     * lifetime, not just this coroutine's. Written by the confined+NonCancellable coroutine, read on
+     * the socket-callback thread. @Volatile for cross-thread visibility.
      */
     @Volatile
     private var deleteInFlight = false
@@ -1816,14 +1827,17 @@ class MessagingCoordinator(
     }
 
     override fun onSessionRevoked() {
-        // R14-1 (round 15): a revoke that RACES an in-flight account delete must NOT clear tokens
-        // or tear the session down. Server-side deletion itself commonly triggers this revoke, and
-        // clearing the vault-backed tokens in the intent→confirmed window would strand a
-        // completed-server-delete vault (its reconcile could no longer authenticate the idempotent
-        // 404). The delete flow owns teardown: on CONFIRMED it destroys everything; on not-confirmed
-        // it keeps the session live (a subsequent 401 / the next-unlock reconcile then handles the
-        // stale session). So during a delete, this revoke is a no-op.
-        if (deleteInFlight) return
+        // A revoke must NOT clear tokens or tear the session down while a delete is PENDING (round
+        // 16, R15-P2). "Pending" is the DURABLE intent marker's lifetime — from its durable write
+        // until a confirmed destroy() retires it — which persists across DEFINITE_FAILURE /
+        // AMBIGUOUS / confirmed-not-durable exits AND process restart, long after this coroutine
+        // ends. Stripping the vault-backed tokens in that window would strand a completed- (or
+        // ambiguously-) deleted account: the next-unlock reconcile could no longer authenticate the
+        // idempotent 404. `deleteInFlight` additionally covers the sub-window before the intent
+        // marker is durable. The delete flow owns teardown (CONFIRMED → destroy; not-confirmed →
+        // keep the session, a later 401 / reconcile handles the stale session), so during a pending
+        // delete this revoke is a no-op. Server-side deletion itself commonly triggers this revoke.
+        if (deleteInFlight || intentMarkerPresent()) return
         // Fast, thread-safe teardown on the socket callback thread: stop the
         // relink loop, drop tokens, and — BEFORE the UI is bounced to the gate —
         // synchronously cancel every armed reminder job. Re-fire jobs run on

@@ -790,6 +790,21 @@ class VaultImageStore internal constructor(
         imageLock.withLock { deleteIntentFile.exists() && !serverDeletedFile.exists() }
 
     /**
+     * True while the DURABLE delete-intent marker is present — from its durable write until a
+     * confirmed [destroy] retires it, spanning every not-confirmed exit AND process restart (round
+     * 16, R15-P2). This is the auth-protection lifetime: while it holds, no auth-clearing path may
+     * strip the vault-backed tokens, because a future reconcile may need them to reach the
+     * idempotent 404. Deliberately NOT `&& !confirmed` (unlike [deleteIntentPending]): a
+     * confirmed marker that was created but not fsync-durable ([MessagingCoordinator]'s
+     * onConfirmedNotDurable) can vanish on a crash, dropping back to an intent-only reconcile that
+     * still needs auth — so auth is protected while the intent file is present, regardless of the
+     * confirmed marker (harmlessly true through the brief confirmed→destroy window, where auth is
+     * about to be destroyed anyway).
+     */
+    fun hasDeleteIntentMarker(): Boolean =
+        imageLock.withLock { deleteIntentFile.exists() }
+
+    /**
      * Claim the single-instance registration for [baseDir] (see class kdoc). Idempotent
      * for THIS instance (a re-open no-ops); throws [IllegalStateException] if a DIFFERENT
      * instance already holds the directory. The compound check-then-add is atomic under
