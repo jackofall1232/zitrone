@@ -560,31 +560,38 @@ class MessagingCoordinator(
             }
 
             stage = "ws-send"
-            // Non-suspending publish tail: on the confinement worker this
-            // check→deposit is atomic against deleteContact, so a contact torn
-            // down before this point drops the envelope AND the local plaintext,
-            // and one torn down after this point was still live when we deposited.
-            if (!contactExists(conversation.contactId)) {
-                diag("send: contact deleted mid-send — dropping local copy")
-                messages.discard(messageId)
-            } else if (flushThenSend(
-                    // Outbound durable barrier (symmetric to the inbound ackDurable): reseal the
-                    // SENDING ratchet advance encrypt() just made BEFORE handing ciphertext to the
-                    // relay, so a crash between hand-off and the coalesced reseal can't roll the
-                    // ratchet back and re-encrypt a later message at the same chain index.
+            // Outbound durable barrier BEFORE the non-suspending tail (D2c round 6): reseal the
+            // SENDING ratchet advance encrypt() just made and confirm it durable NOW — the flush's
+            // transient-retry backoff SUSPENDS, so it must complete OUTSIDE the check→send tail,
+            // never between them (a suspension there would let a queued deleteContact interleave and
+            // publish to a just-deleted contact). On a non-durable flush the message is NOT sent:
+            // mark it failed for retry and stop before the tail.
+            if (!flushSendRatchet(
                     flush = flushBeforeAck,
-                    send = { ws.sendMessage(envelope) },
                     onNotDurable = {
                         diag("send: sending-ratchet flush not durable — not sent, marked for retry")
                     },
                 )
             ) {
-                // Flushed durable AND enqueued — but honestly still just SENDING. The tick waits
-                // for the relay's message.stored (→SENT) and the recipient's message.delivered
-                // (→DELIVERED); see [MessageState].
+                diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
+                messages.markFailed(messageId)
+                return@runCatching
+            }
+            // NON-SUSPENDING publish tail: on the confinement worker this check→deposit is atomic
+            // against deleteContact (the durable flush already completed above, OUTSIDE this
+            // window), so a contact torn down before this point drops the envelope AND the local
+            // plaintext, and one torn down after this point was still live when we deposited.
+            if (!contactExists(conversation.contactId)) {
+                diag("send: contact deleted mid-send — dropping local copy")
+                messages.discard(messageId)
+            } else if (ws.sendMessage(envelope)) {
+                // Handed to the relay — but honestly still just SENDING. The tick waits for the
+                // relay's message.stored (→SENT) and the recipient's message.delivered (→DELIVERED);
+                // see [MessageState].
             } else {
-                // The flush was not durable (never sent) OR the socket was down: either way the
-                // send did not reach the relay. Connection state only — never the envelope.
+                // The socket was down: the send did not reach the relay. The ratchet advance is
+                // already durable, so a retry advances cleanly. Connection state only — never the
+                // envelope.
                 diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
                 messages.markFailed(messageId)
             }
@@ -775,25 +782,30 @@ class MessagingCoordinator(
                 mediaType = MessageEnvelope.MEDIA_TEXT,
             )
             stage = "ws-send"
-            // Non-suspending publish tail (see [confined]): the blob upload above
-            // suspended, so re-check the contact still exists — atomically with
-            // the deposit — before handing ciphertext to the relay. If it was
-            // deleted mid-upload, drop the envelope AND the local copy (incl. the
-            // in-memory attachment bytes).
-            if (!contactExists(conversation.contactId)) {
-                diag("send: contact deleted mid-send — dropping local copy")
-                messages.discard(messageId)
-            } else if (flushThenSend(
-                    // Outbound durable barrier (see [deliverText]): reseal the sending-ratchet
-                    // advance from encrypt() durable BEFORE handing ciphertext to the relay.
+            // Outbound durable barrier BEFORE the non-suspending tail (see [deliverText]): reseal
+            // the sending-ratchet advance from encrypt() durable NOW — its transient-retry backoff
+            // SUSPENDS, so it must run OUTSIDE the check→send tail (the blob upload above already
+            // suspended; the flush is the last suspension before the atomic deposit). On a
+            // non-durable flush the attachment is NOT sent: mark it failed and stop before the tail.
+            if (!flushSendRatchet(
                     flush = flushBeforeAck,
-                    send = { ws.sendMessage(envelope) },
                     onNotDurable = {
                         diag("send: sending-ratchet flush not durable — not sent, marked for retry")
                     },
                 )
             ) {
-                // Flushed durable AND enqueued — honestly still SENDING until the relay/peer acks.
+                diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
+                messages.markFailed(messageId)
+                return@runCatching
+            }
+            // NON-SUSPENDING publish tail (see [confined]): atomic against deleteContact with the
+            // durable flush already done. If the contact was deleted mid-upload, drop the envelope
+            // AND the local copy (incl. the in-memory attachment bytes).
+            if (!contactExists(conversation.contactId)) {
+                diag("send: contact deleted mid-send — dropping local copy")
+                messages.discard(messageId)
+            } else if (ws.sendMessage(envelope)) {
+                // Handed to the relay — honestly still SENDING until the relay/peer acks.
             } else {
                 diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
                 messages.markFailed(messageId)
@@ -924,26 +936,32 @@ class MessagingCoordinator(
                     burnOnRead = false,
                     mediaType = MessageEnvelope.MEDIA_TEXT,
                 )
-                // Non-suspending publish tail (see [confined]): atomic with
-                // deleteContact. A receipt for a just-deleted contact is dropped
-                // (no post-delete ciphertext) and not queued.
-                if (!contactExists(contactId)) {
-                    diag("receipt: contact deleted mid-send — dropped, not queued")
-                } else if (flushThenSend(
-                        // Outbound durable barrier (see [deliverText]): the receipt's encrypt()
-                        // advanced the sending ratchet too — reseal it durable before the hand-off.
+                // Outbound durable barrier BEFORE the non-suspending tail (see [deliverText]): the
+                // receipt's encrypt() advanced the sending ratchet too — reseal it durable NOW, its
+                // suspending backoff OUTSIDE the check→send tail. On a non-durable flush the receipt
+                // is NOT sent: the messages are already READ locally so they never re-enter
+                // onMessagesSeen — queue the ids for the reconnect flush and stop before the tail.
+                if (!flushSendRatchet(
                         flush = flushBeforeAck,
-                        send = { ws.sendMessage(envelope) },
                         onNotDurable = {
                             diag("receipt: sending-ratchet flush not durable — queued for retry")
                         },
                     )
                 ) {
+                    diag("receipt: not handed to relay — queued (${ws.connectionState.value})")
+                    queueReceipts(contactId, messageIds)
+                    return@runCatching
+                }
+                // NON-SUSPENDING publish tail (see [confined]): atomic with deleteContact, the
+                // durable flush already done. A receipt for a just-deleted contact is dropped (no
+                // post-delete ciphertext) and not queued.
+                if (!contactExists(contactId)) {
+                    diag("receipt: contact deleted mid-send — dropped, not queued")
+                } else if (ws.sendMessage(envelope)) {
                     // Delivered to the socket — nothing more to do.
                 } else {
-                    // Flush not durable OR socket down. The messages are already READ locally, so
-                    // they will never re-enter onMessagesSeen — queue the ids for the reconnect
-                    // flush. Connection state only — never the envelope.
+                    // Socket down. The messages are already READ locally, so queue the ids for the
+                    // reconnect flush. Connection state only — never the envelope.
                     diag("receipt: not handed to relay — queued (${ws.connectionState.value})")
                     queueReceipts(contactId, messageIds)
                 }
@@ -1561,26 +1579,29 @@ internal suspend fun flushThenAck(
 }
 
 /**
- * Outbound durable barrier (D2c round 2), symmetric to [flushThenAck]. signal.encrypt advances the
- * SENDING ratchet (coalesced reseal via the vault); this reseals it DURABLE via [flush] BEFORE
- * handing the ciphertext to the relay via [send], so a crash between the hand-off and the background
- * reseal can never roll the sending ratchet back and re-encrypt a later message at the SAME chain
- * index (key/nonce reuse — a forward-secrecy break). On a non-durable [flush] the message is NOT
- * sent (returns false → the caller marks it failed / queues it for retry); the in-memory ratchet
- * advance the coalesced reseal may still persist leaves at worst a benign skipped index, which the
- * recipient's ratchet tolerates. A [CancellationException] is rethrown so cooperative cancellation
- * unwinds. The default no-op [flush] on the non-vault path never throws, so [send] always fires —
- * behaviour-identical to the pre-D2c immediate send. Transient blips ([isTransientFlushFailure])
- * are retried up to [maxAttempts] exactly like the inbound barrier; capacity / closed fail-closed.
+ * Outbound durable barrier (D2c round 2; round 6 split out the send). signal.encrypt advances the
+ * SENDING ratchet (coalesced reseal via the vault); this reseals it DURABLE via [flush] and reports
+ * whether that flush confirmed — the CALLER then runs its NON-SUSPENDING `contactExists → sendMessage`
+ * tail iff this returned true. Splitting the flush OUT of the send is load-bearing: [flush] SUSPENDS
+ * on its transient-retry backoff, so it must run BEFORE the check→send tail, never between the check
+ * and the send — otherwise a queued deleteContact could interleave on the confined worker and publish
+ * ciphertext to (or resurface plaintext for) a just-deleted contact, breaking delete-atomicity. The
+ * durable-before-handoff crash guarantee is unchanged: [flush] is still after encrypt() and before
+ * the send, so a crash between the eventual hand-off and the background reseal can never roll the
+ * sending ratchet back and re-encrypt a later message at the SAME chain index (key/nonce reuse — a
+ * forward-secrecy break).
  *
- * Returns whether the message was handed to the relay durably-after-flush: false means either the
- * flush was not durable (never sent) OR [send] reported the socket was down — the caller treats both
- * as a non-send. Extracted top-level (mirroring [flushThenAck]) so the ordering + fail-closed
- * decision is host-testable without a live socket.
+ * Returns whether the ratchet advance was confirmed DURABLE. false → the caller must NOT send (marks
+ * the message failed / queues it for retry); the in-memory advance the coalesced reseal may still
+ * persist leaves at worst a benign skipped index, which the recipient's ratchet tolerates. A
+ * [CancellationException] is rethrown so cooperative cancellation unwinds. The default no-op [flush]
+ * on the non-vault path never throws, so it always returns true — behaviour-identical to the pre-D2c
+ * immediate send. Transient blips ([isTransientFlushFailure]) are retried up to [maxAttempts] exactly
+ * like the inbound barrier; capacity / closed fail-closed. Extracted top-level (mirroring
+ * [flushThenAck]) so the ordering + fail-closed decision is host-testable without a live socket.
  */
-internal suspend fun flushThenSend(
+internal suspend fun flushSendRatchet(
     flush: suspend () -> Unit,
-    send: () -> Boolean,
     onNotDurable: () -> Unit,
     maxAttempts: Int = FLUSH_MAX_ATTEMPTS,
     backoff: suspend (attempt: Int) -> Unit = { attempt -> delay(FLUSH_RETRY_BASE_MS * attempt) },
@@ -1593,7 +1614,7 @@ internal suspend fun flushThenSend(
             throw c
         } catch (t: Throwable) {
             // Retry only a transient blip while attempts remain; capacity / closed fail closed and
-            // do NOT send — the message stays un-sent for the caller's retry.
+            // the caller does NOT send — the message stays un-sent for its retry.
             if (attempt < maxAttempts && isTransientFlushFailure(t)) {
                 backoff(attempt)
                 attempt++
@@ -1602,7 +1623,7 @@ internal suspend fun flushThenSend(
             onNotDurable()
             return false
         }
-        return send()
+        return true
     }
 }
 

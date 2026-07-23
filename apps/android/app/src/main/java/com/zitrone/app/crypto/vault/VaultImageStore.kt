@@ -569,6 +569,47 @@ class VaultImageStore internal constructor(
     }
 
     /**
+     * DESTROY every on-disk trace of this vault and drop all in-RAM state — the
+     * account-deletion primitive (no remanence). Under [imageLock]: wipe the in-RAM
+     * DEK, drop the cached [canonical], delete `vault.bin` and `vault.dek` (and any
+     * interrupted-write `.tmp` leftovers), and RELEASE this instance's single-instance
+     * registration so a fresh [create] may re-open the directory in the same process.
+     *
+     * DISTINCT FROM [close] (load-bearing). [close] only wipes RAM and LEAVES the disk
+     * image intact — a lock, not a deletion: after close() [exists] stays true and the
+     * encrypted image (with the account's full crypto identity: keypair, ratchet records,
+     * roster) survives on disk, recoverable by a later unlock. destroy() is the ONLY path
+     * that removes the files, so after it [exists] is false and nothing is recoverable.
+     * Account deletion MUST use destroy(), never close()/reseal. When paired with a session
+     * teardown that reseals via VaultRuntime.close(), destroy() MUST run AFTER that reseal so
+     * no freshly-resealed image survives.
+     *
+     * IDEMPOTENT: [File.delete] returns false (never throws) on a missing file, so a second
+     * destroy() — or a destroy() on a never-created store — is a safe no-op. The file deletes
+     * are best-effort; even if one returns false the RAM state is still wiped and the
+     * registration released, leaving the store fully closed. Runs ONLY under [imageLock] and
+     * never invokes a VaultSession, so it introduces no reverse lock nesting.
+     */
+    fun destroy() {
+        imageLock.withLock {
+            // Wipe live key material + drop the cached image FIRST, so no DEK/plaintext-adjacent
+            // state is retained even on the (unexpected) chance a delete below throws.
+            dek?.let { wipe(it) }
+            dek = null
+            canonical = null
+            // Remove BOTH persisted files and any interrupted-write temps. delete() is
+            // best-effort and never throws on a missing file (returns false) — idempotent.
+            binFile.delete()
+            dekFile.delete()
+            deleteLeftoverTmp(binFile)
+            deleteLeftoverTmp(dekFile)
+            // Release the single-instance registration so a fresh create() may re-open this
+            // directory in the SAME process (re-onboard after account deletion).
+            unregister()
+        }
+    }
+
+    /**
      * Claim the single-instance registration for [baseDir] (see class kdoc). Idempotent
      * for THIS instance (a re-open no-ops); throws [IllegalStateException] if a DIFFERENT
      * instance already holds the directory. The compound check-then-add is atomic under

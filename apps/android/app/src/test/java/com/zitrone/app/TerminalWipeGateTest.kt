@@ -11,51 +11,76 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 /**
- * D2c round 2: the account-delete completion's terminal-wipe teardown ([completeTerminalWipe]) must
- * ALWAYS release the unlock gate. Its crypto wipe (signalStore.wipe → runtime.mutate) can THROW on a
- * closed-runtime race — a revocation ran runtime.close() first — and the round-1 code called
- * endTerminalWipe() as the last statement, so that throw left the gate SET forever (the app stuck at
- * a lock screen that can't proceed). The fix runs the release in a `finally` and tolerates the wipe
- * throw (the account is being wiped regardless). Extracted top-level so the finally is host-testable.
+ * D2c round 6: the account-delete completion's terminal-wipe teardown ([completeTerminalWipe]) must
+ * (a) DESTROY the vault so no crypto remains on disk (no remanence) and (b) ALWAYS release the unlock
+ * gate. Ordering is load-bearing: [finishUi] runs FIRST — it tears the session down, and that runs
+ * VaultRuntime.close()'s final SYNCHRONOUS reseal, which rewrites the image WITH the account's crypto
+ * — then [destroyVault] DELETES the image (+ biometric), so no resealed image survives. destroyVault
+ * is in a `finally` around finishUi so even a finishUi throw can't skip the no-remanence step; a
+ * finishUi CancellationException still propagates but only AFTER destroyVault ran. [releaseGate]
+ * (endTerminalWipe) is the outermost `finally` so nothing above leaves unlock blocked forever.
+ * Extracted top-level so the ordering + finally guarantees are host-testable.
  */
 class TerminalWipeGateTest {
 
     @Test
-    fun `happy path runs wipe then ui then releases the gate`() {
+    fun `happy path runs finishUi then destroyVault then releases the gate`() {
         val events = mutableListOf<String>()
         completeTerminalWipe(
-            wipeCryptoRecords = { events += "wipe" },
             finishUi = { events += "ui" },
+            destroyVault = { events += "destroy" },
             releaseGate = { events += "release" },
         )
-        assertEquals(listOf("wipe", "ui", "release"), events)
+        // The reseal (in finishUi) STRICTLY precedes the file destroy — the no-remanence ordering.
+        assertEquals(listOf("ui", "destroy", "release"), events)
     }
 
     @Test
-    fun `a closed-runtime wipe throw is tolerated and the gate is STILL released`() {
+    fun `a finishUi throw is tolerated but destroyVault STILL runs and the gate is released`() {
         val events = mutableListOf<String>()
-        // The regression: a throwing wipe must not skip endTerminalWipe(). UI teardown still runs
-        // (the throw is tolerated) and the gate is released via the finally.
+        // The remanence regression guard: a throwing session teardown must NOT skip the file destroy
+        // (or the account's crypto would survive on disk) and must not crash the confined worker.
         completeTerminalWipe(
-            wipeCryptoRecords = { throw IllegalStateException("vault runtime is closed") },
-            finishUi = { events += "ui" },
+            finishUi = { throw IllegalStateException("teardown failed") },
+            destroyVault = { events += "destroy" },
             releaseGate = { events += "release" },
         )
-        assertEquals("ui completed and the gate was released despite the wipe throw", listOf("ui", "release"), events)
+        assertEquals(
+            "destroyVault ran despite the finishUi throw, and the gate was released",
+            listOf("destroy", "release"), events,
+        )
     }
 
     @Test
-    fun `a CancellationException from the wipe propagates but the gate is STILL released`() {
+    fun `a CancellationException from finishUi propagates but destroyVault and release STILL run`() {
         val events = mutableListOf<String>()
-        // Cooperative cancellation is not swallowed as a tolerated wipe failure — it propagates —
-        // but the finally still releases the gate so unlock is never blocked forever.
+        // Cooperative cancellation is not swallowed as a tolerated failure — it propagates — but the
+        // no-remanence destroy and the gate release still run via the finallys before it escapes.
         assertThrows(CancellationException::class.java) {
             completeTerminalWipe(
-                wipeCryptoRecords = { throw CancellationException("scope cancelled") },
-                finishUi = { events += "ui" },
+                finishUi = { throw CancellationException("scope cancelled") },
+                destroyVault = { events += "destroy" },
                 releaseGate = { events += "release" },
             )
         }
-        assertEquals("finishUi skipped (cancellation), but the gate was released via finally", listOf("release"), events)
+        assertEquals(
+            "destroyVault + gate release ran via finally even though finishUi cancelled",
+            listOf("destroy", "release"), events,
+        )
+    }
+
+    @Test
+    fun `a destroyVault throw still releases the gate`() {
+        val events = mutableListOf<String>()
+        // Defense in depth: the real destroyVault tolerates each step's throw internally, but even a
+        // stray throw must not leave the unlock gate SET forever — releaseGate is the outermost finally.
+        assertThrows(IllegalStateException::class.java) {
+            completeTerminalWipe(
+                finishUi = { events += "ui" },
+                destroyVault = { throw IllegalStateException("destroy failed") },
+                releaseGate = { events += "release" },
+            )
+        }
+        assertEquals("finishUi ran and the gate was released despite the destroy throw", listOf("ui", "release"), events)
     }
 }

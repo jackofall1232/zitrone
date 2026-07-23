@@ -326,6 +326,42 @@ class AppContainer(private val app: Application) {
         biometricCipher.deleteKey()
     }
 
+    /**
+     * The account-deletion primitive (NO REMANENCE). DESTROYS every on-disk + in-RAM trace of the
+     * vault: [VaultImageStore.destroy] deletes `vault.bin` + `vault.dek` (+ tmp leftovers), wipes the
+     * RAM DEK, and releases the single-instance registration; then the biometric wrap + its auth-gated
+     * Keystore key are removed. Each step tolerates its OWN throw (a [CancellationException] still
+     * propagates) so one failure can't strand the rest — the IMAGE destroy is the load-bearing one for
+     * the deletion-permanence promise. Idempotent.
+     *
+     * Do NOT confuse with `runtime.close()` / `signalStore.wipe()`, which RESEAL the image (keeping the
+     * account's crypto on disk) — those are a lock, not a deletion. This MUST run AFTER the session
+     * teardown (runtime.close reseals the image); destroy() then deletes it, so NO resealed image
+     * survives. After this call [hasVault] is false → the app routes to Onboarding (fresh-install state).
+     */
+    fun destroyVaultForAccountDeletion() {
+        tolerateCleanup { imageStore.destroy() }
+        tolerateCleanup { biometricStore.clear() }
+        tolerateCleanup { biometricCipher.deleteKey() }
+    }
+
+    /**
+     * Run one account-deletion cleanup step, tolerating its own non-cancellation throw so a single
+     * failure (e.g. a Keystore already unhealthy) can't strand the remaining steps. A
+     * [CancellationException] is rethrown BEFORE the broad catch so cooperative cancellation still
+     * unwinds — the package-wide catch-ordering discipline.
+     */
+    private inline fun tolerateCleanup(step: () -> Unit) {
+        try {
+            step()
+        } catch (c: CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            // Tolerated: one cleanup's failure must not strand the others (the image destroy is the
+            // load-bearing one; the biometric removals are best-effort hygiene).
+        }
+    }
+
     /** Reveal the passphrase lock screen while KEEPING a queued lemon-drop scan (see controller). */
     fun revealLockScreenKeepingLemonDropScan() =
         lemonDropVeilController.revealLockScreenKeepingScan()

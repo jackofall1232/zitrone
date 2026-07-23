@@ -432,27 +432,40 @@ class MainActivity : FragmentActivity() {
 private enum class VaultBiometricResult { SUCCESS, FAILED, INVALIDATED, UNAVAILABLE, CANCELLED }
 
 /**
- * Run the account-delete completion's terminal-wipe teardown so the unlock gate is ALWAYS released.
- * [wipeCryptoRecords] (signalStore.wipe → runtime.mutate) can THROW on a closed-runtime race — a
- * revocation ran runtime.close() first; the account is being wiped regardless, so that throw is
- * TOLERATED (a CancellationException still propagates). [finishUi] runs next, and [releaseGate]
- * (endTerminalWipe) runs in a `finally` so a wipe throw can NEVER leave unlock blocked forever.
- * Extracted top-level so the finally + closed-runtime tolerance is host-testable.
+ * Run the account-delete completion's terminal-wipe teardown so the vault is DESTROYED (no
+ * remanence) and the unlock gate is ALWAYS released.
+ *
+ * ORDER IS LOAD-BEARING. [finishUi] runs FIRST: it tears the session down, and that teardown runs
+ * `VaultRuntime.close()`'s final SYNCHRONOUS reseal — which rewrites the image on disk WITH the
+ * account's full crypto (identity keypair, ratchet records, roster). [destroyVault] runs NEXT and
+ * DELETES `vault.bin` + `vault.dek` (+ the biometric wrap/key), so no resealed image survives — the
+ * no-remanence guarantee. destroyVault is in a `finally` around finishUi so even a finishUi throw
+ * can NEVER skip the load-bearing file deletion; a finishUi CancellationException still propagates
+ * (cooperative unwind) but only AFTER destroyVault has run. Any OTHER finishUi throw is TOLERATED so
+ * it can't crash the NonCancellable confined worker (no CoroutineExceptionHandler). [releaseGate]
+ * (endTerminalWipe) runs in the OUTERMOST `finally` so nothing above can leave unlock blocked
+ * forever. Extracted top-level so the ordering + finally guarantees are host-testable.
  */
 internal inline fun completeTerminalWipe(
-    wipeCryptoRecords: () -> Unit,
     finishUi: () -> Unit,
+    destroyVault: () -> Unit,
     releaseGate: () -> Unit,
 ) {
     try {
         try {
-            wipeCryptoRecords()
-        } catch (c: kotlinx.coroutines.CancellationException) {
-            throw c
-        } catch (t: Throwable) {
-            // Closed-runtime race — tolerate; the account is being wiped regardless.
+            try {
+                finishUi()
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                // Tolerated — the account is being deleted regardless, and destroyVault (below,
+                // in the finally) must still run so no resealed image is left on disk.
+            }
+        } finally {
+            // ALWAYS destroy AFTER finishUi's runtime.close() reseal, even on a finishUi throw:
+            // the file deletion is the no-remanence step and must not be skipped.
+            destroyVault()
         }
-        finishUi()
     } finally {
         releaseGate()
     }
@@ -639,11 +652,17 @@ private fun ZitroneRoot(
             when (result) {
                 VaultBiometricResult.SUCCESS -> onUnlockSuccess()
                 VaultBiometricResult.INVALIDATED -> {
-                    container.disableBiometric()
-                    biometricEnabled = false
-                    reofferBiometric = true
-                    lockError = VaultUnlockRouter.BIOMETRIC_REENROLL_NOTE
-                    unlocking = false
+                    try {
+                        container.disableBiometric()
+                        biometricEnabled = false
+                        reofferBiometric = true
+                        lockError = VaultUnlockRouter.BIOMETRIC_REENROLL_NOTE
+                    } finally {
+                        // If disableBiometric()/deleteKey() throws (keystore already unhealthy),
+                        // unlocking must STILL clear — both unlock paths gate on !unlocking, so a
+                        // throwing cleanup would otherwise strand the lock screen until an app restart.
+                        unlocking = false
+                    }
                 }
                 VaultBiometricResult.FAILED -> {
                     lockError = VaultUnlockRouter.UNIFORM_FAILURE
@@ -654,11 +673,17 @@ private fun ZitroneRoot(
                     // auth-gated Keystore key is gone / uninitializable) yet biometricEnabled was
                     // still true — reconcile so the dead biometric button doesn't persist: revoke
                     // the wrap + key and drop to passphrase, arming the re-enable the note promises.
-                    container.disableBiometric()
-                    biometricEnabled = false
-                    reofferBiometric = true
-                    lockError = VaultUnlockRouter.BIOMETRIC_REENROLL_NOTE
-                    unlocking = false
+                    try {
+                        container.disableBiometric()
+                        biometricEnabled = false
+                        reofferBiometric = true
+                        lockError = VaultUnlockRouter.BIOMETRIC_REENROLL_NOTE
+                    } finally {
+                        // disableBiometric()/deleteKey() can throw on the very keystore fault that
+                        // produced UNAVAILABLE — unlocking must STILL clear in a finally, or both
+                        // unlock paths (gated on !unlocking) stay stuck until an app restart.
+                        unlocking = false
+                    }
                 }
                 VaultBiometricResult.CANCELLED -> {
                     // User dismissed the prompt — biometric is fine, nothing to reconcile.
@@ -722,23 +747,30 @@ private fun ZitroneRoot(
         }
     }
 
-    // Root detection is warn-once; the account-delete wipe path is unchanged.
+    // Root detection is warn-once. Account delete DESTROYS the vault (no remanence): after the
+    // server-delete + burnAll, tear the session down (finishUi → runtime.close reseal) and then
+    // DELETE the on-disk image + biometric via container.destroyVaultForAccountDeletion(), so no
+    // resealed image survives — do NOT rely on signalStore.wipe()/reseal (which keeps the crypto
+    // on disk). hasVault() is then false, so route to Onboarding (fresh-install state), never
+    // Splash→Locked.
     val onDeleteAccount: () -> Unit = onDeleteAccount@{
         val live = session ?: return@onDeleteAccount
         container.unlockController.beginTerminalWipe()
         live.coordinator.deleteAccountAndWipe {
-            // signalStore.wipe() → runtime.mutate can THROW on a closed-runtime race (a revocation
-            // ran runtime.close() first). endTerminalWipe() MUST still run — otherwise unlock is
-            // blocked forever — so it lives in a finally, and the wipe throw is tolerated (the
-            // account is being wiped regardless).
             completeTerminalWipe(
-                wipeCryptoRecords = { live.signalStore.wipe() },
                 finishUi = {
                     identityFingerprint = null
                     unlocked = false
-                    route = Route.Splash
+                    vaultExists = false
+                    route = Route.Onboarding
+                    // Synchronous session teardown: runtime.close() reseals the image one last
+                    // time. destroyVault (below) then deletes it — ordering is load-bearing.
                     container.unlockController.lockIf(live)
                 },
+                // The load-bearing no-remanence step: delete vault.bin/vault.dek + biometric wrap/key
+                // (each tolerant of its own throw). Runs AFTER the reseal, in completeTerminalWipe's
+                // finally, so it can never be skipped.
+                destroyVault = { container.destroyVaultForAccountDeletion() },
                 releaseGate = { container.unlockController.endTerminalWipe() },
             )
         }

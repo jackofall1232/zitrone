@@ -791,6 +791,71 @@ class VaultImageStoreTest {
         assertThrows(VaultImageException.CorruptImage::class.java) { newStore(dir).open() }
     }
 
+    // ── destroy(): the account-deletion primitive (no remanence) ────────────────────
+
+    @Test
+    fun destroy_removesBothFiles_exitsFalse_andReCreateWorks() {
+        val dir = tmp.newFolder()
+        val store = newStore(dir)
+        store.create(passphrase, "the account crypto".toByteArray(Charsets.UTF_8))
+        assertTrue("image + dek exist after create", store.exists())
+        assertTrue(File(dir, "vault.bin").exists())
+        assertTrue(File(dir, "vault.dek").exists())
+
+        store.destroy()
+
+        // No remanence: BOTH files gone, exists() false — nothing recoverable by a later unlock.
+        assertFalse("exists() is false after destroy", store.exists())
+        assertFalse("vault.bin deleted", File(dir, "vault.bin").exists())
+        assertFalse("vault.dek deleted", File(dir, "vault.dek").exists())
+
+        // destroy() released the single-instance registration, so a fresh store may re-create in the
+        // SAME process (re-onboard after account deletion) and the new vault opens from disk.
+        val reborn = newStore(dir)
+        val fresh = "a brand-new account".toByteArray(Charsets.UTF_8)
+        reborn.create(passphrase, fresh)
+        assertTrue("re-create works after destroy", reborn.exists())
+        reborn.close()
+        val opened = newStore(dir).also { it.open() }.unlock(passphrase)
+        assertNotNull("the re-created vault opens", opened)
+        assertArrayEquals(fresh, opened!!.payloadPlaintext)
+    }
+
+    @Test
+    fun destroy_isIdempotent_onNeverCreatedAndOnAlreadyDestroyed() {
+        val dir = tmp.newFolder()
+        // destroy() on a never-created store is a safe no-op (missing files delete cleanly).
+        val never = newStore(dir)
+        never.destroy()
+        assertFalse(never.exists())
+
+        // A second destroy() after a real create+destroy is also a no-op — no throw, files stay gone.
+        val store = newStore(dir)
+        store.create(passphrase, "x".toByteArray(Charsets.UTF_8))
+        store.destroy()
+        store.destroy()
+        assertFalse("still gone after a second destroy", store.exists())
+        assertFalse(File(dir, "vault.bin").exists())
+        assertFalse(File(dir, "vault.dek").exists())
+    }
+
+    @Test
+    fun destroy_removesLeftoverTmp_soNoWriteRemnantSurvives() {
+        val dir = tmp.newFolder()
+        val store = newStore(dir)
+        store.create(passphrase, "y".toByteArray(Charsets.UTF_8))
+        // Simulate an interrupted-write temp next to the constant-size files.
+        val binTmp = File(dir, "vault.bin.tmp").also { it.writeBytes(ByteArray(16) { 0x7 }) }
+        val dekTmp = File(dir, "vault.dek.tmp").also { it.writeBytes(ByteArray(8) { 0x9 }) }
+
+        store.destroy()
+
+        assertFalse("vault.bin gone", File(dir, "vault.bin").exists())
+        assertFalse("vault.dek gone", File(dir, "vault.dek").exists())
+        assertFalse("vault.bin.tmp leftover gone", binTmp.exists())
+        assertFalse("vault.dek.tmp leftover gone", dekTmp.exists())
+    }
+
     /**
      * Fixed-key `javax.crypto` AES-256-GCM stand-in for the Android Keystore device
      * key. Emits the SAME 60-byte `nonce(12) ‖ ct(32) ‖ tag(16)` blob shape the
