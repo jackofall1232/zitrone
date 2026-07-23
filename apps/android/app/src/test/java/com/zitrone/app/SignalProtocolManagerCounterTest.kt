@@ -67,6 +67,25 @@ class SignalProtocolManagerCounterTest {
     }
 
     @Test
+    fun `an ATTEMPTED batch is never re-served — a fresh batch is generated instead`() {
+        // Round 9 (Codex): once the upload REQUEST left the device, a lost response cannot
+        // distinguish "relay never got it" from "relay committed it and a peer consumed an id" —
+        // and the relay re-inserts a consumed id (ON CONFLICT DO NOTHING + consume-by-DELETE).
+        // So an attempted-but-unconfirmed batch must NOT be re-served; its privates stay in the
+        // store (a peer may hold a bundle against them) and a fresh batch takes over.
+        val first = manager.generateOneTimePreKeys(count = 3)
+        assertEquals(listOf(1, 2, 3), first.map { it.id })
+        manager.markOneTimePreKeyUploadAttempted()
+
+        val second = manager.generateOneTimePreKeys(count = 3)
+        assertEquals("fresh ids, not the attempted batch", listOf(4, 5, 6), second.map { it.id })
+        assertEquals("attempted privates retained for in-flight bundles", 6, store.countOneTimePreKeys())
+
+        // The fresh batch reset the attempted flag: an (unattempted) retry re-serves IT.
+        assertEquals(listOf(4, 5, 6), manager.generateOneTimePreKeys(count = 3).map { it.id })
+    }
+
+    @Test
     fun `signed prekey ids sequence independently and stamp the creation time`() {
         store.setLocalIdentity(IdentityKeyPair.generate(), 1)
 

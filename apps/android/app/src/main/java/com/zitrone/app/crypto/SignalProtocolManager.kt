@@ -200,27 +200,35 @@ class SignalProtocolManager(
     }
 
     /**
-     * The one-time prekeys the relay still needs. A stored-but-unconfirmed batch is RE-SERVED
-     * first (upload retry — same ids, idempotent); only when nothing is pending is a fresh batch
-     * generated (default 100 — the upload batch size from
-     * security.encryption.key_types.one_time_prekeys) and marked pending. Private halves stay in
-     * the store; only public halves are returned. The pending marker is retired by
-     * [confirmOneTimePreKeysUploaded] — without it every failed upload would orphan a full batch
-     * of private halves in the fixed-capacity vault and generate ANOTHER on the next low signal.
-     * A never-uploaded prekey can never be consumed (the relay never served it), so re-serving
-     * the stored records is always safe; ids whose records vanished (wiped store) are dropped.
+     * The one-time prekeys the relay still needs. A stored batch whose upload was NEVER
+     * ATTEMPTED is RE-SERVED (retry after a flush-gated skip — the relay never saw the ids, so
+     * the same ids are safe); otherwise a fresh batch is generated (default 100 — the upload
+     * batch size from security.encryption.key_types.one_time_prekeys) and marked pending +
+     * unattempted. Private halves stay in the store; only public halves are returned.
+     *
+     * The ATTEMPTED split is load-bearing (round 8, Codex): once an upload REQUEST left the
+     * device, a lost response / crash cannot distinguish "relay never got it" from "relay
+     * committed it and a peer already consumed an id" — and the relay's insert re-creates a
+     * consumed id (`ON CONFLICT DO NOTHING` + consume-by-DELETE), which would serve the same
+     * one-time prekey to a second initiator. So an attempted-but-unconfirmed batch is never
+     * re-served: its PRIVATE halves stay in the store (a peer may hold a bundle against them)
+     * and a fresh batch is generated — the bounded-orphan cost is confined to the rare
+     * lost-response window instead of every flush failure. The pending marker is retired by
+     * [confirmOneTimePreKeysUploaded]; ids whose records vanished (wiped store) are dropped.
      */
     fun generateOneTimePreKeys(count: Int = ONE_TIME_PREKEY_BATCH): List<OneTimePreKeyDto> {
-        val pending = store.pendingOneTimePreKeyUploadIds()
-            .mapNotNull { id ->
-                runCatching { store.loadPreKey(id) }.getOrNull()?.let { record ->
-                    OneTimePreKeyDto(
-                        id = id,
-                        publicKeyBase64 = encode(record.keyPair.publicKey.getPublicKeyBytes()),
-                    )
+        if (!store.oneTimePreKeyUploadAttempted()) {
+            val pending = store.pendingOneTimePreKeyUploadIds()
+                .mapNotNull { id ->
+                    runCatching { store.loadPreKey(id) }.getOrNull()?.let { record ->
+                        OneTimePreKeyDto(
+                            id = id,
+                            publicKeyBase64 = encode(record.keyPair.publicKey.getPublicKeyBytes()),
+                        )
+                    }
                 }
-            }
-        if (pending.isNotEmpty()) return pending
+            if (pending.isNotEmpty()) return pending
+        }
         val fresh = (0 until count).map {
             val id = allocatePreKeyId()
             val keyPair = Curve.generateKeyPair()
@@ -228,12 +236,25 @@ class SignalProtocolManager(
             OneTimePreKeyDto(id = id, publicKeyBase64 = encode(keyPair.publicKey.getPublicKeyBytes()))
         }
         store.setPendingOneTimePreKeyUploadIds(fresh.map { it.id })
+        store.setOneTimePreKeyUploadAttempted(false)
         return fresh
+    }
+
+    /**
+     * The pending batch's upload request is about to leave the device. Callers mark this AFTER
+     * the privates' durable flush and reseal it durable BEFORE the actual upload (see
+     * [com.zitrone.app.MessagingCoordinator.onPreKeyLow]) — ordering that keeps both retry
+     * properties: a flush-gated skip stays re-servable (flag never set), while a lost response
+     * can never re-serve possibly-consumed ids (flag durable before the request existed).
+     */
+    fun markOneTimePreKeyUploadAttempted() {
+        store.setOneTimePreKeyUploadAttempted(true)
     }
 
     /** The relay confirmed it holds the batch's public halves — retire the pending marker. */
     fun confirmOneTimePreKeysUploaded() {
         store.setPendingOneTimePreKeyUploadIds(emptyList())
+        store.setOneTimePreKeyUploadAttempted(false)
     }
 
     /** Register confirmed: it uploaded BOTH the signed prekey and the one-time batch. */

@@ -251,19 +251,25 @@ class MainActivity : FragmentActivity() {
         // delivery side effects — leave the drop unburned on the relay for a
         // re-scan rather than render an undeliverable copy.
         val redeemer = container.session.value?.lemonDropRedeemer ?: return
-        // Render immediately; the side effects (encrypted-prefs write + network
-        // burn) run off the main thread. Prekey consumption goes first: once
-        // the message has rendered, the drop must not be openable again even
-        // if the burn never lands (single-use by design; the TTL then reaps
-        // the undecryptable relay copy). Run on the PROCESS scope, not the
-        // Activity's — a rotation or exit right after unlock must not cancel
-        // the prekey deletion, which would leave the drop re-openable.
-        lemonDropVeil.value =
-            LemonDropVeil.Delivered(pending.text, pending.senderLabel, pending.senderVerified)
+        // COMMIT BEFORE RENDER (round 8, Codex): the prekey consumption must be DURABLE before
+        // the plaintext is ever shown — rendering first left a gap where a forced logout closed
+        // the runtime under the queued side effects, so the user had SEEN the message while both
+        // the relay drop and its usable one-time prekey survived (re-openable, breaking
+        // single-use). Now: consume + durable reseal + burn on IO first; only a confirmed
+        // consumption renders Delivered. On a failed/refused commit (teardown race, transient
+        // flush) NOTHING is consumed-and-lost — show the generic advocacy veil; the drop remains
+        // on the relay for a re-scan. Run on the PROCESS scope, not the Activity's — a rotation
+        // or exit right after unlock must not cancel the delivery commit.
         container.scope.launch(Dispatchers.IO) {
             // Prekey consumption → durable reseal → burn; the burn is skipped when the flush
             // can't confirm, so the relay shred order never outruns the consumption on disk.
-            redeemer.deliverDurablyThenBurn(pending)
+            val committed = runCatching { redeemer.deliverDurablyCommit(pending) }.getOrDefault(false)
+            lemonDropVeil.value = if (committed) {
+                LemonDropVeil.Delivered(pending.text, pending.senderLabel, pending.senderVerified)
+            } else {
+                LemonDropVeil.Advocacy(LemonDropScanOutcome.UNKNOWN)
+            }
+            if (committed) redeemer.burn(pending)
         }
     }
 
@@ -321,13 +327,16 @@ class MainActivity : FragmentActivity() {
     /**
      * Authenticate a CryptoObject-bound cipher with a BIOMETRIC_STRONG-only prompt — NO
      * device-credential on this prompt (the app passphrase IS the fallback; biometric-1.1.0
-     * CryptoObject+DEVICE_CREDENTIAL has platform caveats). On success the [cipher] is
-     * authenticated and ready for one operation; [onSuccess] runs. Any error / cancel →
-     * [onError]. A soft failure (a non-matching finger) keeps the prompt open.
+     * CryptoObject+DEVICE_CREDENTIAL has platform caveats). On success [onSuccess] receives the
+     * AUTHENTICATED cipher from the [BiometricPrompt.AuthenticationResult] — NOT the instance
+     * passed in: on some OEM/API combinations only the result's cipher is marked authorized, and
+     * using the original throws IllegalBlockSize/BadPadding at `doFinal` (Gemini round 4). A
+     * result with no cipher is an error. Any error / cancel → [onError]. A soft failure (a
+     * non-matching finger) keeps the prompt open.
      */
     private fun authenticateCrypto(
         cipher: javax.crypto.Cipher,
-        onSuccess: () -> Unit,
+        onSuccess: (javax.crypto.Cipher) -> Unit,
         onError: () -> Unit,
     ) {
         val prompt = BiometricPrompt(
@@ -335,7 +344,8 @@ class MainActivity : FragmentActivity() {
             ContextCompat.getMainExecutor(this),
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    onSuccess()
+                    val authenticated = result.cryptoObject?.cipher
+                    if (authenticated != null) onSuccess(authenticated) else onError()
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
@@ -376,7 +386,7 @@ class MainActivity : FragmentActivity() {
         } ?: return onResult(VaultBiometricResult.UNAVAILABLE)
         authenticateCrypto(
             cipher,
-            onSuccess = {
+            onSuccess = { authenticatedCipher ->
                 lifecycleScope.launch {
                     // Contain ANY keystore/store throw from the unwrap+open (IllegalBlockSizeException
                     // on an invalidated-key race, KeyStoreException, ProviderException, a bad-slot
@@ -384,7 +394,7 @@ class MainActivity : FragmentActivity() {
                     // PASSPHRASE FIELD (result FAILED), never crash the coroutine — but a
                     // CancellationException is cooperative teardown and must propagate, not fold.
                     val ok = try {
-                        container.unlockWithBiometric(cipher, wrap)
+                        container.unlockWithBiometric(authenticatedCipher, wrap)
                     } catch (c: kotlinx.coroutines.CancellationException) {
                         throw c
                     } catch (t: Throwable) {
@@ -415,10 +425,10 @@ class MainActivity : FragmentActivity() {
         }
         authenticateCrypto(
             cipher,
-            onSuccess = {
+            onSuccess = { authenticatedCipher ->
                 val session = container.session.value
                 val ok = session != null &&
-                    runCatching { container.enableBiometricFromSession(cipher, session) }.getOrDefault(false)
+                    runCatching { container.enableBiometricFromSession(authenticatedCipher, session) }.getOrDefault(false)
                 if (!ok) container.biometricCipher.deleteKey()
                 onResult(ok)
             },

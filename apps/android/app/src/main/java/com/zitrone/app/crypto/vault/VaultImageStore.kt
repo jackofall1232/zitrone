@@ -625,6 +625,10 @@ class VaultImageStore internal constructor(
             // one). Best-effort: if the marker itself cannot be written (the same failing disk),
             // behavior degrades to the in-session routing only — never worse than pre-marker.
             runCatching { destroyMarkerFile.createNewFile() }
+            // Make the marker itself crash-durable (best-effort — see above) BEFORE the unlinks:
+            // an un-synced marker + a crash mid-unlink could otherwise restart into a partial
+            // vault with no resume signal.
+            runCatching { dirSync(baseDir) }
             // Wipe live key material + drop the cached image FIRST, so no DEK/plaintext-adjacent
             // state is retained even on the (unexpected) chance a delete below throws.
             dek?.let { wipe(it) }
@@ -639,16 +643,30 @@ class VaultImageStore internal constructor(
             // Release the single-instance registration so a fresh create() may re-open this
             // directory in the SAME process (re-onboard after account deletion).
             unregister()
-            // VERIFY the persisted image is actually GONE (see kdoc): delete()'s bool is false on
-            // an I/O error too, so re-stat instead. A surviving file means the full-crypto image
-            // is still on disk — destruction FAILED, so throw and let account-delete treat this as
-            // NOT-deleted. exists()==false (already-absent) does NOT throw, keeping destroy()
-            // idempotent. Temps are variable-size scratch and never carry the image, so they are
-            // not part of the survival check.
-            if (binFile.exists() || dekFile.exists()) {
+            // VERIFY everything image-bearing is actually GONE (see kdoc): delete()'s bool is
+            // false on an I/O error too, so re-stat instead. The TEMPS are part of the check
+            // (round 8, Codex): renameIntoPlace stages the COMPLETE outer image in vault.bin.tmp
+            // (and the wrapped DEK in vault.dek.tmp), so under the same failing filesystem this
+            // verify exists to catch, an encrypted image copy could survive as a temp while the
+            // primaries are gone. A surviving file → destruction FAILED → throw; account-delete
+            // treats this as NOT-deleted. exists()==false (already-absent) does NOT throw,
+            // keeping destroy() idempotent.
+            if (binFile.exists() || dekFile.exists() ||
+                leftoverTmp(binFile).exists() || leftoverTmp(dekFile).exists()
+            ) {
                 throw VaultImageException.DestroyFailed()
             }
-            // Both files confirmed gone — retire the marker. Best-effort: a marker that survives
+            // Make the unlinks CRASH-DURABLE before retiring the marker (round 8, Codex): the
+            // exists() re-stat proves only the current namespace, not what a journal replay
+            // restores. Without this fsync, a crash could resurrect vault.bin/vault.dek while the
+            // marker's own (later) unlink survived — restarting into the unlock gate over a
+            // server-deleted account, the exact state the marker exists to prevent. A
+            // non-durable sync keeps the marker (throw DestroyFailed → retry re-runs the
+            // idempotent destroy), never a false success.
+            if (dirSync(baseDir) != DirSyncResult.DURABLE) {
+                throw VaultImageException.DestroyFailed()
+            }
+            // Unlinks confirmed durable — retire the marker. Best-effort: a marker that survives
             // just re-runs an idempotent destroy at next boot, which re-stats absent and succeeds.
             destroyMarkerFile.delete()
         }
@@ -765,8 +783,11 @@ class VaultImageStore internal constructor(
     }
 
     /** Delete an incomplete-write temp for [target], if any. Best-effort. */
+    private fun leftoverTmp(target: File): File =
+        File(target.parentFile, "${target.name}$TMP_SUFFIX")
+
     private fun deleteLeftoverTmp(target: File) {
-        File(target.parentFile, "${target.name}$TMP_SUFFIX").delete()
+        leftoverTmp(target).delete()
     }
 
     private companion object {

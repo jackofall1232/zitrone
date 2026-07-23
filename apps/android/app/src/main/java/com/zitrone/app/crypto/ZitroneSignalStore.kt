@@ -80,6 +80,18 @@ interface ZitroneSignalStore : SignalProtocolStore {
 
     fun setPendingOneTimePreKeyUploadIds(value: List<Int>)
 
+    /**
+     * Whether the pending one-time batch's upload was ATTEMPTED (the request left the device),
+     * default false. Load-bearing safety split for the retry: a batch whose upload was never
+     * attempted is safe to RE-SERVE (the relay never saw the ids); one whose upload was attempted
+     * but not confirmed must NOT be re-served — the relay may have committed it and peers may
+     * already have consumed ids, and the relay's insert re-creates a consumed id
+     * (`ON CONFLICT DO NOTHING` + consume-by-DELETE), serving the same one-time prekey twice.
+     */
+    fun oneTimePreKeyUploadAttempted(): Boolean
+
+    fun setOneTimePreKeyUploadAttempted(value: Boolean)
+
     // -- contact teardown / repair / wipe -------------------------------------
 
     /**

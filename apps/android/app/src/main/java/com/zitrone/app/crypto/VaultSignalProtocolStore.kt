@@ -372,6 +372,20 @@ class VaultSignalProtocolStore(
         }
     }
 
+    /** Attempted-upload flag for the pending batch (presence = true) — see the interface. */
+    override fun oneTimePreKeyUploadAttempted(): Boolean =
+        runtime.read { it.signalRecords.containsKey(KEY_PENDING_PREKEY_UPLOADS_ATTEMPTED) }
+
+    override fun setOneTimePreKeyUploadAttempted(value: Boolean) {
+        runtime.mutate {
+            if (value) {
+                putRecord(it, KEY_PENDING_PREKEY_UPLOADS_ATTEMPTED, byteArrayOf(1))
+            } else {
+                removeRecord(it, KEY_PENDING_PREKEY_UPLOADS_ATTEMPTED)
+            }
+        }
+    }
+
     // -- misc -----------------------------------------------------------------
 
     override fun countOneTimePreKeys(): Int =
@@ -438,6 +452,7 @@ class VaultSignalProtocolStore(
         private const val KEY_SIGNED_PREKEY_CREATED_AT = "signed_prekey_created_at"
         private const val KEY_PENDING_SIGNED_PREKEY_UPLOAD = "pending_signed_prekey_upload"
         private const val KEY_PENDING_PREKEY_UPLOADS = "pending_prekey_uploads"
+        private const val KEY_PENDING_PREKEY_UPLOADS_ATTEMPTED = "pending_prekey_uploads_attempted"
     }
 }
 

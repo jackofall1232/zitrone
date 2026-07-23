@@ -884,6 +884,34 @@ class VaultImageStoreTest {
     }
 
     @Test
+    fun destroy_throwsDestroyFailed_whenAnImageBearingTmpSurvives() {
+        val dir = tmp.newFolder()
+        val store = newStore(dir)
+        // Round 9 (Codex): renameIntoPlace stages the COMPLETE outer image in vault.bin.tmp, so a
+        // surviving temp under a failing filesystem is an encrypted image copy — the survival
+        // check must cover it, not just the primaries. Model an un-deletable temp the same way
+        // as the primary-file case (a non-empty directory).
+        val tmpFile = File(dir, "vault.bin.tmp").also { it.mkdir() }
+        File(tmpFile, "child").writeBytes(ByteArray(4))
+
+        assertThrows(VaultImageException.DestroyFailed::class.java) { store.destroy() }
+        assertTrue("destroyPending survives — deletion is not complete", store.destroyPending())
+    }
+
+    @Test
+    fun destroy_throwsDestroyFailed_andKeepsMarker_whenUnlinkFsyncIsNotDurable() {
+        val dir = tmp.newFolder()
+        // Round 9 (Codex): exists() proves only the current namespace — the unlinks must be
+        // confirmed crash-durable (directory fsync) BEFORE the marker is retired, else a journal
+        // replay can resurrect the vault files with no durable resume signal. A NOT_DURABLE sync
+        // is a failed destroy: throw, marker kept, retry re-runs the idempotent unlink.
+        val store = newStore(dir) { DirSyncResult.NOT_DURABLE }
+
+        assertThrows(VaultImageException.DestroyFailed::class.java) { store.destroy() }
+        assertTrue("marker kept until the unlinks are DURABLE", store.destroyPending())
+    }
+
+    @Test
     fun destroy_doesNotThrow_whenFilesAreAlreadyAbsent_idempotencyViaExistsNotDeleteBool() {
         val dir = tmp.newFolder()
         // The verify check is keyed on exists(), NOT the delete() bool: an already-absent file re-stats

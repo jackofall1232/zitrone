@@ -1262,10 +1262,14 @@ class MessagingCoordinator(
                 // create an "Unknown contact" below (see isDeletedContact).
                 if (isDeletedContact(envelope.senderId)) {
                     diag("recv: message for deleted contact — dropped before decrypt")
-                    // No flush barrier: the tombstone check ([isDeletedContact]) is read-only and
-                    // the drop happens BEFORE decrypt, so no ratchet/roster mutation occurred —
-                    // nothing to make durable, ack immediately.
-                    ws.ackMessage(envelope.id)
+                    // The drop happens BEFORE decrypt, so THIS branch mutates nothing — but the
+                    // TOMBSTONE it keys on may itself still be RAM-only (an APPLIED_UNCONFIRMED
+                    // delete whose flush hasn't confirmed). Acking bare would let the relay
+                    // discard the message while a crash restores the pre-delete vault generation:
+                    // contact back, message permanently gone (round 8, Codex). ackDurable forces
+                    // the dirty state (the deletion included) durable first; on a non-durable
+                    // flush the straggler stays un-acked (redelivered → re-dropped here).
+                    ackDurable(envelope.id)
                     return@runCatching
                 }
                 // Decrypt advances the receiving ratchet — serialize it with
@@ -1585,8 +1589,22 @@ class MessagingCoordinator(
                         diag("prekey: top-up reseal not durable — upload skipped, retries on next low signal")
                     }
                 ) {
-                    api.uploadPreKeys(oneTimePreKeys)
-                    signal.confirmOneTimePreKeysUploaded()
+                    // TWO-PHASE attempted marker (round 8, Codex): mark the batch ATTEMPTED and
+                    // reseal that durable BEFORE the request leaves — a lost response / crash
+                    // after the upload must never re-serve possibly-consumed ids (the relay
+                    // re-inserts a consumed id). The ordering keeps the flush-gated skip above
+                    // re-servable: the flag is only ever durable for a batch whose request was
+                    // genuinely about to exist. A non-durable second flush skips the upload too
+                    // (the RAM-only flag rolls back on crash → safe re-serve; in-process it
+                    // conservatively generates a fresh batch next signal).
+                    signal.markOneTimePreKeyUploadAttempted()
+                    if (flushBeforePreKeyPublish {
+                            diag("prekey: attempted-marker reseal not durable — upload deferred")
+                        }
+                    ) {
+                        api.uploadPreKeys(oneTimePreKeys)
+                        signal.confirmOneTimePreKeysUploaded()
+                    }
                 }
             }
         }

@@ -292,6 +292,18 @@ class EncryptedSignalProtocolStore internal constructor(
         }
     }
 
+    /** Attempted-upload flag for the pending batch, default false — see the interface. */
+    override fun oneTimePreKeyUploadAttempted(): Boolean =
+        prefs.getBoolean(KEY_PENDING_PREKEY_UPLOADS_ATTEMPTED, false)
+
+    override fun setOneTimePreKeyUploadAttempted(value: Boolean) {
+        if (value) {
+            prefs.edit().putBoolean(KEY_PENDING_PREKEY_UPLOADS_ATTEMPTED, true).apply()
+        } else {
+            prefs.edit().remove(KEY_PENDING_PREKEY_UPLOADS_ATTEMPTED).apply()
+        }
+    }
+
     // -- misc -----------------------------------------------------------------
 
     override fun countOneTimePreKeys(): Int =
@@ -375,5 +387,6 @@ class EncryptedSignalProtocolStore internal constructor(
         private const val KEY_SIGNED_PREKEY_CREATED_AT = "signed_prekey_created_at"
         private const val KEY_PENDING_SIGNED_PREKEY_UPLOAD = "pending_signed_prekey_upload"
         private const val KEY_PENDING_PREKEY_UPLOADS = "pending_prekey_uploads"
+        private const val KEY_PENDING_PREKEY_UPLOADS_ATTEMPTED = "pending_prekey_uploads_attempted"
     }
 }
