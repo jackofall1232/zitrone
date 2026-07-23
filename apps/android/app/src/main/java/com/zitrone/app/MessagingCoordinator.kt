@@ -243,6 +243,38 @@ class MessagingCoordinator(
      */
     private val pendingReceipts = ConcurrentHashMap<String, MutableList<String>>()
 
+    /**
+     * Post-ack side effects (delivery receipt / notification / attachment redemption) a display
+     * branch still OWES for a shown-but-not-yet-acked envelope — see [PendingPostAckLedger].
+     * Every display branch registers its owed entry immediately after
+     * [MessageRepository.addIncoming], and [settlePostAck] is the SINGLE execution site, called on
+     * whichever path finally lands the durable ack: the normal branch, or the
+     * duplicate-redelivery ACK_AND_DROP path.
+     */
+    private val pendingPostAck = PendingPostAckLedger()
+
+    /**
+     * Execute + clear the owed post-ack side effects for [envelopeId]. Call ONLY after a DURABLE
+     * ack ([ackDurable] returned true). Same order as the pre-round-7 inline code: receipt,
+     * notification, redemption. Settling is an atomic remove, so the normal path and the
+     * duplicate path can never both run the effects for one envelope.
+     */
+    private fun settlePostAck(envelopeId: String) {
+        pendingPostAck.settle(envelopeId)?.let { owed ->
+            // Delivery receipt to the SENDER (peer-routed by the relay → their
+            // message.delivered). senderId comes from the decrypted envelope; the relay never
+            // stored it, preserving zero-knowledge. Best-effort: a dropped receipt just means
+            // the sender stays at SENT, never worse.
+            if (owed.sendReceipt) ws.sendReceived(envelopeId, owed.senderId)
+            // Content-free notification: always just "New message". The scheduler
+            // rate-limits + re-fires it per conversation.
+            if (owed.notify) notificationScheduler.onIncomingMessage(owed.conversationId)
+            // One-shot blob redemption — this settling is what keeps it reachable when the
+            // durable ack only lands on the duplicate path (round 7, Codex :1237).
+            owed.attachment?.let { redeemAttachment(envelopeId, it) }
+        }
+    }
+
     init {
         ws.listener = this
         // Local burns (burn-on-read / burn-all) propagate to the other side.
@@ -1100,6 +1132,11 @@ class MessagingCoordinator(
                 // dropped) from a contact that is still present.
                 if (outcome != ContactDeleteOutcome.NOT_APPLIED) {
                     pendingReceipts.remove(contactId)
+                    // Owed post-ack side effects for this contact's shown-but-unacked envelopes die
+                    // with the contact: their redeliveries now hit the deleted-contact drop (a bare
+                    // ack, never the duplicate path), so the entries would otherwise just leak —
+                    // and a receipt/notification/redemption for a deleted contact must not fire.
+                    pendingPostAck.dropContact(contactId)
                     _typingPeers.value = _typingPeers.value - contactId
                     notificationScheduler.onConversationRemoved(conversationId)
                 }
@@ -1279,18 +1316,28 @@ class MessagingCoordinator(
                             ),
                         ),
                     )
+                    // Owe the post-ack side effects BEFORE the roster bump or the flush can fail:
+                    // if either does, the relay's redelivery decrypts to a DUPLICATE (the ratchet
+                    // is already past it) and the ACK_AND_DROP path — not this branch — lands the
+                    // ack; it settles this entry so the one-shot blob still gets redeemed. See
+                    // [PendingPostAckLedger].
+                    pendingPostAck.owe(
+                        envelope.id,
+                        PendingPostAckLedger.Owed(
+                            senderId = envelope.senderId,
+                            conversationId = conversationId,
+                            sendReceipt = true,
+                            notify = true,
+                            attachment = attachment,
+                        ),
+                    )
                     conversations.onIncomingMessage(envelope.senderId)
                     // Durable barrier: the decrypt advanced the ratchet. On a non-durable flush,
-                    // skip the ack AND every post-ack side effect (relay redelivers). D4 absorbed.
+                    // skip the ack AND every post-ack side effect (relay redelivers; the owed
+                    // entry above keeps them retryable on the duplicate path). D4 absorbed.
                     if (!ackDurable(envelope.id)) return@runCatching
-                    // Delivery receipt back to the SENDER (peer-routed by the
-                    // relay → their message.delivered). senderId comes from the
-                    // decrypted envelope; the relay never stored it, preserving
-                    // zero-knowledge. Best-effort: a dropped receipt just means
-                    // the sender stays at SENT, never worse.
-                    ws.sendReceived(envelope.id, envelope.senderId)
-                    notificationScheduler.onIncomingMessage(conversationId)
-                    redeemAttachment(envelope.id, attachment)
+                    // Receipt → notification → blob redemption, from the owed entry.
+                    settlePostAck(envelope.id)
                     return@runCatching
                 }
                 // A control payload this build can't parse (a newer client's,
@@ -1311,11 +1358,24 @@ class MessagingCoordinator(
                             unsupported = true,
                         ),
                     )
+                    // Owe the notification before the bump/flush can fail — see the attachment
+                    // branch and [PendingPostAckLedger]. No receipt: this branch never sends one.
+                    pendingPostAck.owe(
+                        envelope.id,
+                        PendingPostAckLedger.Owed(
+                            senderId = envelope.senderId,
+                            conversationId = conversationId,
+                            sendReceipt = false,
+                            notify = true,
+                            attachment = null,
+                        ),
+                    )
                     conversations.onIncomingMessage(envelope.senderId)
                     // Durable barrier: the decrypt advanced the ratchet. On a non-durable flush,
-                    // skip the ack and the notification (relay redelivers). D4 absorbed.
+                    // skip the ack and the notification (relay redelivers; the owed entry above
+                    // keeps it retryable on the duplicate path). D4 absorbed.
                     if (!ackDurable(envelope.id)) return@runCatching
-                    notificationScheduler.onIncomingMessage(conversationId)
+                    settlePostAck(envelope.id)
                     return@runCatching
                 }
                 // DISPLAY FIRST (RAM-only), then the roster bump — see the attachment branch.
@@ -1331,19 +1391,28 @@ class MessagingCoordinator(
                         state = MessageState.DELIVERED,
                     ),
                 )
+                // Owe the receipt + notification before the bump/flush can fail — see the
+                // attachment branch and [PendingPostAckLedger].
+                pendingPostAck.owe(
+                    envelope.id,
+                    PendingPostAckLedger.Owed(
+                        senderId = envelope.senderId,
+                        conversationId = conversationId,
+                        sendReceipt = true,
+                        notify = true,
+                        attachment = null,
+                    ),
+                )
                 conversations.onIncomingMessage(envelope.senderId)
                 // Ack AFTER successful decrypt + store AND a durable ratchet reseal: the ack is
                 // what makes the server delete its copy (store-and-forward, zero retention), so it
                 // must never outrun the receiving-ratchet advance reaching disk. On a non-durable
-                // flush, skip the ack and the receipt (relay redelivers → zero loss). D4 absorbed.
+                // flush, skip the ack and the receipt (relay redelivers; the owed entry above
+                // keeps them retryable on the duplicate path). D4 absorbed.
                 if (!ackDurable(envelope.id)) return@runCatching
-                // Delivery receipt to the SENDER (peer-routed → their
-                // message.delivered). See the attachment branch above for the
-                // zero-knowledge rationale.
-                ws.sendReceived(envelope.id, envelope.senderId)
-                // Content-free notification: always just "New message". The
-                // scheduler rate-limits + re-fires it per conversation.
-                notificationScheduler.onIncomingMessage(conversationId)
+                // Receipt → notification, from the owed entry (see settlePostAck for the
+                // zero-knowledge receipt rationale).
+                settlePostAck(envelope.id)
             }.onFailure { e ->
                 // The decision (rethrow / ack-drop / diagnose / swallow) is factored into the pure
                 // [classifyRecvFailure] so it is host-testable without a live socket; the side
@@ -1368,6 +1437,14 @@ class MessagingCoordinator(
                         // but before the ack, both resolve to a durable ack here on redelivery.
                         // No slot/credential data logged; the envelope id is an opaque relay handle.
                         if (ackDurable(envelope.id)) {
+                            // Settle any post-ack side effects the FIRST delivery still owes for
+                            // this envelope (it displayed the message, then its roster bump threw
+                            // at capacity or its flush was non-durable). This is what keeps an
+                            // attachment's one-shot blob redeemable — without it the placeholder
+                            // stays LOADING forever (round 7, Codex :1237) — and delivers the owed
+                            // receipt + notification. Settling is atomic, so the normal path and
+                            // this one can never both run the effects for the same envelope.
+                            settlePostAck(envelope.id)
                             diag("recv: duplicate (already consumed) — flushed, acked + dropped")
                         }
                     }
@@ -1738,3 +1815,53 @@ internal fun contactDeleteOutcome(durable: Boolean, mutateApplied: Boolean): Con
         mutateApplied -> ContactDeleteOutcome.APPLIED_UNCONFIRMED
         else -> ContactDeleteOutcome.NOT_APPLIED
     }
+
+/**
+ * The post-ack side effects (delivery receipt / notification / attachment redemption) a display
+ * branch still OWES for a shown-but-not-yet-acked envelope, keyed by envelope id (round 7,
+ * Codex :1237).
+ *
+ * A display branch registers its owed entry via [owe] immediately after
+ * [MessageRepository.addIncoming] — BEFORE the roster bump or the durable flush, either of which
+ * can fail (a `VaultCapacityException` from the bump, or a non-durable flush). If one does, the
+ * envelope stays un-acked and the relay redelivers — but the redelivery decrypts to
+ * `DuplicateMessageException` (the ratchet is already past it), so the duplicate ACK_AND_DROP
+ * path, not the display branch, is what finally lands the durable ack. [settle] hands it the owed
+ * entry so the one-shot attachment blob still gets redeemed (instead of a placeholder stuck
+ * LOADING forever), the sender still sees DELIVERED, and the notification still fires. [settle]
+ * is an atomic remove: exactly ONE path runs the effects for an envelope.
+ *
+ * [dropContact] discards a deleted contact's owed entries — its redeliveries hit the
+ * deleted-contact drop (a bare ack, never the duplicate path), and no effect may fire for a
+ * deleted contact.
+ *
+ * In-memory only, like the messages themselves: after a process death the placeholder is gone
+ * too, so nothing is left to owe (the RAM-only durable-before-ack residual documented in round 4).
+ */
+internal class PendingPostAckLedger {
+    internal data class Owed(
+        val senderId: String,
+        val conversationId: String,
+        val sendReceipt: Boolean,
+        val notify: Boolean,
+        val attachment: AttachmentControlPayload.Attachment?,
+    )
+
+    private val owed = ConcurrentHashMap<String, Owed>()
+
+    /** Register the side effects [envelopeId]'s display branch owes; overwrites any stale entry. */
+    fun owe(envelopeId: String, entry: Owed) {
+        owed[envelopeId] = entry
+    }
+
+    /** Atomically claim [envelopeId]'s owed entry, or null if none/already settled. */
+    fun settle(envelopeId: String): Owed? = owed.remove(envelopeId)
+
+    /** Discard every entry owed for [senderId] (contact deleted — effects must not fire). */
+    fun dropContact(senderId: String) {
+        owed.entries.removeIf { it.value.senderId == senderId }
+    }
+
+    /** Owed envelope ids (test observability). */
+    fun pending(): Set<String> = owed.keys.toSet()
+}
