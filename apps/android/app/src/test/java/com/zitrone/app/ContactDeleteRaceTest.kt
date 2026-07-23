@@ -152,4 +152,24 @@ class ContactDeleteRaceTest {
         assertEquals(0, repo.conversations.value.first { it.id == "bob" }.unreadCount)
         assertFalse("alice not resurrected", store.sealedRoster!!.contains("alice"))
     }
+
+    /**
+     * The delete's in-memory reconcile MUST run regardless of the seal's durable result — the
+     * contract the seal-side containment (ZitroneApp catches a closed-runtime mutate throw and
+     * returns false, never lets it escape) relies on: a false return still removes the contact
+     * from RAM and returns false, never a crash or a half-delete left in the roster.
+     */
+    @Test
+    fun `an unconfirmed-durable seal still reconciles RAM and reports false`() {
+        val store = FakeRosterStore()
+        val repo = ConversationRepository(store, clock = { 1_000_000L })
+        repo.upsert(convo("alice"))
+        repo.upsert(convo("bob"))
+
+        val durable = repo.deleteContactDurably("alice", "alice", 1_000_000L) { _, _ -> false }
+
+        assertFalse("a false seal is reported as unconfirmed-durable", durable)
+        assertEquals("alice removed from RAM even when the flush is unconfirmed", setOf("bob"),
+            repo.conversations.value.map { it.id }.toSet())
+    }
 }

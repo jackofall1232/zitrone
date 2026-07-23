@@ -207,10 +207,16 @@ class AppContainer(private val app: Application) {
         },
         // Teardown: stop the coordinator THEN close the runtime (final reseal + state
         // wipe), under transportLock. The imageStore itself stays open (device half).
+        // runtime.close() (the reseal + key-material wipe) runs in a finally so a
+        // throw from coordinator.stop() can NEVER skip the wipe — otherwise a lock
+        // would leave the slot key + decrypted plaintext resident in the heap.
         stopSession = {
             synchronized(transportLock) {
-                it.coordinator.stop()
-                it.runtime.close()
+                try {
+                    it.coordinator.stop()
+                } finally {
+                    it.runtime.close()
+                }
             }
         },
         afterPublish = ::onSessionPublished,
@@ -575,12 +581,20 @@ class SessionContainer(
      */
     private suspend fun deleteContactAtomically(conversationId: String, contactId: String, at: Long): Boolean =
         conversationRepository.deleteContactDurably(conversationId, contactId, at) { rosterJson, tombstonesJson ->
-            runtime.mutate { state ->
-                vaultSignalStore.removeContactCryptoRecords(state, contactId)
-                rosterJson?.let { state.rosterJson = it }
-                state.tombstonesJson = tombstonesJson
-            }
+            // BOTH mutate and flush are contained: a teardown race (forced logout /
+            // revocation runs runtime.close() while this delete is mid-seal) makes
+            // mutate throw IllegalStateException("closed") — synchronous, so
+            // cancellation can't preempt it. Uncaught, that would crash the
+            // confined worker (no CoroutineExceptionHandler) AND leave a half-delete
+            // (burnAll already ran; the RAM/tombstone reconcile in the caller would
+            // be skipped). Caught, it degrades to the same "unconfirmed durable"
+            // false the flush failure returns — the removal is never rolled back.
             try {
+                runtime.mutate { state ->
+                    vaultSignalStore.removeContactCryptoRecords(state, contactId)
+                    rosterJson?.let { state.rosterJson = it }
+                    state.tombstonesJson = tombstonesJson
+                }
                 runtime.flushBeforeAck()
                 true
             } catch (t: Throwable) {
