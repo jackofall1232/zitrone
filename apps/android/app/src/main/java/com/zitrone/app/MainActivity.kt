@@ -392,14 +392,39 @@ class MainActivity : FragmentActivity() {
      */
     private fun startVaultBiometricUnlock(onResult: (VaultBiometricResult) -> Unit) {
         val container = (application as ZitroneApp).container
-        val wrap = container.biometricStore.load() ?: return onResult(VaultBiometricResult.UNAVAILABLE)
-        val cipher = try {
-            container.biometricCipher.cipherForDecrypt(wrap.nonce)
-        } catch (e: android.security.keystore.KeyPermanentlyInvalidatedException) {
-            return onResult(VaultBiometricResult.INVALIDATED)
-        } catch (e: Exception) {
-            return onResult(VaultBiometricResult.UNAVAILABLE)
-        } ?: return onResult(VaultBiometricResult.UNAVAILABLE)
+        // Keystore work (blob load + cipher init) off the main thread (round 11, Codex): a slow
+        // or busy TEE/StrongBox can stall these binder calls long enough to jank or ANR. Only
+        // the BiometricPrompt launch returns to main.
+        lifecycleScope.launch {
+            val prepared = withContext(Dispatchers.IO) {
+                val wrap = container.biometricStore.load()
+                    ?: return@withContext null to VaultBiometricResult.UNAVAILABLE
+                try {
+                    val cipher = container.biometricCipher.cipherForDecrypt(wrap.nonce)
+                        ?: return@withContext null to VaultBiometricResult.UNAVAILABLE
+                    (cipher to wrap) to VaultBiometricResult.SUCCESS
+                } catch (e: android.security.keystore.KeyPermanentlyInvalidatedException) {
+                    null to VaultBiometricResult.INVALIDATED
+                } catch (e: Exception) {
+                    null to VaultBiometricResult.UNAVAILABLE
+                }
+            }
+            val (cipherAndWrap, failure) = prepared
+            if (cipherAndWrap == null) {
+                onResult(failure)
+                return@launch
+            }
+            val (cipher, wrap) = cipherAndWrap
+            startVaultBiometricPrompt(container, cipher, wrap, onResult)
+        }
+    }
+
+    private fun startVaultBiometricPrompt(
+        container: AppContainer,
+        cipher: javax.crypto.Cipher,
+        wrap: com.zitrone.app.crypto.vault.BiometricWrappedKey,
+        onResult: (VaultBiometricResult) -> Unit,
+    ) {
         authenticateCrypto(
             cipher,
             onSuccess = { authenticatedCipher ->
@@ -434,11 +459,25 @@ class MainActivity : FragmentActivity() {
     private fun startBiometricEnableFromSession(onResult: (Boolean) -> Unit) {
         val container = (application as ZitroneApp).container
         if (container.session.value == null) return onResult(false)
-        val cipher = try {
-            container.biometricCipher.newEncryptCipher()
-        } catch (e: Exception) {
-            return onResult(false)
+        // Keystore keygen off the main thread (round 11, Codex): newEncryptCipher deletes the
+        // prior alias and generates a hardware-backed key — a slow TEE/StrongBox can take long
+        // enough on these binder calls to jank or ANR. Only the prompt launch returns to main.
+        lifecycleScope.launch {
+            val cipher = try {
+                withContext(Dispatchers.IO) { container.biometricCipher.newEncryptCipher() }
+            } catch (e: Exception) {
+                onResult(false)
+                return@launch
+            }
+            startBiometricEnablePrompt(container, cipher, onResult)
         }
+    }
+
+    private fun startBiometricEnablePrompt(
+        container: AppContainer,
+        cipher: javax.crypto.Cipher,
+        onResult: (Boolean) -> Unit,
+    ) {
         authenticateCrypto(
             cipher,
             onSuccess = { authenticatedCipher ->
@@ -611,6 +650,41 @@ private fun ZitroneRoot(
                     live.signalManager.ensureIdentity()
                     live.signalManager.localFingerprint()
                 }.getOrNull()
+            }
+        }
+    }
+
+    // Route reconciliation with the PROCESS-scoped session (round 11, Codex). The route vars
+    // above are composition-local: an Activity recreation during a slow vault operation seeds
+    // them from a one-time snapshot, and the operation's own completion callback then writes to
+    // the DISPOSED composition's state. Two stranded shapes: rotation during an Argon2
+    // unlock/create seeds Locked/Onboarding, the surviving worker publishes the session, and no
+    // live coroutine ever routes to ChatList (every further unlock is refused — a session is
+    // already live); rotation during the NonCancellable account delete seeds ChatList, the
+    // delete then nulls the session, and the replacement composes blank. This collector — one
+    // per LIVE composition — reconciles both directions. The locked-direction target derives
+    // from DISK TRUTH (destroy marker / image presence), the SAME derivation the delete
+    // handler's finally uses, so whichever writes last the result is identical — an observer
+    // deriving anything else would race that finally and could stomp DeleteIncomplete with a
+    // lock gate over a destroyed vault.
+    LaunchedEffect(Unit) {
+        container.session.collect { live ->
+            if (live != null) {
+                if (!unlocked) {
+                    unlocked = true
+                    unlocking = false
+                    lockError = null
+                    route = Route.ChatList
+                }
+            } else if (unlocked) {
+                unlocked = false
+                identityFingerprint = null
+                vaultExists = container.hasVault()
+                route = when {
+                    container.vaultDestroyPending() -> Route.DeleteIncomplete
+                    vaultExists -> Route.Locked
+                    else -> Route.Onboarding
+                }
             }
         }
     }

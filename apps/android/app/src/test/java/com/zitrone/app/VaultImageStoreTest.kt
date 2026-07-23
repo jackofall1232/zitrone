@@ -899,13 +899,34 @@ class VaultImageStoreTest {
     }
 
     @Test
+    fun destroy_abortsWithFilesUntouched_whenTheMarkerFsyncIsNotDurable() {
+        val dir = tmp.newFolder()
+        val first = newStore(dir)
+        first.create(passphrase, "v".toByteArray(Charsets.UTF_8))
+        first.close()
+        // Round 11 (Codex): the marker is REQUIRED-durable BEFORE any unlink — proceeding
+        // without it could partially unlink, crash, and restart into a marker-less broken vault
+        // (unlock dead-end / silent re-register). A non-durable marker aborts with the vault
+        // files UNTOUCHED.
+        val store = newStore(dir) { DirSyncResult.NOT_DURABLE }
+
+        assertThrows(VaultImageException.DestroyFailed::class.java) { store.destroy() }
+        assertTrue("vault.bin untouched on marker-gate abort", File(dir, "vault.bin").exists())
+        assertTrue("vault.dek untouched on marker-gate abort", File(dir, "vault.dek").exists())
+    }
+
+    @Test
     fun destroy_throwsDestroyFailed_andKeepsMarker_whenUnlinkFsyncIsNotDurable() {
         val dir = tmp.newFolder()
         // Round 9 (Codex): exists() proves only the current namespace — the unlinks must be
         // confirmed crash-durable (directory fsync) BEFORE the marker is retired, else a journal
         // replay can resurrect the vault files with no durable resume signal. A NOT_DURABLE sync
-        // is a failed destroy: throw, marker kept, retry re-runs the idempotent unlink.
-        val store = newStore(dir) { DirSyncResult.NOT_DURABLE }
+        // AFTER the unlinks (marker sync = first call = DURABLE) is a failed destroy: throw,
+        // marker kept, retry re-runs the idempotent unlink.
+        var calls = 0
+        val store = newStore(dir) {
+            if (++calls == 1) DirSyncResult.DURABLE else DirSyncResult.NOT_DURABLE
+        }
 
         assertThrows(VaultImageException.DestroyFailed::class.java) { store.destroy() }
         assertTrue("marker kept until the unlinks are DURABLE", store.destroyPending())

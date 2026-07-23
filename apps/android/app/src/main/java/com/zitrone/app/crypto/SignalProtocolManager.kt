@@ -216,7 +216,10 @@ class SignalProtocolManager(
      * lost-response window instead of every flush failure. The pending marker is retired by
      * [confirmOneTimePreKeysUploaded]; ids whose records vanished (wiped store) are dropped.
      */
-    fun generateOneTimePreKeys(count: Int = ONE_TIME_PREKEY_BATCH): List<OneTimePreKeyDto> {
+    fun generateOneTimePreKeys(
+        count: Int = ONE_TIME_PREKEY_BATCH,
+        discardAttempted: Boolean = false,
+    ): List<OneTimePreKeyDto> {
         if (!store.oneTimePreKeyUploadAttempted()) {
             val pending = store.pendingOneTimePreKeyUploadIds()
                 .mapNotNull { id ->
@@ -228,6 +231,17 @@ class SignalProtocolManager(
                     }
                 }
             if (pending.isNotEmpty()) return pending
+        } else if (discardAttempted) {
+            // REGISTER-retry only (round 11, Codex): with NO live account (accountId == null), a
+            // maybe-registered batch's private halves are dead weight — a bundle under the orphan
+            // account id can only produce messages addressed TO that orphan, which this client
+            // (about to register a fresh id) will never receive. Discarding them keeps the
+            // offline-retry loop's vault footprint net-zero (each retry destroys the superseded
+            // batch before generating). NEVER valid for the top-up path, where the account is
+            // live and peers may hold bundles against the attempted batch.
+            store.pendingOneTimePreKeyUploadIds().forEach { id ->
+                runCatching { store.removePreKey(id) }
+            }
         }
         val fresh = (0 until count).map {
             val id = allocatePreKeyId()

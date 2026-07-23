@@ -346,12 +346,17 @@ class MessagingCoordinator(
                 if (api.accountId == null) {
                     if (registration == null) {
                         stage = "generate-prekeys"
-                        // Reuse a stored-but-unconfirmed signed prekey / one-time batch from a
-                        // PREVIOUS attempt (process death between store and register) before
-                        // generating fresh — the pending-upload markers make the retry idempotent
-                        // instead of orphaning private halves per attempt (round 8).
+                        // Reuse a stored-but-unconfirmed signed prekey / NEVER-ATTEMPTED one-time
+                        // batch from a previous attempt before generating fresh (round 8). An
+                        // ATTEMPTED batch (a register request that may have reached the relay) is
+                        // never reused — the same single-use publics must not exist under two
+                        // account ids — and its superseded privates are discarded (safe here ONLY:
+                        // no live account can ever receive a message keyed to them), keeping the
+                        // offline-retry loop net-zero in the vault (round 11, Codex). The signed
+                        // prekey IS reused across attempts: it is multi-use and the relay upserts
+                        // it per-account.
                         val signedPreKey = signal.pendingSignedPreKeyUpload() ?: signal.generateSignedPreKey()
-                        val oneTimePreKeys = signal.generateOneTimePreKeys()
+                        val oneTimePreKeys = signal.generateOneTimePreKeys(discardAttempted = true)
                         registration = suspend {
                             api.register(
                                 identityKeyBase64 = signal.localIdentityPublicKeyBase64(),
@@ -385,8 +390,28 @@ class MessagingCoordinator(
                     ) {
                         throw PreKeyFlushNotDurableException()
                     }
+                    // TWO-PHASE attempted marker, same as the top-up path (round 11, Codex): mark
+                    // the batch ATTEMPTED + reseal durable BEFORE the register request can leave.
+                    // A lost response (or crash) then regenerates instead of re-registering the
+                    // same single-use publics under a second account id.
+                    signal.markOneTimePreKeyUploadAttempted()
+                    if (!flushBeforePreKeyPublish {
+                            diag("boot[$attempt]: attempted-marker reseal not durable — register deferred")
+                        }
+                    ) {
+                        throw PreKeyFlushNotDurableException()
+                    }
                     diag("boot[$attempt]: firing POST /api/v1/register")
-                    registration?.invoke()
+                    try {
+                        registration?.invoke()
+                    } catch (t: Throwable) {
+                        // The request MAY have reached the relay (response lost / any ambiguous
+                        // failure): drop the cached closure so the retry regenerates its batch
+                        // (the ATTEMPTED marker makes generateOneTimePreKeys refuse to re-serve
+                        // this one) instead of re-uploading the same publics.
+                        registration = null
+                        throw t
+                    }
                     // The relay now holds the public halves — retire both pending-upload markers
                     // (losing this confirm just re-uploads the same records, idempotent).
                     signal.confirmPreKeysUploaded()
@@ -1155,13 +1180,18 @@ class MessagingCoordinator(
             val contactId = conversation.contactId
             val atomicDelete = vaultContactDelete
             if (atomicDelete != null) {
-                // Vault path. Peer-burn FIRST, while the roster entry still resolves the peer for
-                // the best-effort burn frames (legacy ordering) — burnAll only READS the roster and
-                // enqueues burn frames, it does not persist the roster, so it needs no monitor and
-                // cannot race the seal below.
+                // Vault path. Capture the burn set FIRST (read-only) but fire NOTHING yet: burning
+                // local history and emitting peer burn frames before the delete is known to have
+                // APPLIED would irreversibly destroy the messages of a contact whose deletion then
+                // failed (NOT_APPLIED — teardown race), stranding the user with a kept contact and
+                // vanished history (round 11, Codex). The frames are sent manually with the
+                // captured contactId below because after an applied delete the roster row is gone
+                // and burnAll's per-message hook could no longer resolve the peer.
                 val at = System.currentTimeMillis()
-                messages.burnAll(conversationId, notifyPeer = true)
-                // Then the atomic teardown: crypto records + roster entry + tombstone seal in ONE
+                val burnIds = messages.messages.value[conversationId].orEmpty()
+                    .filter { it.state != MessageState.BURNING }
+                    .map { it.id }
+                // The atomic teardown: crypto records + roster entry + tombstone seal in ONE
                 // runtime.mutate + ONE durable flush, and the roster RAM reconciles to it — ALL
                 // under the ConversationRepository monitor (the single serialization point), so no
                 // concurrent roster write can resurrect or lose an entry. The removal is applied in
@@ -1176,6 +1206,10 @@ class MessagingCoordinator(
                 // post-unlock retry; stripping it would desync the UI (typing/receipts/notifications
                 // dropped) from a contact that is still present.
                 if (outcome != ContactDeleteOutcome.NOT_APPLIED) {
+                    // Burn ONLY after the delete applied (round 11): peer frames with the captured
+                    // contactId (see above), then the local history without the hook.
+                    burnIds.forEach { ws.burnMessage(it, contactId) }
+                    messages.burnAll(conversationId, notifyPeer = false)
                     pendingReceipts.remove(contactId)
                     // Owed post-ack side effects for this contact's shown-but-unacked envelopes die
                     // with the contact: their redeliveries now hit the deleted-contact drop (a bare
@@ -1187,9 +1221,39 @@ class MessagingCoordinator(
                 }
                 when (outcome) {
                     ContactDeleteOutcome.DURABLE -> Unit
-                    ContactDeleteOutcome.APPLIED_UNCONFIRMED ->
+                    ContactDeleteOutcome.APPLIED_UNCONFIRMED -> {
                         diag("delete: vault teardown applied in memory + live state; durable flush " +
-                            "unconfirmed — it persists on the next flush (contact is gone, not kept)")
+                            "unconfirmed — retrying in the background (contact is gone, not kept)")
+                        // Active durability retry (round 11, Codex): a bare failed flush does NOT
+                        // re-arm the coalesced reseal (VaultSession deliberately avoids the
+                        // failure hot-loop), so without this the applied deletion could sit
+                        // RAM-only until the next unrelated mutation or teardown — a process kill
+                        // in that window resurrects the contact's roster + crypto on the next
+                        // unlock. Bounded backoff; the removal itself is already applied and is
+                        // never rolled back, so a still-unconfirmed exit just leaves the existing
+                        // documented resurrect-on-unlock residual (user re-deletes).
+                        scope.launch(confined) {
+                            var backoffMs = 1_000L
+                            repeat(FLUSH_RETRY_ATTEMPTS) {
+                                delay(backoffMs)
+                                backoffMs *= 2
+                                val confirmed = try {
+                                    flushBeforeAck()
+                                    true
+                                } catch (c: CancellationException) {
+                                    throw c
+                                } catch (_: Throwable) {
+                                    false
+                                }
+                                if (confirmed) {
+                                    diag("delete: deferred durable flush confirmed")
+                                    return@launch
+                                }
+                            }
+                            diag("delete: durable flush still unconfirmed after retries — persists " +
+                                "on the next successful flush or teardown reseal")
+                        }
+                    }
                     ContactDeleteOutcome.NOT_APPLIED ->
                         // The runtime closed before the mutate applied (a revocation / forced logout
                         // raced the delete): the removal never reached live state, so the contact is
@@ -1733,6 +1797,9 @@ internal class PreKeyFlushNotDurableException :
 
 /** Attempts (incl. the first) [flushThenAck] makes at a TRANSIENT durable-flush blip. */
 internal const val FLUSH_MAX_ATTEMPTS = 3
+
+/** Background durability-retry attempts for an APPLIED_UNCONFIRMED contact delete (1s/2s/…). */
+internal const val FLUSH_RETRY_ATTEMPTS = 5
 
 /** Linear backoff step between transient retries — attempt N waits N × this (~50/100 ms). */
 internal const val FLUSH_RETRY_BASE_MS = 50L

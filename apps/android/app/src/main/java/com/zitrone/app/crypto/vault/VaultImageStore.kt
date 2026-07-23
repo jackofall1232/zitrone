@@ -615,6 +615,13 @@ class VaultImageStore internal constructor(
      */
     fun destroy() {
         imageLock.withLock {
+            // Wipe live key material + drop the cached image FIRST — before even the marker gate
+            // can throw — so no DEK/plaintext-adjacent state is retained on ANY exit. A destroy
+            // request is terminal for this store's usefulness regardless of outcome (the session
+            // is already torn down); the retry path never needs the cached DEK.
+            dek?.let { wipe(it) }
+            dek = null
+            canonical = null
             // DESTROY-PENDING MARKER (crash / restart continuity): a destroy is only requested
             // after the SERVER account is already gone, so once we are here the local image must
             // eventually die even across process death. Drop a marker BEFORE the unlinks; it is
@@ -622,18 +629,18 @@ class VaultImageStore internal constructor(
             // [destroyPending] and re-runs this (idempotent) instead of offering the lock gate —
             // without it, a failed unlink + restart would route Locked over a vault whose account
             // no longer exists (dead-end on a partial unlink, or a silent re-register on a zeroed
-            // one). Best-effort: if the marker itself cannot be written (the same failing disk),
-            // behavior degrades to the in-session routing only — never worse than pre-marker.
-            runCatching { destroyMarkerFile.createNewFile() }
-            // Make the marker itself crash-durable (best-effort — see above) BEFORE the unlinks:
-            // an un-synced marker + a crash mid-unlink could otherwise restart into a partial
-            // vault with no resume signal.
-            runCatching { dirSync(baseDir) }
-            // Wipe live key material + drop the cached image FIRST, so no DEK/plaintext-adjacent
-            // state is retained even on the (unexpected) chance a delete below throws.
-            dek?.let { wipe(it) }
-            dek = null
-            canonical = null
+            // one). REQUIRED-DURABLE (round 11, Codex): if the marker cannot be written AND
+            // fsynced, ABORT with the vault files untouched — proceeding could partially unlink,
+            // crash, and restart into exactly the marker-less broken state above. The abort is
+            // honest: DestroyFailed keeps the caller on the finish-deletion path (in-session
+            // routing + retry), never a false success.
+            val markerDurable = runCatching {
+                destroyMarkerFile.createNewFile()
+                destroyMarkerFile.exists() && dirSync(baseDir) == DirSyncResult.DURABLE
+            }.getOrDefault(false)
+            if (!markerDurable) {
+                throw VaultImageException.DestroyFailed()
+            }
             // Remove BOTH persisted files and any interrupted-write temps. delete() is
             // best-effort and never throws on a missing file (returns false) — idempotent.
             binFile.delete()
