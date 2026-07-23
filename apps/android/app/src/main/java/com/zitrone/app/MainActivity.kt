@@ -815,6 +815,18 @@ private fun ZitroneRoot(
     // Biometric unlock (§2): BIOMETRIC_STRONG CryptoObject only. Invalidation (a new
     // enrollment) drops to the passphrase field with an honest note, clears the dead wrap, and
     // arms the re-enable that the note promises (fired on the next passphrase unlock).
+    // Revoke biometric (wrap blob + auth-gated Keystore key) OFF the main thread, then run the
+    // Compose-state reconcile on main (round 12c, Gemini): disableBiometric() → deleteEntry() is a
+    // Keystore binder call that can stall main under a busy TEE (same invariant as the round-11b
+    // cipher moves). runCatching so a deleteKey throw on an already-unhealthy keystore still runs
+    // the full reconcile — the dead biometric affordance must not persist even then.
+    val disableBiometricThen: (() -> Unit) -> Unit = { onReconciled ->
+        scope.launch {
+            withContext(Dispatchers.IO) { runCatching { container.disableBiometric() } }
+            onReconciled()
+        }
+    }
+
     val onUnlockBiometric: () -> Unit = onUnlockBiometric@{
         if (unlocking) return@onUnlockBiometric
         unlocking = true
@@ -822,39 +834,20 @@ private fun ZitroneRoot(
         startVaultBiometricUnlock { result ->
             when (result) {
                 VaultBiometricResult.SUCCESS -> onUnlockSuccess()
-                VaultBiometricResult.INVALIDATED -> {
-                    try {
-                        container.disableBiometric()
+                // INVALIDATED (new enrollment) and UNAVAILABLE (unusable wrap / gone key) both
+                // revoke off-main and drop to passphrase, arming the re-enable the note promises.
+                // unlocking clears in the reconcile (which always runs — runCatching above), so a
+                // throwing cleanup can't strand the lock screen (both unlock paths gate !unlocking).
+                VaultBiometricResult.INVALIDATED, VaultBiometricResult.UNAVAILABLE ->
+                    disableBiometricThen {
                         biometricEnabled = false
                         reofferBiometric = true
                         lockError = VaultUnlockRouter.BIOMETRIC_REENROLL_NOTE
-                    } finally {
-                        // If disableBiometric()/deleteKey() throws (keystore already unhealthy),
-                        // unlocking must STILL clear — both unlock paths gate on !unlocking, so a
-                        // throwing cleanup would otherwise strand the lock screen until an app restart.
                         unlocking = false
                     }
-                }
                 VaultBiometricResult.FAILED -> {
                     lockError = VaultUnlockRouter.UNIFORM_FAILURE
                     unlocking = false
-                }
-                VaultBiometricResult.UNAVAILABLE -> {
-                    // The persisted wrap is UNUSABLE (load() null on a malformed blob, or the
-                    // auth-gated Keystore key is gone / uninitializable) yet biometricEnabled was
-                    // still true — reconcile so the dead biometric button doesn't persist: revoke
-                    // the wrap + key and drop to passphrase, arming the re-enable the note promises.
-                    try {
-                        container.disableBiometric()
-                        biometricEnabled = false
-                        reofferBiometric = true
-                        lockError = VaultUnlockRouter.BIOMETRIC_REENROLL_NOTE
-                    } finally {
-                        // disableBiometric()/deleteKey() can throw on the very keystore fault that
-                        // produced UNAVAILABLE — unlocking must STILL clear in a finally, or both
-                        // unlock paths (gated on !unlocking) stay stuck until an app restart.
-                        unlocking = false
-                    }
                 }
                 VaultBiometricResult.CANCELLED -> {
                     // User dismissed the prompt — biometric is fine, nothing to reconcile.
@@ -872,8 +865,7 @@ private fun ZitroneRoot(
         if (enable) {
             startBiometricEnable { biometricEnabled = container.biometricStore.isEnabled() }
         } else {
-            container.disableBiometric()
-            biometricEnabled = false
+            disableBiometricThen { biometricEnabled = false }
         }
     }
 
