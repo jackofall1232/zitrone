@@ -326,15 +326,54 @@ class ApiClient(
         execute(post("/api/v1/qr-drops/burn", body, authenticated = false))
     }
 
-    /** DELETE /api/v1/account — full, irreversible purge of all server data. */
-    suspend fun deleteAccount() {
-        try {
+    /**
+     * The definite outcome of a server account-delete request. The caller MUST destroy local
+     * crypto ONLY on [CONFIRMED_GONE] — running local destruction on a swallowed error was the
+     * round-12 P1 (a still-live server account left orphaned while the only local keys were wiped).
+     */
+    enum class AccountDeleteResult {
+        /** The server confirmed the account no longer exists (2xx, or 404 = already gone). */
+        CONFIRMED_GONE,
+
+        /** The server responded that it did NOT delete (auth/permission/conflict). Retrying the
+         *  same request will not help; the account still exists. */
+        DEFINITE_FAILURE,
+
+        /** Transport failure or a server error (offline / DNS / TLS / timeout / 5xx): whether the
+         *  server processed the delete is UNKNOWN. Do not destroy; a later retry may resolve it. */
+        AMBIGUOUS,
+    }
+
+    /**
+     * DELETE /api/v1/account — full, irreversible purge of all server data. Returns a DEFINITE
+     * outcome instead of throwing-and-being-swallowed (round 13). Local auth state is cleared ONLY
+     * on [AccountDeleteResult.CONFIRMED_GONE]; on failure/ambiguous the tokens are KEPT so the
+     * delete can be retried (a definite failure with the account still present must remain
+     * authenticated to try again).
+     */
+    suspend fun deleteAccount(): AccountDeleteResult {
+        val result = try {
             execute(request("/api/v1/account").delete().build())
-        } finally {
+            AccountDeleteResult.CONFIRMED_GONE
+        } catch (e: ApiException) {
+            // The server responded. 404 = already gone (idempotent success). 5xx = the server
+            // erred and may or may not have deleted → ambiguous. Any other definite 4xx = it
+            // refused → the account still exists.
+            when {
+                e.code == 404 -> AccountDeleteResult.CONFIRMED_GONE
+                e.code >= 500 -> AccountDeleteResult.AMBIGUOUS
+                else -> AccountDeleteResult.DEFINITE_FAILURE
+            }
+        } catch (e: IOException) {
+            // Transport never got a definite answer (offline / DNS / TLS / read timeout).
+            AccountDeleteResult.AMBIGUOUS
+        }
+        if (result == AccountDeleteResult.CONFIRMED_GONE) {
             clearTokens()
             authStore.clearAccount()
             _accountId.value = null
         }
+        return result
     }
 
     // -- plumbing -------------------------------------------------------------------

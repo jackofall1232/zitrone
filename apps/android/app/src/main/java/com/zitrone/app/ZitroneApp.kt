@@ -163,20 +163,30 @@ class AppContainer(private val app: Application) {
     fun hasVault(): Boolean = imageStore.exists()
 
     /**
-     * Routing truth OVERRIDING [hasVault]: an account deletion confirmed the SERVER delete but
-     * not yet the local vault unlink ([VaultImageStore.destroyPending]). The only valid route is
-     * "finish the deletion" (retry [destroyVaultForAccountDeletion]) — never the unlock gate: a
-     * partially-unlinked image no longer opens, and a zeroed one would silently re-register.
+     * Routing truth OVERRIDING [hasVault]: the SERVER account is CONFIRMED gone and the local
+     * vault destroy is owed ([VaultImageStore.serverDeleteConfirmed]). The only valid route is
+     * "finish the deletion" (retry [destroyVaultForAccountDeletion]) — never the unlock gate. This
+     * is the ONLY authorisation for the auto-destroy route: a mere delete-INTENT (server outcome
+     * unknown) does NOT set it (round 13 — the round-12 conflation was the P1).
      */
-    fun vaultDestroyPending(): Boolean = imageStore.destroyPending()
+    fun serverDeleteConfirmed(): Boolean = imageStore.serverDeleteConfirmed()
 
     /**
-     * Persist the account-deletion INTENT durably before the server-delete request or session
-     * teardown (round 12, Codex). Throws if the marker cannot be made durable — the caller must
-     * then NOT proceed to delete the server account (fail-closed). See
-     * [VaultImageStore.markDestroyPending].
+     * A delete was INITIATED but the server delete is not confirmed (a crash/failure mid-delete).
+     * The vault is still valid and the account may still exist, so boot routes to normal unlock and
+     * clears this stale intent — it NEVER authorises destruction. See
+     * [VaultImageStore.deleteIntentPending].
      */
-    fun markVaultDestroyPending() = imageStore.markDestroyPending()
+    fun vaultDeleteIntentPending(): Boolean = imageStore.deleteIntentPending()
+
+    /** Persist the delete INTENT durably (throws if not durable; caller fails closed). */
+    fun markVaultDeleteIntent() = imageStore.markDeleteIntent()
+
+    /** Persist SERVER-DELETE-CONFIRMED durably — the auto-destroy authorisation. */
+    fun markServerDeleteConfirmed() = imageStore.markServerDeleteConfirmed()
+
+    /** Durably clear a stale delete-intent marker (abandoned/interrupted delete). */
+    fun clearVaultDeleteIntent() = imageStore.clearDeleteIntent()
 
     // @Volatile so the transport apply-loop (running on Dispatchers.Default) and
     // the construction thread publish/read the current client consistently.
@@ -452,7 +462,9 @@ class AppContainer(private val app: Application) {
             vaultOps = vaultOps,
             vaultOpen = vaultOpen,
             persist = imageStore::writeSealedPayload,
-            persistDeleteIntent = imageStore::markDestroyPending,
+            persistDeleteIntent = imageStore::markDeleteIntent,
+            persistServerDeleteConfirmed = imageStore::markServerDeleteConfirmed,
+            clearDeleteIntent = imageStore::clearDeleteIntent,
         )
     }
 
@@ -549,8 +561,10 @@ class SessionContainer(
     vaultOps: VaultSodiumOps,
     vaultOpen: VaultOpen,
     persist: (slotIndex: Int, sealedPayload: ByteArray) -> Unit,
-    /** Durable account-deletion intent (destroy marker) — see [MessagingCoordinator]. */
+    /** Two-phase account-deletion markers (round 13) — see [MessagingCoordinator]. */
     persistDeleteIntent: () -> Unit = {},
+    persistServerDeleteConfirmed: () -> Unit = {},
+    clearDeleteIntent: () -> Unit = {},
 ) {
     /** Which image slot this session unlocked — needed to persist a biometric re-wrap ([withVaultKey]). */
     val slotIndex: Int = vaultOpen.slotIndex
@@ -666,8 +680,11 @@ class SessionContainer(
                 // Flush-before-ack barrier (D2c, absorbs D4): the coordinator reseals the receiving
                 // ratchet durably before acking each inbound delivery. rt is the live runtime.
                 flushBeforeAck = rt::flushBeforeAck,
-                // Durable deletion intent before the server delete / teardown (round 12).
+                // Two-phase deletion markers (round 13): intent before the server delete, confirmed
+                // only after the server confirms gone; clear-intent abandons a definite failure.
                 persistDeleteIntent = persistDeleteIntent,
+                persistServerDeleteConfirmed = persistServerDeleteConfirmed,
+                clearDeleteIntent = clearDeleteIntent,
             )
         } catch (t: Throwable) {
             runCatching { rt.close() }

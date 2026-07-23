@@ -116,14 +116,23 @@ class MessagingCoordinator(
      */
     private val flushBeforeAck: suspend () -> Unit = {},
     /**
-     * Persist the account-deletion INTENT durably (the destroy-pending marker) — invoked at the
-     * very start of [deleteAccountAndWipe], BEFORE the server-delete request leaves the device
-     * and before any session teardown (round 12, Codex). Must THROW if the intent cannot be made
-     * durable: the delete then aborts without touching the server, so a crash can never leave a
-     * server-deleted account with an intact local vault and no resume marker. Production supplies
-     * [AppContainer.markVaultDestroyPending]; the default no-op suits the legacy path (no vault).
+     * Persist the account-deletion INTENT durably (the `vault.delete-intent` marker) — the FIRST
+     * step of [deleteAccountAndWipe], before the server-delete request leaves the device. Means
+     * ONLY "a delete was initiated"; it NEVER authorises local destruction (round 13). MUST THROW
+     * if it cannot be made durable — the delete then aborts without touching the server. Production
+     * supplies [AppContainer.markVaultDeleteIntent]; default no-op for the legacy path (no vault).
      */
     private val persistDeleteIntent: () -> Unit = {},
+    /**
+     * Persist SERVER-DELETE-CONFIRMED durably (the `vault.delete-confirmed` marker) — written ONLY
+     * after [ApiClient.deleteAccount] returns [ApiClient.AccountDeleteResult.CONFIRMED_GONE]. This
+     * is the ONLY marker that authorises the unlink-only DeleteIncomplete auto-destroy (round 13).
+     * Production supplies [AppContainer.markServerDeleteConfirmed].
+     */
+    private val persistServerDeleteConfirmed: () -> Unit = {},
+    /** Durably clear the delete-intent marker — used when a definite server failure abandons an
+     *  interrupted delete ([AppContainer.clearVaultDeleteIntent]). */
+    private val clearDeleteIntent: () -> Unit = {},
 ) : WsClient.Listener {
 
     private val _typingPeers = MutableStateFlow<Set<String>>(emptySet())
@@ -1215,9 +1224,10 @@ class MessagingCoordinator(
                 // post-unlock retry; stripping it would desync the UI (typing/receipts/notifications
                 // dropped) from a contact that is still present.
                 if (outcome != ContactDeleteOutcome.NOT_APPLIED) {
-                    // Burn ONLY after the delete applied (round 11): peer frames with the captured
-                    // contactId (see above), then the local history without the hook.
-                    burnIds.forEach { ws.burnMessage(it, contactId) }
+                    // RAM-only cleanup — safe regardless of durability, the contact is gone from
+                    // live state. NOTE the irreversible PEER burn is NOT here (round 13, Codex
+                    // P1-B): the local history is RAM-only (gone on any reload), but telling the
+                    // peer to shred its copy must not outrun durable confirmation of the deletion.
                     messages.burnAll(conversationId, notifyPeer = false)
                     pendingReceipts.remove(contactId)
                     // Owed post-ack side effects for this contact's shown-but-unacked envelopes die
@@ -1229,18 +1239,24 @@ class MessagingCoordinator(
                     notificationScheduler.onConversationRemoved(conversationId)
                 }
                 when (outcome) {
-                    ContactDeleteOutcome.DURABLE -> Unit
+                    ContactDeleteOutcome.DURABLE ->
+                        // The deletion is durable — the irreversible peer burn is safe now.
+                        burnIds.forEach { ws.burnMessage(it, contactId) }
                     ContactDeleteOutcome.APPLIED_UNCONFIRMED -> {
                         diag("delete: vault teardown applied in memory + live state; durable flush " +
-                            "unconfirmed — retrying in the background (contact is gone, not kept)")
-                        // Active durability retry (round 11, Codex): a bare failed flush does NOT
-                        // re-arm the coalesced reseal (VaultSession deliberately avoids the
-                        // failure hot-loop), so without this the applied deletion could sit
-                        // RAM-only until the next unrelated mutation or teardown — a process kill
-                        // in that window resurrects the contact's roster + crypto on the next
-                        // unlock. Bounded backoff; the removal itself is already applied and is
-                        // never rolled back, so a still-unconfirmed exit just leaves the existing
-                        // documented resurrect-on-unlock residual (user re-deletes).
+                            "unconfirmed — retrying in the background before the peer burn")
+                        // Round 13 (Codex P1-B): the removal is applied in RAM + scheduled, but a
+                        // bare failed flush does NOT re-arm the coalesced reseal, so it can sit
+                        // un-durable until an unrelated mutation/teardown; a process kill in that
+                        // window RESURRECTS the contact on the next unlock. The peer burn MUST be
+                        // gated on durability — if the contact can come back, the peer must still
+                        // hold the history (else an empty contact resurrects while the peer lost
+                        // its messages for a delete that never took). Retry the flush; send the
+                        // burn frames ONLY once a flush confirms durable. A still-unconfirmed exit
+                        // (retries exhausted / scope cancelled / process killed) leaves the peer
+                        // un-burned — consistent with a resurrected contact — the documented
+                        // resurrect-on-unlock residual (user re-deletes), never a burnt-but-back
+                        // inconsistency.
                         scope.launch(confined) {
                             var backoffMs = 1_000L
                             repeat(FLUSH_RETRY_ATTEMPTS) {
@@ -1255,12 +1271,13 @@ class MessagingCoordinator(
                                     false
                                 }
                                 if (confirmed) {
-                                    diag("delete: deferred durable flush confirmed")
+                                    diag("delete: deferred durable flush confirmed — sending peer burn")
+                                    burnIds.forEach { ws.burnMessage(it, contactId) }
                                     return@launch
                                 }
                             }
-                            diag("delete: durable flush still unconfirmed after retries — persists " +
-                                "on the next successful flush or teardown reseal")
+                            diag("delete: durable flush still unconfirmed after retries — peer burn " +
+                                "withheld; contact resurrects on unlock with peer history intact")
                         }
                     }
                     ContactDeleteOutcome.NOT_APPLIED ->
@@ -1314,21 +1331,35 @@ class MessagingCoordinator(
         }
     }
 
-    /** Wipes the server account AND the local keys/messages. Irreversible. */
-    fun deleteAccountAndWipe(onComplete: () -> Unit, onIntentNotDurable: () -> Unit = {}) {
-        acceptingDeliveries = false
+    /**
+     * Wipes the server account AND the local keys/messages. Irreversible. Round 13: local
+     * destruction happens ONLY on a DEFINITE server-confirmed deletion — never on a swallowed
+     * transport/HTTP failure (the round-12 P1: destroying the only local keys while the server
+     * account stayed live and orphaned).
+     *
+     *  - [onConfirmed]  — the server account is confirmed gone; RAM state is torn down and the
+     *    caller destroys the local vault + routes DeleteIncomplete/Onboarding.
+     *  - [onNotConfirmed] — the server did NOT confirm deletion (definiteFailure = true when the
+     *    server refused, false when the outcome is ambiguous/offline). NOTHING is destroyed; the
+     *    session stays live; the caller lifts the terminal-wipe gate and surfaces a retry.
+     *  - [onIntentNotDurable] — the intent marker itself could not be made durable; the delete
+     *    never touched the server. Caller lifts the gate.
+     */
+    fun deleteAccountAndWipe(
+        onConfirmed: () -> Unit,
+        onNotConfirmed: (definiteFailure: Boolean) -> Unit = {},
+        onIntentNotDurable: () -> Unit = {},
+    ) {
         // NonCancellable: the session scope this launches on is cancelled by
         // UnlockController.lock() (e.g. a server revocation racing the delete).
         // The server-side delete and the DURABLE roster clear must complete once
         // started — pre-D2b the process-lifetime scope guaranteed that; this
-        // preserves it. Bounded work; onComplete's lock() is idempotent.
+        // preserves it. Bounded work; onConfirmed's lock() is idempotent.
         scope.launch(confined + NonCancellable) {
-            // Persist the deletion INTENT durably FIRST (round 12, Codex): the marker must exist
-            // before api.deleteAccount() can leave the device AND before any session teardown
-            // nulls the live session. If it can't be made durable, ABORT — do NOT delete the
-            // server account, or a crash would strand an intact local vault with no resume signal
-            // (Splash → Locked over a gone account). onIntentNotDurable lets the caller lift the
-            // terminal-wipe gate and surface a retry; nothing has been destroyed.
+            // 1. Persist the deletion INTENT durably FIRST — before api.deleteAccount() can leave
+            // the device. It means ONLY "delete initiated" and NEVER authorises destruction, so a
+            // crash here leaves a fully valid, unlockable vault (round 13). If it can't be made
+            // durable, ABORT untouched.
             val intentDurable = try {
                 persistDeleteIntent()
                 true
@@ -1341,15 +1372,39 @@ class MessagingCoordinator(
                 onIntentNotDurable()
                 return@launch
             }
+            // 2. Server delete, session STILL FULLY LIVE (so a not-confirmed outcome can resume
+            // normally, and a retry stays authenticated). Returns a DEFINITE result — never a
+            // swallowed throw.
+            val result = try {
+                api.deleteAccount()
+            } catch (c: CancellationException) {
+                throw c
+            } catch (_: Throwable) {
+                ApiClient.AccountDeleteResult.AMBIGUOUS
+            }
+            if (result != ApiClient.AccountDeleteResult.CONFIRMED_GONE) {
+                // NOT gone: destroy NOTHING. A DEFINITE failure (server refused) abandons the
+                // interrupted delete (clear the intent — retrying won't help). An AMBIGUOUS
+                // outcome LEAVES the intent so a later attempt can resolve it. Session untouched.
+                val definiteFailure = result == ApiClient.AccountDeleteResult.DEFINITE_FAILURE
+                if (definiteFailure) runCatching { clearDeleteIntent() }
+                onNotConfirmed(definiteFailure)
+                return@launch
+            }
+            // 3. CONFIRMED gone: record confirmation durably. Best-effort — destroy() also writes
+            // it, and the intent marker + boot recovery backstop a crash if THIS write fails.
+            runCatching { persistServerDeleteConfirmed() }
+            // 4. Only now tear the session/RAM down. From here the server account is gone, so
+            // destruction is unconditionally safe.
+            acceptingDeliveries = false
             _linking.value = false
             linkJob?.cancel()
-            runCatching { api.deleteAccount() }
             ws.disconnect()
             messages.clearAll()
             conversations.clearAll()
             // Teardown hook: no re-fire job or fire state survives the wipe.
             notificationScheduler.cancelAll()
-            onComplete()
+            onConfirmed()
         }
     }
 

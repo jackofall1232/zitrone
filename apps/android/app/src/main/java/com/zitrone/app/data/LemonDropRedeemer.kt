@@ -164,34 +164,37 @@ class LemonDropRedeemer(
         )
     }
 
-    /** Outcome of [deliverDurablyCommit] — the applied/durable split is load-bearing. */
+    /**
+     * Outcome of [deliverDurablyCommit], run AFTER the plaintext has already rendered
+     * (render-gated consume, round 13). Only [DURABLE] authorises the relay [burn]; the APPLIED/
+     * NOT_APPLIED distinction now governs only the size of the double-open residual (a
+     * still-consumable prekey means the already-seen drop is re-openable behind a fresh biometric),
+     * never a loss — the message was shown before any consume was attempted.
+     */
     enum class DeliveryCommit {
-        /** Consumption confirmed on disk — render AND [burn]. */
+        /** Consumption confirmed on disk — [burn] the relay copy. */
         DURABLE,
 
         /**
-         * The prekey removal APPLIED to live state but the durable flush did not confirm. The
-         * mutation is never rolled back (the coalesced background reseal — or even the very
-         * flush that then threw — may already have persisted it), so a "rescan" could NEVER
-         * decrypt this drop again: the message must RENDER now or risk being lost forever
-         * (round 10, Codex). Only the relay [burn] is withheld — the handoff must not outrun
-         * the consumption reaching disk; the TTL reaps the (now undecryptable-to-us) copy.
+         * The prekey removal APPLIED to live state but the durable flush did not confirm (the
+         * coalesced background reseal typically persists it shortly after). Withhold [burn] until
+         * durable so the relay handoff never outruns disk.
          */
         APPLIED_UNCONFIRMED,
 
-        /** The removal never touched live state (closed-runtime teardown race) — render
-         *  NOTHING; the drop and its prekey are intact, a re-scan retries cleanly. */
+        /** The removal never touched live state (closed-runtime teardown race): the prekey is
+         *  intact, so the already-shown drop is re-openable on a re-scan (bounded double-open). */
         NOT_APPLIED,
     }
 
     /**
-     * Commit the delivery: consume the one-time prekey and reseal that consumption DURABLE —
-     * the same flush-before-handoff rule as every other handoff after a vault mutation (D2c
-     * round 8). The caller renders on any APPLIED outcome and fires [burn] only on [DeliveryCommit.DURABLE].
-     * Idempotent: a re-commit for an already-consumed id no-ops the removal (removeRecord on an
-     * absent key) and just re-runs the flush — which is what lets a backgrounded delivery re-run
-     * after a fresh biometric pass. A drop that used no one-time prekey has nothing to persist
-     * and commits [DeliveryCommit.DURABLE] trivially.
+     * Commit the delivery: consume the one-time prekey and reseal that consumption DURABLE — the
+     * same flush-before-handoff rule as every other handoff after a vault mutation (D2c round 8).
+     * Called by the caller ONLY after the plaintext has rendered (render-gated consume, round 13),
+     * so a non-durable/non-applied outcome is a bounded double-open of an already-seen message,
+     * never a loss. Fires nothing itself; the caller [burn]s only on [DeliveryCommit.DURABLE].
+     * Idempotent: a re-commit for an already-consumed id no-ops the removal and re-runs the flush.
+     * A drop that used no one-time prekey has nothing to persist → [DeliveryCommit.DURABLE].
      */
     suspend fun deliverDurablyCommit(pending: PendingLemonDrop): DeliveryCommit {
         val id = pending.usedOneTimePrekeyId ?: return DeliveryCommit.DURABLE

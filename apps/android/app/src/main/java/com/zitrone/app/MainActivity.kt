@@ -258,40 +258,39 @@ class MainActivity : FragmentActivity() {
         // delivery side effects — leave the drop unburned on the relay for a
         // re-scan rather than render an undeliverable copy.
         val redeemer = container.session.value?.lemonDropRedeemer ?: return
-        // COMMIT BEFORE RENDER (rounds 8-10, Codex): consume the prekey + reseal FIRST, and only
-        // then publish plaintext — gated on the veil still being THIS AwaitUnlock and the
-        // Activity being STARTED (both checked ON MAIN, atomically wrt onStop, which also runs
-        // on main): a user who backgrounds mid-commit must not have Delivered installed behind a
-        // stopped Activity, where returning would show plaintext without a fresh biometric. The
-        // commit outcome split is load-bearing (see DeliveryCommit): NOT_APPLIED renders nothing
-        // (drop intact, re-scannable); APPLIED outcomes MUST render — the consumption is never
-        // rolled back, so "rescan" could never decrypt this drop again — but only DURABLE fires
-        // the burn (the relay handoff must not outrun disk). A publish refused by the gate
-        // leaves AwaitUnlock in place: the user re-authenticates on return and the commit
-        // re-runs idempotently (the removal no-ops, the flush retries). Run on the PROCESS
-        // scope, not the Activity's — rotation or exit must not cancel the commit itself.
-        // NO Activity captures inside the process-scoped coroutine (round 11, Gemini): the veil
-        // and the started-flag are CONTAINER state, so a rotation neither leaks the destroyed
-        // Activity for the coroutine's lifetime nor gates the publish on a stale lifecycle — the
-        // replacement Activity's onStart keeps `activityStarted` current and the publish lands
-        // on the (shared) veil the new composition collects.
-        // BIND TO THE PROMPTED DROP (round 12, Codex): the expected veil is THIS drop's exact
-        // AwaitUnlock, not whatever is showing now — a second /d link arriving while this drop's
-        // biometric prompt was open would have swapped the veil to drop B, and reading veil.value
-        // here would let us consume+render A while stomping B (and B's probe could then stomp A).
-        // Consuming is gated on A still owning the veil (checked on main before the irreversible
-        // removal), and every CAS targets A's own AwaitUnlock — so we never replace a different
-        // drop's state, in either direction. If B has taken over, A is left fully un-consumed and
-        // re-scannable.
+        // RENDER-GATED CONSUME (round 13, Grok P2-1). The biometric for THIS drop already passed,
+        // so we RENDER first (gated on the Activity still being STARTED and the veil still being
+        // this drop's own AwaitUnlock), and consume the one-time prekey ONLY after a successful
+        // render. This closes the permanent-loss window of the old commit-before-render order: if
+        // the user backgrounds before render (activityStarted false) or a second /d link steals
+        // the veil, NOTHING is consumed and the drop stays fully re-scannable — the prekey is not
+        // durably burned out from under an unshown message. The round-12 "no plaintext behind a
+        // stopped Activity" property is preserved: the started-check and onStop's Delivered-clear
+        // both run on Main and are serialized, and the CAS targets this drop's own AwaitUnlock so
+        // a stolen veil (drop B) is never overwritten.
+        //
+        // Residual (documented, strictly milder than the old loss): if the process dies AFTER
+        // render but BEFORE the consume's durable flush lands, the prekey may survive and the drop
+        // is re-openable (a bounded DOUBLE-OPEN of an already-seen message, each behind a fresh
+        // biometric) — never a permanent loss of an unread message.
+        //
+        // Run on the PROCESS scope with NO Activity captures (rounds 11-12): the veil + started
+        // flag are container state, so a rotation neither leaks the Activity nor cancels the flow.
         val veil = container.lemonDropVeil
         val expectedVeil: LemonDropVeil = LemonDropVeil.AwaitUnlock(pending)
         container.scope.launch(Dispatchers.IO) {
-            // A must still own the veil BEFORE the irreversible consume — else abort untouched.
-            val ownsVeil = withContext(Dispatchers.Main) { veil.value == expectedVeil }
-            if (!ownsVeil) return@launch
-            // Rethrow CancellationException (structured concurrency) — folding it into NOT_APPLIED
-            // would swallow a real teardown of this process-scoped coroutine. Any OTHER throw is
-            // an honest not-committed (nothing consumed → advocacy veil).
+            // 1. RENDER decision on Main: only if the Activity is started AND this drop still owns
+            //    the veil. No consume yet — a refused render consumes nothing (drop re-scannable).
+            val rendered = withContext(Dispatchers.Main) {
+                container.activityStarted && veil.compareAndSet(
+                    expectedVeil,
+                    LemonDropVeil.Delivered(pending.text, pending.senderLabel, pending.senderVerified),
+                )
+            }
+            if (!rendered) return@launch
+            // 2. Shown → NOW consume the one-time prekey durably; on a confirmed-durable commit,
+            //    burn the relay copy. A NOT_APPLIED (closed runtime) or APPLIED_UNCONFIRMED commit
+            //    leaves the bounded double-open residual above, never a loss (the user has seen it).
             val commit = try {
                 redeemer.deliverDurablyCommit(pending)
             } catch (c: kotlinx.coroutines.CancellationException) {
@@ -299,28 +298,7 @@ class MainActivity : FragmentActivity() {
             } catch (_: Throwable) {
                 LemonDropRedeemer.DeliveryCommit.NOT_APPLIED
             }
-            val rendered = withContext(Dispatchers.Main) {
-                when {
-                    commit == LemonDropRedeemer.DeliveryCommit.NOT_APPLIED -> {
-                        // Nothing consumed — retire A's veil to advocacy, never B's.
-                        veil.compareAndSet(
-                            expectedVeil,
-                            LemonDropVeil.Advocacy(LemonDropScanOutcome.UNKNOWN),
-                        )
-                        false
-                    }
-                    container.activityStarted ->
-                        // CAS against A's own AwaitUnlock: if B took over mid-commit this fails and
-                        // A's plaintext is NOT shown over B (A is consumed — the bounded one-shot
-                        // forfeit residual — but B's veil is never stomped).
-                        veil.compareAndSet(
-                            expectedVeil,
-                            LemonDropVeil.Delivered(pending.text, pending.senderLabel, pending.senderVerified),
-                        )
-                    else -> false
-                }
-            }
-            if (rendered && commit == LemonDropRedeemer.DeliveryCommit.DURABLE) redeemer.burn(pending)
+            if (commit == LemonDropRedeemer.DeliveryCommit.DURABLE) redeemer.burn(pending)
         }
     }
 
@@ -652,7 +630,7 @@ private fun ZitroneRoot(
         scope.launch {
             val confirmed = withContext(Dispatchers.IO) {
                 runCatching { container.destroyVaultForAccountDeletion() }
-                !container.hasVault() && !container.vaultDestroyPending()
+                !container.hasVault() && !container.serverDeleteConfirmed()
             }
             deleteRetrying = false
             if (confirmed) {
@@ -719,7 +697,10 @@ private fun ZitroneRoot(
                 identityFingerprint = null
                 vaultExists = container.hasVault()
                 route = when {
-                    container.vaultDestroyPending() -> Route.DeleteIncomplete
+                    // Only a CONFIRMED server delete routes to the auto-destroy path (round 13).
+                    // A session going null never carries a mere delete-intent (onNotConfirmed keeps
+                    // the session live), so intent-only handling lives in Splash, not here.
+                    container.serverDeleteConfirmed() -> Route.DeleteIncomplete
                     vaultExists -> Route.Locked
                     else -> Route.Onboarding
                 }
@@ -934,18 +915,32 @@ private fun ZitroneRoot(
         container.unlockController.beginTerminalWipe()
         live.coordinator.deleteAccountAndWipe(
             onIntentNotDurable = {
-                // The destroy-pending marker could not be made durable, so the delete never
-                // touched the server (round 12): lift the gate and surface a retry. Nothing was
-                // destroyed — the session is still live behind the veil. This runs on the
-                // coordinator's background dispatcher, so the Compose-state write is marshaled to
-                // Main (round 12d, Gemini); Main.immediate + container.scope so it survives a
-                // rotation and is not cancelled by the composition.
+                // The delete-intent marker could not be made durable, so the delete never touched
+                // the server (round 13): lift the gate. Nothing was destroyed — the session is
+                // still live. Marshaled to Main (round 12d); Main.immediate + container.scope so it
+                // survives a rotation and is not cancelled by the composition.
                 container.unlockController.endTerminalWipe()
                 container.scope.launch(Dispatchers.Main.immediate) {
                     lockError = "Couldn't start deleting your account. Please try again."
                 }
             },
-            onComplete = {
+            onNotConfirmed = { definiteFailure ->
+                // The server did NOT confirm deletion (round 13): destroy NOTHING, keep the live
+                // session, lift the gate. definiteFailure = the server refused (retry won't help);
+                // else the outcome was ambiguous/offline (a later attempt may resolve it). The
+                // message only surfaces on the lock screen — a known UX gap while the user is on a
+                // session route (flagged for follow-up), but the load-bearing property here is that
+                // no local crypto is destroyed over a possibly-live account.
+                container.unlockController.endTerminalWipe()
+                container.scope.launch(Dispatchers.Main.immediate) {
+                    lockError = if (definiteFailure) {
+                        "Your account couldn't be deleted. Please try again."
+                    } else {
+                        "Couldn't reach the server to delete your account. Check your connection and try again."
+                    }
+                }
+            },
+            onConfirmed = {
             // Routing derives from DISK TRUTH after the wipe, not from exception classification:
             // Onboarding-as-success ONLY when destroy() CONFIRMED both files gone (no image, no
             // destroy-pending marker); anything else — DestroyFailed, an unexpected teardown
@@ -993,13 +988,13 @@ private fun ZitroneRoot(
                     unlocked = false
                     lockError = null
                     vaultExists = container.hasVault()
-                    route = if (!vaultExists && !container.vaultDestroyPending()) {
-                        // Destroy CONFIRMED (files gone, marker retired) → fresh-install state.
+                    route = if (!vaultExists && !container.serverDeleteConfirmed()) {
+                        // Destroy CONFIRMED (files gone, both markers retired) → fresh-install state.
                         Route.Onboarding
                     } else {
-                        // The image (or the destroy-pending marker) survives: the server account
-                        // is gone, so the only honest route is "finish deleting" with a direct
-                        // retry — NEVER the lock gate (see Route.DeleteIncomplete).
+                        // The image (or the server-delete-confirmed marker) survives: the server
+                        // account IS gone, so the only honest route is "finish deleting" with a
+                        // direct retry — NEVER the lock gate (see Route.DeleteIncomplete).
                         Route.DeleteIncomplete
                     }
                 }
@@ -1097,12 +1092,23 @@ private fun ZitroneRoot(
             Route.Splash -> SplashScreen(
                 onFinished = {
                     route = when {
-                        // An interrupted account deletion (crash/restart after the server delete
-                        // but before the local unlink verified) resumes FINISHING the deletion —
-                        // never the unlock gate over a half-deleted vault (see Route.DeleteIncomplete).
-                        container.vaultDestroyPending() -> Route.DeleteIncomplete
-                        vaultExists -> Route.Locked
-                        else -> Route.Onboarding
+                        // SERVER delete CONFIRMED (round 13): the account is provably gone, so
+                        // resume FINISHING the local destroy — never the unlock gate over a vault
+                        // whose account no longer exists (see Route.DeleteIncomplete).
+                        container.serverDeleteConfirmed() -> Route.DeleteIncomplete
+                        else -> {
+                            // A mere delete-INTENT (crash mid-delete, server outcome unknown) does
+                            // NOT authorise destruction: the vault is valid and the account may
+                            // still exist. Route to normal unlock and clear the stale intent
+                            // durably (off-main) — the interrupted attempt is abandoned; the user
+                            // re-initiates from Settings if they still want it.
+                            if (container.vaultDeleteIntentPending()) {
+                                container.scope.launch(Dispatchers.IO) {
+                                    runCatching { container.clearVaultDeleteIntent() }
+                                }
+                            }
+                            if (vaultExists) Route.Locked else Route.Onboarding
+                        }
                     }
                 },
             )

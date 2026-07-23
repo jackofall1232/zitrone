@@ -870,17 +870,16 @@ class VaultImageStoreTest {
 
         assertThrows(VaultImageException.DestroyFailed::class.java) { store.destroy() }
         assertTrue("the un-deletable image is (correctly) reported as still present", bin.exists())
-        // Round 8: the failed destroy leaves the destroy-pending marker — boot routing keys on it
-        // to resume FINISHING the deletion instead of offering the unlock gate over a half-deleted
-        // vault (dead-end on a partial unlink; silent re-register on a zeroed one).
-        assertTrue("destroyPending survives the failed unlink", store.destroyPending())
+        // Round 13: destroy() writes the SERVER-DELETE-CONFIRMED marker before unlinking, so a
+        // failed unlink leaves it — boot resumes FINISHING the deletion (the account is gone).
+        assertTrue("serverDeleteConfirmed survives the failed unlink", store.serverDeleteConfirmed())
 
         // The retry converges: once the filesystem cooperates, the SAME store's destroy verifies
         // and retires the marker.
         File(bin, "child").delete()
         store.destroy()
         assertFalse("retry removed the image", bin.exists())
-        assertFalse("marker retired after the confirmed destroy", store.destroyPending())
+        assertFalse("marker retired after the confirmed destroy", store.serverDeleteConfirmed())
     }
 
     @Test
@@ -895,50 +894,54 @@ class VaultImageStoreTest {
         File(tmpFile, "child").writeBytes(ByteArray(4))
 
         assertThrows(VaultImageException.DestroyFailed::class.java) { store.destroy() }
-        assertTrue("destroyPending survives — deletion is not complete", store.destroyPending())
+        assertTrue("confirmed marker survives — deletion is not complete", store.serverDeleteConfirmed())
     }
 
     @Test
-    fun markDestroyPending_persistsIntentDurably_withoutTouchingTheVaultFiles() {
+    fun markers_persistDurably_withoutTouchingTheVaultFiles_andDriveOnlyTheirOwnReader() {
         val dir = tmp.newFolder()
         val store = newStore(dir)
         store.create(passphrase, "v".toByteArray(Charsets.UTF_8))
 
-        // Round 12 (Codex): the deletion intent is persisted BEFORE the server delete / teardown.
-        // The marker appears, but the vault files are untouched (nothing is destroyed yet).
-        store.markDestroyPending()
+        // Round 13: the delete INTENT is written first and NEVER authorises destruction.
+        store.markDeleteIntent()
+        assertTrue("intent pending", store.deleteIntentPending())
+        assertFalse("intent does NOT authorise destroy", store.serverDeleteConfirmed())
+        assertTrue("vault.bin untouched by intent", File(dir, "vault.bin").exists())
+        assertTrue("vault.dek untouched by intent", File(dir, "vault.dek").exists())
 
-        assertTrue("intent marker persisted", store.destroyPending())
-        assertTrue("vault.bin untouched by mark", File(dir, "vault.bin").exists())
-        assertTrue("vault.dek untouched by mark", File(dir, "vault.dek").exists())
+        // The CONFIRMED marker (server gone) is the only destroy authorisation; once present,
+        // deleteIntentPending() reports false (confirmed supersedes intent).
+        store.markServerDeleteConfirmed()
+        assertTrue("confirmed authorises destroy", store.serverDeleteConfirmed())
+        assertFalse("intent superseded by confirmed", store.deleteIntentPending())
 
-        // Idempotent + a durable no-op inside the subsequent destroy(), which confirms + retires.
-        store.markDestroyPending()
+        // Idempotent; destroy() confirms + retires BOTH markers.
         store.destroy()
-        assertFalse("destroy retired the marker", store.destroyPending())
+        assertFalse("destroy retired confirmed", store.serverDeleteConfirmed())
+        assertFalse("destroy retired intent", store.deleteIntentPending())
         assertFalse(File(dir, "vault.bin").exists())
     }
 
     @Test
-    fun markDestroyPending_throwsDestroyFailed_whenNotDurable_soTheServerDeleteIsNeverStarted() {
+    fun markDeleteIntent_and_markServerDeleteConfirmed_throwWhenNotDurable() {
         val dir = tmp.newFolder()
-        // Marker writing does not require an existing vault — the mark is the FIRST delete step.
+        // Marker writing does not require an existing vault. Fail-closed: a non-durable marker MUST
+        // throw so the caller aborts (intent → never touch the server; confirmed → never unlink).
         val store = newStore(dir) { DirSyncResult.NOT_DURABLE }
-        // Fail-closed: a non-durable intent MUST throw so the caller aborts before the server
-        // delete request can leave the device (round 12).
-        assertThrows(VaultImageException.DestroyFailed::class.java) { store.markDestroyPending() }
+        assertThrows(VaultImageException.DestroyFailed::class.java) { store.markDeleteIntent() }
+        assertThrows(VaultImageException.DestroyFailed::class.java) { store.markServerDeleteConfirmed() }
     }
 
     @Test
-    fun destroy_abortsWithFilesUntouched_whenTheMarkerFsyncIsNotDurable() {
+    fun destroy_abortsWithFilesUntouched_whenTheConfirmedMarkerFsyncIsNotDurable() {
         val dir = tmp.newFolder()
         val first = newStore(dir)
         first.create(passphrase, "v".toByteArray(Charsets.UTF_8))
         first.close()
-        // Round 11 (Codex): the marker is REQUIRED-durable BEFORE any unlink — proceeding
-        // without it could partially unlink, crash, and restart into a marker-less broken vault
-        // (unlock dead-end / silent re-register). A non-durable marker aborts with the vault
-        // files UNTOUCHED.
+        // The confirmed marker is REQUIRED-durable BEFORE any unlink — proceeding without it could
+        // partially unlink, crash, and restart into a marker-less broken vault. A non-durable
+        // marker aborts with the vault files UNTOUCHED.
         val store = newStore(dir) { DirSyncResult.NOT_DURABLE }
 
         assertThrows(VaultImageException.DestroyFailed::class.java) { store.destroy() }
@@ -949,18 +952,47 @@ class VaultImageStoreTest {
     @Test
     fun destroy_throwsDestroyFailed_andKeepsMarker_whenUnlinkFsyncIsNotDurable() {
         val dir = tmp.newFolder()
-        // Round 9 (Codex): exists() proves only the current namespace — the unlinks must be
-        // confirmed crash-durable (directory fsync) BEFORE the marker is retired, else a journal
-        // replay can resurrect the vault files with no durable resume signal. A NOT_DURABLE sync
-        // AFTER the unlinks (marker sync = first call = DURABLE) is a failed destroy: throw,
-        // marker kept, retry re-runs the idempotent unlink.
+        // exists() proves only the current namespace — the unlinks must be confirmed crash-durable
+        // (dir fsync) BEFORE the markers are retired. Confirmed-marker sync (call 1) is DURABLE;
+        // the pre-retire unlink sync (call 2) is NOT_DURABLE → failed destroy: throw, marker kept.
         var calls = 0
         val store = newStore(dir) {
             if (++calls == 1) DirSyncResult.DURABLE else DirSyncResult.NOT_DURABLE
         }
 
         assertThrows(VaultImageException.DestroyFailed::class.java) { store.destroy() }
-        assertTrue("marker kept until the unlinks are DURABLE", store.destroyPending())
+        assertTrue("confirmed marker kept until the unlinks are DURABLE", store.serverDeleteConfirmed())
+    }
+
+    @Test
+    fun destroy_throwsDestroyFailed_whenTheMarkerRetirementFsyncIsNotDurable() {
+        val dir = tmp.newFolder()
+        // Round 13 (Grok P1-2): retiring the markers must itself be crash-durable, else a journal
+        // replay can resurrect a marker over a later SUCCESSOR vault → auto-destroy of a valid
+        // re-onboarded vault. Confirmed-write sync (1) + pre-retire unlink sync (2) DURABLE; the
+        // POST-retire sync (3) NOT_DURABLE → failed destroy: throw (marker-present, files-absent is
+        // the safe stuck state; a retry re-syncs).
+        var calls = 0
+        val store = newStore(dir) {
+            if (++calls <= 2) DirSyncResult.DURABLE else DirSyncResult.NOT_DURABLE
+        }
+        assertThrows(VaultImageException.DestroyFailed::class.java) { store.destroy() }
+    }
+
+    @Test
+    fun create_clearsAStaleMarker_soASuccessorVaultIsNotAutoDestroyed() {
+        val dir = tmp.newFolder()
+        // Round 13 (Grok P1-2): a delete-confirmed marker resurrected from a PRIOR account's delete
+        // (its best-effort retire rolled back by a journal replay) must not survive a re-onboard —
+        // otherwise the fresh vault routes to DeleteIncomplete and is auto-destroyed. create() must
+        // clear it durably.
+        File(dir, "vault.delete-confirmed").createNewFile()
+        val store = newStore(dir)
+        store.create(passphrase, "fresh".toByteArray(Charsets.UTF_8))
+
+        assertFalse("stale confirmed marker cleared by create()", store.serverDeleteConfirmed())
+        assertFalse("no lingering intent either", store.deleteIntentPending())
+        assertTrue("the successor vault survives", File(dir, "vault.bin").exists())
     }
 
     @Test
@@ -973,7 +1005,7 @@ class VaultImageStoreTest {
         store.destroy()
         assertFalse(File(dir, "vault.bin").exists())
         assertFalse(File(dir, "vault.dek").exists())
-        assertFalse("a confirmed destroy leaves no marker", store.destroyPending())
+        assertFalse("a confirmed destroy leaves no marker", store.serverDeleteConfirmed())
     }
 
     /**

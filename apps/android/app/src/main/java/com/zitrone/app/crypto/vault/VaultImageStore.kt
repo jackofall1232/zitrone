@@ -218,7 +218,8 @@ class VaultImageStore internal constructor(
 
     private val binFile: File get() = File(baseDir, IMAGE_FILE)
     private val dekFile: File get() = File(baseDir, DEK_FILE)
-    private val destroyMarkerFile: File get() = File(baseDir, DESTROY_MARKER_FILE)
+    private val deleteIntentFile: File get() = File(baseDir, DELETE_INTENT_FILE)
+    private val serverDeletedFile: File get() = File(baseDir, SERVER_DELETED_FILE)
 
     /** True when a vault image is present on disk (`vault.bin`). */
     fun exists(): Boolean = imageLock.withLock { binFile.exists() }
@@ -434,6 +435,22 @@ class VaultImageStore internal constructor(
                             // delete is needed.
                             throw VaultImageException.NotDurable()
                         }
+                        // Clear any STALE delete markers now that a NEW durable vault exists
+                        // (round 13, Grok P1-2): a marker resurrected by a journal replay from a
+                        // PRIOR account's delete would otherwise route this fresh vault to
+                        // DeleteIncomplete → auto-destroy. The new vault's own dirSync already
+                        // landed above; clear the markers and fsync that clear so the successor can
+                        // never be auto-destroyed. Best-effort delete + a required dirSync: an
+                        // orphaned marker that cannot be cleared durably must fail the create (a
+                        // vault under a live confirmed-delete marker is unsafe) rather than persist.
+                        val hadStaleMarker = deleteIntentFile.exists() || serverDeletedFile.exists()
+                        if (hadStaleMarker) {
+                            deleteIntentFile.delete()
+                            serverDeletedFile.delete()
+                            if (dirSync(baseDir) != DirSyncResult.DURABLE) {
+                                throw VaultImageException.NotDurable()
+                            }
+                        }
                         // Install in-memory state INSIDE the liveOpen-wipe scope so EVERY throw point
                         // before the return — including the 32-byte newDek.copyOf() (an OOM at this
                         // allocation) — wipes liveOpen.vaultKey / liveOpen.payloadPlaintext rather than
@@ -614,27 +631,46 @@ class VaultImageStore internal constructor(
      * the store fully closed and a retry (idempotent) able to re-attempt the unlink.
      */
     /**
-     * Persist the DESTROY-PENDING intent durably WITHOUT unlinking anything — the earliest step of
-     * an account deletion (round 12, Codex). Writing the marker before the server-delete request
-     * leaves the device, and before the session is torn down, means a crash anywhere in the
-     * delete flow restarts with the marker present: boot routing resumes [Route.DeleteIncomplete]
-     * instead of offering a lock gate over a vault whose server account is already gone. Idempotent
-     * (a marker that already exists is a durable no-op) and REQUIRED-DURABLE — throws
-     * [VaultImageException.DestroyFailed] if the marker cannot be written AND dir-fsynced, so the
-     * caller fails closed (does not proceed to delete the server account with no local resume
-     * signal). Runs under [imageLock]; touches no vault file.
+     * TWO-PHASE DELETE MARKERS (round 13). Account deletion is a two-phase durable state machine
+     * so that boot routing can tell "delete requested, server outcome unknown" apart from "server
+     * account confirmed gone" — the conflation of those two into one marker was the round-12 P1
+     * (a crash/failure before the server delete auto-destroyed a still-live-account vault).
+     *
+     *  - [markDeleteIntent] writes `vault.delete-intent` FIRST, before the server request. It means
+     *    ONLY "a delete was initiated" — it NEVER triggers local destruction. A crash here leaves a
+     *    fully valid, unlockable vault whose server account may still exist.
+     *  - [markServerDeleteConfirmed] writes `vault.delete-confirmed` and is written ONLY after
+     *    `api.deleteAccount()` returns a definite gone (2xx / 404). ONLY this marker authorises the
+     *    unlink-only [Route.DeleteIncomplete] auto-destroy: when it is present, the server account
+     *    is provably gone, so destroying the local copy is always safe.
+     *
+     * Both are existence-signals made crash-durable with a dir-fsync (fail-closed on non-durable).
      */
-    fun markDestroyPending() {
-        imageLock.withLock { writeDurableDestroyMarker() }
+    fun markDeleteIntent() {
+        imageLock.withLock { writeDurableMarker(deleteIntentFile) }
     }
 
-    /** Write + fsync the destroy marker; throw [VaultImageException.DestroyFailed] if not durable. */
-    private fun writeDurableDestroyMarker() {
-        val markerDurable = runCatching {
-            destroyMarkerFile.createNewFile()
-            destroyMarkerFile.exists() && dirSync(baseDir) == DirSyncResult.DURABLE
+    fun markServerDeleteConfirmed() {
+        imageLock.withLock { writeDurableMarker(serverDeletedFile) }
+    }
+
+    /** Durably clear the delete-intent marker (dir-fsync). No-op if absent. */
+    fun clearDeleteIntent() {
+        imageLock.withLock {
+            if (deleteIntentFile.exists()) {
+                deleteIntentFile.delete()
+                dirSync(baseDir)
+            }
+        }
+    }
+
+    /** Create [file] + dir-fsync it; throw [VaultImageException.DestroyFailed] if not durable. */
+    private fun writeDurableMarker(file: File) {
+        val durable = runCatching {
+            file.createNewFile()
+            file.exists() && dirSync(baseDir) == DirSyncResult.DURABLE
         }.getOrDefault(false)
-        if (!markerDurable) {
+        if (!durable) {
             throw VaultImageException.DestroyFailed()
         }
     }
@@ -648,17 +684,14 @@ class VaultImageStore internal constructor(
             dek?.let { wipe(it) }
             dek = null
             canonical = null
-            // DESTROY-PENDING MARKER (crash / restart continuity): drop a durable marker BEFORE
-            // the unlinks; it is removed only after the verify below confirms both files gone.
-            // Boot routing checks [destroyPending] and re-runs this (idempotent) instead of
-            // offering the lock gate — without it, a failed unlink + restart would route Locked
-            // over a vault whose account no longer exists (dead-end on a partial unlink, or a
-            // silent re-register on a zeroed one). REQUIRED-DURABLE (round 11): if the marker
-            // cannot be written AND fsynced, ABORT with the vault files untouched — proceeding
-            // could partially unlink, crash, and restart into exactly the marker-less broken
-            // state above. Idempotent with [markDestroyPending], which the delete flow calls
-            // FIRST (round 12) — this is then a durable no-op.
-            writeDurableDestroyMarker()
+            // CONFIRMED MARKER before the unlinks (crash/restart continuity): reaching destroy()
+            // means the server account is confirmed gone, so write `vault.delete-confirmed`
+            // durably BEFORE unlinking. A crash mid-unlink then restarts into
+            // [Route.DeleteIncomplete] (the CONFIRMED marker is present) and re-runs this
+            // idempotent destroy — never a lock gate over a gone account. REQUIRED-DURABLE: if it
+            // can't be written+fsynced, ABORT with the vault files untouched (throw). Idempotent
+            // with [markServerDeleteConfirmed], which the delete flow calls first — then a no-op.
+            writeDurableMarker(serverDeletedFile)
             // Remove BOTH persisted files and any interrupted-write temps. delete() is
             // best-effort and never throws on a missing file (returns false) — idempotent.
             binFile.delete()
@@ -681,30 +714,45 @@ class VaultImageStore internal constructor(
             ) {
                 throw VaultImageException.DestroyFailed()
             }
-            // Make the unlinks CRASH-DURABLE before retiring the marker (round 8, Codex): the
+            // Make the unlinks CRASH-DURABLE before retiring the markers (round 8, Codex): the
             // exists() re-stat proves only the current namespace, not what a journal replay
             // restores. Without this fsync, a crash could resurrect vault.bin/vault.dek while the
-            // marker's own (later) unlink survived — restarting into the unlock gate over a
-            // server-deleted account, the exact state the marker exists to prevent. A
-            // non-durable sync keeps the marker (throw DestroyFailed → retry re-runs the
-            // idempotent destroy), never a false success.
+            // markers' own (later) unlink survived — restarting into DeleteIncomplete over a
+            // now-present image, the exact state the markers exist to signal. A non-durable sync
+            // keeps the markers (throw → retry re-runs the idempotent destroy), never false success.
             if (dirSync(baseDir) != DirSyncResult.DURABLE) {
                 throw VaultImageException.DestroyFailed()
             }
-            // Unlinks confirmed durable — retire the marker. Best-effort: a marker that survives
-            // just re-runs an idempotent destroy at next boot, which re-stats absent and succeeds.
-            destroyMarkerFile.delete()
+            // Unlinks confirmed durable — retire BOTH markers and make the RETIREMENT crash-durable
+            // (round 13, Grok P1-2): a best-effort delete without this fsync can be rolled back by a
+            // journal replay, resurrecting a marker over a later-created SUCCESSOR vault →
+            // DeleteIncomplete → auto-destroy of a valid re-onboarded vault. A non-durable retire is
+            // a FAILED destroy (throw): marker-present + files-absent is the safe stuck state (a
+            // retry re-stats the files absent and re-syncs the retire).
+            deleteIntentFile.delete()
+            serverDeletedFile.delete()
+            if (dirSync(baseDir) != DirSyncResult.DURABLE) {
+                throw VaultImageException.DestroyFailed()
+            }
         }
     }
 
     /**
-     * True while a [destroy] has been REQUESTED (the server account is already deleted) but not
-     * yet CONFIRMED (both files verified gone). Boot routing must treat this as "finish the
-     * deletion" — retry [destroy] — never as a vault to unlock: on a partial unlink the image no
-     * longer opens (a dead-end lock gate), and on a zeroed one an unlock would silently register
-     * a brand-new account.
+     * True once [markServerDeleteConfirmed] has run: the server account is provably gone and the
+     * local image must be destroyed. The ONLY authorisation for the unlink-only
+     * [Route.DeleteIncomplete] auto-destroy. (Replaces the round-12 `destroyPending`, which
+     * conflated intent with confirmation — the P1-A/P1-1 root.)
      */
-    fun destroyPending(): Boolean = imageLock.withLock { destroyMarkerFile.exists() }
+    fun serverDeleteConfirmed(): Boolean = imageLock.withLock { serverDeletedFile.exists() }
+
+    /**
+     * True while a delete was INITIATED but the server delete is not confirmed (intent marker
+     * present, confirmed absent) — a crash/failure mid-delete. The vault is still valid and the
+     * server account may still exist, so boot routes to normal unlock (NOT auto-destroy) and clears
+     * this stale intent; it never authorises destruction.
+     */
+    fun deleteIntentPending(): Boolean =
+        imageLock.withLock { deleteIntentFile.exists() && !serverDeletedFile.exists() }
 
     /**
      * Claim the single-instance registration for [baseDir] (see class kdoc). Idempotent
@@ -820,11 +868,17 @@ class VaultImageStore internal constructor(
         const val DEK_FILE = "vault.dek"
 
         /**
-         * Zero-byte marker present from "destroy requested" (server account already deleted)
-         * until "destroy confirmed" (both files verified gone) — see [destroy]/[destroyPending].
-         * Carries no data; its existence is the only signal.
+         * Zero-byte marker: a delete was INITIATED (server outcome unknown). Never authorises
+         * destruction — see [markDeleteIntent] / [deleteIntentPending]. Existence is the only signal.
          */
-        const val DESTROY_MARKER_FILE = "vault.destroy-pending"
+        const val DELETE_INTENT_FILE = "vault.delete-intent"
+
+        /**
+         * Zero-byte marker: the server account is CONFIRMED gone and local destroy is owed. The
+         * only authorisation for the unlink-only [Route.DeleteIncomplete] auto-destroy — see
+         * [markServerDeleteConfirmed] / [serverDeleteConfirmed]. Existence is the only signal.
+         */
+        const val SERVER_DELETED_FILE = "vault.delete-confirmed"
         const val TMP_SUFFIX = ".tmp"
 
         /**
