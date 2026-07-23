@@ -96,11 +96,13 @@ class MessagingCoordinator(
     /**
      * Vault-only atomic contact-delete (D2c). When non-null (the vault path), it removes the
      * contact's crypto records + roster entry + tombstone in ONE runtime.mutate + ONE durable
-     * flush (VaultSignalProtocolStore atomicity contract :222-231) and returns whether that
-     * flush confirmed durable; [deleteContact] then burns messages and commits the in-memory
-     * removal. Null on the legacy path, which keeps its unchanged per-store delete sequence.
+     * flush (VaultSignalProtocolStore atomicity contract :222-231) and returns the
+     * [ContactDeleteOutcome] — DURABLE, APPLIED_UNCONFIRMED (removal sticks, flush pending), or
+     * NOT_APPLIED (a closed-runtime race meant the removal never touched live state — the delete
+     * did not take). [deleteContact] then burns messages and commits the in-memory removal. Null on
+     * the legacy path, which keeps its unchanged per-store delete sequence.
      */
-    private val vaultContactDelete: (suspend (conversationId: String, contactId: String, at: Long) -> Boolean)? = null,
+    private val vaultContactDelete: (suspend (conversationId: String, contactId: String, at: Long) -> ContactDeleteOutcome)? = null,
     /**
      * Flush-before-ack barrier (D2c — absorbs D4). Invoked on the inbound path AFTER a decrypt
      * has advanced the receiving ratchet and BEFORE [WsClient.ackMessage], so the relay's copy is
@@ -565,14 +567,25 @@ class MessagingCoordinator(
             if (!contactExists(conversation.contactId)) {
                 diag("send: contact deleted mid-send — dropping local copy")
                 messages.discard(messageId)
-            } else if (ws.sendMessage(envelope)) {
-                // Enqueued — but honestly still just SENDING. The tick waits
-                // for the relay's message.stored (→SENT) and the recipient's
-                // message.delivered (→DELIVERED); see [MessageState].
+            } else if (flushThenSend(
+                    // Outbound durable barrier (symmetric to the inbound ackDurable): reseal the
+                    // SENDING ratchet advance encrypt() just made BEFORE handing ciphertext to the
+                    // relay, so a crash between hand-off and the coalesced reseal can't roll the
+                    // ratchet back and re-encrypt a later message at the same chain index.
+                    flush = flushBeforeAck,
+                    send = { ws.sendMessage(envelope) },
+                    onNotDurable = {
+                        diag("send: sending-ratchet flush not durable — not sent, marked for retry")
+                    },
+                )
+            ) {
+                // Flushed durable AND enqueued — but honestly still just SENDING. The tick waits
+                // for the relay's message.stored (→SENT) and the recipient's message.delivered
+                // (→DELIVERED); see [MessageState].
             } else {
-                // Socket not open: the send did not reach the relay.
-                // Connection state only — never the envelope.
-                diag("send: hand-off failed — socket not open (${ws.connectionState.value})")
+                // The flush was not durable (never sent) OR the socket was down: either way the
+                // send did not reach the relay. Connection state only — never the envelope.
+                diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
                 messages.markFailed(messageId)
             }
         }.onFailure { e ->
@@ -770,10 +783,19 @@ class MessagingCoordinator(
             if (!contactExists(conversation.contactId)) {
                 diag("send: contact deleted mid-send — dropping local copy")
                 messages.discard(messageId)
-            } else if (ws.sendMessage(envelope)) {
-                // Enqueued — honestly still SENDING until the relay/peer acks.
+            } else if (flushThenSend(
+                    // Outbound durable barrier (see [deliverText]): reseal the sending-ratchet
+                    // advance from encrypt() durable BEFORE handing ciphertext to the relay.
+                    flush = flushBeforeAck,
+                    send = { ws.sendMessage(envelope) },
+                    onNotDurable = {
+                        diag("send: sending-ratchet flush not durable — not sent, marked for retry")
+                    },
+                )
+            ) {
+                // Flushed durable AND enqueued — honestly still SENDING until the relay/peer acks.
             } else {
-                diag("send: hand-off failed — socket not open (${ws.connectionState.value})")
+                diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
                 messages.markFailed(messageId)
             }
         }.onFailure { e ->
@@ -907,14 +929,22 @@ class MessagingCoordinator(
                 // (no post-delete ciphertext) and not queued.
                 if (!contactExists(contactId)) {
                     diag("receipt: contact deleted mid-send — dropped, not queued")
-                } else if (ws.sendMessage(envelope)) {
+                } else if (flushThenSend(
+                        // Outbound durable barrier (see [deliverText]): the receipt's encrypt()
+                        // advanced the sending ratchet too — reseal it durable before the hand-off.
+                        flush = flushBeforeAck,
+                        send = { ws.sendMessage(envelope) },
+                        onNotDurable = {
+                            diag("receipt: sending-ratchet flush not durable — queued for retry")
+                        },
+                    )
+                ) {
                     // Delivered to the socket — nothing more to do.
                 } else {
-                    // Socket down. The messages are already READ locally, so
-                    // they will never re-enter onMessagesSeen — queue the ids
-                    // for the reconnect flush. Connection state only — never
-                    // the envelope.
-                    diag("receipt: hand-off failed — queued (${ws.connectionState.value})")
+                    // Flush not durable OR socket down. The messages are already READ locally, so
+                    // they will never re-enter onMessagesSeen — queue the ids for the reconnect
+                    // flush. Connection state only — never the envelope.
+                    diag("receipt: not handed to relay — queued (${ws.connectionState.value})")
                     queueReceipts(contactId, messageIds)
                 }
             }.onFailure { e ->
@@ -1003,13 +1033,22 @@ class MessagingCoordinator(
                 // memory + live state REGARDLESS of the durable result (the crypto is already gone
                 // and cannot be un-removed), so a false return is reported honestly as "not yet
                 // confirmed durable" — NEVER "contact kept" (which would lie: its crypto is gone).
-                val durable = atomicDelete(conversationId, contactId, at)
+                val outcome = atomicDelete(conversationId, contactId, at)
                 pendingReceipts.remove(contactId)
                 _typingPeers.value = _typingPeers.value - contactId
                 notificationScheduler.onConversationRemoved(conversationId)
-                if (!durable) {
-                    diag("delete: vault teardown applied in memory + live state; durable flush " +
-                        "unconfirmed — it persists on the next flush (contact is gone, not kept)")
+                when (outcome) {
+                    ContactDeleteOutcome.DURABLE -> Unit
+                    ContactDeleteOutcome.APPLIED_UNCONFIRMED ->
+                        diag("delete: vault teardown applied in memory + live state; durable flush " +
+                            "unconfirmed — it persists on the next flush (contact is gone, not kept)")
+                    ContactDeleteOutcome.NOT_APPLIED ->
+                        // The runtime closed before the mutate applied (a revocation / forced logout
+                        // raced the delete): the removal never reached live state, so the contact is
+                        // NOT durably gone and reappears on the next unlock — surfaced honestly, not
+                        // as an applied-but-unconfirmed removal.
+                        diag("delete: vault runtime closed before teardown applied — delete did not " +
+                            "take; retry after unlock")
                 }
                 onComplete?.invoke()
                 return@launch
@@ -1140,16 +1179,24 @@ class MessagingCoordinator(
                 val deliveredAtMs = runCatching {
                     Instant.parse(envelope.timestamp).toEpochMilli()
                 }.getOrDefault(System.currentTimeMillis())
-                val conversation = conversations.onIncomingMessage(envelope.senderId)
+                // Resolve the conversation id with a READ (no roster mutation) so a decrypted
+                // message can be DISPLAYED before the activity/unread bump — a decrypt advanced the
+                // ratchet, and messages are RAM-only so displaying can never fail durably. The bump
+                // ([onIncomingMessage]) then runs post-display, so a post-decrypt roster mutation
+                // that later overflows can never leave a ratchet-advanced message unshown while the
+                // dup-ack-drop path acks it away (round 2). onIncomingMessage assigns exactly this
+                // id (existing entry's id, else the sender id for a fresh "Unknown contact").
+                val conversationId = conversations.conversationIdFor(envelope.senderId)
                 // Attachments ride inside ordinary envelopes too (see
                 // AttachmentControlPayload) — recognize them AFTER receipts but
                 // BEFORE treating the payload as text: the blob is redeemed and
                 // decrypted from memory once the placeholder is on screen.
                 AttachmentControlPayload.parse(text)?.let { attachment ->
+                    // DISPLAY FIRST (RAM-only, cannot fail durably), then the roster bump.
                     messages.addIncoming(
                         Message(
                             id = envelope.id,
-                            conversationId = conversation.id,
+                            conversationId = conversationId,
                             text = "",
                             isMine = false,
                             timestampMs = deliveredAtMs,
@@ -1166,6 +1213,7 @@ class MessagingCoordinator(
                             ),
                         ),
                     )
+                    conversations.onIncomingMessage(envelope.senderId)
                     // Durable barrier: the decrypt advanced the ratchet. On a non-durable flush,
                     // skip the ack AND every post-ack side effect (relay redelivers). D4 absorbed.
                     if (!ackDurable(envelope.id)) return@runCatching
@@ -1175,7 +1223,7 @@ class MessagingCoordinator(
                     // zero-knowledge. Best-effort: a dropped receipt just means
                     // the sender stays at SENT, never worse.
                     ws.sendReceived(envelope.id, envelope.senderId)
-                    notificationScheduler.onIncomingMessage(conversation.id)
+                    notificationScheduler.onIncomingMessage(conversationId)
                     redeemAttachment(envelope.id, attachment)
                     return@runCatching
                 }
@@ -1183,10 +1231,11 @@ class MessagingCoordinator(
                 // or a near-miss attachment) — a generic placeholder, NEVER the
                 // raw text, which may carry key material.
                 if (AttachmentControlPayload.isControlPayload(text)) {
+                    // DISPLAY FIRST (RAM-only), then the roster bump — see the attachment branch.
                     messages.addIncoming(
                         Message(
                             id = envelope.id,
-                            conversationId = conversation.id,
+                            conversationId = conversationId,
                             text = "",
                             isMine = false,
                             timestampMs = deliveredAtMs,
@@ -1196,16 +1245,18 @@ class MessagingCoordinator(
                             unsupported = true,
                         ),
                     )
+                    conversations.onIncomingMessage(envelope.senderId)
                     // Durable barrier: the decrypt advanced the ratchet. On a non-durable flush,
                     // skip the ack and the notification (relay redelivers). D4 absorbed.
                     if (!ackDurable(envelope.id)) return@runCatching
-                    notificationScheduler.onIncomingMessage(conversation.id)
+                    notificationScheduler.onIncomingMessage(conversationId)
                     return@runCatching
                 }
+                // DISPLAY FIRST (RAM-only), then the roster bump — see the attachment branch.
                 messages.addIncoming(
                     Message(
                         id = envelope.id,
-                        conversationId = conversation.id,
+                        conversationId = conversationId,
                         text = text,
                         isMine = false,
                         timestampMs = deliveredAtMs,
@@ -1214,6 +1265,7 @@ class MessagingCoordinator(
                         state = MessageState.DELIVERED,
                     ),
                 )
+                conversations.onIncomingMessage(envelope.senderId)
                 // Ack AFTER successful decrypt + store AND a durable ratchet reseal: the ack is
                 // what makes the server delete its copy (store-and-forward, zero retention), so it
                 // must never outrun the receiving-ratchet advance reaching disk. On a non-durable
@@ -1225,7 +1277,7 @@ class MessagingCoordinator(
                 ws.sendReceived(envelope.id, envelope.senderId)
                 // Content-free notification: always just "New message". The
                 // scheduler rate-limits + re-fires it per conversation.
-                notificationScheduler.onIncomingMessage(conversation.id)
+                notificationScheduler.onIncomingMessage(conversationId)
             }.onFailure { e ->
                 // The decision (rethrow / ack-drop / diagnose / swallow) is factored into the pure
                 // [classifyRecvFailure] so it is host-testable without a live socket; the side
@@ -1507,3 +1559,84 @@ internal suspend fun flushThenAck(
         return true
     }
 }
+
+/**
+ * Outbound durable barrier (D2c round 2), symmetric to [flushThenAck]. signal.encrypt advances the
+ * SENDING ratchet (coalesced reseal via the vault); this reseals it DURABLE via [flush] BEFORE
+ * handing the ciphertext to the relay via [send], so a crash between the hand-off and the background
+ * reseal can never roll the sending ratchet back and re-encrypt a later message at the SAME chain
+ * index (key/nonce reuse — a forward-secrecy break). On a non-durable [flush] the message is NOT
+ * sent (returns false → the caller marks it failed / queues it for retry); the in-memory ratchet
+ * advance the coalesced reseal may still persist leaves at worst a benign skipped index, which the
+ * recipient's ratchet tolerates. A [CancellationException] is rethrown so cooperative cancellation
+ * unwinds. The default no-op [flush] on the non-vault path never throws, so [send] always fires —
+ * behaviour-identical to the pre-D2c immediate send. Transient blips ([isTransientFlushFailure])
+ * are retried up to [maxAttempts] exactly like the inbound barrier; capacity / closed fail-closed.
+ *
+ * Returns whether the message was handed to the relay durably-after-flush: false means either the
+ * flush was not durable (never sent) OR [send] reported the socket was down — the caller treats both
+ * as a non-send. Extracted top-level (mirroring [flushThenAck]) so the ordering + fail-closed
+ * decision is host-testable without a live socket.
+ */
+internal suspend fun flushThenSend(
+    flush: suspend () -> Unit,
+    send: () -> Boolean,
+    onNotDurable: () -> Unit,
+    maxAttempts: Int = FLUSH_MAX_ATTEMPTS,
+    backoff: suspend (attempt: Int) -> Unit = { attempt -> delay(FLUSH_RETRY_BASE_MS * attempt) },
+): Boolean {
+    var attempt = 1
+    while (true) {
+        try {
+            flush()
+        } catch (c: CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            // Retry only a transient blip while attempts remain; capacity / closed fail closed and
+            // do NOT send — the message stays un-sent for the caller's retry.
+            if (attempt < maxAttempts && isTransientFlushFailure(t)) {
+                backoff(attempt)
+                attempt++
+                continue
+            }
+            onNotDurable()
+            return false
+        }
+        return send()
+    }
+}
+
+/**
+ * Outcome of the vault atomic contact-delete seal (ZitroneApp's `deleteContactAtomically`). Public
+ * because it is the return type of the public [MessagingCoordinator] constructor's vault-delete hook.
+ */
+enum class ContactDeleteOutcome {
+    /** The mutate applied the removal AND the flush confirmed it durable. */
+    DURABLE,
+
+    /**
+     * The mutate applied the removal (the contact's crypto is gone from live state, NEVER rolled
+     * back) but the durable flush was UNCONFIRMED — it persists on the next successful flush.
+     */
+    APPLIED_UNCONFIRMED,
+
+    /**
+     * The runtime was CLOSED before the mutate applied (a revocation / forced logout ran
+     * runtime.close() first): the removal NEVER touched live state, so the delete did not take and
+     * the contact reappears on the next unlock. Distinct from [APPLIED_UNCONFIRMED] — reporting it
+     * as an applied removal would falsely claim the contact is gone.
+     */
+    NOT_APPLIED,
+}
+
+/**
+ * Map the seal's durable result + whether its mutate applied to a [ContactDeleteOutcome]. Extracted
+ * so the closed-runtime (NOT_APPLIED) vs unconfirmed-flush (APPLIED_UNCONFIRMED) distinction is
+ * host-testable. A `durable` result implies the mutate applied.
+ */
+internal fun contactDeleteOutcome(durable: Boolean, mutateApplied: Boolean): ContactDeleteOutcome =
+    when {
+        durable -> ContactDeleteOutcome.DURABLE
+        mutateApplied -> ContactDeleteOutcome.APPLIED_UNCONFIRMED
+        else -> ContactDeleteOutcome.NOT_APPLIED
+    }

@@ -107,6 +107,16 @@ class ConversationRepository(
     fun findByContact(contactId: String): Conversation? =
         _conversations.value.firstOrNull { it.contactId == contactId }
 
+    /**
+     * The conversation id an inbound message from [contactId] belongs to, resolved with a pure READ
+     * — no activity bump, no persisted entry created. Lets the coordinator DISPLAY a decrypted
+     * message before the (vault-mutating) [onIncomingMessage] bump, so a post-decrypt roster
+     * overflow can never leave a ratchet-advanced message unshown. Matches the id [onIncomingMessage]
+     * assigns: an existing entry's id, else the [contactId] itself for a fresh "Unknown contact".
+     */
+    fun conversationIdFor(contactId: String): String =
+        findByContact(contactId)?.id ?: contactId
+
     @Synchronized
     fun upsert(conversation: Conversation) {
         setConversations(

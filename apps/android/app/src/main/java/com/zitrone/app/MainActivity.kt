@@ -431,6 +431,33 @@ class MainActivity : FragmentActivity() {
 /** Outcome of a vault biometric-unlock attempt (see [MainActivity.startVaultBiometricUnlock]). */
 private enum class VaultBiometricResult { SUCCESS, FAILED, INVALIDATED, UNAVAILABLE, CANCELLED }
 
+/**
+ * Run the account-delete completion's terminal-wipe teardown so the unlock gate is ALWAYS released.
+ * [wipeCryptoRecords] (signalStore.wipe → runtime.mutate) can THROW on a closed-runtime race — a
+ * revocation ran runtime.close() first; the account is being wiped regardless, so that throw is
+ * TOLERATED (a CancellationException still propagates). [finishUi] runs next, and [releaseGate]
+ * (endTerminalWipe) runs in a `finally` so a wipe throw can NEVER leave unlock blocked forever.
+ * Extracted top-level so the finally + closed-runtime tolerance is host-testable.
+ */
+internal inline fun completeTerminalWipe(
+    wipeCryptoRecords: () -> Unit,
+    finishUi: () -> Unit,
+    releaseGate: () -> Unit,
+) {
+    try {
+        try {
+            wipeCryptoRecords()
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            // Closed-runtime race — tolerate; the account is being wiped regardless.
+        }
+        finishUi()
+    } finally {
+        releaseGate()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Navigation — hand-rolled single-stack routing, no nav dependency.
 // ---------------------------------------------------------------------------
@@ -622,7 +649,19 @@ private fun ZitroneRoot(
                     lockError = VaultUnlockRouter.UNIFORM_FAILURE
                     unlocking = false
                 }
-                VaultBiometricResult.UNAVAILABLE, VaultBiometricResult.CANCELLED -> {
+                VaultBiometricResult.UNAVAILABLE -> {
+                    // The persisted wrap is UNUSABLE (load() null on a malformed blob, or the
+                    // auth-gated Keystore key is gone / uninitializable) yet biometricEnabled was
+                    // still true — reconcile so the dead biometric button doesn't persist: revoke
+                    // the wrap + key and drop to passphrase, arming the re-enable the note promises.
+                    container.disableBiometric()
+                    biometricEnabled = false
+                    reofferBiometric = true
+                    lockError = VaultUnlockRouter.BIOMETRIC_REENROLL_NOTE
+                    unlocking = false
+                }
+                VaultBiometricResult.CANCELLED -> {
+                    // User dismissed the prompt — biometric is fine, nothing to reconcile.
                     unlocking = false
                 }
             }
@@ -688,12 +727,20 @@ private fun ZitroneRoot(
         val live = session ?: return@onDeleteAccount
         container.unlockController.beginTerminalWipe()
         live.coordinator.deleteAccountAndWipe {
-            live.signalStore.wipe()
-            identityFingerprint = null
-            unlocked = false
-            route = Route.Splash
-            container.unlockController.lockIf(live)
-            container.unlockController.endTerminalWipe()
+            // signalStore.wipe() → runtime.mutate can THROW on a closed-runtime race (a revocation
+            // ran runtime.close() first). endTerminalWipe() MUST still run — otherwise unlock is
+            // blocked forever — so it lives in a finally, and the wipe throw is tolerated (the
+            // account is being wiped regardless).
+            completeTerminalWipe(
+                wipeCryptoRecords = { live.signalStore.wipe() },
+                finishUi = {
+                    identityFingerprint = null
+                    unlocked = false
+                    route = Route.Splash
+                    container.unlockController.lockIf(live)
+                },
+                releaseGate = { container.unlockController.endTerminalWipe() },
+            )
         }
     }
 

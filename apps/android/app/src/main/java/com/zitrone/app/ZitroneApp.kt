@@ -244,13 +244,28 @@ class AppContainer(private val app: Application) {
             // create() does not consume its initialPayload.
             wipe(initial)
         }
-        // ZERO-USERS CLEAN BREAK (maintainer decision 2026-07-23): a pre-0.9.1 install
-        // upgrading routes to vault setup, and creating the vault WIPES the orphaned legacy
-        // signal/auth/contacts prefs — one-time hygiene, no data anyone owns (no accounts /
-        // users exist). PREFS_SETTINGS (device settings + the biometric wrap) is deliberately
-        // kept.
-        wipeLegacyPrefs()
-        publishSession(open)
+        // `open` now holds a LIVE vault key + genesis payload. publishSession consumes them on an
+        // accepted build and wipes them on a refused one; anything BEFORE that hand-off (the
+        // best-effort legacy cleanup, a cancellation) must not abandon them unwiped.
+        var handedOff = false
+        try {
+            // ZERO-USERS CLEAN BREAK (maintainer decision 2026-07-23): a pre-0.9.1 install
+            // upgrading routes to vault setup, and creating the vault WIPES the orphaned legacy
+            // signal/auth/contacts prefs — one-time hygiene, no data anyone owns (no accounts /
+            // users exist). PREFS_SETTINGS (device settings + the biometric wrap) is deliberately
+            // kept. Best-effort: a legacy-prefs error must NOT brick a fresh vault, so it is caught
+            // and ignored rather than thrown.
+            runCatching { wipeLegacyPrefs() }
+            publishSession(open).also { handedOff = true }
+        } finally {
+            // Wipe only if publishSession never returned (a throw/cancellation before the hand-off):
+            // once it returns it has already consumed-or-wiped the arrays, and re-wiping a key we
+            // DID hand off would corrupt the running session.
+            if (!handedOff) {
+                wipe(open.vaultKey)
+                wipe(open.payloadPlaintext)
+            }
+        }
     }
 
     /**
@@ -276,13 +291,13 @@ class AppContainer(private val app: Application) {
     suspend fun unlockWithBiometric(
         decryptCipher: javax.crypto.Cipher,
         wrap: com.zitrone.app.crypto.vault.BiometricWrappedKey,
-    ): Boolean {
-        val vaultKey = biometricCipher.openVaultKey(decryptCipher, wrap.blob) ?: return false
-        return try {
-            withContext(Dispatchers.Default) {
-                val open = imageStore.unlockWithKey(vaultKey, wrap.slotIndex) ?: return@withContext false
-                publishSession(open)
-            }
+    ): Boolean = withContext(Dispatchers.Default) {
+        // The whole body — including openVaultKey's Cipher.doFinal — runs off-main so no crypto ever
+        // executes on the caller (main) thread.
+        val vaultKey = biometricCipher.openVaultKey(decryptCipher, wrap.blob) ?: return@withContext false
+        try {
+            val open = imageStore.unlockWithKey(vaultKey, wrap.slotIndex) ?: return@withContext false
+            publishSession(open)
         } finally {
             wipe(vaultKey)
         }
@@ -583,25 +598,38 @@ class SessionContainer(
      * flush confirmed; the removal is applied in memory + live state regardless (never rolled back —
      * the crypto cannot be un-removed), so a false return means "unconfirmed durable", not "kept".
      */
-    private suspend fun deleteContactAtomically(conversationId: String, contactId: String, at: Long): Boolean =
-        conversationRepository.deleteContactDurably(conversationId, contactId, at) { rosterJson, tombstonesJson ->
+    private suspend fun deleteContactAtomically(
+        conversationId: String,
+        contactId: String,
+        at: Long,
+    ): ContactDeleteOutcome {
+        // Set ONLY after runtime.mutate returns (the removal reached live state). A closed-runtime
+        // mutate throws its `check(!closed)` BEFORE the block applies, so this stays false — letting
+        // the caller distinguish a NOT_APPLIED (delete did not take) from an APPLIED_UNCONFIRMED
+        // (removal sticks, flush pending). Captured across the seal lambda, which runs synchronously.
+        var mutateApplied = false
+        val durable = conversationRepository.deleteContactDurably(conversationId, contactId, at) { rosterJson, tombstonesJson ->
             // BOTH mutate and flush are contained: a teardown race (forced logout /
             // revocation runs runtime.close() while this delete is mid-seal) makes
             // mutate throw IllegalStateException("closed") — synchronous, so
             // cancellation can't preempt it. Uncaught, that would crash the
             // confined worker (no CoroutineExceptionHandler) AND leave a half-delete
             // (burnAll already ran; the RAM/tombstone reconcile in the caller would
-            // be skipped). Caught, it degrades to the same "unconfirmed durable"
-            // false the flush failure returns — the removal is never rolled back.
+            // be skipped). Caught, it degrades to a false — but the caller now reads
+            // [mutateApplied] to tell a lost delete from an unconfirmed one. The
+            // removal is never rolled back.
             sealDurableOrFalse {
                 runtime.mutate { state ->
                     vaultSignalStore.removeContactCryptoRecords(state, contactId)
                     rosterJson?.let { state.rosterJson = it }
                     state.tombstonesJson = tombstonesJson
                 }
+                mutateApplied = true
                 runtime.flushBeforeAck()
             }
         }
+        return contactDeleteOutcome(durable, mutateApplied)
+    }
 }
 
 /**
