@@ -31,6 +31,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -984,7 +985,12 @@ class MessagingCoordinator(
     /** Wipes the server account AND the local keys/messages. Irreversible. */
     fun deleteAccountAndWipe(onComplete: () -> Unit) {
         acceptingDeliveries = false
-        scope.launch(confined) {
+        // NonCancellable: the session scope this launches on is cancelled by
+        // UnlockController.lock() (e.g. a server revocation racing the delete).
+        // The server-side delete and the DURABLE roster clear must complete once
+        // started — pre-D2b the process-lifetime scope guaranteed that; this
+        // preserves it. Bounded work; onComplete's lock() is idempotent.
+        scope.launch(confined + NonCancellable) {
             _linking.value = false
             linkJob?.cancel()
             runCatching { api.deleteAccount() }
