@@ -800,9 +800,17 @@ class VaultImageStore internal constructor(
      * still needs auth — so auth is protected while the intent file is present, regardless of the
      * confirmed marker (harmlessly true through the brief confirmed→destroy window, where auth is
      * about to be destroyed anyway).
+     *
+     * FAIL-CLOSED re-stat (round 16, R16-R2 / Codex): this is an auth-PROTECTION read — the guard
+     * skips clearing tokens when this is true — so an indeterminate stat must protect, not expose.
+     * `File.exists()==false` conflates "absent" with "stat could not be determined", which would
+     * fail OPEN (permit the token clear) on an I/O fault while the intent is present. `!Files.notExists`
+     * is true when the marker is present OR indeterminate (`Files.notExists` is true ONLY on a proven
+     * absence), so auth is protected unless the intent is provably gone. (This is the opposite bias
+     * from the routing readers, where an indeterminate false correctly withholds auto-destroy.)
      */
     fun hasDeleteIntentMarker(): Boolean =
-        imageLock.withLock { deleteIntentFile.exists() }
+        imageLock.withLock { !Files.notExists(deleteIntentFile.toPath()) }
 
     /**
      * Claim the single-instance registration for [baseDir] (see class kdoc). Idempotent
