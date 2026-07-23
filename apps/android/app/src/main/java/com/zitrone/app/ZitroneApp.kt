@@ -593,20 +593,38 @@ class SessionContainer(
             // (burnAll already ran; the RAM/tombstone reconcile in the caller would
             // be skipped). Caught, it degrades to the same "unconfirmed durable"
             // false the flush failure returns — the removal is never rolled back.
-            try {
+            sealDurableOrFalse {
                 runtime.mutate { state ->
                     vaultSignalStore.removeContactCryptoRecords(state, contactId)
                     rosterJson?.let { state.rosterJson = it }
                     state.tombstonesJson = tombstonesJson
                 }
                 runtime.flushBeforeAck()
-                true
-            } catch (c: CancellationException) {
-                // Preserve cooperative cancellation: a scope teardown must unwind, not be folded
-                // into an "unconfirmed durable" false. The removal is still never rolled back.
-                throw c
-            } catch (t: Throwable) {
-                false
             }
         }
 }
+
+/**
+ * Runs a vault durability [seal] (a mutate + [VaultRuntime.flushBeforeAck]) and maps its outcome to
+ * the [ConversationRepository.deleteContactDurably] contract: `true` when it committed durably;
+ * `false` on a NON-cancellation failure ("unconfirmed durable" — the removal is NEVER rolled back,
+ * so a false means "not confirmed", not "kept"); and a RETHROWN [CancellationException] so a scope
+ * teardown mid-delete (forced logout / revocation running runtime.close()) UNWINDS cooperatively
+ * instead of being folded into a false.
+ *
+ * Extracted top-level (mirroring [flushThenAck]) so the catch-ORDERING — rethrow the cancellation
+ * BEFORE the broad `catch (Throwable) -> false` — is host-testable without a live SessionContainer.
+ * That ordering is the whole point: were the order reversed, a real teardown cancellation would be
+ * swallowed as a false. NOTE a full vault ([VaultCapacityException]) and a closed runtime both throw
+ * [IllegalStateException], which lands in the Throwable arm as an honest `false`; only cooperative
+ * cancellation escapes.
+ */
+internal fun sealDurableOrFalse(seal: () -> Unit): Boolean =
+    try {
+        seal()
+        true
+    } catch (c: CancellationException) {
+        throw c
+    } catch (t: Throwable) {
+        false
+    }

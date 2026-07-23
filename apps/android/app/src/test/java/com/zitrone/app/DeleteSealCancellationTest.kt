@@ -5,57 +5,55 @@
 
 package com.zitrone.app
 
-import com.zitrone.app.data.Conversation
-import com.zitrone.app.data.ConversationRepository
-import com.zitrone.app.data.OrphanContact
-import com.zitrone.app.data.RosterStore
+import com.zitrone.app.crypto.vault.VaultCapacityException
 import kotlinx.coroutines.CancellationException
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * D2c: the vault contact-delete seal lambda ([ZitroneApp.deleteContactAtomically]) rethrows
- * CancellationException BEFORE its catch(Throwable){false}, so cooperative cancellation (a forced
- * logout / revocation tearing down the session scope mid-delete) unwinds instead of being folded
- * into an "unconfirmed durable" false.
+ * D2c: the vault contact-delete seal ([ZitroneApp.deleteContactAtomically]) maps its mutate +
+ * [com.zitrone.app.crypto.vault.VaultRuntime.flushBeforeAck] to the
+ * [com.zitrone.app.data.ConversationRepository.deleteContactDurably] contract through the extracted
+ * [sealDurableOrFalse] — which rethrows a [CancellationException] BEFORE its `catch (Throwable) ->
+ * false`, so a forced logout / revocation tearing down the session scope mid-delete UNWINDS
+ * cooperatively instead of being folded into an "unconfirmed durable" false.
  *
- * The property the fix depends on is that [ConversationRepository.deleteContactDurably] does NOT
- * swallow a throw from its `seal` — it propagates, so the lambda's rethrow reaches the coroutine
- * machinery. That contract is exercised here against the real repo over a fake roster store. The
- * lambda's own 3-line try/catch (rethrow c, then catch t -> false) needs a live SessionContainer to
- * reach, so it is verified by inspection; this guards the seam it relies on.
+ * Round 4 replaces the previous vacuous test (which drove its OWN seal into `deleteContactDurably`
+ * and never touched the lambda's catch-ordering — the fix it claimed to guard) with direct coverage
+ * of the real production code path: `sealDurableOrFalse` is exactly the try/catch the seal lambda
+ * now runs, extracted top-level so it is host-testable without a live SessionContainer. These cases
+ * pin the catch-ORDERING: were the two catches reversed, the cancellation case would return false
+ * instead of throwing.
  */
 class DeleteSealCancellationTest {
 
-    private class FakeRosterStore : RosterStore {
-        @Volatile var sealedRoster: String? = null
-        @Volatile var sealedTombstones: String? = null
-        override fun readBlob(): String? = sealedRoster
-        override fun writeBlob(json: String) { sealedRoster = json }
-        override fun writeBlobDurably(json: String): Boolean { sealedRoster = json; return true }
-        override fun orphanedContacts(): List<OrphanContact> = emptyList()
-        override fun readTombstonesBlob(): String? = sealedTombstones
-        override fun writeTombstonesBlob(json: String) { sealedTombstones = json }
+    @Test
+    fun `a committed seal returns true`() {
+        assertTrue(sealDurableOrFalse { /* mutate + flush succeeded */ })
     }
 
     @Test
-    fun `deleteContactDurably propagates a CancellationException from the seal (never folds to false)`() {
-        val repo = ConversationRepository(FakeRosterStore(), clock = { 1_000_000L })
-        repo.upsert(Conversation(id = "alice", contactId = "alice", displayName = "alice"))
-
+    fun `a CancellationException is rethrown, never folded to false`() {
+        // The property the atomicity fix depends on: cooperative cancellation escapes the seal so
+        // the coroutine machinery unwinds a teardown, rather than being caught as a false.
         assertThrows(CancellationException::class.java) {
-            repo.deleteContactDurably("alice", "alice", 1_000_000L) { _, _ ->
-                // Stand in for the seal lambda rethrowing on a scope teardown: mutate/flush would
-                // have unwound with a CancellationException, which the lambda rethrows.
-                throw CancellationException("session scope cancelled mid-delete")
-            }
+            sealDurableOrFalse { throw CancellationException("session scope cancelled mid-delete") }
         }
+    }
 
-        // The in-memory reconcile (the line AFTER seal in deleteContactDurably) is skipped because
-        // the throw propagated — proof it was not swallowed. On a real teardown the whole session is
-        // going away, so the roster entry staying is inert.
-        assertTrue("the entry is retained because the throw propagated past the reconcile",
-            repo.conversations.value.any { it.id == "alice" })
+    @Test
+    fun `a closed-runtime IllegalStateException degrades to an honest false`() {
+        // runtime.mutate/flushBeforeAck throw IllegalStateException("closed") on a teardown race;
+        // caught as "unconfirmed durable" false (never a crash, never a rollback).
+        assertFalse(sealDurableOrFalse { throw IllegalStateException("vault runtime closed") })
+    }
+
+    @Test
+    fun `a full-vault VaultCapacityException degrades to an honest false`() {
+        // VaultCapacityException IS an IllegalStateException — it must still land in the Throwable
+        // arm (false), NOT escape like a cancellation.
+        assertFalse(sealDurableOrFalse { throw VaultCapacityException("vault slot full") })
     }
 }

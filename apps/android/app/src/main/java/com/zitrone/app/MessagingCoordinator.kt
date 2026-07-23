@@ -12,6 +12,7 @@ import com.zitrone.app.crypto.AttachmentCrypto
 import com.zitrone.app.crypto.MessagePadding
 import com.zitrone.app.crypto.SignalProtocolManager
 import com.zitrone.app.crypto.vault.VaultCapacityException
+import com.zitrone.app.crypto.vault.VaultImageException
 import com.zitrone.app.diagnostics.BootDiagnostics
 import com.zitrone.app.data.AttachmentControlPayload
 import com.zitrone.app.data.AttachmentLoadState
@@ -44,6 +45,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.signal.libsignal.protocol.DuplicateMessageException
+import java.io.IOException
 import java.time.Instant
 import java.time.format.DateTimeFormatter
 import java.util.UUID
@@ -1224,16 +1227,36 @@ class MessagingCoordinator(
                 // scheduler rate-limits + re-fires it per conversation.
                 notificationScheduler.onIncomingMessage(conversation.id)
             }.onFailure { e ->
-                if (e is CancellationException) throw e
-                // Spec §4: surface a vault-at-capacity overflow as a non-fatal DIAGNOSTIC rather
-                // than swallowing it. The inbound ratchet persist (facade runtime.mutate → encode)
-                // threw VaultCapacityException, so the message was correctly NEVER acked (fail-
-                // closed) and the relay will redeliver — but without this the user gets no signal
-                // that the vault is full and how to recover (delete data). Other failures keep
-                // their existing swallow-and-redeliver behaviour.
-                if (e is VaultCapacityException) {
-                    diag("recv: vault at capacity — inbound left un-acked (relay redelivers); " +
-                        "free space by deleting data")
+                // The decision (rethrow / ack-drop / diagnose / swallow) is factored into the pure
+                // [classifyRecvFailure] so it is host-testable without a live socket; the side
+                // effects (ack, diag, rethrow) stay here. Ordering is load-bearing — see that fn.
+                when (classifyRecvFailure(e)) {
+                    RecvFailureAction.RETHROW -> throw e
+                    RecvFailureAction.ACK_AND_DROP -> {
+                        // A redelivery of a message we ALREADY consumed: the receiving ratchet is
+                        // durably PAST it (our own crash-recovery redelivery, or a replay), so
+                        // decrypt threw DuplicateMessageException. A forward ratchet can NEVER
+                        // re-derive it, so "skip the ack and rely on redelivery" would loop FOREVER
+                        // (redeliver → dup → no ack → resend), surviving restart. ACK so the relay
+                        // drops its copy, then drop. This is the universal net that closes the
+                        // durable-but-unacked loop for EVERY cause: a transient flush the coalesced
+                        // background reseal later persisted, capacity space was later freed for, or
+                        // a crash after the reseal reached disk but before the ack.
+                        // No slot/credential data logged; the envelope id is an opaque relay handle.
+                        ws.ackMessage(envelope.id)
+                        diag("recv: duplicate (already consumed) — acked + dropped")
+                    }
+                    RecvFailureAction.DIAGNOSE_AT_CAPACITY ->
+                        // Spec §4: surface a vault-at-capacity overflow as a non-fatal DIAGNOSTIC
+                        // rather than swallowing it. The inbound ratchet persist (facade
+                        // runtime.mutate → encode) threw VaultCapacityException, so the message was
+                        // correctly NEVER acked (fail-closed) and the relay will redeliver — but
+                        // without this the user gets no signal that the vault is full and how to
+                        // recover (delete data).
+                        diag("recv: vault at capacity — inbound left un-acked (relay redelivers); " +
+                            "free space by deleting data")
+                    // Other failures keep their existing swallow-and-redeliver behaviour.
+                    RecvFailureAction.SWALLOW -> Unit
                 }
             }
         }
@@ -1384,6 +1407,59 @@ class MessagingCoordinator(
     }
 }
 
+/** The action [onMessageDeliver] takes when a post-decrypt inbound branch throws. */
+internal enum class RecvFailureAction {
+    /** Cooperative cancellation — rethrow so the scope unwinds; never ack. */
+    RETHROW,
+
+    /**
+     * A redelivery of an already-consumed message ([DuplicateMessageException]) — ack so the relay
+     * drops its copy, then drop. Recovery by redelivery is impossible (forward ratchet), so this is
+     * the universal net that breaks the infinite-redelivery loop for a durable-but-unacked advance.
+     */
+    ACK_AND_DROP,
+
+    /** Vault at capacity ([VaultCapacityException]) — fail-closed (no ack) + a recovery diagnostic. */
+    DIAGNOSE_AT_CAPACITY,
+
+    /** Any other failure — swallow; the relay redelivers (behaviour unchanged from pre-D2c). */
+    SWALLOW,
+}
+
+/**
+ * Classify a post-decrypt inbound failure. Ordering is LOAD-BEARING: cancellation is checked FIRST
+ * (a teardown must unwind, never be folded into a lower branch), then the already-consumed duplicate
+ * (checked BEFORE capacity because a dup is terminal regardless of vault fullness — and because it
+ * is the net that closes the durable-but-unacked loop that a transient/capacity flush failure can
+ * open via VaultSession's coalesced background reseal). Extracted pure so the decision is host-
+ * testable without a live socket; the side effects live in [onMessageDeliver].
+ */
+internal fun classifyRecvFailure(e: Throwable): RecvFailureAction = when {
+    e is CancellationException -> RecvFailureAction.RETHROW
+    e is DuplicateMessageException -> RecvFailureAction.ACK_AND_DROP
+    e is VaultCapacityException -> RecvFailureAction.DIAGNOSE_AT_CAPACITY
+    else -> RecvFailureAction.SWALLOW
+}
+
+/** Attempts (incl. the first) [flushThenAck] makes at a TRANSIENT durable-flush blip. */
+internal const val FLUSH_MAX_ATTEMPTS = 3
+
+/** Linear backoff step between transient retries — attempt N waits N × this (~50/100 ms). */
+internal const val FLUSH_RETRY_BASE_MS = 50L
+
+/**
+ * A flush failure worth RETRYING in-line rather than deferring to the redelivery + duplicate path.
+ * Only a genuinely transient durability blip qualifies: an unconfirmed image write
+ * ([VaultImageException.NotDurable]) or a raw disk [IOException], which usually clears on the next
+ * attempt. A full vault ([VaultCapacityException]) and a closed runtime (a plain
+ * [IllegalStateException]) are NOT transient — they must fail-closed without an ack (a later encode
+ * that fits, or a fresh session, resolves them, and the duplicate handler backstops any advance
+ * that persisted meanwhile). NOTE [VaultCapacityException] is itself an [IllegalStateException], so
+ * this deliberate allow-list (NOT an IllegalStateException deny-list) keeps capacity out of retry.
+ */
+internal fun isTransientFlushFailure(t: Throwable): Boolean =
+    t is VaultImageException.NotDurable || t is IOException
+
 /**
  * Flush-before-ack decision (D2c, absorbs D4), extracted so it is host-testable without a live
  * socket. Runs the durable reseal barrier [flush] and only THEN [ack]s the envelope; if [flush]
@@ -1393,21 +1469,41 @@ class MessagingCoordinator(
  * CancellationException is rethrown so cooperative cancellation still unwinds. The default no-op
  * [flush] on the non-vault path never throws, so the ack always fires there — behaviour-identical
  * to the pre-D2c immediate ack.
+ *
+ * Round 4: a TRANSIENT flush failure ([isTransientFlushFailure]) is retried up to [maxAttempts]
+ * times with a small [backoff] before giving up. A brief disk hiccup usually clears at once,
+ * resolving to durable + ack IN-LINE rather than deferring to the wasteful redelivery + duplicate-
+ * decrypt path (which is correct — the duplicate handler ack-drops it — but costs a relay round
+ * trip). Non-transient failures (capacity, closed) are NOT retried: they fail-closed immediately,
+ * exactly as before, and the receiving-ratchet advance that VaultSession's coalesced background
+ * reseal may still persist is backstopped by the DuplicateMessageException handler on redelivery.
  */
 internal suspend fun flushThenAck(
     envelopeId: String,
     flush: suspend () -> Unit,
     ack: (String) -> Unit,
     onNotDurable: () -> Unit,
+    maxAttempts: Int = FLUSH_MAX_ATTEMPTS,
+    backoff: suspend (attempt: Int) -> Unit = { attempt -> delay(FLUSH_RETRY_BASE_MS * attempt) },
 ): Boolean {
-    try {
-        flush()
-    } catch (c: CancellationException) {
-        throw c
-    } catch (t: Throwable) {
-        onNotDurable()
-        return false
+    var attempt = 1
+    while (true) {
+        try {
+            flush()
+        } catch (c: CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            // Retry only a transient blip, and only while attempts remain; a full vault or a
+            // closed runtime falls straight through to the fail-closed no-ack path below.
+            if (attempt < maxAttempts && isTransientFlushFailure(t)) {
+                backoff(attempt)
+                attempt++
+                continue
+            }
+            onNotDurable()
+            return false
+        }
+        ack(envelopeId)
+        return true
     }
-    ack(envelopeId)
-    return true
 }
