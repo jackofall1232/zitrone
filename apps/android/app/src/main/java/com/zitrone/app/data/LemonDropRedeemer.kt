@@ -5,7 +5,7 @@
 
 package com.zitrone.app.data
 
-import com.zitrone.app.crypto.EncryptedSignalProtocolStore
+import com.zitrone.app.crypto.ZitroneSignalStore
 import com.zitrone.app.crypto.LemonDropOneShot
 import com.zitrone.app.crypto.SafetyNumber
 import com.zitrone.app.net.ApiClient
@@ -31,7 +31,7 @@ import kotlin.coroutines.cancellation.CancellationException
  *    swallowed — TTL is the backstop, same as web.
  *
  * PRIVATE-SCALAR BRIDGE — the deliberate, scoped exception: [recipientKeys]
- * below pulls raw private scalars out of [EncryptedSignalProtocolStore]
+ * below pulls raw private scalars out of the [ZitroneSignalStore]
  * (identity, signed prekeys, one consumed one-time prekey), which ordinary
  * code must never do — SignalProtocolManager's contract is that private key
  * bytes never leave the store. The exception exists because a lemon drop is
@@ -42,7 +42,7 @@ import kotlin.coroutines.cancellation.CancellationException
  */
 class LemonDropRedeemer(
     private val api: ApiClient,
-    private val signalStore: EncryptedSignalProtocolStore,
+    private val signalStore: ZitroneSignalStore,
     private val conversations: ConversationRepository,
     private val sodium: LemonDropOneShot.SodiumOps,
 ) {

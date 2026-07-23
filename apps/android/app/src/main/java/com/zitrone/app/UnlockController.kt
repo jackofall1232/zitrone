@@ -52,16 +52,30 @@ class UnlockController<S : Any>(
     private var terminalWipe = false
 
     /**
-     * Build + publish the session if none is live. Idempotent. Refused while a
-     * terminal wipe is in progress (see [beginTerminalWipe]) — the UI's normal
-     * routing retries once the wipe's completion lifts the gate.
+     * Build + publish the session if none is live, from the default [buildSession].
+     * Idempotent. Refused while a terminal wipe is in progress (see
+     * [beginTerminalWipe]) — the UI's normal routing retries once the wipe's
+     * completion lifts the gate.
      */
-    fun unlock() {
+    fun unlock() = unlock(buildSession)
+
+    /**
+     * As [unlock], but from a caller-[prepared] factory that already carries resolved
+     * credentials — D2c's vault path resolves the [com.zitrone.app.crypto.vault.VaultOpen]
+     * OFF the monitor (Argon2id / biometric happen before this call), then hands the build
+     * in here. Same monitor, same idempotence + terminal-wipe refusal as [unlock].
+     *
+     * A REFUSED build (terminal wipe in progress, or a session already live) never invokes
+     * [prepared], so the credential it closes over would be abandoned — [onRefused] runs
+     * instead so the caller wipes the unused VaultOpen. On an accepted build [prepared] owns
+     * the arrays (VaultSession consumes them); [onRefused] is not called.
+     */
+    fun unlock(prepared: (CoroutineScope) -> S, onRefused: () -> Unit = {}) {
         synchronized(lock) {
-            if (terminalWipe) return
-            if (current != null) return
+            if (terminalWipe) return onRefused()
+            if (current != null) return onRefused()
             val scope = newSessionScope()
-            val session = buildSession(scope)
+            val session = prepared(scope)
             sessionScope = scope
             current = session
             publish(session)

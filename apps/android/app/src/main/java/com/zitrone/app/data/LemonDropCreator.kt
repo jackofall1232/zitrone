@@ -7,7 +7,7 @@ package com.zitrone.app.data
 
 import android.util.Base64
 import android.util.Log
-import com.zitrone.app.crypto.EncryptedSignalProtocolStore
+import com.zitrone.app.crypto.ZitroneSignalStore
 import com.zitrone.app.crypto.LemonDropCreate
 import com.zitrone.app.crypto.LemonDropOneShot
 import com.zitrone.app.crypto.LibsignalXEdDSAVerifier
@@ -40,14 +40,14 @@ import kotlin.coroutines.cancellation.CancellationException
  *    bubble (plaintext-in-RAM only, exactly like every other outgoing message).
  *
  * PRIVATE-SCALAR BRIDGE — the same scoped exception LemonDropRedeemer holds on
- * the open side: [senderIdentity] pulls the raw X25519 scalar out of
- * [EncryptedSignalProtocolStore] for the one-shot X3DH, which ordinary code must
+ * the open side: [senderIdentity] pulls the raw X25519 scalar out of the
+ * [ZitroneSignalStore] for the one-shot X3DH, which ordinary code must
  * never do. It is private to this class, feeds only [LemonDropCreate.create]
  * (which zeros it), and must not be widened.
  */
 class LemonDropCreator(
     private val api: ApiClient,
-    private val signalStore: EncryptedSignalProtocolStore,
+    private val signalStore: ZitroneSignalStore,
     private val conversations: ConversationRepository,
     private val messages: MessageRepository,
     private val sodium: LemonDropOneShot.SodiumOps,

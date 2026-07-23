@@ -244,6 +244,45 @@ class ConversationRepository(
     private fun serializeTombstones(): String =
         JSONObject().apply { tombstones.forEach { (id, at) -> put(id, at) } }.toString()
 
+    /**
+     * Vault atomic contact-delete (VaultSignalProtocolStore atomicity contract :222-231):
+     * the post-deletion roster + tombstone blobs for removing [conversationId] / tombstoning
+     * [contactId] at [at], computed against live state WITHOUT persisting or mutating memory —
+     * the caller folds them into ONE runtime.mutate alongside the crypto-record removal, then
+     * calls [commitDeletion] once that mutate's flush confirms durable. The roster blob is null
+     * when [readOnly] (an unreadable stored blob must never be overwritten), so the mutate then
+     * leaves the sealed roster untouched, matching [removeDurably]'s read-only short-circuit.
+     */
+    @Synchronized
+    fun deletionBlobs(conversationId: String, contactId: String, at: Long): DeletionBlobs {
+        val roster = if (readOnly) {
+            null
+        } else {
+            serialize(_conversations.value.filterNot { it.id == conversationId })
+        }
+        val tombstoneJson = JSONObject().apply {
+            tombstones.forEach { (id, t) -> if (at - t < TOMBSTONE_WINDOW_MS) put(id, t) }
+            put(contactId, at)
+        }.toString()
+        return DeletionBlobs(roster, tombstoneJson)
+    }
+
+    /**
+     * Apply the in-memory half of the atomic delete AFTER its combined mutate flushed durably:
+     * drop the conversation and record the tombstone WITHOUT re-persisting (the mutate already
+     * sealed roster + tombstones in one generation). [at] must be the same instant passed to
+     * [deletionBlobs] so memory and the sealed blob agree.
+     */
+    @Synchronized
+    fun commitDeletion(conversationId: String, contactId: String, at: Long) {
+        _conversations.value = _conversations.value.filterNot { it.id == conversationId }
+        tombstones.entries.removeAll { at - it.value >= TOMBSTONE_WINDOW_MS }
+        tombstones[contactId] = at
+    }
+
+    /** The pre-computed post-deletion blobs (see [deletionBlobs]); [rosterJson] is null when read-only. */
+    class DeletionBlobs(val rosterJson: String?, val tombstonesJson: String)
+
     @Synchronized
     fun clearAll() {
         // Account wipe: drop the deleted-contact tombstones too, so no trace of

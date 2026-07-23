@@ -230,20 +230,29 @@ class VaultSignalProtocolStore(
      * roster state; do NOT call it as a standalone contact-delete in PR-D.
      */
     override fun destroyContactCrypto(name: String): Boolean {
-        val prefixes = listOf(KEY_SESSION, KEY_REMOTE_IDENTITY, KEY_SENDER_KEY)
-        runtime.mutate { state ->
-            state.signalRecords.keys
-                // filter() already materializes a fresh ArrayList, detached from the map's
-                // key-set view, so it is safe to iterate while removeRecord mutates the map.
-                .filter { key -> prefixes.any { key.startsWith("$it$name:") } }
-                .forEach { removeRecord(state, it) }
-        }
+        runtime.mutate { state -> removeContactCryptoRecords(state, name) }
         return try {
             runtime.flushBeforeAck()
             true
         } catch (t: Throwable) {
             false
         }
+    }
+
+    /**
+     * The mutate-body half of [destroyContactCrypto] with NO flush: purge [name]'s session,
+     * remote-identity, and sender-key records from [state], zeroing each removed array. Runs
+     * INSIDE a caller-supplied [VaultRuntime.mutate] so the PR-D contact-delete can fold roster
+     * entry + tombstone + these crypto records into ONE mutate + ONE flush (the atomicity
+     * contract above). Never call [destroyContactCrypto] standalone on the wired vault path.
+     */
+    fun removeContactCryptoRecords(state: VaultState, name: String) {
+        val prefixes = listOf(KEY_SESSION, KEY_REMOTE_IDENTITY, KEY_SENDER_KEY)
+        state.signalRecords.keys
+            // filter() already materializes a fresh ArrayList, detached from the map's
+            // key-set view, so it is safe to iterate while removeRecord mutates the map.
+            .filter { key -> prefixes.any { key.startsWith("$it$name:") } }
+            .forEach { removeRecord(state, it) }
     }
 
     // -- Kyber prekeys (post-quantum, required by the store interface) --------

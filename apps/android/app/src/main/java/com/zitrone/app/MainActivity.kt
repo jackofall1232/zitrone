@@ -20,6 +20,16 @@ import androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL
 import androidx.biometric.BiometricPrompt
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -27,13 +37,20 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.lifecycleScope
+import com.zitrone.app.crypto.vault.VaultOpen
 import com.zitrone.app.data.Conversation
 import com.zitrone.app.data.LemonDropScanOutcome
 import com.zitrone.app.data.LemonDropVeil
@@ -57,9 +74,15 @@ import com.zitrone.app.ui.screens.LockScreen
 import com.zitrone.app.ui.screens.OnboardingScreen
 import com.zitrone.app.ui.screens.SettingsScreen
 import com.zitrone.app.ui.screens.SplashScreen
+import com.zitrone.app.ui.theme.BackgroundPrimary
+import com.zitrone.app.ui.theme.Lemon
 import com.zitrone.app.ui.theme.Motion
+import com.zitrone.app.ui.theme.TextOnLemon
+import com.zitrone.app.ui.theme.TextPrimary
+import com.zitrone.app.ui.theme.TextSecondary
 import com.zitrone.app.ui.theme.ZitroneTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -136,6 +159,8 @@ class MainActivity : FragmentActivity() {
                 ZitroneRoot(
                     container = container,
                     requestBiometric = ::showBiometricPrompt,
+                    startVaultBiometricUnlock = ::startVaultBiometricUnlock,
+                    startBiometricEnroll = ::startBiometricEnroll,
                     lemonDropVeil = lemonDropVeil.asStateFlow(),
                     onLemonDropDismissed = {
                         (application as ZitroneApp).container.dismissLemonDropVeil()
@@ -291,7 +316,108 @@ class MainActivity : FragmentActivity() {
             else -> onResult(true, null)
         }
     }
+
+    /**
+     * Authenticate a CryptoObject-bound cipher with a BIOMETRIC_STRONG-only prompt — NO
+     * device-credential on this prompt (the app passphrase IS the fallback; biometric-1.1.0
+     * CryptoObject+DEVICE_CREDENTIAL has platform caveats). On success the [cipher] is
+     * authenticated and ready for one operation; [onSuccess] runs. Any error / cancel →
+     * [onError]. A soft failure (a non-matching finger) keeps the prompt open.
+     */
+    private fun authenticateCrypto(
+        cipher: javax.crypto.Cipher,
+        onSuccess: () -> Unit,
+        onError: () -> Unit,
+    ) {
+        val prompt = BiometricPrompt(
+            this,
+            ContextCompat.getMainExecutor(this),
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    onSuccess()
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    onError()
+                }
+
+                override fun onAuthenticationFailed() {
+                    // Keep the prompt open; the user can retry.
+                }
+            },
+        )
+        val promptInfo = BiometricPrompt.PromptInfo.Builder()
+            .setTitle(getString(R.string.biometric_title))
+            .setSubtitle(getString(R.string.biometric_subtitle))
+            // A negative button is REQUIRED when only BIOMETRIC_STRONG is allowed.
+            .setNegativeButtonText(getString(R.string.biometric_negative))
+            .setAllowedAuthenticators(BIOMETRIC_STRONG)
+            .build()
+        prompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(cipher))
+    }
+
+    /**
+     * The vault biometric-unlock path (§2): recover the auth-gated decrypt cipher for the
+     * stored wrap, prompt (BIOMETRIC_STRONG CryptoObject), and on success open the slot with
+     * the recovered vault key. A [android.security.keystore.KeyPermanentlyInvalidatedException]
+     * (a new enrollment) — or a missing/failed cipher — drops to the passphrase field via
+     * [VaultBiometricResult.INVALIDATED] / [VaultBiometricResult.UNAVAILABLE].
+     */
+    private fun startVaultBiometricUnlock(onResult: (VaultBiometricResult) -> Unit) {
+        val container = (application as ZitroneApp).container
+        val wrap = container.biometricStore.load() ?: return onResult(VaultBiometricResult.UNAVAILABLE)
+        val cipher = try {
+            container.biometricCipher.cipherForDecrypt(wrap.nonce)
+        } catch (e: android.security.keystore.KeyPermanentlyInvalidatedException) {
+            return onResult(VaultBiometricResult.INVALIDATED)
+        } catch (e: Exception) {
+            return onResult(VaultBiometricResult.UNAVAILABLE)
+        } ?: return onResult(VaultBiometricResult.UNAVAILABLE)
+        authenticateCrypto(
+            cipher,
+            onSuccess = {
+                lifecycleScope.launch {
+                    val ok = container.unlockWithBiometric(cipher, wrap)
+                    onResult(if (ok) VaultBiometricResult.SUCCESS else VaultBiometricResult.FAILED)
+                }
+            },
+            onError = { onResult(VaultBiometricResult.CANCELLED) },
+        )
+    }
+
+    /**
+     * The onboarding biometric-ENABLE path (§1): generate a fresh auth-gated encrypt cipher,
+     * prompt (BIOMETRIC_STRONG CryptoObject), and on success wrap a COPY of the fresh vault
+     * key under it and persist the constant-size blob. On any error the unused fresh key is
+     * deleted. [onResult] reports whether biometric unlock was enabled; either way the caller
+     * then completes onboarding with the same VaultOpen.
+     */
+    private fun startBiometricEnroll(
+        vaultOpen: com.zitrone.app.crypto.vault.VaultOpen,
+        onResult: (Boolean) -> Unit,
+    ) {
+        val container = (application as ZitroneApp).container
+        val cipher = try {
+            container.biometricCipher.newEncryptCipher()
+        } catch (e: Exception) {
+            return onResult(false)
+        }
+        authenticateCrypto(
+            cipher,
+            onSuccess = {
+                runCatching { container.enableBiometric(cipher, vaultOpen) }
+                onResult(true)
+            },
+            onError = {
+                container.biometricCipher.deleteKey()
+                onResult(false)
+            },
+        )
+    }
 }
+
+/** Outcome of a vault biometric-unlock attempt (see [MainActivity.startVaultBiometricUnlock]). */
+private enum class VaultBiometricResult { SUCCESS, FAILED, INVALIDATED, UNAVAILABLE, CANCELLED }
 
 // ---------------------------------------------------------------------------
 // Navigation — hand-rolled single-stack routing, no nav dependency.
@@ -313,35 +439,44 @@ private sealed interface Route {
 private fun ZitroneRoot(
     container: AppContainer,
     requestBiometric: ((Boolean, String?) -> Unit) -> Unit,
+    startVaultBiometricUnlock: ((VaultBiometricResult) -> Unit) -> Unit,
+    startBiometricEnroll: (VaultOpen, (Boolean) -> Unit) -> Unit,
     lemonDropVeil: StateFlow<LemonDropVeil?>,
     onLemonDropDismissed: () -> Unit,
     onLemonDropOpened: (PendingLemonDrop) -> Unit,
 ) {
     // Device-half flows only — process-lifetime, safe to read pre-unlock. Every
     // session-derived flow moved into [SessionUi], composed only when the session
-    // below is non-null.
+    // below is non-null. `settings` still drives the vault-scoped UI fields
+    // (ttl / burn / lemon-drop compose), which D2c keeps on legacy prefs (D5 moves them).
     val settings by container.settingsRepository.settings.collectAsState()
     val transportState by container.transportResolver.state.collectAsState()
     val lemonDropVeilState by lemonDropVeil.collectAsState()
-    // Built on unlock, null while locked. The single seam the D2b lifecycle turns
-    // on: session-derived objects come alive here, not at process start.
+    // Built on unlock over the vault, null while locked.
     val session by container.session.collectAsState()
+
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     var route by remember { mutableStateOf<Route>(Route.Splash) }
     var unlocked by remember { mutableStateOf(false) }
     var lockError by remember { mutableStateOf<String?>(null) }
+    var unlocking by remember { mutableStateOf(false) }
+    // Routing truth (§0): a vault image present → UNLOCK, absent → SETUP. Flips true the
+    // instant a create succeeds; otherwise unchanged for the process lifetime.
+    var vaultExists by remember { mutableStateOf(container.hasVault()) }
+    var creating by remember { mutableStateOf(false) }
+    var createError by remember { mutableStateOf<String?>(null) }
+    // A freshly created VaultOpen held between create success and the biometric-enable
+    // decision (§1). Non-null renders the enable offer, which owns handing it to the session.
+    var pendingVaultOpen by remember { mutableStateOf<VaultOpen?>(null) }
 
-    // This device's OWN identity self-fingerprint, tiled as the always-on
-    // "security paper" watermark behind every chat surface (Settings also shows
-    // it verbatim). Hoisted here — the one place shared by the veil (in front of
-    // the gate) and every session surface — so all share a single off-main-thread
-    // computation. Null until it lands; a compute failure also leaves it null and
-    // simply paints no watermark (never blocks the UI).
-    // SESSION-GATED: computed once a session is live (session != null implies
-    // unlocked), so ensureIdentity only ever runs behind the real app gate. The
-    // locked-scan veil renders unmarked — it holds nothing secret and needs no
-    // fingerprint. A live-session lemon drop (Advocacy/AwaitUnlock/Delivered)
-    // necessarily has a session, so the mark is present on the see-once plaintext.
+    // Whether the platform can authenticate BIOMETRIC_STRONG right now — the gate for both
+    // OFFERING enable (onboarding) and the lock-screen biometric affordance.
+    val canAuthenticateStrong =
+        BiometricManager.from(context).canAuthenticate(BIOMETRIC_STRONG) ==
+            BiometricManager.BIOMETRIC_SUCCESS
+
     var identityFingerprint by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(session) {
         val live = session
@@ -356,21 +491,14 @@ private fun ZitroneRoot(
     }
 
     // Session lifecycle — tied to the session INSTANCE, not the route, so it runs
-    // once per unlock cycle (never per navigation). Composed only while a session
-    // is live; a fresh unlock builds a new instance and re-runs both effects.
+    // once per unlock cycle. A fresh unlock builds a new instance over the durable
+    // vault image (state reloads exactly as on a process restart).
     session?.let { live ->
-        // Boot the messaging stack once the gate opens and the session exists.
         LaunchedEffect(live) { live.coordinator.start() }
-        // Server-side session revocation forces the gate shut AND tears the
-        // session down; a re-unlock builds a fresh one over the durable legacy
-        // stores (state reloads exactly as on a process restart). Rewired onto
-        // each new session instance.
         DisposableEffect(live) {
             live.coordinator.onForcedLogout = {
                 unlocked = false
                 route = Route.Locked
-                // lockIf: this callback belongs to THIS session; if it fires
-                // late (rewire races), it must not tear down a successor.
                 container.unlockController.lockIf(live)
             }
             onDispose { live.coordinator.onForcedLogout = null }
@@ -378,113 +506,145 @@ private fun ZitroneRoot(
     }
 
     // Root detection: warn once per process, never block.
-    val context = LocalContext.current
     var rootWarningVisible by remember {
         mutableStateOf(RootDetection.check(context).likelyRooted)
     }
 
-    val unlock: () -> Unit = {
-        requestBiometric { success, error ->
-            if (success) {
-                lockError = null
-                unlocked = true
-                route = Route.ChatList
-                // Build the session NOW — the one intended lifecycle change.
-                // Published synchronously, so the ChatList route below composes
-                // against a live session in the same frame.
-                container.unlockController.unlock()
+    // Land on the chat list after a successful unlock (passphrase or biometric); clear the
+    // RAM backoff so the next lock cycle starts fresh.
+    val onUnlockSuccess: () -> Unit = {
+        lockError = null
+        unlocking = false
+        unlocked = true
+        route = Route.ChatList
+        container.unlockRouter.recordSuccess()
+    }
+
+    // Passphrase unlock (§2): ALWAYS available. Enforce the RAM backoff BEFORE the off-main
+    // attempt, then surface only a uniform generic failure (no per-slot / per-factor branch).
+    val onUnlockPassphrase: (String) -> Unit = onUnlockPassphrase@{ pass ->
+        if (unlocking) return@onUnlockPassphrase
+        unlocking = true
+        lockError = null
+        scope.launch {
+            val backoff = container.unlockRouter.backoffDelayMs()
+            if (backoff > 0) delay(backoff)
+            val ok = runCatching { container.unlockWithPassphrase(pass) }.getOrDefault(false)
+            if (ok) {
+                onUnlockSuccess()
             } else {
-                lockError = error
+                container.unlockRouter.recordFailure()
+                lockError = VaultUnlockRouter.UNIFORM_FAILURE
+                unlocking = false
             }
         }
     }
 
-    // Account delete: wipe THROUGH the live session (there is no delegating
-    // getter any more), in order — coordinator wipe-work → signalStore.wipe() →
-    // lock() — then land on Splash. Reachable only from Settings, where a session
-    // is live; the guard is a backstop.
+    // Biometric availability for the lock-screen affordance and the veil CTA.
+    val biometricUnlockAvailable =
+        vaultExists && container.biometricStore.isEnabled() && canAuthenticateStrong
+
+    // Biometric unlock (§2): BIOMETRIC_STRONG CryptoObject only. Invalidation (a new
+    // enrollment) drops to the passphrase field with an honest note and clears the dead wrap.
+    val onUnlockBiometric: () -> Unit = onUnlockBiometric@{
+        if (unlocking) return@onUnlockBiometric
+        unlocking = true
+        lockError = null
+        startVaultBiometricUnlock { result ->
+            when (result) {
+                VaultBiometricResult.SUCCESS -> onUnlockSuccess()
+                VaultBiometricResult.INVALIDATED -> {
+                    container.disableBiometric()
+                    lockError = VaultUnlockRouter.BIOMETRIC_REENROLL_NOTE
+                    unlocking = false
+                }
+                VaultBiometricResult.FAILED -> {
+                    lockError = VaultUnlockRouter.UNIFORM_FAILURE
+                    unlocking = false
+                }
+                VaultBiometricResult.UNAVAILABLE, VaultBiometricResult.CANCELLED -> {
+                    unlocking = false
+                }
+            }
+        }
+    }
+
+    // Complete onboarding: hand the VaultOpen to the session build (which consumes it) and
+    // land on the chat list. onboarding completion = first unlock (publishSession marks it).
+    val finishOnboarding: (VaultOpen) -> Unit = { open ->
+        pendingVaultOpen = null
+        container.publishSession(open)
+        vaultExists = true
+        onUnlockSuccess()
+    }
+
+    // Create the vault (§1): off-main; on success either offer biometric enable (if the
+    // platform can) or complete onboarding directly. NotDurable / any failure is surfaced as
+    // a retryable error — creation never bricks.
+    val onCreateVault: (String) -> Unit = onCreateVault@{ pass ->
+        if (creating) return@onCreateVault
+        creating = true
+        createError = null
+        scope.launch {
+            val open = runCatching { container.createVault(pass) }.getOrNull()
+            creating = false
+            if (open == null) {
+                createError = "Couldn't finish creating your vault. Please try again."
+            } else if (canAuthenticateStrong) {
+                pendingVaultOpen = open
+            } else {
+                finishOnboarding(open)
+            }
+        }
+    }
+
+    // Root detection is warn-once; the account-delete wipe path is unchanged.
     val onDeleteAccount: () -> Unit = onDeleteAccount@{
         val live = session ?: return@onDeleteAccount
-        // Gate unlock shut for the wipe's duration: a successor session built
-        // while the shared stores are being cleared underneath it would hold
-        // stale roster/auth state with vanished crypto (Codex PR #45 r2). The
-        // completion below always runs (NonCancellable) and lifts the gate.
         container.unlockController.beginTerminalWipe()
         live.coordinator.deleteAccountAndWipe {
             live.signalStore.wipe()
-            // Drop the DELETED account's mark or it would keep watermarking (and
-            // being shown in Settings for) the next identity until process death
-            // (PR #8 review). The session-keyed effect recomputes it for the
-            // fresh identity once the next session builds.
             identityFingerprint = null
             unlocked = false
             route = Route.Splash
-            // Session objects are gone after the wipe — tear the slot down last.
-            // lockIf: the NonCancellable wipe can outlive its session (a racing
-            // revocation tears it down first); a late completion must not tear
-            // down a successor. With the terminal-wipe gate above no successor
-            // can build during the wipe — this is now pure belt-and-braces.
             container.unlockController.lockIf(live)
             container.unlockController.endTerminalWipe()
         }
     }
 
-    // The Locked veil must make the SAME decision Splash's routing makes — it
-    // short-circuits that routing, so re-derive it here. Never unlockable on a
-    // not-yet-onboarded install (an app-unlock there would skip onboarding,
-    // mint identity keys and register a relay account pre-consent), and never
-    // a prompt for a user whose gate is off (Splash unlocks those silently).
-    val veilLockedPreOnboarding =
-        lemonDropVeilState is LemonDropVeil.Locked && !settings.onboardingDone
-    val gateOff = settings.onboardingDone && !settings.biometricRequired
-    // Gate-off parity: with the veil short-circuiting routing, Splash's silent
-    // auto-unlock can never run while the veil is up — which would force an
-    // auth prompt the user disabled, or lose the queued scan on dismiss.
-    // Unlock silently NOW (same no-prompt semantics as Splash); the queued
-    // scan probes and the veil refines to its outcome with zero interaction,
-    // exactly as the pre-unlock probe behaved on main. Route is untouched:
-    // dismissing the veil lands on Splash, which routes as usual.
-    val veilLocked = lemonDropVeilState is LemonDropVeil.Locked
-    LaunchedEffect(veilLocked, gateOff) {
-        if (veilLocked && gateOff && !unlocked) {
-            unlocked = true
-            container.unlockController.unlock()
-        }
+    // Biometric-enable offer (§1) — shown right after a successful create when the platform
+    // can authenticate. Enable wraps a copy of the vault key under the auth-gated key; either
+    // way onboarding completes with the SAME VaultOpen. Short-circuits routing.
+    pendingVaultOpen?.let { open ->
+        BiometricEnrollOffer(
+            onEnable = { startBiometricEnroll(open) { finishOnboarding(open) } },
+            onSkip = { finishOnboarding(open) },
+        )
+        return
     }
+
+    // A Locked veil on a not-yet-created-vault install does NOT compose — normal routing
+    // (Splash → Onboarding) runs instead, scan still queued; the first unlock drains it.
+    val veilLockedPreOnboarding =
+        lemonDropVeilState is LemonDropVeil.Locked && !vaultExists
+
+    // The Locked-veil CTA routes into the SAME unlock router: biometric one-tap when
+    // available, otherwise reveal the lock screen (passphrase). No silent auto-unlock, no
+    // fail-open (D2b's gate-off branches are removed outright, §0/§2).
     val unlockFromVeil: () -> Unit = {
         when {
-            !settings.onboardingDone -> Unit // Locked veil is not composed pre-onboarding
-            settings.biometricRequired -> unlock()
+            !vaultExists -> Unit // Locked veil is not composed pre-vault
+            biometricUnlockAvailable -> onUnlockBiometric()
             else -> {
-                // Gate off: no prompt (backstop — the effect above normally
-                // beats the tap). Mirrors Splash's silent-unlock branch.
-                unlocked = true
-                route = Route.ChatList
-                container.unlockController.unlock()
+                onLemonDropDismissed()
+                route = Route.Locked
             }
         }
     }
 
-    // Lemon-drop veil. It sits IN FRONT of everything, including the biometric
-    // gate, and short-circuits the normal routing below: while it is up,
-    // Splash/Locked/ChatList are not composed, so the gate never advances
-    // behind it. Safe in front of the lock because the pre-unlock states
-    // (Locked, Advocacy, AwaitUnlock) render no secret content; Delivered — the
-    // one state that shows plaintext — is reachable only through the explicit
-    // biometric success wired below (see LemonDropVeil's invariant). Dismiss
-    // just drops the veil, revealing the app's real state underneath (still
-    // locked if it was locked), untouched — and, pre-unlock, burns nothing.
-    // EXCEPTION: a Locked veil on a not-yet-onboarded install does NOT compose —
-    // normal routing (Splash → Onboarding) runs instead, with the scan still
-    // queued; the first real unlock after onboarding drains it. The veil offers
-    // an app-unlock CTA, and there is no legitimate app-unlock before onboarding.
     lemonDropVeilState?.takeUnless { veilLockedPreOnboarding }?.let { veil ->
         BackHandler(enabled = true) { onLemonDropDismissed() }
         when (veil) {
-            // Scanned while the app is locked: the gate decision above. On
-            // success the queued scan probes (AppContainer.onSessionPublished)
-            // and this refines into Advocacy/AwaitUnlock — the same transitions a
-            // live-session scan makes. No fingerprint yet (no session) — unmarked.
             LemonDropVeil.Locked ->
                 LemonDropUnlockScreen(
                     onUnlock = unlockFromVeil,
@@ -527,42 +687,31 @@ private fun ZitroneRoot(
         label = "rootNavigation",
     ) { current ->
         when (current) {
+            // Vault-only routing (§0): image present → unlock gate, absent → setup. NO
+            // silent auto-unlock.
             Route.Splash -> SplashScreen(
                 onFinished = {
-                    route = when {
-                        !settings.onboardingDone -> Route.Onboarding
-                        settings.biometricRequired -> Route.Locked
-                        else -> {
-                            unlocked = true
-                            container.unlockController.unlock()
-                            Route.ChatList
-                        }
-                    }
+                    route = if (vaultExists) Route.Locked else Route.Onboarding
                 },
             )
 
             Route.Onboarding -> OnboardingScreen(
-                onDone = {
-                    container.settingsRepository.setOnboardingDone(true)
-                    route = if (settings.biometricRequired) {
-                        Route.Locked
-                    } else {
-                        unlocked = true
-                        container.unlockController.unlock()
-                        Route.ChatList
-                    }
-                },
+                onCreateVault = onCreateVault,
+                creating = creating,
+                createError = createError,
             )
 
-            Route.Locked -> {
-                LockScreen(onUnlockRequest = unlock, errorMessage = lockError)
-                LaunchedEffect(Unit) { unlock() }
-            }
+            // Vault unlock gate: passphrase always, biometric iff enabled + available. No
+            // auto-prompt — the user types a passphrase or taps biometrics.
+            Route.Locked -> LockScreen(
+                onUnlockWithPassphrase = onUnlockPassphrase,
+                onBiometricUnlock = if (biometricUnlockAvailable) onUnlockBiometric else null,
+                errorMessage = lockError,
+                unlocking = unlocking,
+            )
 
-            // Session routes. `route` becomes one of these only in the same event
-            // that called unlock() (which publishes the session synchronously), so
-            // the session is live here. During a teardown crossfade the outgoing
-            // session screen renders empty rather than reading a dead session.
+            // Session routes. `route` becomes one of these only after publishSession ran
+            // synchronously, so the session is live here.
             else -> session?.let { live ->
                 SessionUi(
                     session = live,
@@ -577,6 +726,49 @@ private fun ZitroneRoot(
                     onDeleteAccount = onDeleteAccount,
                 )
             }
+        }
+    }
+}
+
+/**
+ * The skippable biometric-enable offer shown once, right after a fresh vault is created
+ * (§1). Enabling dual-wraps the vault key under the auth-gated biometric key so later
+ * launches can unlock with a single BIOMETRIC_STRONG tap; the passphrase always remains the
+ * fallback. Skipping proceeds passphrase-only.
+ */
+@Composable
+private fun BiometricEnrollOffer(
+    onEnable: () -> Unit,
+    onSkip: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(BackgroundPrimary)
+            .padding(horizontal = 32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            text = "Enable biometric unlock?",
+            style = MaterialTheme.typography.headlineSmall,
+            color = TextPrimary,
+            textAlign = TextAlign.Center,
+        )
+        Text(
+            text = "Unlock with a fingerprint or face instead of typing your passphrase each " +
+                "time. Your passphrase still works, and stays the only way back in if biometrics change.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextSecondary,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 12.dp, bottom = 24.dp),
+        )
+        Button(
+            onClick = onEnable,
+            colors = ButtonDefaults.buttonColors(containerColor = Lemon, contentColor = TextOnLemon),
+        ) { Text("Enable biometrics") }
+        TextButton(onClick = onSkip, modifier = Modifier.padding(top = 8.dp)) {
+            Text("Not now", color = TextSecondary)
         }
     }
 }

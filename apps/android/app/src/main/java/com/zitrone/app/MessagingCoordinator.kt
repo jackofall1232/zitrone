@@ -89,6 +89,14 @@ class MessagingCoordinator(
     private val settings: SettingsRepository,
     private val diagnostics: BootDiagnostics,
     private val notificationScheduler: NotificationScheduler,
+    /**
+     * Vault-only atomic contact-delete (D2c). When non-null (the vault path), it removes the
+     * contact's crypto records + roster entry + tombstone in ONE runtime.mutate + ONE durable
+     * flush (VaultSignalProtocolStore atomicity contract :222-231) and returns whether that
+     * flush confirmed durable; [deleteContact] then burns messages and commits the in-memory
+     * removal. Null on the legacy path, which keeps its unchanged per-store delete sequence.
+     */
+    private val vaultContactDelete: (suspend (conversationId: String, contactId: String, at: Long) -> Boolean)? = null,
 ) : WsClient.Listener {
 
     private val _typingPeers = MutableStateFlow<Set<String>>(emptySet())
@@ -942,6 +950,30 @@ class MessagingCoordinator(
                 return@launch
             }
             val contactId = conversation.contactId
+            val atomicDelete = vaultContactDelete
+            if (atomicDelete != null) {
+                // Vault path: crypto records + roster entry + tombstone are torn down in ONE
+                // runtime.mutate + ONE durable flush (destroyContactCrypto is NEVER called
+                // standalone). A false return means the combined flush did not reach disk —
+                // abort with everything kept for a retry, exactly like the legacy commit-failed
+                // branch below.
+                val at = System.currentTimeMillis()
+                if (!atomicDelete(conversationId, contactId, at)) {
+                    diag("delete: atomic vault teardown did not reach disk — aborting, contact kept")
+                    onComplete?.invoke()
+                    return@launch
+                }
+                // The roster entry still resolves the peer for the best-effort burn frames;
+                // the in-memory removal + tombstone are committed (no re-persist — the mutate
+                // above already sealed both) AFTER the burn.
+                messages.burnAll(conversationId, notifyPeer = true)
+                conversations.commitDeletion(conversationId, contactId, at)
+                pendingReceipts.remove(contactId)
+                _typingPeers.value = _typingPeers.value - contactId
+                notificationScheduler.onConversationRemoved(conversationId)
+                onComplete?.invoke()
+                return@launch
+            }
             val wiped = signal.destroyContact(contactId)
             if (!wiped) {
                 // Teardown did not reach disk (I/O error / storage full). Do NOT
