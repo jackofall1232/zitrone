@@ -890,6 +890,11 @@ private fun ZitroneRoot(
         container.scope.launch {
             val result = runCatching { container.createVaultAndPublish(pass) }
             container.endVaultCreate()
+            // container.scope is Dispatchers.Default — marshal the Compose-state reconcile to Main
+            // (the createVaultAndPublish + endVaultCreate above are correctly off-main). Snapshot
+            // state is thread-safe to write, but keeping every state mutation on Main avoids
+            // cross-var tearing and matches the openLemonDrop pattern (round 12d, Gemini).
+            withContext(Dispatchers.Main) {
             result.fold(
                 onSuccess = { published ->
                     vaultExists = true
@@ -914,6 +919,7 @@ private fun ZitroneRoot(
                     }
                 },
             )
+            }
         }
     }
 
@@ -930,9 +936,14 @@ private fun ZitroneRoot(
             onIntentNotDurable = {
                 // The destroy-pending marker could not be made durable, so the delete never
                 // touched the server (round 12): lift the gate and surface a retry. Nothing was
-                // destroyed — the session is still live behind the veil.
+                // destroyed — the session is still live behind the veil. This runs on the
+                // coordinator's background dispatcher, so the Compose-state write is marshaled to
+                // Main (round 12d, Gemini); Main.immediate + container.scope so it survives a
+                // rotation and is not cancelled by the composition.
                 container.unlockController.endTerminalWipe()
-                lockError = "Couldn't start deleting your account. Please try again."
+                container.scope.launch(Dispatchers.Main.immediate) {
+                    lockError = "Couldn't start deleting your account. Please try again."
+                }
             },
             onComplete = {
             // Routing derives from DISK TRUTH after the wipe, not from exception classification:
@@ -967,21 +978,30 @@ private fun ZitroneRoot(
                 throw c
             } catch (t: Throwable) {
                 // DestroyFailed (a surviving file) or an unexpected teardown throw — either way
-                // the finally below routes from disk truth. releaseGate already ran in
+                // the routing below derives from disk truth. releaseGate already ran in
                 // completeTerminalWipe's outermost finally, so the unlock gate is not stranded.
             } finally {
-                identityFingerprint = null
-                unlocked = false
-                lockError = null
-                vaultExists = container.hasVault()
-                route = if (!vaultExists && !container.vaultDestroyPending()) {
-                    // Destroy CONFIRMED (files verified gone, marker retired) → fresh-install state.
-                    Route.Onboarding
-                } else {
-                    // The image (or the destroy-pending marker) survives: the server account is
-                    // gone, so the only honest route is "finish deleting" with a direct retry —
-                    // NEVER the lock gate (see Route.DeleteIncomplete).
-                    Route.DeleteIncomplete
+                // This callback runs on the coordinator's background (confined) dispatcher, so the
+                // Compose-state reconcile is marshaled to Main (round 12d, Gemini). Main.immediate
+                // + container.scope so a rotation mid-wipe cannot cancel it. The disk-truth reads
+                // (hasVault / vaultDestroyPending — fast stats under imageLock) run on Main here,
+                // as they already do from Splash routing. The session→route reconciler is the
+                // parallel main-thread backstop: lockIf published session=null above, so it also
+                // derives the same route from the same disk truth — the two cannot disagree.
+                container.scope.launch(Dispatchers.Main.immediate) {
+                    identityFingerprint = null
+                    unlocked = false
+                    lockError = null
+                    vaultExists = container.hasVault()
+                    route = if (!vaultExists && !container.vaultDestroyPending()) {
+                        // Destroy CONFIRMED (files gone, marker retired) → fresh-install state.
+                        Route.Onboarding
+                    } else {
+                        // The image (or the destroy-pending marker) survives: the server account
+                        // is gone, so the only honest route is "finish deleting" with a direct
+                        // retry — NEVER the lock gate (see Route.DeleteIncomplete).
+                        Route.DeleteIncomplete
+                    }
                 }
             }
             },
