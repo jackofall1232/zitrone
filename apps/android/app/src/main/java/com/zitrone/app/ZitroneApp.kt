@@ -274,6 +274,15 @@ class AppContainer(private val app: Application) {
         synchronized(transportLock) { applyTransportLocked(state) }
 
     private fun applyTransportLocked(state: TransportState) {
+        // Apply ONLY the latest resolver state. A collector callback can capture
+        // an emission, then wait on the lock while the publish-time re-apply
+        // (which reads the state UNDER the lock) applies a newer one; applying
+        // the stale capture afterward would roll a live session back to old
+        // endpoints until the next emission — a window where the post-unlock
+        // bootstrap could dial clearnet after Tor/I2P was already selected
+        // (Codex PR #45 r2). Skipping is safe: whatever superseded this state
+        // is either already applied or its own collector iteration is imminent.
+        if (state != transportResolver.state.value) return
         val (client, apiBase, ws) = transportEndpoints(state)
         // Always reconcile the client so the NEXT connect dials the resolved
         // transport. With NO live session (pre-unlock) this swap is all there is

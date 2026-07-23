@@ -92,6 +92,11 @@ class LemonDropVeilController(
                 return
             }
             veil.value = LemonDropVeil.Advocacy(LemonDropScanOutcome.UNKNOWN)
+            // A live scan supersedes any scan still queued from the locked era
+            // (latest-wins): without this, onUnlocked could later drain the OLD
+            // queued scan over this newer one — the publish→hook gap race
+            // (Codex PR #45 r2).
+            pendingQrId = null
             (++scanToken).also { inFlight = it to qrId }
         }
         launchProbe(qrId, token)
@@ -124,15 +129,25 @@ class LemonDropVeilController(
      */
     fun onLocked() {
         synchronized(lock) {
+            val latest = scanToken
             ++scanToken
             val held = veil.value
+            // A drop the user explicitly opened must not stay on screen once the
+            // app locks: it is already burned (unrecoverable either way), and
+            // plaintext must not outlive the session that authorized rendering
+            // it — same stance as [clearDelivered] (Gemini PR #45 r2).
+            if (held is LemonDropVeil.Delivered) veil.value = null
             val requeue = when {
                 held is LemonDropVeil.AwaitUnlock -> held.pending.qrId
-                inFlight != null -> inFlight?.second
+                // Re-queue the in-flight scan ONLY if it was the latest
+                // interaction: a scan queued in the publish(null)→hook gap is
+                // newer and must not be overwritten by an older flight
+                // (latest-wins across the transition — Codex PR #45 r2).
+                inFlight?.first == latest -> inFlight?.second
                 else -> null
             }
             inFlight = null
-            if (requeue != null) {
+            if (requeue != null && pendingQrId == null) {
                 pendingQrId = requeue
                 veil.value = LemonDropVeil.Locked
             }

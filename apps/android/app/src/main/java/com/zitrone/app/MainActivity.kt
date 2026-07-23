@@ -405,6 +405,11 @@ private fun ZitroneRoot(
     // is live; the guard is a backstop.
     val onDeleteAccount: () -> Unit = onDeleteAccount@{
         val live = session ?: return@onDeleteAccount
+        // Gate unlock shut for the wipe's duration: a successor session built
+        // while the shared stores are being cleared underneath it would hold
+        // stale roster/auth state with vanished crypto (Codex PR #45 r2). The
+        // completion below always runs (NonCancellable) and lifts the gate.
+        container.unlockController.beginTerminalWipe()
         live.coordinator.deleteAccountAndWipe {
             live.signalStore.wipe()
             // Drop the DELETED account's mark or it would keep watermarking (and
@@ -417,10 +422,10 @@ private fun ZitroneRoot(
             // Session objects are gone after the wipe — tear the slot down last.
             // lockIf: the NonCancellable wipe can outlive its session (a racing
             // revocation tears it down first); a late completion must not tear
-            // down a successor the user already re-unlocked. That successor sees
-            // the wiped stores and re-bootstraps a fresh account — the deleted
-            // account converges to gone either way.
+            // down a successor. With the terminal-wipe gate above no successor
+            // can build during the wipe — this is now pure belt-and-braces.
             container.unlockController.lockIf(live)
+            container.unlockController.endTerminalWipe()
         }
     }
 

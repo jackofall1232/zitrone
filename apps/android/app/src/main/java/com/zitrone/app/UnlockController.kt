@@ -6,7 +6,10 @@
 package com.zitrone.app
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Owns the session-per-unlock lifecycle (P1b-2 PR-D2b). [unlock] builds the one
@@ -41,14 +44,21 @@ class UnlockController<S : Any>(
     private val publish: (S?) -> Unit,
     private val stopSession: (S) -> Unit,
     private val afterPublish: () -> Unit,
+    private val drainTimeoutMs: Long = 2_000,
 ) {
     private val lock = Any()
     private var current: S? = null
     private var sessionScope: CoroutineScope? = null
+    private var terminalWipe = false
 
-    /** Build + publish the session if none is live. Idempotent. */
+    /**
+     * Build + publish the session if none is live. Idempotent. Refused while a
+     * terminal wipe is in progress (see [beginTerminalWipe]) — the UI's normal
+     * routing retries once the wipe's completion lifts the gate.
+     */
     fun unlock() {
         synchronized(lock) {
+            if (terminalWipe) return
             if (current != null) return
             val scope = newSessionScope()
             val session = buildSession(scope)
@@ -83,9 +93,39 @@ class UnlockController<S : Any>(
     private fun lockCurrent() {
         val session = current ?: return
         stopSession(session)
+        val job = sessionScope?.coroutineContext?.get(Job)
         sessionScope?.cancel()
+        // cancel() returns immediately and cancellation is cooperative: work
+        // already running — a decrypt persisting a ratchet update — would race a
+        // successor session over the SAME legacy stores (concurrent ratchet
+        // mutations can permanently break a contact's session — Codex PR #45
+        // r2). Wait, bounded, for the scope to drain before a successor can
+        // build. The bound covers the realistic window (store writes are
+        // ms-scale); a coroutine stuck in uninterruptible network I/O can
+        // overrun it — a residual, accepted for D2b since production lock()
+        // callers are background threads and an unlock() racing this blocks on
+        // the monitor for at most the bound. D2c's VaultRuntime serializes all
+        // store access through one lock, retiring this race class outright.
+        if (job != null) {
+            runBlocking { withTimeoutOrNull(drainTimeoutMs) { job.join() } }
+        }
         publish(null)
         current = null
         sessionScope = null
+    }
+
+    /**
+     * Gate [unlock] shut for the duration of a terminal (account-delete) wipe: a
+     * successor session built while the shared legacy stores are being cleared
+     * underneath it would hold stale roster/auth state with vanished crypto
+     * (Codex PR #45 r2). The wipe runs NonCancellable and its completion calls
+     * [endTerminalWipe], so the gate always lifts.
+     */
+    fun beginTerminalWipe() {
+        synchronized(lock) { terminalWipe = true }
+    }
+
+    fun endTerminalWipe() {
+        synchronized(lock) { terminalWipe = false }
     }
 }

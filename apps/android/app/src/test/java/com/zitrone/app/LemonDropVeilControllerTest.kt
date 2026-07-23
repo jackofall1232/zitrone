@@ -287,6 +287,73 @@ class LemonDropVeilControllerTest {
     }
 
     @Test
+    fun `a live scan supersedes a scan still queued from the locked era`() = runTest {
+        // The publish→onUnlocked gap: a scan arriving after the session is
+        // visible but before the hook drains the queue is NEWER — the queued
+        // scan must not probe over it.
+        val calls = mutableListOf<String>()
+        var unlocked = false
+        val controller = LemonDropVeilController(
+            scope = backgroundScope,
+            isUnlocked = { unlocked },
+            probe = { qrId -> calls += qrId; sealed },
+            ioDispatcher = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        controller.onScan("older") // queued while locked
+        unlocked = true
+        controller.onScan("newer") // the gap scan — probes immediately
+        controller.onUnlocked() // must NOT drain "older" over it
+        advanceUntilIdle()
+
+        assertEquals(listOf("newer"), calls)
+        assertEquals(LemonDropVeil.Advocacy(LemonDropScanOutcome.SEALED), controller.veil.value)
+    }
+
+    @Test
+    fun `onLocked does not overwrite a scan queued in the teardown gap`() = runTest {
+        // The publish(null)→onLocked gap: a fresh locked scan lands first; the
+        // older in-flight scan must not clobber it (latest-wins).
+        val gate = CompletableDeferred<Unit>()
+        val calls = mutableListOf<String>()
+        var unlocked = true
+        val controller = LemonDropVeilController(
+            scope = backgroundScope,
+            isUnlocked = { unlocked },
+            probe = { qrId ->
+                calls += qrId
+                gate.await()
+                sealed
+            },
+            ioDispatcher = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        controller.onScan("older") // in flight
+        unlocked = false
+        controller.onScan("fresh") // gap scan, queued
+        controller.onLocked()
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        controller.onUnlocked() // drains the queue — must be "fresh"
+        assertTrue("stale flight must not displace the newer queued scan", calls.contains("fresh"))
+        assertEquals(listOf("older"), calls.filter { it == "older" })
+    }
+
+    @Test
+    fun `onLocked clears a displayed Delivered drop`() = runTest {
+        val controller = LemonDropVeilController(
+            scope = backgroundScope,
+            isUnlocked = { true },
+            probe = { sealed },
+            ioDispatcher = UnconfinedTestDispatcher(testScheduler),
+        )
+        controller.veil.value = LemonDropVeil.Delivered("secret", "A", true)
+        controller.onLocked()
+        assertNull("plaintext must not outlive the session that authorized it", controller.veil.value)
+    }
+
+    @Test
     fun `a dismissed scan is not resurrected by a later onLocked`() = runTest {
         val gate = CompletableDeferred<Unit>()
         val calls = mutableListOf<String>()

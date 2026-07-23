@@ -9,6 +9,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotSame
@@ -164,6 +165,73 @@ class UnlockControllerTest {
         // The callback bound to the live session still works.
         rig.controller.lockIf(second)
         assertEquals(listOf(first, second), rig.stopped)
+    }
+
+    @Test
+    fun `unlock is refused while a terminal wipe is in progress and works after`() {
+        val rig = Rig()
+        rig.controller.beginTerminalWipe()
+        rig.controller.unlock()
+        assertTrue("no session may build over stores being wiped", rig.built.isEmpty())
+        rig.controller.endTerminalWipe()
+        rig.controller.unlock()
+        assertEquals(1, rig.built.size)
+    }
+
+    @Test
+    fun `lock waits for the cancelled session scope to drain`() {
+        // Cancellation is cooperative: running work (a ratchet-persisting
+        // decrypt) must finish before a successor session can build over the
+        // same stores. Simulate with sleep — cancel() cannot interrupt it.
+        val drained = java.util.concurrent.atomic.AtomicBoolean(false)
+        var scope: CoroutineScope? = null
+        val controller = UnlockController<Any>(
+            newSessionScope = {
+                CoroutineScope(SupervisorJob() + Dispatchers.IO).also { scope = it }
+            },
+            buildSession = { Any() },
+            publish = {},
+            stopSession = {},
+            afterPublish = {},
+        )
+        controller.unlock()
+        val started = CountDownLatch(1)
+        scope!!.launch {
+            started.countDown()
+            Thread.sleep(300)
+            drained.set(true)
+        }
+        started.await()
+        controller.lock()
+        assertTrue("lock must wait out in-flight session work", drained.get())
+    }
+
+    @Test
+    fun `the drain wait is bounded — a stuck coroutine cannot hang lock`() {
+        var scope: CoroutineScope? = null
+        val controller = UnlockController<Any>(
+            newSessionScope = {
+                CoroutineScope(SupervisorJob() + Dispatchers.IO).also { scope = it }
+            },
+            buildSession = { Any() },
+            publish = {},
+            stopSession = {},
+            afterPublish = {},
+            drainTimeoutMs = 100,
+        )
+        controller.unlock()
+        val started = CountDownLatch(1)
+        scope!!.launch {
+            started.countDown()
+            Thread.sleep(10_000)
+        }
+        started.await()
+        val begun = System.currentTimeMillis()
+        controller.lock()
+        assertTrue(
+            "lock must return at the bound, not wait for the stuck coroutine",
+            System.currentTimeMillis() - begun < 5_000,
+        )
     }
 
     @Test
