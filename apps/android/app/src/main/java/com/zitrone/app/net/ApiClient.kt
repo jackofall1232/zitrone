@@ -345,14 +345,15 @@ class ApiClient(
     }
 
     /**
-     * DELETE /api/v1/account — full, irreversible purge of all server data. Returns a DEFINITE
-     * outcome instead of throwing-and-being-swallowed (round 13). Local auth state is cleared ONLY
-     * on [AccountDeleteResult.CONFIRMED_GONE]; on failure/ambiguous the tokens are KEPT so the
-     * delete can be retried (a definite failure with the account still present must remain
-     * authenticated to try again).
+     * DELETE /api/v1/account — requests the server-side purge and CLASSIFIES the outcome; it does
+     * NOT mutate local auth (round 14, F1). Local auth (tokens + account id) is vault-backed, so it
+     * is destroyed together with the vault by [AppContainer.destroyVaultForAccountDeletion] once the
+     * deletion is CONFIRMED and recorded durably — clearing it here (as round 13 did) wiped the
+     * credentials the crash-recovery reconcile needs to repeat the authenticated DELETE and reach
+     * the idempotent 404. Retaining auth until destroy is what makes the roll-forward real.
      */
-    suspend fun deleteAccount(): AccountDeleteResult {
-        val result = try {
+    suspend fun deleteAccount(): AccountDeleteResult =
+        try {
             execute(request("/api/v1/account").delete().build())
             AccountDeleteResult.CONFIRMED_GONE
         } catch (e: ApiException) {
@@ -368,13 +369,6 @@ class ApiClient(
             // Transport never got a definite answer (offline / DNS / TLS / read timeout).
             AccountDeleteResult.AMBIGUOUS
         }
-        if (result == AccountDeleteResult.CONFIRMED_GONE) {
-            clearTokens()
-            authStore.clearAccount()
-            _accountId.value = null
-        }
-        return result
-    }
 
     // -- plumbing -------------------------------------------------------------------
 

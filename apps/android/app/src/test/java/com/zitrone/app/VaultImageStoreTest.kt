@@ -1008,6 +1008,60 @@ class VaultImageStoreTest {
         assertFalse("a confirmed destroy leaves no marker", store.serverDeleteConfirmed())
     }
 
+    // ── round 14 F2/F3/F4 — re-stat marker discipline ────────────────────────────────
+
+    @Test
+    fun create_failsWithNothingWritten_whenAStaleMarkerSurvivesTheClear() {
+        val dir = tmp.newFolder()
+        // Round 14 (F2): a stale confirmed marker that CANNOT be unlinked (File.delete()==false, an
+        // I/O failure) must fail the create with NO successor vault on disk — never a fresh vault
+        // coexisting with a live confirmed marker (which the next boot would auto-destroy). Model
+        // the un-deletable marker as a non-empty directory (File.delete() returns false, re-stat
+        // finds it present).
+        val marker = File(dir, "vault.delete-confirmed").also { it.mkdir() }
+        File(marker, "child").writeBytes(ByteArray(4))
+
+        val store = newStore(dir)
+        assertThrows(VaultImageException.NotDurable::class.java) {
+            store.create(passphrase, "fresh".toByteArray(Charsets.UTF_8))
+        }
+        assertFalse("no successor vault written when the stale marker can't be cleared", File(dir, "vault.bin").exists())
+        assertFalse("no dek written either", File(dir, "vault.dek").exists())
+    }
+
+    @Test
+    fun create_failsWithNothingWritten_whenTheMarkerClearFsyncIsNotDurable() {
+        val dir = tmp.newFolder()
+        File(dir, "vault.delete-confirmed").createNewFile()
+        // The stale-marker clear runs BEFORE any vault byte and requires a DURABLE fsync; a
+        // non-durable clear fails the create with nothing written (round 14, F2).
+        val store = newStore(dir) { DirSyncResult.NOT_DURABLE }
+        assertThrows(VaultImageException.NotDurable::class.java) {
+            store.create(passphrase, "fresh".toByteArray(Charsets.UTF_8))
+        }
+        assertFalse("no successor vault on a non-durable marker clear", File(dir, "vault.bin").exists())
+    }
+
+    @Test
+    fun clearDeleteIntent_throwsWhenNotDurable_andWhenTheMarkerSurvives() {
+        // Round 14 (F3): clearDeleteIntent checks its dirSync result and re-stats the marker —
+        // it no longer assumes success. Non-durable fsync → throw.
+        val d1 = tmp.newFolder()
+        File(d1, "vault.delete-intent").createNewFile()
+        val s1 = newStore(d1) { DirSyncResult.NOT_DURABLE }
+        assertThrows(VaultImageException.DestroyFailed::class.java) { s1.clearDeleteIntent() }
+
+        // Un-deletable intent marker (File.delete()==false) → re-stat finds it present → throw.
+        val d2 = tmp.newFolder()
+        val marker = File(d2, "vault.delete-intent").also { it.mkdir() }
+        File(marker, "child").writeBytes(ByteArray(4))
+        val s2 = newStore(d2)
+        assertThrows(VaultImageException.DestroyFailed::class.java) { s2.clearDeleteIntent() }
+
+        // An already-absent intent marker is a clean no-op (idempotent).
+        newStore(tmp.newFolder()).clearDeleteIntent()
+    }
+
     /**
      * Fixed-key `javax.crypto` AES-256-GCM stand-in for the Android Keystore device
      * key. Emits the SAME 60-byte `nonce(12) ‖ ct(32) ‖ tag(16)` blob shape the

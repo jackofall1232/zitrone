@@ -125,14 +125,13 @@ class MessagingCoordinator(
     private val persistDeleteIntent: () -> Unit = {},
     /**
      * Persist SERVER-DELETE-CONFIRMED durably (the `vault.delete-confirmed` marker) — written ONLY
-     * after [ApiClient.deleteAccount] returns [ApiClient.AccountDeleteResult.CONFIRMED_GONE]. This
-     * is the ONLY marker that authorises the unlink-only DeleteIncomplete auto-destroy (round 13).
-     * Production supplies [AppContainer.markServerDeleteConfirmed].
+     * after [ApiClient.deleteAccount] returns [ApiClient.AccountDeleteResult.CONFIRMED_GONE], and
+     * REQUIRED-durable (round 14, F1): it MUST throw if it cannot be made durable so the caller
+     * never tears down / clears auth over an un-recorded confirmation. This is the ONLY marker that
+     * authorises the unlink-only DeleteIncomplete auto-destroy. Production supplies
+     * [AppContainer.markServerDeleteConfirmed].
      */
     private val persistServerDeleteConfirmed: () -> Unit = {},
-    /** Durably clear the delete-intent marker — used when a definite server failure abandons an
-     *  interrupted delete ([AppContainer.clearVaultDeleteIntent]). */
-    private val clearDeleteIntent: () -> Unit = {},
 ) : WsClient.Listener {
 
     private val _typingPeers = MutableStateFlow<Set<String>>(emptySet())
@@ -1337,17 +1336,23 @@ class MessagingCoordinator(
      * transport/HTTP failure (the round-12 P1: destroying the only local keys while the server
      * account stayed live and orphaned).
      *
-     *  - [onConfirmed]  — the server account is confirmed gone; RAM state is torn down and the
-     *    caller destroys the local vault + routes DeleteIncomplete/Onboarding.
+     *  - [onConfirmed]  — the server account is confirmed gone AND that confirmation is durably
+     *    recorded; RAM state is torn down and the caller destroys the local vault + routes.
      *  - [onNotConfirmed] — the server did NOT confirm deletion (definiteFailure = true when the
      *    server refused, false when the outcome is ambiguous/offline). NOTHING is destroyed; the
-     *    session stays live; the caller lifts the terminal-wipe gate and surfaces a retry.
+     *    session stays live; the intent marker is KEPT (never silently abandoned, round 14 F1); the
+     *    caller lifts the terminal-wipe gate and surfaces a retry (reconciled on the next unlock).
+     *  - [onConfirmedNotDurable] — the server IS gone but the confirmed marker could not be made
+     *    durable (round 14 F1). NOTHING is destroyed and auth is NOT cleared; the intent marker is
+     *    KEPT so the next unlock's reconcile repeats the (now idempotent-404) DELETE and records
+     *    confirmation durably. Caller lifts the gate + surfaces.
      *  - [onIntentNotDurable] — the intent marker itself could not be made durable; the delete
      *    never touched the server. Caller lifts the gate.
      */
     fun deleteAccountAndWipe(
         onConfirmed: () -> Unit,
         onNotConfirmed: (definiteFailure: Boolean) -> Unit = {},
+        onConfirmedNotDurable: () -> Unit = {},
         onIntentNotDurable: () -> Unit = {},
     ) {
         // NonCancellable: the session scope this launches on is cancelled by
@@ -1383,19 +1388,34 @@ class MessagingCoordinator(
                 ApiClient.AccountDeleteResult.AMBIGUOUS
             }
             if (result != ApiClient.AccountDeleteResult.CONFIRMED_GONE) {
-                // NOT gone: destroy NOTHING. A DEFINITE failure (server refused) abandons the
-                // interrupted delete (clear the intent — retrying won't help). An AMBIGUOUS
-                // outcome LEAVES the intent so a later attempt can resolve it. Session untouched.
-                val definiteFailure = result == ApiClient.AccountDeleteResult.DEFINITE_FAILURE
-                if (definiteFailure) runCatching { clearDeleteIntent() }
-                onNotConfirmed(definiteFailure)
+                // NOT gone: destroy NOTHING and KEEP the intent marker — never silently abandon
+                // (round 14, F1). A DEFINITE failure is an auth/permission problem (the account
+                // still exists); an AMBIGUOUS outcome is offline/5xx. Either way the session stays
+                // live and the intent persists, so the next unlock's reconcile repeats the DELETE.
+                onNotConfirmed(result == ApiClient.AccountDeleteResult.DEFINITE_FAILURE)
                 return@launch
             }
-            // 3. CONFIRMED gone: record confirmation durably. Best-effort — destroy() also writes
-            // it, and the intent marker + boot recovery backstop a crash if THIS write fails.
-            runCatching { persistServerDeleteConfirmed() }
-            // 4. Only now tear the session/RAM down. From here the server account is gone, so
-            // destruction is unconditionally safe.
+            // 3. CONFIRMED gone: record the confirmation REQUIRED-durable (round 14, F1 — no more
+            // best-effort swallow). Until vault.delete-confirmed is durable, a crash would strand a
+            // gone-server-account against a live vault with no auto-destroy authorization. On a
+            // non-durable write, tear down NOTHING and clear NO auth: keep the session + the intent
+            // marker so the next unlock's reconcile repeats the (idempotent-404) DELETE and records
+            // confirmation. Auth is NOT cleared anywhere in this flow now — it is vault-backed and
+            // destroyed with the vault by destroy(), which also keeps it available for the reconcile.
+            val confirmedDurable = try {
+                persistServerDeleteConfirmed()
+                true
+            } catch (c: CancellationException) {
+                throw c
+            } catch (_: Throwable) {
+                false
+            }
+            if (!confirmedDurable) {
+                onConfirmedNotDurable()
+                return@launch
+            }
+            // 4. Confirmation is durable — only now tear the session/RAM down. From here the server
+            // account is gone AND recorded, so destruction is unconditionally safe and recoverable.
             acceptingDeliveries = false
             _linking.value = false
             linkJob?.cancel()

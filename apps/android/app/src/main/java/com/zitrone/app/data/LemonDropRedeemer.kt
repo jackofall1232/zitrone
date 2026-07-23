@@ -273,11 +273,13 @@ class LemonDropRedeemer(
  * `sealDurableOrFalse`) so the applied/durable split — the load-bearing part of
  * [LemonDropRedeemer.deliverDurablyCommit] — is host-testable without an ApiClient:
  * a [consume] throw means the mutate never applied (closed-runtime teardown →
- * [LemonDropRedeemer.DeliveryCommit.NOT_APPLIED], nothing lost, drop re-scannable); a [flush]
- * throw AFTER an applied consume is [LemonDropRedeemer.DeliveryCommit.APPLIED_UNCONFIRMED] —
- * never "unapplied", because the removal is scheduled (or already sealed) and a rescan could
- * never decrypt the drop again, so the caller MUST still render. [CancellationException]
- * propagates from either phase (cooperative teardown, never folded into an outcome).
+ * [LemonDropRedeemer.DeliveryCommit.NOT_APPLIED]); a [flush] throw AFTER an applied consume is
+ * [LemonDropRedeemer.DeliveryCommit.APPLIED_UNCONFIRMED] — never "unapplied", because the removal
+ * is scheduled (or already sealed). Round 13 is render-GATED: the caller has ALREADY rendered
+ * before invoking this, so the outcome governs only the relay [burn] (fired only on [DURABLE]) and
+ * the size of the double-open residual (a still-consumable prekey ⇒ the already-seen drop is
+ * re-openable), never a loss. [CancellationException] propagates from either phase (cooperative
+ * teardown, never folded into an outcome).
  */
 internal suspend fun classifyDeliveryCommit(
     consume: () -> Unit,

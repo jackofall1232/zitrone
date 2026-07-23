@@ -392,6 +392,20 @@ class VaultImageStore internal constructor(
             register()
             try {
                 require(!binFile.exists()) { "vault image already exists" }
+                // Clear any STALE delete markers BEFORE writing the successor vault (round 14, F2).
+                // A marker resurrected by a journal replay from a PRIOR account's delete would
+                // otherwise route this fresh vault to DeleteIncomplete → auto-destroy. Done FIRST
+                // (no vault byte written yet) and VERIFIED by re-stat + required dirSync, so:
+                //  - a silent File.delete() failure (bool false, marker survives) FAILS create with
+                //    nothing on disk — never a successor vault coexisting with a live marker;
+                //  - the old post-write ordering window ("vault durable, marker-clear not yet
+                //    durable" → crash → successor auto-destroyed) is gone: the markers are proven
+                //    absent + durable BEFORE the vault exists.
+                if ((deleteIntentFile.exists() || serverDeletedFile.exists()) &&
+                    !clearBothMarkersDurably()
+                ) {
+                    throw VaultImageException.NotDurable()
+                }
                 val newDek = ops.randomBytes(DEK_BYTES)
                 // Ephemeral here: the persisted copy lives in `dek`. Wipe the local on EVERY
                 // exit, incl. if createImage / encrypt / wrap / verify / write throws mid-way.
@@ -434,22 +448,6 @@ class VaultImageStore internal constructor(
                             // → retry) or a COMPLETE, openable vault — never {bin, no-dek}. No rollback
                             // delete is needed.
                             throw VaultImageException.NotDurable()
-                        }
-                        // Clear any STALE delete markers now that a NEW durable vault exists
-                        // (round 13, Grok P1-2): a marker resurrected by a journal replay from a
-                        // PRIOR account's delete would otherwise route this fresh vault to
-                        // DeleteIncomplete → auto-destroy. The new vault's own dirSync already
-                        // landed above; clear the markers and fsync that clear so the successor can
-                        // never be auto-destroyed. Best-effort delete + a required dirSync: an
-                        // orphaned marker that cannot be cleared durably must fail the create (a
-                        // vault under a live confirmed-delete marker is unsafe) rather than persist.
-                        val hadStaleMarker = deleteIntentFile.exists() || serverDeletedFile.exists()
-                        if (hadStaleMarker) {
-                            deleteIntentFile.delete()
-                            serverDeletedFile.delete()
-                            if (dirSync(baseDir) != DirSyncResult.DURABLE) {
-                                throw VaultImageException.NotDurable()
-                            }
                         }
                         // Install in-memory state INSIDE the liveOpen-wipe scope so EVERY throw point
                         // before the return — including the 32-byte newDek.copyOf() (an OOM at this
@@ -654,14 +652,35 @@ class VaultImageStore internal constructor(
         imageLock.withLock { writeDurableMarker(serverDeletedFile) }
     }
 
-    /** Durably clear the delete-intent marker (dir-fsync). No-op if absent. */
+    /**
+     * Durably clear the delete-intent marker. Round 13/14 (F3): the [dirSync] result is CHECKED
+     * and the marker RE-STATTED absent — [File.delete] returns false on an I/O failure just like on
+     * an already-absent file, so its bool cannot be trusted. Throws [VaultImageException.DestroyFailed]
+     * if the marker survives (unlink failed) or the retire is not crash-durable; a no-op (already
+     * absent) succeeds.
+     */
     fun clearDeleteIntent() {
         imageLock.withLock {
-            if (deleteIntentFile.exists()) {
-                deleteIntentFile.delete()
-                dirSync(baseDir)
+            if (!deleteIntentFile.exists()) return@withLock
+            deleteIntentFile.delete()
+            if (deleteIntentFile.exists() || dirSync(baseDir) != DirSyncResult.DURABLE) {
+                throw VaultImageException.DestroyFailed()
             }
         }
+    }
+
+    /**
+     * Delete BOTH delete markers and confirm the retire crash-durably by RE-STAT — never by
+     * trusting [File.delete]'s bool (false on an I/O failure too). Returns true iff both markers
+     * re-stat ABSENT AND the directory fsync is [DirSyncResult.DURABLE]. Idempotent (already-absent
+     * markers succeed). The single choke point for the marker-retirement discipline used by
+     * [create] (F2) and [destroy] (F4). Caller must hold [imageLock].
+     */
+    private fun clearBothMarkersDurably(): Boolean {
+        deleteIntentFile.delete()
+        serverDeletedFile.delete()
+        val durable = dirSync(baseDir) == DirSyncResult.DURABLE
+        return durable && !deleteIntentFile.exists() && !serverDeletedFile.exists()
     }
 
     /** Create [file] + dir-fsync it; throw [VaultImageException.DestroyFailed] if not durable. */
@@ -723,15 +742,14 @@ class VaultImageStore internal constructor(
             if (dirSync(baseDir) != DirSyncResult.DURABLE) {
                 throw VaultImageException.DestroyFailed()
             }
-            // Unlinks confirmed durable — retire BOTH markers and make the RETIREMENT crash-durable
-            // (round 13, Grok P1-2): a best-effort delete without this fsync can be rolled back by a
-            // journal replay, resurrecting a marker over a later-created SUCCESSOR vault →
-            // DeleteIncomplete → auto-destroy of a valid re-onboarded vault. A non-durable retire is
-            // a FAILED destroy (throw): marker-present + files-absent is the safe stuck state (a
-            // retry re-stats the files absent and re-syncs the retire).
-            deleteIntentFile.delete()
-            serverDeletedFile.delete()
-            if (dirSync(baseDir) != DirSyncResult.DURABLE) {
+            // Unlinks confirmed durable — retire BOTH markers, verified by RE-STAT + a required
+            // fsync (round 13 Grok P1-2 / round 14 F4): trusting File.delete()'s bool would let a
+            // silent unlink failure leave a marker that a journal replay resurrects over a later
+            // SUCCESSOR vault → DeleteIncomplete → auto-destroy of a valid re-onboarded vault. A
+            // marker that survives the delete, or a non-durable retire, is a FAILED destroy (throw):
+            // marker-present + files-absent is the safe stuck state (a retry re-stats the files
+            // absent and re-runs the retire). Self-healing over the empty image, now also correct.
+            if (!clearBothMarkersDurably()) {
                 throw VaultImageException.DestroyFailed()
             }
         }

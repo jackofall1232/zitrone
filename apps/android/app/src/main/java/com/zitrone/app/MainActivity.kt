@@ -926,11 +926,12 @@ private fun ZitroneRoot(
             },
             onNotConfirmed = { definiteFailure ->
                 // The server did NOT confirm deletion (round 13): destroy NOTHING, keep the live
-                // session, lift the gate. definiteFailure = the server refused (retry won't help);
-                // else the outcome was ambiguous/offline (a later attempt may resolve it). The
-                // message only surfaces on the lock screen — a known UX gap while the user is on a
-                // session route (flagged for follow-up), but the load-bearing property here is that
-                // no local crypto is destroyed over a possibly-live account.
+                // session AND the intent marker (never abandoned, round 14 F1 — the next unlock's
+                // reconcile retries). definiteFailure = the server refused (an auth/permission
+                // problem, the account still exists); else ambiguous/offline. The message only
+                // surfaces on the lock screen — a known UX gap while the user is on a session route
+                // (flagged for follow-up); the load-bearing property is that no local crypto is
+                // destroyed over a possibly-live account.
                 container.unlockController.endTerminalWipe()
                 container.scope.launch(Dispatchers.Main.immediate) {
                     lockError = if (definiteFailure) {
@@ -938,6 +939,17 @@ private fun ZitroneRoot(
                     } else {
                         "Couldn't reach the server to delete your account. Check your connection and try again."
                     }
+                }
+            },
+            onConfirmedNotDurable = {
+                // The server account IS gone, but this device couldn't durably RECORD the
+                // confirmation (round 14, F1): destroy NOTHING and clear NO auth. Keep the session
+                // + the intent marker so the next unlock's reconcile repeats the (now idempotent-
+                // 404) DELETE and records confirmation before destroying. No local crypto is
+                // destroyed without a durable confirmed marker.
+                container.unlockController.endTerminalWipe()
+                container.scope.launch(Dispatchers.Main.immediate) {
+                    lockError = "Your account was deleted. This device will finish clearing it the next time you open the app."
                 }
             },
             onConfirmed = {
@@ -1001,6 +1013,21 @@ private fun ZitroneRoot(
             }
             },
         )
+    }
+
+    // Reconcile an interrupted account deletion (round 14, F1). A delete-intent marker that
+    // survived a crash means a delete was INITIATED but never durably confirmed — the account may
+    // or may not be gone server-side. On the first LIVE session after such a boot (auth is
+    // retained, since round 14 no longer clears it early), retry the authenticated DELETE via the
+    // same handler: an idempotent 404 (already gone) → confirm + destroy; a success → confirm +
+    // destroy; any not-confirmed outcome surfaces + KEEPS the intent for the next unlock. Keyed on
+    // the session instance so it runs once per unlock; a confirmed reconcile tears the session
+    // down (won't re-fire). The boot path does NOT assume auth is present — a token-less DELETE
+    // returns 401 → DEFINITE_FAILURE → surfaced, not silently abandoned.
+    LaunchedEffect(session) {
+        if (session != null && container.vaultDeleteIntentPending()) {
+            onDeleteAccount()
+        }
     }
 
     // Biometric-enable offer (§1) — over the LIVE session (holds NO VaultOpen, so an Activity
@@ -1096,19 +1123,13 @@ private fun ZitroneRoot(
                         // resume FINISHING the local destroy — never the unlock gate over a vault
                         // whose account no longer exists (see Route.DeleteIncomplete).
                         container.serverDeleteConfirmed() -> Route.DeleteIncomplete
-                        else -> {
-                            // A mere delete-INTENT (crash mid-delete, server outcome unknown) does
-                            // NOT authorise destruction: the vault is valid and the account may
-                            // still exist. Route to normal unlock and clear the stale intent
-                            // durably (off-main) — the interrupted attempt is abandoned; the user
-                            // re-initiates from Settings if they still want it.
-                            if (container.vaultDeleteIntentPending()) {
-                                container.scope.launch(Dispatchers.IO) {
-                                    runCatching { container.clearVaultDeleteIntent() }
-                                }
-                            }
-                            if (vaultExists) Route.Locked else Route.Onboarding
-                        }
+                        // A mere delete-INTENT (crash mid-delete, server outcome unknown) does NOT
+                        // authorise destruction and is NOT abandoned here (round 14, F1): the vault
+                        // is valid and the account may still exist. Route to normal unlock; the
+                        // post-unlock reconcile (see the intent LaunchedEffect) retries the
+                        // authenticated DELETE. Splash never clears intent and never auto-destroys.
+                        vaultExists -> Route.Locked
+                        else -> Route.Onboarding
                     }
                 },
             )

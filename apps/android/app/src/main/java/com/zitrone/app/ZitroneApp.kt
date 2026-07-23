@@ -185,9 +185,6 @@ class AppContainer(private val app: Application) {
     /** Persist SERVER-DELETE-CONFIRMED durably — the auto-destroy authorisation. */
     fun markServerDeleteConfirmed() = imageStore.markServerDeleteConfirmed()
 
-    /** Durably clear a stale delete-intent marker (abandoned/interrupted delete). */
-    fun clearVaultDeleteIntent() = imageStore.clearDeleteIntent()
-
     // @Volatile so the transport apply-loop (running on Dispatchers.Default) and
     // the construction thread publish/read the current client consistently.
     @Volatile
@@ -464,7 +461,6 @@ class AppContainer(private val app: Application) {
             persist = imageStore::writeSealedPayload,
             persistDeleteIntent = imageStore::markDeleteIntent,
             persistServerDeleteConfirmed = imageStore::markServerDeleteConfirmed,
-            clearDeleteIntent = imageStore::clearDeleteIntent,
         )
     }
 
@@ -564,7 +560,6 @@ class SessionContainer(
     /** Two-phase account-deletion markers (round 13) — see [MessagingCoordinator]. */
     persistDeleteIntent: () -> Unit = {},
     persistServerDeleteConfirmed: () -> Unit = {},
-    clearDeleteIntent: () -> Unit = {},
 ) {
     /** Which image slot this session unlocked — needed to persist a biometric re-wrap ([withVaultKey]). */
     val slotIndex: Int = vaultOpen.slotIndex
@@ -684,7 +679,6 @@ class SessionContainer(
                 // only after the server confirms gone; clear-intent abandons a definite failure.
                 persistDeleteIntent = persistDeleteIntent,
                 persistServerDeleteConfirmed = persistServerDeleteConfirmed,
-                clearDeleteIntent = clearDeleteIntent,
             )
         } catch (t: Throwable) {
             runCatching { rt.close() }
