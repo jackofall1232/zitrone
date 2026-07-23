@@ -147,6 +147,26 @@ class UnlockControllerTest {
     }
 
     @Test
+    fun `lockIf tears down only the expected session`() {
+        val rig = Rig()
+        rig.controller.unlock()
+        val first = rig.built[0]
+        rig.controller.lock()
+        rig.controller.unlock()
+        val second = rig.built[1]
+
+        // A detached callback from the FIRST session's lifetime fires late: it
+        // must not tear down the innocent successor.
+        rig.controller.lockIf(first)
+        assertEquals(listOf(first), rig.stopped)
+        assertTrue("successor stays live", rig.scopes[1].isActive)
+
+        // The callback bound to the live session still works.
+        rig.controller.lockIf(second)
+        assertEquals(listOf(first, second), rig.stopped)
+    }
+
+    @Test
     fun `an unlock in progress serializes a concurrent lock`() {
         val rig = Rig()
         rig.buildStarted = CountDownLatch(1)

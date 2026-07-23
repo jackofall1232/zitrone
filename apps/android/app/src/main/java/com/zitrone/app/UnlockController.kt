@@ -65,13 +65,27 @@ class UnlockController<S : Any>(
 
     /** Tear down + null the live session if any. Idempotent. */
     fun lock() {
-        synchronized(lock) {
-            val session = current ?: return
-            stopSession(session)
-            sessionScope?.cancel()
-            publish(null)
-            current = null
-            sessionScope = null
-        }
+        synchronized(lock) { lockCurrent() }
+    }
+
+    /**
+     * [lock], but ONLY if [expected] is still the live session. Teardown
+     * callbacks capture the session they belong to (the forced-logout wiring,
+     * the account-delete completion); a detached callback firing late — e.g. the
+     * NonCancellable account wipe finishing after a concurrent revocation
+     * already tore its session down and the user re-unlocked — must not tear
+     * down the innocent successor session (Codex PR #45 r1).
+     */
+    fun lockIf(expected: S) {
+        synchronized(lock) { if (current === expected) lockCurrent() }
+    }
+
+    private fun lockCurrent() {
+        val session = current ?: return
+        stopSession(session)
+        sessionScope?.cancel()
+        publish(null)
+        current = null
+        sessionScope = null
     }
 }

@@ -69,6 +69,15 @@ class LemonDropVeilController(
     private var pendingQrId: String? = null
 
     /**
+     * The scan whose probe is currently in flight, keyed by its token so a stale
+     * completion can't clear a newer probe's entry. Needed by [onLocked]: a probe
+     * launched on the PROCESS scope survives a session teardown, and without
+     * invalidation its result — decrypted drop material — would publish onto the
+     * veil of a locked app (Codex PR #45 r1).
+     */
+    private var inFlight: Pair<Long, String>? = null
+
+    /**
      * Handle a scanned `/d/{id}`. While unlocked: raise advocacy/UNKNOWN and run
      * the single fetch + isolated open in the PROCESS scope. While locked: queue
      * the id and raise [LemonDropVeil.Locked] WITHOUT fetching or decrypting —
@@ -83,7 +92,7 @@ class LemonDropVeilController(
                 return
             }
             veil.value = LemonDropVeil.Advocacy(LemonDropScanOutcome.UNKNOWN)
-            ++scanToken
+            (++scanToken).also { inFlight = it to qrId }
         }
         launchProbe(qrId, token)
     }
@@ -97,9 +106,37 @@ class LemonDropVeilController(
             val qrId = pendingQrId ?: return
             pendingQrId = null
             veil.value = LemonDropVeil.Advocacy(LemonDropScanOutcome.UNKNOWN)
-            qrId to ++scanToken
+            qrId to (++scanToken).also { inFlight = it to qrId }
         }
         launchProbe(queued.first, queued.second)
+    }
+
+    /**
+     * App locked (session torn down). Probes run on the PROCESS scope, so a
+     * teardown does not cancel one mid-flight — invalidate it instead and put its
+     * scan back in the queue, so the next unlock re-probes rather than the stale
+     * result publishing decrypted drop material onto a locked app's veil. A
+     * decrypted-but-undelivered [LemonDropVeil.AwaitUnlock] is downgraded the
+     * same way (its plaintext dropped, its qrId re-queued — the drop is unburned
+     * on the relay, so the re-probe recovers it). Advocacy outcomes carry no
+     * secrets and [LemonDropVeil.Delivered] was explicitly rendered by a per-drop
+     * biometric success (cleared on Activity stop, as always) — both are kept.
+     */
+    fun onLocked() {
+        synchronized(lock) {
+            ++scanToken
+            val held = veil.value
+            val requeue = when {
+                held is LemonDropVeil.AwaitUnlock -> held.pending.qrId
+                inFlight != null -> inFlight?.second
+                else -> null
+            }
+            inFlight = null
+            if (requeue != null) {
+                pendingQrId = requeue
+                veil.value = LemonDropVeil.Locked
+            }
+        }
     }
 
     /** Dismiss the veil, invalidate any in-flight probe, and drop a queued scan. */
@@ -107,6 +144,9 @@ class LemonDropVeilController(
         synchronized(lock) {
             ++scanToken
             pendingQrId = null
+            // Forget the invalidated probe too — a later onLocked() must not
+            // re-queue a scan the user walked away from.
+            inFlight = null
             veil.value = null
         }
     }
@@ -131,6 +171,7 @@ class LemonDropVeilController(
             }
             synchronized(lock) {
                 if (scanToken == token) veil.value = refined
+                if (inFlight?.first == token) inFlight = null
             }
         }
     }

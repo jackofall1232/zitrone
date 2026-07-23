@@ -369,7 +369,9 @@ private fun ZitroneRoot(
             live.coordinator.onForcedLogout = {
                 unlocked = false
                 route = Route.Locked
-                container.unlockController.lock()
+                // lockIf: this callback belongs to THIS session; if it fires
+                // late (rewire races), it must not tear down a successor.
+                container.unlockController.lockIf(live)
             }
             onDispose { live.coordinator.onForcedLogout = null }
         }
@@ -413,7 +415,12 @@ private fun ZitroneRoot(
             unlocked = false
             route = Route.Splash
             // Session objects are gone after the wipe — tear the slot down last.
-            container.unlockController.lock()
+            // lockIf: the NonCancellable wipe can outlive its session (a racing
+            // revocation tears it down first); a late completion must not tear
+            // down a successor the user already re-unlocked. That successor sees
+            // the wiped stores and re-bootstraps a fresh account — the deleted
+            // account converges to gone either way.
+            container.unlockController.lockIf(live)
         }
     }
 

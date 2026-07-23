@@ -206,4 +206,110 @@ class LemonDropVeilControllerTest {
         controller.clearDelivered()
         assertNull(controller.veil.value)
     }
+
+    @Test
+    fun `onLocked invalidates an in-flight probe and re-queues its scan`() = runTest {
+        // Probes run on the PROCESS scope, so a session teardown doesn't cancel
+        // them — onLocked must stop the late result from publishing decrypted
+        // material onto a locked app's veil, and re-queue the scan instead.
+        val gate = CompletableDeferred<Unit>()
+        val calls = mutableListOf<String>()
+        var unlocked = true
+        val controller = LemonDropVeilController(
+            scope = backgroundScope,
+            isUnlocked = { unlocked },
+            probe = { qrId ->
+                calls += qrId
+                gate.await()
+                LemonDropRedeemer.ProbeResult.ReadyToOpen(pending)
+            },
+            ioDispatcher = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        controller.onScan("q1") // probe suspends on the gate
+        unlocked = false
+        controller.onLocked()
+        gate.complete(Unit) // the stale probe now finishes
+        advanceUntilIdle()
+
+        assertEquals("veil must not accept the stale result", LemonDropVeil.Locked, controller.veil.value)
+        // The scan went back in the queue: the next unlock re-probes it.
+        controller.onUnlocked()
+        advanceUntilIdle()
+        assertEquals(listOf("q1", "q1"), calls)
+    }
+
+    @Test
+    fun `onLocked downgrades an undelivered AwaitUnlock, dropping plaintext and re-queueing`() = runTest {
+        val calls = mutableListOf<String>()
+        val controller = LemonDropVeilController(
+            scope = backgroundScope,
+            isUnlocked = { true },
+            probe = { qrId -> calls += qrId; LemonDropRedeemer.ProbeResult.ReadyToOpen(pending) },
+            ioDispatcher = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        controller.onScan(pending.qrId)
+        advanceUntilIdle()
+        assertTrue(controller.veil.value is LemonDropVeil.AwaitUnlock)
+
+        controller.onLocked()
+        assertEquals(
+            "plaintext must not be held across a lock",
+            LemonDropVeil.Locked,
+            controller.veil.value,
+        )
+        // The drop is unburned on the relay — the next unlock recovers it.
+        controller.onUnlocked()
+        advanceUntilIdle()
+        assertEquals(listOf(pending.qrId, pending.qrId), calls)
+    }
+
+    @Test
+    fun `onLocked keeps a harmless advocacy outcome and does not fabricate a queue`() = runTest {
+        val controller = LemonDropVeilController(
+            scope = backgroundScope,
+            isUnlocked = { true },
+            probe = { sealed },
+            ioDispatcher = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        controller.onScan("q1")
+        advanceUntilIdle()
+        controller.onLocked()
+        assertEquals(
+            "a completed advocacy outcome carries no secrets and is kept",
+            LemonDropVeil.Advocacy(LemonDropScanOutcome.SEALED),
+            controller.veil.value,
+        )
+        controller.onUnlocked()
+        advanceUntilIdle() // nothing queued — no second probe
+    }
+
+    @Test
+    fun `a dismissed scan is not resurrected by a later onLocked`() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val calls = mutableListOf<String>()
+        val controller = LemonDropVeilController(
+            scope = backgroundScope,
+            isUnlocked = { true },
+            probe = { qrId ->
+                calls += qrId
+                gate.await()
+                sealed
+            },
+            ioDispatcher = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        controller.onScan("q1") // in flight
+        controller.dismiss()
+        controller.onLocked()
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertNull("dismissed scan must stay dismissed", controller.veil.value)
+        controller.onUnlocked()
+        advanceUntilIdle()
+        assertEquals("no re-probe of a walked-away scan", listOf("q1"), calls)
+    }
 }

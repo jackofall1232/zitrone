@@ -185,8 +185,22 @@ class AppContainer(private val app: Application) {
     val unlockController = UnlockController(
         newSessionScope = { CoroutineScope(SupervisorJob() + Dispatchers.Default) },
         buildSession = ::buildSession,
-        publish = { _session.value = it },
-        stopSession = { it.coordinator.stop() },
+        // publish + stop run under [transportLock]: [applyTransportLocked] reads
+        // the published slot and, for a LIVE socket, disconnects + reconnects it.
+        // Unserialized, a resolver emission racing lock() could capture the dying
+        // session, pass its connection-state check AFTER stop()'s disconnect, and
+        // reconnect an authenticated socket nobody owns any more (Codex PR #45
+        // r1). Under the lock, a migration either completes before teardown
+        // (whose disconnect then kills the reconnected socket) or sees null and
+        // skips. Lock order is always controller-monitor → transportLock.
+        publish = { published ->
+            synchronized(transportLock) { _session.value = published }
+            // The veil must not hold or later publish drop material once the app
+            // locks: invalidate any in-flight probe (re-queueing its scan) and
+            // downgrade a held-but-undelivered drop back to the queue.
+            if (published == null) lemonDropVeilController.onLocked()
+        },
+        stopSession = { synchronized(transportLock) { it.coordinator.stop() } },
         afterPublish = ::onSessionPublished,
     )
 
@@ -232,6 +246,20 @@ class AppContainer(private val app: Application) {
         lemonDropVeilController.onUnlocked()
     }
 
+    /**
+     * Serializes [applyTransportLocked] between its callers — the resolver
+     * collector, [onSessionPublished], and session teardown (the publish/stop
+     * wrappers above) — which run on different threads. On main the collector was
+     * the sole caller, so applies could never interleave; the lock restores that
+     * invariant and lets teardown exclude a mid-flight live-session migration.
+     *
+     * MUST be declared ABOVE the init block below: the collector it guards is
+     * launched there, and Kotlin runs initializers in declaration order — a
+     * collector on another thread reaching `synchronized(transportLock)` before
+     * this field initializes would NPE and kill the apply loop (Codex PR #45 r1).
+     */
+    private val transportLock = Any()
+
     init {
         // The resolver owns the whole chain now (I2P/Tor/clearnet); its state
         // drives a single apply-loop. This REPLACES the old torEnabled collector
@@ -241,15 +269,6 @@ class AppContainer(private val app: Application) {
             transportResolver.state.collect(::applyTransport)
         }
     }
-
-
-    /**
-     * Serializes [applyTransportLocked] between its two callers — the resolver
-     * collector and [onSessionPublished] — which run on different threads. On
-     * main the collector was the sole caller, so applies could never interleave;
-     * the lock restores that invariant.
-     */
-    private val transportLock = Any()
 
     private fun applyTransport(state: TransportState) =
         synchronized(transportLock) { applyTransportLocked(state) }
