@@ -899,6 +899,37 @@ class VaultImageStoreTest {
     }
 
     @Test
+    fun markDestroyPending_persistsIntentDurably_withoutTouchingTheVaultFiles() {
+        val dir = tmp.newFolder()
+        val store = newStore(dir)
+        store.create(passphrase, "v".toByteArray(Charsets.UTF_8))
+
+        // Round 12 (Codex): the deletion intent is persisted BEFORE the server delete / teardown.
+        // The marker appears, but the vault files are untouched (nothing is destroyed yet).
+        store.markDestroyPending()
+
+        assertTrue("intent marker persisted", store.destroyPending())
+        assertTrue("vault.bin untouched by mark", File(dir, "vault.bin").exists())
+        assertTrue("vault.dek untouched by mark", File(dir, "vault.dek").exists())
+
+        // Idempotent + a durable no-op inside the subsequent destroy(), which confirms + retires.
+        store.markDestroyPending()
+        store.destroy()
+        assertFalse("destroy retired the marker", store.destroyPending())
+        assertFalse(File(dir, "vault.bin").exists())
+    }
+
+    @Test
+    fun markDestroyPending_throwsDestroyFailed_whenNotDurable_soTheServerDeleteIsNeverStarted() {
+        val dir = tmp.newFolder()
+        // Marker writing does not require an existing vault — the mark is the FIRST delete step.
+        val store = newStore(dir) { DirSyncResult.NOT_DURABLE }
+        // Fail-closed: a non-durable intent MUST throw so the caller aborts before the server
+        // delete request can leave the device (round 12).
+        assertThrows(VaultImageException.DestroyFailed::class.java) { store.markDestroyPending() }
+    }
+
+    @Test
     fun destroy_abortsWithFilesUntouched_whenTheMarkerFsyncIsNotDurable() {
         val dir = tmp.newFolder()
         val first = newStore(dir)

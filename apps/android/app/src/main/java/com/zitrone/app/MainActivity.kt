@@ -275,14 +275,26 @@ class MainActivity : FragmentActivity() {
         // Activity for the coroutine's lifetime nor gates the publish on a stale lifecycle — the
         // replacement Activity's onStart keeps `activityStarted` current and the publish lands
         // on the (shared) veil the new composition collects.
+        // BIND TO THE PROMPTED DROP (round 12, Codex): the expected veil is THIS drop's exact
+        // AwaitUnlock, not whatever is showing now — a second /d link arriving while this drop's
+        // biometric prompt was open would have swapped the veil to drop B, and reading veil.value
+        // here would let us consume+render A while stomping B (and B's probe could then stomp A).
+        // Consuming is gated on A still owning the veil (checked on main before the irreversible
+        // removal), and every CAS targets A's own AwaitUnlock — so we never replace a different
+        // drop's state, in either direction. If B has taken over, A is left fully un-consumed and
+        // re-scannable.
         val veil = container.lemonDropVeil
-        val expectedVeil = veil.value
+        val expectedVeil: LemonDropVeil = LemonDropVeil.AwaitUnlock(pending)
         container.scope.launch(Dispatchers.IO) {
+            // A must still own the veil BEFORE the irreversible consume — else abort untouched.
+            val ownsVeil = withContext(Dispatchers.Main) { veil.value == expectedVeil }
+            if (!ownsVeil) return@launch
             val commit = runCatching { redeemer.deliverDurablyCommit(pending) }
                 .getOrDefault(LemonDropRedeemer.DeliveryCommit.NOT_APPLIED)
             val rendered = withContext(Dispatchers.Main) {
                 when {
                     commit == LemonDropRedeemer.DeliveryCommit.NOT_APPLIED -> {
+                        // Nothing consumed — retire A's veil to advocacy, never B's.
                         veil.compareAndSet(
                             expectedVeil,
                             LemonDropVeil.Advocacy(LemonDropScanOutcome.UNKNOWN),
@@ -290,6 +302,9 @@ class MainActivity : FragmentActivity() {
                         false
                     }
                     container.activityStarted ->
+                        // CAS against A's own AwaitUnlock: if B took over mid-commit this fails and
+                        // A's plaintext is NOT shown over B (A is consumed — the bounded one-shot
+                        // forfeit residual — but B's veil is never stomped).
                         veil.compareAndSet(
                             expectedVeil,
                             LemonDropVeil.Delivered(pending.text, pending.senderLabel, pending.senderVerified),
@@ -911,7 +926,15 @@ private fun ZitroneRoot(
     val onDeleteAccount: () -> Unit = onDeleteAccount@{
         val live = session ?: return@onDeleteAccount
         container.unlockController.beginTerminalWipe()
-        live.coordinator.deleteAccountAndWipe {
+        live.coordinator.deleteAccountAndWipe(
+            onIntentNotDurable = {
+                // The destroy-pending marker could not be made durable, so the delete never
+                // touched the server (round 12): lift the gate and surface a retry. Nothing was
+                // destroyed — the session is still live behind the veil.
+                container.unlockController.endTerminalWipe()
+                lockError = "Couldn't start deleting your account. Please try again."
+            },
+            onComplete = {
             // Routing derives from DISK TRUTH after the wipe, not from exception classification:
             // Onboarding-as-success ONLY when destroy() CONFIRMED both files gone (no image, no
             // destroy-pending marker); anything else — DestroyFailed, an unexpected teardown
@@ -961,7 +984,8 @@ private fun ZitroneRoot(
                     Route.DeleteIncomplete
                 }
             }
-        }
+            },
+        )
     }
 
     // Biometric-enable offer (§1) — over the LIVE session (holds NO VaultOpen, so an Activity

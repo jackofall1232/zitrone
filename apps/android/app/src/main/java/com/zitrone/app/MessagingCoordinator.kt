@@ -115,6 +115,15 @@ class MessagingCoordinator(
      * (runtime.stateLock → session → storage) is preserved.
      */
     private val flushBeforeAck: suspend () -> Unit = {},
+    /**
+     * Persist the account-deletion INTENT durably (the destroy-pending marker) — invoked at the
+     * very start of [deleteAccountAndWipe], BEFORE the server-delete request leaves the device
+     * and before any session teardown (round 12, Codex). Must THROW if the intent cannot be made
+     * durable: the delete then aborts without touching the server, so a crash can never leave a
+     * server-deleted account with an intact local vault and no resume marker. Production supplies
+     * [AppContainer.markVaultDestroyPending]; the default no-op suits the legacy path (no vault).
+     */
+    private val persistDeleteIntent: () -> Unit = {},
 ) : WsClient.Listener {
 
     private val _typingPeers = MutableStateFlow<Set<String>>(emptySet())
@@ -1306,7 +1315,7 @@ class MessagingCoordinator(
     }
 
     /** Wipes the server account AND the local keys/messages. Irreversible. */
-    fun deleteAccountAndWipe(onComplete: () -> Unit) {
+    fun deleteAccountAndWipe(onComplete: () -> Unit, onIntentNotDurable: () -> Unit = {}) {
         acceptingDeliveries = false
         // NonCancellable: the session scope this launches on is cancelled by
         // UnlockController.lock() (e.g. a server revocation racing the delete).
@@ -1314,6 +1323,24 @@ class MessagingCoordinator(
         // started — pre-D2b the process-lifetime scope guaranteed that; this
         // preserves it. Bounded work; onComplete's lock() is idempotent.
         scope.launch(confined + NonCancellable) {
+            // Persist the deletion INTENT durably FIRST (round 12, Codex): the marker must exist
+            // before api.deleteAccount() can leave the device AND before any session teardown
+            // nulls the live session. If it can't be made durable, ABORT — do NOT delete the
+            // server account, or a crash would strand an intact local vault with no resume signal
+            // (Splash → Locked over a gone account). onIntentNotDurable lets the caller lift the
+            // terminal-wipe gate and surface a retry; nothing has been destroyed.
+            val intentDurable = try {
+                persistDeleteIntent()
+                true
+            } catch (c: CancellationException) {
+                throw c
+            } catch (_: Throwable) {
+                false
+            }
+            if (!intentDurable) {
+                onIntentNotDurable()
+                return@launch
+            }
             _linking.value = false
             linkJob?.cancel()
             runCatching { api.deleteAccount() }

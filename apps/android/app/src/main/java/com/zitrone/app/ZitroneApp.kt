@@ -170,6 +170,14 @@ class AppContainer(private val app: Application) {
      */
     fun vaultDestroyPending(): Boolean = imageStore.destroyPending()
 
+    /**
+     * Persist the account-deletion INTENT durably before the server-delete request or session
+     * teardown (round 12, Codex). Throws if the marker cannot be made durable — the caller must
+     * then NOT proceed to delete the server account (fail-closed). See
+     * [VaultImageStore.markDestroyPending].
+     */
+    fun markVaultDestroyPending() = imageStore.markDestroyPending()
+
     // @Volatile so the transport apply-loop (running on Dispatchers.Default) and
     // the construction thread publish/read the current client consistently.
     @Volatile
@@ -444,6 +452,7 @@ class AppContainer(private val app: Application) {
             vaultOps = vaultOps,
             vaultOpen = vaultOpen,
             persist = imageStore::writeSealedPayload,
+            persistDeleteIntent = imageStore::markDestroyPending,
         )
     }
 
@@ -540,6 +549,8 @@ class SessionContainer(
     vaultOps: VaultSodiumOps,
     vaultOpen: VaultOpen,
     persist: (slotIndex: Int, sealedPayload: ByteArray) -> Unit,
+    /** Durable account-deletion intent (destroy marker) — see [MessagingCoordinator]. */
+    persistDeleteIntent: () -> Unit = {},
 ) {
     /** Which image slot this session unlocked — needed to persist a biometric re-wrap ([withVaultKey]). */
     val slotIndex: Int = vaultOpen.slotIndex
@@ -655,6 +666,8 @@ class SessionContainer(
                 // Flush-before-ack barrier (D2c, absorbs D4): the coordinator reseals the receiving
                 // ratchet durably before acking each inbound delivery. rt is the live runtime.
                 flushBeforeAck = rt::flushBeforeAck,
+                // Durable deletion intent before the server delete / teardown (round 12).
+                persistDeleteIntent = persistDeleteIntent,
             )
         } catch (t: Throwable) {
             runCatching { rt.close() }

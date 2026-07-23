@@ -613,6 +613,32 @@ class VaultImageStore internal constructor(
      * does NOT throw. The RAM wipe + registration release still happen before the throw, leaving
      * the store fully closed and a retry (idempotent) able to re-attempt the unlink.
      */
+    /**
+     * Persist the DESTROY-PENDING intent durably WITHOUT unlinking anything — the earliest step of
+     * an account deletion (round 12, Codex). Writing the marker before the server-delete request
+     * leaves the device, and before the session is torn down, means a crash anywhere in the
+     * delete flow restarts with the marker present: boot routing resumes [Route.DeleteIncomplete]
+     * instead of offering a lock gate over a vault whose server account is already gone. Idempotent
+     * (a marker that already exists is a durable no-op) and REQUIRED-DURABLE — throws
+     * [VaultImageException.DestroyFailed] if the marker cannot be written AND dir-fsynced, so the
+     * caller fails closed (does not proceed to delete the server account with no local resume
+     * signal). Runs under [imageLock]; touches no vault file.
+     */
+    fun markDestroyPending() {
+        imageLock.withLock { writeDurableDestroyMarker() }
+    }
+
+    /** Write + fsync the destroy marker; throw [VaultImageException.DestroyFailed] if not durable. */
+    private fun writeDurableDestroyMarker() {
+        val markerDurable = runCatching {
+            destroyMarkerFile.createNewFile()
+            destroyMarkerFile.exists() && dirSync(baseDir) == DirSyncResult.DURABLE
+        }.getOrDefault(false)
+        if (!markerDurable) {
+            throw VaultImageException.DestroyFailed()
+        }
+    }
+
     fun destroy() {
         imageLock.withLock {
             // Wipe live key material + drop the cached image FIRST — before even the marker gate
@@ -622,25 +648,17 @@ class VaultImageStore internal constructor(
             dek?.let { wipe(it) }
             dek = null
             canonical = null
-            // DESTROY-PENDING MARKER (crash / restart continuity): a destroy is only requested
-            // after the SERVER account is already gone, so once we are here the local image must
-            // eventually die even across process death. Drop a marker BEFORE the unlinks; it is
-            // removed only after the verify below confirms both files gone. Boot routing checks
-            // [destroyPending] and re-runs this (idempotent) instead of offering the lock gate —
-            // without it, a failed unlink + restart would route Locked over a vault whose account
-            // no longer exists (dead-end on a partial unlink, or a silent re-register on a zeroed
-            // one). REQUIRED-DURABLE (round 11, Codex): if the marker cannot be written AND
-            // fsynced, ABORT with the vault files untouched — proceeding could partially unlink,
-            // crash, and restart into exactly the marker-less broken state above. The abort is
-            // honest: DestroyFailed keeps the caller on the finish-deletion path (in-session
-            // routing + retry), never a false success.
-            val markerDurable = runCatching {
-                destroyMarkerFile.createNewFile()
-                destroyMarkerFile.exists() && dirSync(baseDir) == DirSyncResult.DURABLE
-            }.getOrDefault(false)
-            if (!markerDurable) {
-                throw VaultImageException.DestroyFailed()
-            }
+            // DESTROY-PENDING MARKER (crash / restart continuity): drop a durable marker BEFORE
+            // the unlinks; it is removed only after the verify below confirms both files gone.
+            // Boot routing checks [destroyPending] and re-runs this (idempotent) instead of
+            // offering the lock gate — without it, a failed unlink + restart would route Locked
+            // over a vault whose account no longer exists (dead-end on a partial unlink, or a
+            // silent re-register on a zeroed one). REQUIRED-DURABLE (round 11): if the marker
+            // cannot be written AND fsynced, ABORT with the vault files untouched — proceeding
+            // could partially unlink, crash, and restart into exactly the marker-less broken
+            // state above. Idempotent with [markDestroyPending], which the delete flow calls
+            // FIRST (round 12) — this is then a durable no-op.
+            writeDurableDestroyMarker()
             // Remove BOTH persisted files and any interrupted-write temps. delete() is
             // best-effort and never throws on a missing file (returns false) — idempotent.
             binFile.delete()
