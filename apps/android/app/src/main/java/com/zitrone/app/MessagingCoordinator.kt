@@ -392,6 +392,23 @@ class MessagingCoordinator(
                     signal.confirmPreKeysUploaded()
                     diag("boot[$attempt]: registration accepted by server")
                 }
+                // Flush the REGISTRATION STATE durable before minting a session (round 10,
+                // Codex): register stored the assigned account id through the vault-backed
+                // AuthStore as a coalesced mutation only. A crash inside that ≤2s window reopens
+                // the vault with accountId == null, and the next boot registers AGAIN — the
+                // server mints a fresh UUID and the account that may already have been displayed
+                // or shared is orphaned. Deliberately OUTSIDE the register branch: a retry
+                // attempt keeps the RAM accountId (register is skipped), so the gate must re-run
+                // on EVERY attempt until it confirms — inside the branch, a first-flush failure
+                // would never be re-checked. On an already-clean state this is a cheap no-op
+                // flush; the session/socket never outruns the identity reaching disk.
+                stage = "flush-registration"
+                if (!flushBeforePreKeyPublish {
+                        diag("boot[$attempt]: registration-state reseal not durable — session deferred to retry")
+                    }
+                ) {
+                    throw PreKeyFlushNotDurableException()
+                }
                 stage = "create-session"
                 val tokens = api.createSession(signal::signLoginChallenge)
                 stage = "ws-connect"

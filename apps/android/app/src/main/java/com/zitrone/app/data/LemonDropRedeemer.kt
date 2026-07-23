@@ -164,37 +164,41 @@ class LemonDropRedeemer(
         )
     }
 
+    /** Outcome of [deliverDurablyCommit] — the applied/durable split is load-bearing. */
+    enum class DeliveryCommit {
+        /** Consumption confirmed on disk — render AND [burn]. */
+        DURABLE,
+
+        /**
+         * The prekey removal APPLIED to live state but the durable flush did not confirm. The
+         * mutation is never rolled back (the coalesced background reseal — or even the very
+         * flush that then threw — may already have persisted it), so a "rescan" could NEVER
+         * decrypt this drop again: the message must RENDER now or risk being lost forever
+         * (round 10, Codex). Only the relay [burn] is withheld — the handoff must not outrun
+         * the consumption reaching disk; the TTL reaps the (now undecryptable-to-us) copy.
+         */
+        APPLIED_UNCONFIRMED,
+
+        /** The removal never touched live state (closed-runtime teardown race) — render
+         *  NOTHING; the drop and its prekey are intact, a re-scan retries cleanly. */
+        NOT_APPLIED,
+    }
+
     /**
      * Commit the delivery: consume the one-time prekey and reseal that consumption DURABLE —
      * the same flush-before-handoff rule as every other handoff after a vault mutation (D2c
-     * round 8). Returns true only when the consumption is confirmed on disk; the caller renders
-     * the plaintext and fires [burn] ONLY then. Without this gate the message could be SHOWN
-     * while a teardown race (forced logout closing the runtime under the queued side effects) or
-     * a crash inside the coalesced ≤2s reseal window left the consumed prekey live on disk with
-     * the drop still on the relay — re-openable, breaking single-use. A false return commits
-     * NOTHING the user saw: the drop stays scannable and a later open retries. A drop that used
-     * no one-time prekey has nothing to persist and commits trivially.
+     * round 8). The caller renders on any APPLIED outcome and fires [burn] only on [DeliveryCommit.DURABLE].
+     * Idempotent: a re-commit for an already-consumed id no-ops the removal (removeRecord on an
+     * absent key) and just re-runs the flush — which is what lets a backgrounded delivery re-run
+     * after a fresh biometric pass. A drop that used no one-time prekey has nothing to persist
+     * and commits [DeliveryCommit.DURABLE] trivially.
      */
-    suspend fun deliverDurablyCommit(pending: PendingLemonDrop): Boolean {
-        pending.usedOneTimePrekeyId?.let { id ->
-            try {
-                signalStore.removePreKey(id)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                // Closed-runtime teardown race — nothing consumed, honest not-committed.
-                return false
-            }
-            return try {
-                flushDurable()
-                true
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                false
-            }
-        }
-        return true
+    suspend fun deliverDurablyCommit(pending: PendingLemonDrop): DeliveryCommit {
+        val id = pending.usedOneTimePrekeyId ?: return DeliveryCommit.DURABLE
+        return classifyDeliveryCommit(
+            consume = { signalStore.removePreKey(id) },
+            flush = flushDurable,
+        )
     }
 
     /** Like [runCatching] but never swallows a coroutine [CancellationException]
@@ -258,5 +262,37 @@ class LemonDropRedeemer(
                 }
             },
         )
+    }
+}
+
+/**
+ * The delivery-commit decision, extracted top-level (mirroring `flushThenAck` /
+ * `sealDurableOrFalse`) so the applied/durable split — the load-bearing part of
+ * [LemonDropRedeemer.deliverDurablyCommit] — is host-testable without an ApiClient:
+ * a [consume] throw means the mutate never applied (closed-runtime teardown →
+ * [LemonDropRedeemer.DeliveryCommit.NOT_APPLIED], nothing lost, drop re-scannable); a [flush]
+ * throw AFTER an applied consume is [LemonDropRedeemer.DeliveryCommit.APPLIED_UNCONFIRMED] —
+ * never "unapplied", because the removal is scheduled (or already sealed) and a rescan could
+ * never decrypt the drop again, so the caller MUST still render. [CancellationException]
+ * propagates from either phase (cooperative teardown, never folded into an outcome).
+ */
+internal suspend fun classifyDeliveryCommit(
+    consume: () -> Unit,
+    flush: suspend () -> Unit,
+): LemonDropRedeemer.DeliveryCommit {
+    try {
+        consume()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        return LemonDropRedeemer.DeliveryCommit.NOT_APPLIED
+    }
+    return try {
+        flush()
+        LemonDropRedeemer.DeliveryCommit.DURABLE
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        LemonDropRedeemer.DeliveryCommit.APPLIED_UNCONFIRMED
     }
 }

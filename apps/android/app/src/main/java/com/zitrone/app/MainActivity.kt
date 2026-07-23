@@ -51,6 +51,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.lifecycleScope
 import com.zitrone.app.data.Conversation
+import com.zitrone.app.data.LemonDropRedeemer
 import com.zitrone.app.data.LemonDropScanOutcome
 import com.zitrone.app.data.LemonDropVeil
 import com.zitrone.app.data.PendingLemonDrop
@@ -251,25 +252,40 @@ class MainActivity : FragmentActivity() {
         // delivery side effects — leave the drop unburned on the relay for a
         // re-scan rather than render an undeliverable copy.
         val redeemer = container.session.value?.lemonDropRedeemer ?: return
-        // COMMIT BEFORE RENDER (round 8, Codex): the prekey consumption must be DURABLE before
-        // the plaintext is ever shown — rendering first left a gap where a forced logout closed
-        // the runtime under the queued side effects, so the user had SEEN the message while both
-        // the relay drop and its usable one-time prekey survived (re-openable, breaking
-        // single-use). Now: consume + durable reseal + burn on IO first; only a confirmed
-        // consumption renders Delivered. On a failed/refused commit (teardown race, transient
-        // flush) NOTHING is consumed-and-lost — show the generic advocacy veil; the drop remains
-        // on the relay for a re-scan. Run on the PROCESS scope, not the Activity's — a rotation
-        // or exit right after unlock must not cancel the delivery commit.
+        // COMMIT BEFORE RENDER (rounds 8-10, Codex): consume the prekey + reseal FIRST, and only
+        // then publish plaintext — gated on the veil still being THIS AwaitUnlock and the
+        // Activity being STARTED (both checked ON MAIN, atomically wrt onStop, which also runs
+        // on main): a user who backgrounds mid-commit must not have Delivered installed behind a
+        // stopped Activity, where returning would show plaintext without a fresh biometric. The
+        // commit outcome split is load-bearing (see DeliveryCommit): NOT_APPLIED renders nothing
+        // (drop intact, re-scannable); APPLIED outcomes MUST render — the consumption is never
+        // rolled back, so "rescan" could never decrypt this drop again — but only DURABLE fires
+        // the burn (the relay handoff must not outrun disk). A publish refused by the gate
+        // leaves AwaitUnlock in place: the user re-authenticates on return and the commit
+        // re-runs idempotently (the removal no-ops, the flush retries). Run on the PROCESS
+        // scope, not the Activity's — rotation or exit must not cancel the commit itself.
+        val expectedVeil = lemonDropVeil.value
         container.scope.launch(Dispatchers.IO) {
-            // Prekey consumption → durable reseal → burn; the burn is skipped when the flush
-            // can't confirm, so the relay shred order never outruns the consumption on disk.
-            val committed = runCatching { redeemer.deliverDurablyCommit(pending) }.getOrDefault(false)
-            lemonDropVeil.value = if (committed) {
-                LemonDropVeil.Delivered(pending.text, pending.senderLabel, pending.senderVerified)
-            } else {
-                LemonDropVeil.Advocacy(LemonDropScanOutcome.UNKNOWN)
+            val commit = runCatching { redeemer.deliverDurablyCommit(pending) }
+                .getOrDefault(LemonDropRedeemer.DeliveryCommit.NOT_APPLIED)
+            val rendered = withContext(Dispatchers.Main) {
+                when {
+                    commit == LemonDropRedeemer.DeliveryCommit.NOT_APPLIED -> {
+                        lemonDropVeil.compareAndSet(
+                            expectedVeil,
+                            LemonDropVeil.Advocacy(LemonDropScanOutcome.UNKNOWN),
+                        )
+                        false
+                    }
+                    lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) ->
+                        lemonDropVeil.compareAndSet(
+                            expectedVeil,
+                            LemonDropVeil.Delivered(pending.text, pending.senderLabel, pending.senderVerified),
+                        )
+                    else -> false
+                }
             }
-            if (committed) redeemer.burn(pending)
+            if (rendered && commit == LemonDropRedeemer.DeliveryCommit.DURABLE) redeemer.burn(pending)
         }
     }
 
