@@ -60,6 +60,15 @@ class VaultUnlockRouter {
         const val BIOMETRIC_REENROLL_NOTE =
             "Biometric unlock needs re-enabling after a passphrase unlock."
 
+        /**
+         * DISTINCT from [UNIFORM_FAILURE]: surfaced only when the vault IMAGE itself is
+         * damaged/unreadable (VaultImageException.CorruptImage / MissingImage), which is NOT a
+         * passphrase guess — so it must not be flattened into the wrong-passphrase oracle-avoiding
+         * uniform failure. Names no slot and no credential.
+         */
+        const val IMAGE_UNREADABLE_NOTE =
+            "This vault couldn't be opened — the stored image may be damaged."
+
         private const val BACKOFF_STEP_MS = 500L
         private const val MAX_BACKOFF_MS = 8_000L
     }

@@ -11,6 +11,7 @@ package com.zitrone.app.data
 import android.content.SharedPreferences
 import com.zitrone.app.crypto.KeyStoreManager
 import com.zitrone.app.crypto.vault.BiometricWrappedKey
+import com.zitrone.app.crypto.vault.SLOT_COUNT
 import java.util.Base64
 
 /**
@@ -37,7 +38,10 @@ class BiometricUnlockStore(private val prefs: SharedPreferences) {
     fun load(): BiometricWrappedKey? {
         val encoded = prefs.getString(KEY_BLOB, null) ?: return null
         val slot = prefs.getInt(KEY_SLOT, -1)
-        if (slot < 0) return null
+        // Validate the FULL slot range, not just >= 0: a corrupted/tampered prefs int must read as
+        // "not enabled" here, never reach unlockWithKey's require(slotIndex in 0 until SLOT_COUNT)
+        // and crash the unlock coroutine.
+        if (slot !in 0 until SLOT_COUNT) return null
         val blob = try {
             Base64.getDecoder().decode(encoded)
         } catch (e: IllegalArgumentException) {
@@ -47,8 +51,8 @@ class BiometricUnlockStore(private val prefs: SharedPreferences) {
         return BiometricWrappedKey(slot, blob)
     }
 
-    /** True when a wrap is present (biometric unlock enabled). */
-    fun isEnabled(): Boolean = prefs.contains(KEY_BLOB) && prefs.getInt(KEY_SLOT, -1) >= 0
+    /** True when a wrap is present (biometric unlock enabled) with an in-range slot. */
+    fun isEnabled(): Boolean = prefs.contains(KEY_BLOB) && prefs.getInt(KEY_SLOT, -1) in 0 until SLOT_COUNT
 
     /** Persist a fresh wrap (enable / re-enable). Constant-size; never logged. */
     fun save(wrap: BiometricWrappedKey) {

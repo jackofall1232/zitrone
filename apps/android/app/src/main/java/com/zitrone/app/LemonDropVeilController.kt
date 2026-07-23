@@ -154,6 +154,19 @@ class LemonDropVeilController(
         }
     }
 
+    /**
+     * Reveal the passphrase lock screen from the Locked veil WITHOUT dropping the queued scan —
+     * the passphrase-CTA path (the biometric one-tap drains the scan via its own unlock). Unlike
+     * [dismiss], this KEEPS [pendingQrId] and does NOT bump [scanToken], so the first unlock's
+     * [onUnlocked] still drains the drop (the D2b invariant "the scan stays queued; the first
+     * unlock drains it"). No-op unless a Locked veil is showing.
+     */
+    fun revealLockScreenKeepingScan() {
+        synchronized(lock) {
+            if (veil.value is LemonDropVeil.Locked) veil.value = null
+        }
+    }
+
     /** Dismiss the veil, invalidate any in-flight probe, and drop a queued scan. */
     fun dismiss() {
         synchronized(lock) {

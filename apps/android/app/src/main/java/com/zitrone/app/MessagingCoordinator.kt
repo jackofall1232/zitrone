@@ -11,6 +11,7 @@ import android.util.Log
 import com.zitrone.app.crypto.AttachmentCrypto
 import com.zitrone.app.crypto.MessagePadding
 import com.zitrone.app.crypto.SignalProtocolManager
+import com.zitrone.app.crypto.vault.VaultCapacityException
 import com.zitrone.app.diagnostics.BootDiagnostics
 import com.zitrone.app.data.AttachmentControlPayload
 import com.zitrone.app.data.AttachmentLoadState
@@ -952,25 +953,27 @@ class MessagingCoordinator(
             val contactId = conversation.contactId
             val atomicDelete = vaultContactDelete
             if (atomicDelete != null) {
-                // Vault path: crypto records + roster entry + tombstone are torn down in ONE
-                // runtime.mutate + ONE durable flush (destroyContactCrypto is NEVER called
-                // standalone). A false return means the combined flush did not reach disk —
-                // abort with everything kept for a retry, exactly like the legacy commit-failed
-                // branch below.
+                // Vault path. Peer-burn FIRST, while the roster entry still resolves the peer for
+                // the best-effort burn frames (legacy ordering) — burnAll only READS the roster and
+                // enqueues burn frames, it does not persist the roster, so it needs no monitor and
+                // cannot race the seal below.
                 val at = System.currentTimeMillis()
-                if (!atomicDelete(conversationId, contactId, at)) {
-                    diag("delete: atomic vault teardown did not reach disk — aborting, contact kept")
-                    onComplete?.invoke()
-                    return@launch
-                }
-                // The roster entry still resolves the peer for the best-effort burn frames;
-                // the in-memory removal + tombstone are committed (no re-persist — the mutate
-                // above already sealed both) AFTER the burn.
                 messages.burnAll(conversationId, notifyPeer = true)
-                conversations.commitDeletion(conversationId, contactId, at)
+                // Then the atomic teardown: crypto records + roster entry + tombstone seal in ONE
+                // runtime.mutate + ONE durable flush, and the roster RAM reconciles to it — ALL
+                // under the ConversationRepository monitor (the single serialization point), so no
+                // concurrent roster write can resurrect or lose an entry. The removal is applied in
+                // memory + live state REGARDLESS of the durable result (the crypto is already gone
+                // and cannot be un-removed), so a false return is reported honestly as "not yet
+                // confirmed durable" — NEVER "contact kept" (which would lie: its crypto is gone).
+                val durable = atomicDelete(conversationId, contactId, at)
                 pendingReceipts.remove(contactId)
                 _typingPeers.value = _typingPeers.value - contactId
                 notificationScheduler.onConversationRemoved(conversationId)
+                if (!durable) {
+                    diag("delete: vault teardown applied in memory + live state; durable flush " +
+                        "unconfirmed — it persists on the next flush (contact is gone, not kept)")
+                }
                 onComplete?.invoke()
                 return@launch
             }
@@ -1174,6 +1177,18 @@ class MessagingCoordinator(
                 // Content-free notification: always just "New message". The
                 // scheduler rate-limits + re-fires it per conversation.
                 notificationScheduler.onIncomingMessage(conversation.id)
+            }.onFailure { e ->
+                if (e is CancellationException) throw e
+                // Spec §4: surface a vault-at-capacity overflow as a non-fatal DIAGNOSTIC rather
+                // than swallowing it. The inbound ratchet persist (facade runtime.mutate → encode)
+                // threw VaultCapacityException, so the message was correctly NEVER acked (fail-
+                // closed) and the relay will redeliver — but without this the user gets no signal
+                // that the vault is full and how to recover (delete data). Other failures keep
+                // their existing swallow-and-redeliver behaviour.
+                if (e is VaultCapacityException) {
+                    diag("recv: vault at capacity — inbound left un-acked (relay redelivers); " +
+                        "free space by deleting data")
+                }
             }
         }
     }

@@ -162,6 +162,33 @@ class LemonDropVeilControllerTest {
     }
 
     @Test
+    fun `revealLockScreenKeepingScan hides the Locked veil but the first unlock still drains the scan`() = runTest {
+        // The passphrase-CTA on the Locked veil (D2b invariant): it reveals the lock screen without
+        // dropping the queued scan, so — UNLIKE dismiss — the first unlock still probes it.
+        val calls = mutableListOf<String>()
+        var unlocked = false
+        val controller = LemonDropVeilController(
+            scope = backgroundScope,
+            isUnlocked = { unlocked },
+            probe = { qrId -> calls += qrId; sealed },
+            ioDispatcher = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        controller.onScan("q1") // queued while locked, veil = Locked
+        assertEquals(LemonDropVeil.Locked, controller.veil.value)
+
+        controller.revealLockScreenKeepingScan()
+        assertNull("the Locked veil is hidden to reveal the passphrase field", controller.veil.value)
+
+        unlocked = true
+        controller.onUnlocked()
+        advanceUntilIdle()
+
+        assertEquals("the queued scan is preserved and drained by the first unlock", listOf("q1"), calls)
+        assertEquals(LemonDropVeil.Advocacy(LemonDropScanOutcome.SEALED), controller.veil.value)
+    }
+
+    @Test
     fun `a stale probe does not clobber a newer scan`() = runTest {
         val gates = mutableMapOf<String, CompletableDeferred<LemonDropRedeemer.ProbeResult>>()
         val controller = LemonDropVeilController(

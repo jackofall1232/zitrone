@@ -245,43 +245,45 @@ class ConversationRepository(
         JSONObject().apply { tombstones.forEach { (id, at) -> put(id, at) } }.toString()
 
     /**
-     * Vault atomic contact-delete (VaultSignalProtocolStore atomicity contract :222-231):
-     * the post-deletion roster + tombstone blobs for removing [conversationId] / tombstoning
-     * [contactId] at [at], computed against live state WITHOUT persisting or mutating memory —
-     * the caller folds them into ONE runtime.mutate alongside the crypto-record removal, then
-     * calls [commitDeletion] once that mutate's flush confirms durable. The roster blob is null
-     * when [readOnly] (an unreadable stored blob must never be overwritten), so the mutate then
-     * leaves the sealed roster untouched, matching [removeDurably]'s read-only short-circuit.
+     * Vault atomic contact-delete under THIS repo's monitor — the SINGLE serialization point that
+     * makes a delete compose atomically with every other roster write (all `@Synchronized` here,
+     * all persisting through the same `runtime.mutate`). The delete's crypto+roster+tombstone must
+     * seal in ONE `runtime.mutate` (VaultSignalProtocolStore :222-231); doing that seal, and
+     * reconciling this in-memory roster to it, WITHOUT releasing the monitor is what closes the
+     * resurrection/loss race the pre-D2c snapshot-then-commit split left open: no concurrent
+     * upsert / markConversationRead / setDisplayName / setVerified can interleave to re-seal the
+     * removed entry (durable resurrection) or overwrite it with a stale full-roster snapshot
+     * (durable loss of a concurrent add).
+     *
+     * Applies the tombstone in memory, derives the post-deletion roster + tombstone blobs from
+     * LIVE state, hands them to [seal] (which folds them plus the crypto-record removal into one
+     * `runtime.mutate` + one `flushBeforeAck`), then drops the roster entry from memory to match
+     * the just-sealed generation. The roster blob is null when [readOnly] (an unreadable stored
+     * blob is never overwritten — matches [persist] / [removeDurably]).
+     *
+     * The in-memory removal + tombstone are RETAINED regardless of [seal]'s result — a delete that
+     * reclaimed crypto is never rolled back (the crypto is already gone from live state and will
+     * persist on the next flush). A `false` return therefore means only that the SYNCHRONOUS
+     * durable flush did not confirm, NOT that the contact was kept. Peer-burn must run BEFORE this
+     * call (while the entry still resolves the peer); it only reads the roster, so it holds no
+     * monitor and does not race the seal.
      */
     @Synchronized
-    fun deletionBlobs(conversationId: String, contactId: String, at: Long): DeletionBlobs {
-        val roster = if (readOnly) {
-            null
-        } else {
-            serialize(_conversations.value.filterNot { it.id == conversationId })
-        }
-        val tombstoneJson = JSONObject().apply {
-            tombstones.forEach { (id, t) -> if (at - t < TOMBSTONE_WINDOW_MS) put(id, t) }
-            put(contactId, at)
-        }.toString()
-        return DeletionBlobs(roster, tombstoneJson)
-    }
-
-    /**
-     * Apply the in-memory half of the atomic delete AFTER its combined mutate flushed durably:
-     * drop the conversation and record the tombstone WITHOUT re-persisting (the mutate already
-     * sealed roster + tombstones in one generation). [at] must be the same instant passed to
-     * [deletionBlobs] so memory and the sealed blob agree.
-     */
-    @Synchronized
-    fun commitDeletion(conversationId: String, contactId: String, at: Long) {
-        _conversations.value = _conversations.value.filterNot { it.id == conversationId }
+    fun deleteContactDurably(
+        conversationId: String,
+        contactId: String,
+        at: Long,
+        seal: (rosterJson: String?, tombstonesJson: String) -> Boolean,
+    ): Boolean {
         tombstones.entries.removeAll { at - it.value >= TOMBSTONE_WINDOW_MS }
         tombstones[contactId] = at
+        val tombstonesJson = serializeTombstones()
+        val rosterJson =
+            if (readOnly) null else serialize(_conversations.value.filterNot { it.id == conversationId })
+        val durable = seal(rosterJson, tombstonesJson)
+        _conversations.value = _conversations.value.filterNot { it.id == conversationId }
+        return durable
     }
-
-    /** The pre-computed post-deletion blobs (see [deletionBlobs]); [rosterJson] is null when read-only. */
-    class DeletionBlobs(val rosterJson: String?, val tombstonesJson: String)
 
     @Synchronized
     fun clearAll() {

@@ -219,14 +219,16 @@ class AppContainer(private val app: Application) {
     // ── Vault unlock / create orchestration (all off-main; caller drives the UI) ──
 
     /**
-     * Create a fresh vault sealing an EMPTY keystore under [passphrase], and return the
-     * live [VaultOpen] (onboarding = first unlock). CPU-heavy (Argon2id×SLOT_COUNT+1) →
-     * runs off-main. Wipes the orphaned legacy prefs at creation (the zero-users
-     * clean-break decision, see [wipeLegacyPrefs]). Propagates
-     * [com.zitrone.app.crypto.vault.VaultImageException.NotDurable] so the caller can
-     * surface a retry — creation NEVER bricks.
+     * Create a fresh vault sealing an EMPTY keystore under [passphrase], then PUBLISH its session
+     * (onboarding = first unlock) in the SAME off-main block — so a mid-work coroutine cancellation
+     * can never discard the freshly created [VaultOpen] unwiped: [publishSession] consumes-or-wipes
+     * it before this block returns, and the session it builds lives on the process scope, not the
+     * Activity. Returns true once the session is published. CPU-heavy (Argon2id×SLOT_COUNT+1). Wipes
+     * the orphaned legacy prefs at creation (the zero-users clean-break decision). Propagates
+     * [com.zitrone.app.crypto.vault.VaultImageException.NotDurable] so the caller can surface a
+     * retry (or re-derive [hasVault] and route to unlock) — creation NEVER bricks.
      */
-    suspend fun createVault(passphrase: String): VaultOpen = withContext(Dispatchers.Default) {
+    suspend fun createVaultAndPublish(passphrase: String): Boolean = withContext(Dispatchers.Default) {
         val initial = VaultStateCodec.encode(VaultState.empty())
         val open = try {
             imageStore.create(passphrase, initial)
@@ -241,58 +243,59 @@ class AppContainer(private val app: Application) {
         // users exist). PREFS_SETTINGS (device settings + the biometric wrap) is deliberately
         // kept.
         wipeLegacyPrefs()
-        open
-    }
-
-    /**
-     * Attempt [passphrase] against the vault (off-main; both slots, no early exit). On a
-     * match, publishes the session and returns true; on no match returns false (the caller
-     * applies the RAM backoff via [unlockRouter]). Never logs anything credential-shaped.
-     */
-    suspend fun unlockWithPassphrase(passphrase: String): Boolean {
-        val open = withContext(Dispatchers.Default) { imageStore.unlock(passphrase) } ?: return false
         publishSession(open)
-        return true
     }
 
     /**
-     * Recover the vault key from [blob] with an already-AUTHENTICATED [decryptCipher] (from a
-     * successful CryptoObject BiometricPrompt), open the slot with it off-main, and publish the
-     * session. The caller's [blob] is untouched; the recovered vault key is wiped in `finally`
-     * (unlockWithKey holds its own independent copy — store contract :474-478). Returns true on
-     * success, false on an AEAD failure / no match.
+     * Attempt [passphrase] against the vault (off-main; both slots, no early exit) and, on a
+     * match, PUBLISH the session — both in the SAME off-main block so a cancellation that fires as
+     * the block ends cannot strand the materialized [VaultOpen] unwiped ([publishSession] consumes
+     * or wipes it synchronously before the block returns). Returns whether a session was published
+     * (false on no match OR on a refused build). Never logs anything credential-shaped.
+     */
+    suspend fun unlockWithPassphrase(passphrase: String): Boolean = withContext(Dispatchers.Default) {
+        val open = imageStore.unlock(passphrase) ?: return@withContext false
+        publishSession(open)
+    }
+
+    /**
+     * Recover the vault key from [wrap] with an already-AUTHENTICATED [decryptCipher] (from a
+     * successful CryptoObject BiometricPrompt), open the slot with it off-main, and PUBLISH the
+     * session — the open+publish share one off-main block so cancellation can't strand the
+     * [VaultOpen]. The recovered vault key is wiped in `finally` (unlockWithKey holds its own
+     * independent copy — store contract :474-478). Returns whether a session was published (false
+     * on an AEAD failure / no match / refused build).
      */
     suspend fun unlockWithBiometric(
         decryptCipher: javax.crypto.Cipher,
         wrap: com.zitrone.app.crypto.vault.BiometricWrappedKey,
     ): Boolean {
         val vaultKey = biometricCipher.openVaultKey(decryptCipher, wrap.blob) ?: return false
-        val open = try {
-            withContext(Dispatchers.Default) { imageStore.unlockWithKey(vaultKey, wrap.slotIndex) }
+        return try {
+            withContext(Dispatchers.Default) {
+                val open = imageStore.unlockWithKey(vaultKey, wrap.slotIndex) ?: return@withContext false
+                publishSession(open)
+            }
         } finally {
             wipe(vaultKey)
-        } ?: return false
-        publishSession(open)
-        return true
+        }
     }
 
     /**
-     * Wrap a COPY of [vaultOpen]'s vault key under the auth-gated biometric key using an
-     * already-AUTHENTICATED [encryptCipher] (from a successful CryptoObject BiometricPrompt),
-     * and persist the constant-size `{ slotIndex, blob }` wrap. The copy is wiped in `finally`;
-     * [vaultOpen] is left intact for the following session build. Call BEFORE handing the
-     * VaultOpen to [publishSession] (which consumes its arrays).
+     * Enable biometric unlock over the LIVE [session] (spec §1): wrap a COPY of the running slot's
+     * vault key — obtained via the narrow [SessionContainer.withVaultKey], wiped in its `finally` —
+     * under the auth-gated biometric key with an already-AUTHENTICATED [encryptCipher], and persist
+     * the constant-size `{ slotIndex, blob }` wrap. Returns true on success. Used by BOTH the
+     * onboarding enable offer (post-publish) and the Settings toggle, so no live [VaultOpen] is ever
+     * held across a recomposition.
      */
-    fun enableBiometric(encryptCipher: javax.crypto.Cipher, vaultOpen: VaultOpen) {
-        val keyCopy = vaultOpen.vaultKey.copyOf()
-        val blob = try {
-            biometricCipher.sealVaultKey(encryptCipher, keyCopy)
-        } finally {
-            wipe(keyCopy)
-        }
-        biometricStore.save(
-            com.zitrone.app.crypto.vault.BiometricWrappedKey(vaultOpen.slotIndex, blob),
-        )
+    fun enableBiometricFromSession(
+        encryptCipher: javax.crypto.Cipher,
+        session: SessionContainer,
+    ): Boolean = session.withVaultKey { key ->
+        val blob = biometricCipher.sealVaultKey(encryptCipher, key)
+        biometricStore.save(com.zitrone.app.crypto.vault.BiometricWrappedKey(session.slotIndex, blob))
+        true
     }
 
     /** Disable biometric unlock: delete the persisted wrap AND the auth-gated Keystore key. */
@@ -301,21 +304,31 @@ class AppContainer(private val app: Application) {
         biometricCipher.deleteKey()
     }
 
+    /** Reveal the passphrase lock screen while KEEPING a queued lemon-drop scan (see controller). */
+    fun revealLockScreenKeepingLemonDropScan() =
+        lemonDropVeilController.revealLockScreenKeepingScan()
+
     /**
      * Hand a resolved [vaultOpen] to the session build. On an accepted build the VaultSession
      * consumes its arrays; a REFUSED build (terminal wipe / already live) wipes them here so no
-     * vault key or plaintext is abandoned. Marks onboarding complete (first unlock = onboarding
-     * completion), harmless to repeat on later unlocks.
+     * vault key or plaintext is abandoned, and a BUILD THROW is wiped by [UnlockController] +
+     * SessionContainer's construction guard, then rethrown. Returns whether a session was actually
+     * published (so the caller never reports success onto a null session). Marks onboarding complete
+     * (first unlock = onboarding completion) only when a session was published.
      */
-    fun publishSession(vaultOpen: VaultOpen) {
+    fun publishSession(vaultOpen: VaultOpen): Boolean {
+        var published = false
         unlockController.unlock(
-            prepared = { sessionScope -> buildVaultSession(sessionScope, vaultOpen) },
+            prepared = { sessionScope ->
+                buildVaultSession(sessionScope, vaultOpen).also { published = true }
+            },
             onRefused = {
                 wipe(vaultOpen.vaultKey)
                 wipe(vaultOpen.payloadPlaintext)
             },
         )
-        settingsRepository.setOnboardingDone(true)
+        if (published) settingsRepository.setOnboardingDone(true)
+        return published
     }
 
     private fun buildVaultSession(sessionScope: CoroutineScope, vaultOpen: VaultOpen): SessionContainer {
@@ -335,7 +348,7 @@ class AppContainer(private val app: Application) {
         )
     }
 
-    /** Clear the orphaned legacy stores at vault creation (see [createVault]). */
+    /** Clear the orphaned legacy stores at vault creation (see [createVaultAndPublish]). */
     private fun wipeLegacyPrefs() {
         keyStoreManager.prefs(KeyStoreManager.PREFS_SIGNAL_STORE).edit().clear().apply()
         keyStoreManager.prefs(KeyStoreManager.PREFS_AUTH).edit().clear().apply()
@@ -429,13 +442,44 @@ class SessionContainer(
     vaultOpen: VaultOpen,
     persist: (slotIndex: Int, sealedPayload: ByteArray) -> Unit,
 ) {
+    /** Which image slot this session unlocked — needed to persist a biometric re-wrap ([withVaultKey]). */
+    val slotIndex: Int = vaultOpen.slotIndex
+
+    /** The single mutation gate over this slot's keystore (see the [VaultRuntime] kdoc). */
+    val runtime: VaultRuntime
+
+    // The VaultSession that owns this slot's key + payload. Held ONLY so [withVaultKey] can hand a
+    // wiped-in-finally COPY of the vault key to the biometric re-wrap (spec §1); not used otherwise.
+    private val vaultSession: VaultSession
+
+    // The concrete facade is kept for the atomic contact-delete's flush-free record removal;
+    // consumers see the store-agnostic [ZitroneSignalStore] seam (D2a), unchanged over either store.
+    private val vaultSignalStore: VaultSignalProtocolStore
+    val signalStore: ZitroneSignalStore
+    val signalManager: SignalProtocolManager
+    val apiClient: ApiClient
+    val wsClient: WsClient
+    val messageRepository: MessageRepository
+    val conversationRepository: ConversationRepository
+
     /**
-     * The single mutation gate over this slot's keystore. Built by DECODING a defensive
-     * COPY of the VaultOpen payload FIRST — before the [VaultSession] constructor
-     * destructively consumes the VaultOpen's payload + key arrays (VaultSession.kt:54-59) —
-     * so the two never race over the same buffers. The copy is wiped in `finally`.
+     * Vault-scoped settings facade — HELD but NOT yet driving SettingsScreen (that switch is
+     * D5). D2c keeps every vault-scoped setting reading legacy prefs on all paths to avoid a
+     * split-brain; this reference just proves the facade slots in.
      */
-    val runtime: VaultRuntime = run {
+    val vaultSettingsStore: VaultSettingsStore
+    val lemonDropRedeemer: LemonDropRedeemer
+    val lemonDropCreator: LemonDropCreator
+    val notificationScheduler: NotificationScheduler
+    val coordinator: MessagingCoordinator
+
+    init {
+        // DECODE a defensive COPY of the payload FIRST — before the [VaultSession] constructor
+        // destructively consumes the VaultOpen's payload + key arrays (VaultSession.kt:54-59) — so
+        // the two never race over the same buffers, and the copy is wiped in `finally`. A decode
+        // failure (e.g. a downgrade over a newer state version) throws HERE, before any
+        // VaultSession/runtime exists: the caller's onRefused wipes the still-intact VaultOpen and
+        // UnlockController cancels the freshly created scope.
         val decoded: VaultState = run {
             val copy = vaultOpen.payloadPlaintext.copyOf()
             try {
@@ -452,93 +496,95 @@ class SessionContainer(
             slotIndex = vaultOpen.slotIndex,
             persist = persist,
         )
-        VaultRuntime(session, decoded)
-    }
-
-    // The concrete facade is kept for the atomic contact-delete's flush-free record removal;
-    // consumers see the store-agnostic [ZitroneSignalStore] seam (D2a), unchanged over either store.
-    private val vaultSignalStore = VaultSignalProtocolStore(runtime)
-    val signalStore: ZitroneSignalStore = vaultSignalStore
-    val signalManager = SignalProtocolManager(signalStore)
-
-    val apiClient = ApiClient(apiBaseUrl, httpClient, VaultAuthStore(runtime))
-
-    val wsClient = WsClient(wsUrl, httpClient, scope) { line ->
-        Log.w("ZitroneBoot", line)
-        bootDiagnostics.record(line)
-    }
-
-    val messageRepository = MessageRepository(scope)
-    val conversationRepository = ConversationRepository(VaultRosterStore(runtime))
-
-    /**
-     * Vault-scoped settings facade — HELD but NOT yet driving SettingsScreen (that switch is
-     * D5). D2c keeps every vault-scoped setting reading legacy prefs on all paths to avoid a
-     * split-brain; this reference just proves the facade slots in.
-     */
-    val vaultSettingsStore = VaultSettingsStore(runtime)
-
-    val lemonDropRedeemer = LemonDropRedeemer(
-        api = apiClient,
-        signalStore = signalStore,
-        conversations = conversationRepository,
-        sodium = LemonDropSodiumOps(SodiumAndroid()),
-    )
-
-    val lemonDropCreator = LemonDropCreator(
-        api = apiClient,
-        signalStore = signalStore,
-        conversations = conversationRepository,
-        messages = messageRepository,
-        sodium = LemonDropSodiumOps(SodiumAndroid()),
-    )
-
-    val notificationScheduler = NotificationScheduler(
-        scope = scope,
-        fire = { MessagingNotifications.showNewMessage(app) },
-        isEnabled = { settings.settings.value.unreadReminderEnabled },
-        hasUnread = { conversationId ->
-            messageRepository.conversationMessages(conversationId)
-                .any { !it.isMine && it.state == MessageState.DELIVERED }
-        },
-        clock = { android.os.SystemClock.elapsedRealtime() },
-    )
-
-    val coordinator = MessagingCoordinator(
-        appContext = app,
-        scope = scope,
-        signal = signalManager,
-        api = apiClient,
-        ws = wsClient,
-        messages = messageRepository,
-        conversations = conversationRepository,
-        settings = settings,
-        diagnostics = bootDiagnostics,
-        notificationScheduler = notificationScheduler,
-        vaultContactDelete = ::deleteContactAtomically,
-    )
-
-    /**
-     * Vault contact-delete atomicity (VaultSignalProtocolStore :222-231): remove the contact's
-     * crypto records + roster entry + tombstone in ONE [VaultRuntime.mutate], then ONE
-     * [VaultRuntime.flushBeforeAck]. Returns whether the flush confirmed durable; the coordinator
-     * commits the in-memory removal (after burning the messages) only on true. On a flush failure
-     * the removal is retained in memory (never rolled back) but reported un-durable so the caller
-     * keeps the contact for a retry. [at] anchors the tombstone consistently with the coordinator's
-     * later commit.
-     */
-    private suspend fun deleteContactAtomically(conversationId: String, contactId: String, at: Long): Boolean {
-        val blobs = conversationRepository.deletionBlobs(conversationId, contactId, at)
-        return try {
-            runtime.mutate { state ->
-                vaultSignalStore.removeContactCryptoRecords(state, contactId)
-                blobs.rosterJson?.let { state.rosterJson = it }
-                state.tombstonesJson = blobs.tombstonesJson
+        vaultSession = session
+        val rt = VaultRuntime(session, decoded)
+        runtime = rt
+        // From here the runtime holds this slot's live key + payload copies. Any throw while
+        // building the facades / coordinator below would otherwise abandon a live VaultSession on
+        // the heap with no reseal or wipe — so reseal + wipe it via runtime.close() (idempotent)
+        // and rethrow; UnlockController.unlock cancels the scope on that rethrow.
+        try {
+            vaultSignalStore = VaultSignalProtocolStore(rt)
+            signalStore = vaultSignalStore
+            signalManager = SignalProtocolManager(signalStore)
+            apiClient = ApiClient(apiBaseUrl, httpClient, VaultAuthStore(rt))
+            wsClient = WsClient(wsUrl, httpClient, scope) { line ->
+                Log.w("ZitroneBoot", line)
+                bootDiagnostics.record(line)
             }
-            runtime.flushBeforeAck()
-            true
+            messageRepository = MessageRepository(scope)
+            conversationRepository = ConversationRepository(VaultRosterStore(rt))
+            vaultSettingsStore = VaultSettingsStore(rt)
+            lemonDropRedeemer = LemonDropRedeemer(
+                api = apiClient,
+                signalStore = signalStore,
+                conversations = conversationRepository,
+                sodium = LemonDropSodiumOps(SodiumAndroid()),
+            )
+            lemonDropCreator = LemonDropCreator(
+                api = apiClient,
+                signalStore = signalStore,
+                conversations = conversationRepository,
+                messages = messageRepository,
+                sodium = LemonDropSodiumOps(SodiumAndroid()),
+            )
+            notificationScheduler = NotificationScheduler(
+                scope = scope,
+                fire = { MessagingNotifications.showNewMessage(app) },
+                isEnabled = { settings.settings.value.unreadReminderEnabled },
+                hasUnread = { conversationId ->
+                    messageRepository.conversationMessages(conversationId)
+                        .any { !it.isMine && it.state == MessageState.DELIVERED }
+                },
+                clock = { android.os.SystemClock.elapsedRealtime() },
+            )
+            coordinator = MessagingCoordinator(
+                appContext = app,
+                scope = scope,
+                signal = signalManager,
+                api = apiClient,
+                ws = wsClient,
+                messages = messageRepository,
+                conversations = conversationRepository,
+                settings = settings,
+                diagnostics = bootDiagnostics,
+                notificationScheduler = notificationScheduler,
+                vaultContactDelete = ::deleteContactAtomically,
+            )
         } catch (t: Throwable) {
-            false
+            runCatching { rt.close() }
+            throw t
         }
     }
+
+    /**
+     * Hand a wiped-in-finally COPY of the live vault key to [block] (delegates to
+     * [VaultSession.withVaultKey]). The ONLY use is biometric enable over a live session (spec §1)
+     * — dual-wrapping the vault key without re-deriving it from the passphrase.
+     */
+    fun <T> withVaultKey(block: (ByteArray) -> T): T = vaultSession.withVaultKey(block)
+
+    /**
+     * Vault contact-delete atomicity (VaultSignalProtocolStore :222-231): the roster entry +
+     * tombstone + crypto-record removal seal in ONE [VaultRuntime.mutate] + ONE
+     * [VaultRuntime.flushBeforeAck], run INSIDE [ConversationRepository.deleteContactDurably] so the
+     * whole operation holds that repo's monitor — the single serialization point that keeps a
+     * concurrent roster write from resurrecting or losing an entry. Returns whether the durable
+     * flush confirmed; the removal is applied in memory + live state regardless (never rolled back —
+     * the crypto cannot be un-removed), so a false return means "unconfirmed durable", not "kept".
+     */
+    private suspend fun deleteContactAtomically(conversationId: String, contactId: String, at: Long): Boolean =
+        conversationRepository.deleteContactDurably(conversationId, contactId, at) { rosterJson, tombstonesJson ->
+            runtime.mutate { state ->
+                vaultSignalStore.removeContactCryptoRecords(state, contactId)
+                rosterJson?.let { state.rosterJson = it }
+                state.tombstonesJson = tombstonesJson
+            }
+            try {
+                runtime.flushBeforeAck()
+                true
+            } catch (t: Throwable) {
+                false
+            }
+        }
 }

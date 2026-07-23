@@ -7,10 +7,13 @@ package com.zitrone.app
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -33,10 +36,13 @@ class UnlockControllerPreparedTest {
         val built = mutableListOf<FakeSession>()
         val published = mutableListOf<FakeSession?>()
         val stopped = mutableListOf<FakeSession>()
+        val scopes = mutableListOf<CoroutineScope>()
         private var nextId = 0
 
         val controller = UnlockController<FakeSession>(
-            newSessionScope = { CoroutineScope(SupervisorJob() + Dispatchers.Unconfined) },
+            newSessionScope = {
+                CoroutineScope(SupervisorJob() + Dispatchers.Unconfined).also { scopes += it }
+            },
             buildSession = { error("no-arg build is unused on the vault path") },
             publish = { published += it },
             stopSession = { stopped += it },
@@ -50,6 +56,14 @@ class UnlockControllerPreparedTest {
                     // the session owns it thereafter.
                     FakeSession(nextId++).also { built += it }
                 },
+                onRefused = { open.wiped = true },
+            )
+        }
+
+        /** A build that THROWS after the scope was handed in (mirrors a decode failure mid-build). */
+        fun preparedUnlockThrowing(open: FakeOpen, error: Throwable) {
+            controller.unlock(
+                prepared = { throw error },
                 onRefused = { open.wiped = true },
             )
         }
@@ -85,6 +99,29 @@ class UnlockControllerPreparedTest {
         assertTrue("terminal wipe refuses and wipes the VaultOpen", open.wiped)
         // Once the gate lifts, a prepared unlock proceeds normally.
         rig.controller.endTerminalWipe()
+        val open2 = FakeOpen()
+        rig.preparedUnlock(open2)
+        assertEquals(1, rig.built.size)
+        assertFalse(open2.wiped)
+    }
+
+    @Test
+    fun `a THROWING prepared build wipes the VaultOpen, cancels the scope, and stays usable`() {
+        val rig = Rig()
+        val open = FakeOpen()
+        val boom = IllegalStateException("unsupported vault state version")
+        // The build throw must PROPAGATE (so the caller can escalate) — not be swallowed.
+        val thrown = assertThrows(IllegalStateException::class.java) {
+            rig.preparedUnlockThrowing(open, boom)
+        }
+        assertSame(boom, thrown)
+        assertTrue("a failed build must wipe the VaultOpen it was handed", open.wiped)
+        assertTrue("nothing was published on a failed build", rig.published.isEmpty())
+        assertTrue(
+            "the freshly created session scope must be cancelled, never stranded",
+            rig.scopes.last().coroutineContext[Job]?.isCancelled == true,
+        )
+        // The controller is not left half-locked: a fresh prepared unlock proceeds normally.
         val open2 = FakeOpen()
         rig.preparedUnlock(open2)
         assertEquals(1, rig.built.size)

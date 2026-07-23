@@ -70,6 +70,9 @@ fun SettingsScreen(
     torAvailable: Boolean,
     officialRouterInstalled: Boolean,
     i2pdInstalled: Boolean,
+    biometricEnabled: Boolean,
+    biometricAvailable: Boolean,
+    onToggleBiometric: (Boolean) -> Unit,
     onBack: () -> Unit,
     onDeleteAccount: () -> Unit,
     onOpenDiagnostics: () -> Unit,
@@ -117,11 +120,17 @@ fun SettingsScreen(
 
         // ----- Security ------------------------------------------------------
         SectionHeader("Security")
+        // The REAL biometric control (D2c): [checked] mirrors biometricStore.isEnabled() (hoisted
+        // here as [biometricEnabled]); toggling ON dual-wraps the live session's vault key, OFF
+        // deletes the wrap + auth-gated key (a genuine revoke). Enabling needs the platform to be
+        // able to authenticate; disabling is always allowed so a user can revoke even if biometrics
+        // later became unavailable.
         ToggleRow(
             title = "Biometric unlock",
-            subtitle = "Require fingerprint or face before showing chats",
-            checked = settings.biometricRequired,
-            onToggle = settingsRepository::setBiometricRequired,
+            subtitle = "Unlock with a fingerprint or face instead of your passphrase",
+            checked = biometricEnabled,
+            onToggle = onToggleBiometric,
+            enabled = biometricEnabled || biometricAvailable,
         )
         Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
             Text(
