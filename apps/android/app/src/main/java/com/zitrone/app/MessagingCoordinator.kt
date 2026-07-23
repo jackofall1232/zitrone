@@ -260,12 +260,26 @@ class MessagingCoordinator(
      * duplicate path can never both run the effects for one envelope.
      */
     private fun settlePostAck(envelopeId: String) {
+        // Teardown gate (round 8): the duplicate path can land a durable ack from a coroutine
+        // parked across a revocation/logout — the ack itself is correct (the advance IS durable),
+        // but no side effect may fire after teardown. Claim + DISCARD the entry; stop() also
+        // clears the ledger, this covers the already-queued race.
+        if (!acceptingDeliveries) {
+            pendingPostAck.settle(envelopeId)
+            return
+        }
         pendingPostAck.settle(envelopeId)?.let { owed ->
             // Delivery receipt to the SENDER (peer-routed by the relay → their
             // message.delivered). senderId comes from the decrypted envelope; the relay never
             // stored it, preserving zero-knowledge. Best-effort: a dropped receipt just means
-            // the sender stays at SENT, never worse.
+            // the sender stays at SENT, never worse. Sent even for a since-burned message —
+            // it WAS displayed, so DELIVERED is the truthful sender state.
             if (owed.sendReceipt) ws.sendReceived(envelopeId, owed.senderId)
+            // Staleness gate (round 8): a duplicate can land the durable ack long after display
+            // (offline gap) — if the message has since TTL-burned out of RAM, a "New message"
+            // alert would be a phantom and the redeemed bytes would have no placeholder to land
+            // in ([MessageRepository.attachmentLoaded] keys on the message), so both are skipped.
+            if (!messages.exists(envelopeId)) return
             // Content-free notification: always just "New message". The scheduler
             // rate-limits + re-fires it per conversation.
             if (owed.notify) notificationScheduler.onIncomingMessage(owed.conversationId)
@@ -332,7 +346,11 @@ class MessagingCoordinator(
                 if (api.accountId == null) {
                     if (registration == null) {
                         stage = "generate-prekeys"
-                        val signedPreKey = signal.generateSignedPreKey()
+                        // Reuse a stored-but-unconfirmed signed prekey / one-time batch from a
+                        // PREVIOUS attempt (process death between store and register) before
+                        // generating fresh — the pending-upload markers make the retry idempotent
+                        // instead of orphaning private halves per attempt (round 8).
+                        val signedPreKey = signal.pendingSignedPreKeyUpload() ?: signal.generateSignedPreKey()
                         val oneTimePreKeys = signal.generateOneTimePreKeys()
                         registration = suspend {
                             api.register(
@@ -369,6 +387,9 @@ class MessagingCoordinator(
                     }
                     diag("boot[$attempt]: firing POST /api/v1/register")
                     registration?.invoke()
+                    // The relay now holds the public halves — retire both pending-upload markers
+                    // (losing this confirm just re-uploads the same records, idempotent).
+                    signal.confirmPreKeysUploaded()
                     diag("boot[$attempt]: registration accepted by server")
                 }
                 stage = "create-session"
@@ -422,14 +443,17 @@ class MessagingCoordinator(
                     signal.rotateSignedPreKeyIfNeeded()?.let { rotated ->
                         // Prekey durability barrier (see the register path): the rotation just STORED
                         // the new signed prekey's PRIVATE half — reseal it DURABLE before publishing
-                        // its PUBLIC half. On a non-durable flush do NOT upload; the next boot's
-                        // rotation retries. Publishing a signed prekey whose private half a crash
-                        // could roll back would break every peer's X3DH against it.
+                        // its PUBLIC half. On a non-durable flush do NOT upload. The retry is REAL
+                        // (round 8): generation marks the id upload-pending, and
+                        // rotateSignedPreKeyIfNeeded re-serves that stored record on every boot
+                        // until the confirm below retires it — the age gate alone would never
+                        // retry (createdAt was already bumped at generation).
                         if (flushBeforePreKeyPublish {
                                 diag("boot: signed-prekey reseal not durable — rotation upload skipped, retries next boot")
                             }
                         ) {
                             api.uploadPreKeys(emptyList(), rotated)
+                            signal.confirmSignedPreKeyUploaded()
                         }
                     }
                 }
@@ -450,6 +474,10 @@ class MessagingCoordinator(
         // Teardown hook: drop all pending re-fire jobs + fire state so nothing
         // carries across an identity switch (see NotificationScheduler).
         notificationScheduler.cancelAll()
+        // Owed post-ack side effects die with the session: a receipt, notification, or blob
+        // redemption must never fire for a locked/logged-out/burned account, and nothing
+        // carries across an identity switch (see PendingPostAckLedger).
+        pendingPostAck.clear()
     }
 
     /**
@@ -1549,13 +1577,16 @@ class MessagingCoordinator(
                 // Prekey durability barrier (see the register path): the top-up just STORED the new
                 // one-time prekeys' PRIVATE halves — reseal them DURABLE before publishing their
                 // PUBLIC halves. On a non-durable flush do NOT upload; the next low-prekey signal
-                // retries. Publishing publics whose privates a crash could roll back would hand peers
-                // bundles we can't complete X3DH for (permanent first-message undecryptability).
+                // RE-SERVES this same stored batch (upload-pending marker, round 8) rather than
+                // generating another — a fresh batch per failure would pile orphaned private
+                // halves into the fixed-capacity vault. Publishing publics whose privates a crash
+                // could roll back would hand peers bundles we can't complete X3DH for.
                 if (flushBeforePreKeyPublish {
                         diag("prekey: top-up reseal not durable — upload skipped, retries on next low signal")
                     }
                 ) {
                     api.uploadPreKeys(oneTimePreKeys)
+                    signal.confirmOneTimePreKeysUploaded()
                 }
             }
         }
@@ -1864,4 +1895,9 @@ internal class PendingPostAckLedger {
 
     /** Owed envelope ids (test observability). */
     fun pending(): Set<String> = owed.keys.toSet()
+
+    /** Session teardown: discard every owed entry (no effect may cross an identity switch). */
+    fun clear() {
+        owed.clear()
+    }
 }

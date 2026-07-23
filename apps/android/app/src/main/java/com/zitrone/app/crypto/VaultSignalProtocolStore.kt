@@ -332,6 +332,46 @@ class VaultSignalProtocolStore(
         runtime.mutate { putRecord(it, KEY_SIGNED_PREKEY_CREATED_AT, value.toBeBytes()) }
     }
 
+    /** The signed-prekey id pending upload confirmation, default 0 (none) — see the interface. */
+    override fun pendingSignedPreKeyUploadId(): Int =
+        runtime.read { it.signalRecords[KEY_PENDING_SIGNED_PREKEY_UPLOAD]?.toInt() } ?: 0
+
+    override fun setPendingSignedPreKeyUploadId(value: Int) {
+        runtime.mutate {
+            if (value == 0) {
+                removeRecord(it, KEY_PENDING_SIGNED_PREKEY_UPLOAD)
+            } else {
+                putRecord(it, KEY_PENDING_SIGNED_PREKEY_UPLOAD, value.toBeBytes())
+            }
+        }
+    }
+
+    /**
+     * One-time-prekey ids pending upload confirmation, default empty — see the interface.
+     * Stored as an ASCII comma-joined id list; ids are public bookkeeping (never key material),
+     * matching the counter records above.
+     */
+    override fun pendingOneTimePreKeyUploadIds(): List<Int> =
+        runtime.read { it.signalRecords[KEY_PENDING_PREKEY_UPLOADS] }
+            ?.toString(Charsets.US_ASCII)
+            ?.split(',')
+            ?.mapNotNull { id -> id.toIntOrNull() }
+            .orEmpty()
+
+    override fun setPendingOneTimePreKeyUploadIds(value: List<Int>) {
+        runtime.mutate {
+            if (value.isEmpty()) {
+                removeRecord(it, KEY_PENDING_PREKEY_UPLOADS)
+            } else {
+                putRecord(
+                    it,
+                    KEY_PENDING_PREKEY_UPLOADS,
+                    value.joinToString(",").toByteArray(Charsets.US_ASCII),
+                )
+            }
+        }
+    }
+
     // -- misc -----------------------------------------------------------------
 
     override fun countOneTimePreKeys(): Int =
@@ -396,6 +436,8 @@ class VaultSignalProtocolStore(
         private const val KEY_NEXT_PREKEY_ID = "next_prekey_id"
         private const val KEY_NEXT_SIGNED_PREKEY_ID = "next_signed_prekey_id"
         private const val KEY_SIGNED_PREKEY_CREATED_AT = "signed_prekey_created_at"
+        private const val KEY_PENDING_SIGNED_PREKEY_UPLOAD = "pending_signed_prekey_upload"
+        private const val KEY_PENDING_PREKEY_UPLOADS = "pending_prekey_uploads"
     }
 }
 

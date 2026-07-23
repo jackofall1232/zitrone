@@ -218,6 +218,7 @@ class VaultImageStore internal constructor(
 
     private val binFile: File get() = File(baseDir, IMAGE_FILE)
     private val dekFile: File get() = File(baseDir, DEK_FILE)
+    private val destroyMarkerFile: File get() = File(baseDir, DESTROY_MARKER_FILE)
 
     /** True when a vault image is present on disk (`vault.bin`). */
     fun exists(): Boolean = imageLock.withLock { binFile.exists() }
@@ -614,6 +615,16 @@ class VaultImageStore internal constructor(
      */
     fun destroy() {
         imageLock.withLock {
+            // DESTROY-PENDING MARKER (crash / restart continuity): a destroy is only requested
+            // after the SERVER account is already gone, so once we are here the local image must
+            // eventually die even across process death. Drop a marker BEFORE the unlinks; it is
+            // removed only after the verify below confirms both files gone. Boot routing checks
+            // [destroyPending] and re-runs this (idempotent) instead of offering the lock gate —
+            // without it, a failed unlink + restart would route Locked over a vault whose account
+            // no longer exists (dead-end on a partial unlink, or a silent re-register on a zeroed
+            // one). Best-effort: if the marker itself cannot be written (the same failing disk),
+            // behavior degrades to the in-session routing only — never worse than pre-marker.
+            runCatching { destroyMarkerFile.createNewFile() }
             // Wipe live key material + drop the cached image FIRST, so no DEK/plaintext-adjacent
             // state is retained even on the (unexpected) chance a delete below throws.
             dek?.let { wipe(it) }
@@ -637,8 +648,20 @@ class VaultImageStore internal constructor(
             if (binFile.exists() || dekFile.exists()) {
                 throw VaultImageException.DestroyFailed()
             }
+            // Both files confirmed gone — retire the marker. Best-effort: a marker that survives
+            // just re-runs an idempotent destroy at next boot, which re-stats absent and succeeds.
+            destroyMarkerFile.delete()
         }
     }
+
+    /**
+     * True while a [destroy] has been REQUESTED (the server account is already deleted) but not
+     * yet CONFIRMED (both files verified gone). Boot routing must treat this as "finish the
+     * deletion" — retry [destroy] — never as a vault to unlock: on a partial unlink the image no
+     * longer opens (a dead-end lock gate), and on a zeroed one an unlock would silently register
+     * a brand-new account.
+     */
+    fun destroyPending(): Boolean = imageLock.withLock { destroyMarkerFile.exists() }
 
     /**
      * Claim the single-instance registration for [baseDir] (see class kdoc). Idempotent
@@ -749,6 +772,13 @@ class VaultImageStore internal constructor(
     private companion object {
         const val IMAGE_FILE = "vault.bin"
         const val DEK_FILE = "vault.dek"
+
+        /**
+         * Zero-byte marker present from "destroy requested" (server account already deleted)
+         * until "destroy confirmed" (both files verified gone) — see [destroy]/[destroyPending].
+         * Carries no data; its existence is the only signal.
+         */
+        const val DESTROY_MARKER_FILE = "vault.destroy-pending"
         const val TMP_SUFFIX = ".tmp"
 
         /**

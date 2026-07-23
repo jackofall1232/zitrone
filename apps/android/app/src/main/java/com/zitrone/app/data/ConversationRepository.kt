@@ -5,6 +5,7 @@
 
 package com.zitrone.app.data
 
+import com.zitrone.app.ContactDeleteOutcome
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -283,16 +284,30 @@ class ConversationRepository(
         conversationId: String,
         contactId: String,
         at: Long,
-        seal: (rosterJson: String?, tombstonesJson: String) -> Boolean,
-    ): Boolean {
+        seal: (rosterJson: String?, tombstonesJson: String) -> ContactDeleteOutcome,
+    ): ContactDeleteOutcome {
         tombstones.entries.removeAll { at - it.value >= TOMBSTONE_WINDOW_MS }
-        tombstones[contactId] = at
+        val previousTombstone = tombstones.put(contactId, at)
         val tombstonesJson = serializeTombstones()
         val rosterJson =
             if (readOnly) null else serialize(_conversations.value.filterNot { it.id == conversationId })
-        val durable = seal(rosterJson, tombstonesJson)
-        _conversations.value = _conversations.value.filterNot { it.id == conversationId }
-        return durable
+        val outcome = seal(rosterJson, tombstonesJson)
+        if (outcome == ContactDeleteOutcome.NOT_APPLIED) {
+            // The seal never touched live state (closed-runtime teardown race): the contact is
+            // STILL PRESENT and reappears on the next unlock, so the RAM state must say so too —
+            // keep the conversation row and take back the tombstone (round 8: removing the row
+            // while the caller's outcome gate preserves typing/receipt/notification state would
+            // desync the UI both ways, and a live tombstone would drop-before-decrypt inbound
+            // messages from a contact that still exists).
+            if (previousTombstone != null) {
+                tombstones[contactId] = previousTombstone
+            } else {
+                tombstones.remove(contactId)
+            }
+        } else {
+            _conversations.value = _conversations.value.filterNot { it.id == conversationId }
+        }
+        return outcome
     }
 
     @Synchronized

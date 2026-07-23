@@ -52,7 +52,15 @@ class SignalProtocolManagerCounterTest {
         // The RAW on-disk contract — same key + int type the old manager wrote.
         assertEquals(6, prefs.getInt("next_prekey_id", -1))
 
-        // A second batch continues the sequence — never reuses an id.
+        // UNCONFIRMED batch: the relay never acknowledged it, so the next call RE-SERVES the
+        // same stored batch (upload retry, round 8) instead of generating — no fresh ids, no
+        // orphaned private halves piling into the store.
+        val reserved = manager.generateOneTimePreKeys(count = 3)
+        assertEquals(listOf(1, 2, 3, 4, 5), reserved.map { it.id })
+        assertEquals(5, store.countOneTimePreKeys())
+
+        // Confirmed → a second batch continues the sequence — never reuses an id.
+        manager.confirmOneTimePreKeysUploaded()
         val second = manager.generateOneTimePreKeys(count = 3)
         assertEquals(listOf(6, 7, 8), second.map { it.id })
         assertEquals(8, store.countOneTimePreKeys())
@@ -105,7 +113,14 @@ class SignalProtocolManagerCounterTest {
         assertNotNull(rotated)
         assertEquals(1, rotated!!.id)
 
-        // Just generated → inside the window → no rotation.
+        // UNCONFIRMED upload: re-serves the SAME stored record on every call (upload retry,
+        // round 8 — the age gate alone would never retry, createdAt was already bumped). The
+        // rebuild must be byte-identical to the original DTO: same id, key, signature, stamp.
+        val reserved = manager.rotateSignedPreKeyIfNeeded()
+        assertEquals(rotated, reserved)
+
+        // Confirmed + inside the window → no rotation.
+        manager.confirmSignedPreKeyUploaded()
         assertNull(manager.rotateSignedPreKeyIfNeeded())
 
         // Backdate past the max age → rotates again with the next id.
@@ -115,5 +130,15 @@ class SignalProtocolManagerCounterTest {
         val rotatedAgain = manager.rotateSignedPreKeyIfNeeded()
         assertNotNull(rotatedAgain)
         assertEquals(2, rotatedAgain!!.id)
+    }
+
+    @Test
+    fun `a pending id whose record vanished clears itself instead of failing forever`() {
+        store.setLocalIdentity(IdentityKeyPair.generate(), 1)
+        val generated = manager.generateSignedPreKey()
+        // Simulate a wiped/repaired store that lost the record but kept the marker.
+        store.removeSignedPreKey(generated.id)
+        assertNull("no phantom re-serve from a missing record", manager.pendingSignedPreKeyUpload())
+        assertEquals("the stale marker was cleared", 0, store.pendingSignedPreKeyUploadId())
     }
 }

@@ -45,6 +45,13 @@ class LemonDropRedeemer(
     private val signalStore: ZitroneSignalStore,
     private val conversations: ConversationRepository,
     private val sodium: LemonDropOneShot.SodiumOps,
+    /**
+     * Durable-flush barrier between [deliver]'s prekey consumption (a coalesced vault mutation)
+     * and [burn]'s relay handoff — see [deliverDurablyThenBurn]. Injected like the coordinator's
+     * flush-before-ack (production: `VaultRuntime::flushBeforeAck`); default no-op for callers
+     * without a vault runtime.
+     */
+    private val flushDurable: suspend () -> Unit = {},
 ) {
 
     /** Outcome of the pre-unlock probe phase. */
@@ -165,6 +172,29 @@ class LemonDropRedeemer(
         pending.usedOneTimePrekeyId?.let { id ->
             runCatching { signalStore.removePreKey(id) }
         }
+    }
+
+    /**
+     * [deliver], then reseal the prekey consumption DURABLE, then [burn] — the same
+     * flush-before-handoff rule as every other network handoff after a vault mutation (D2c
+     * round 8). Without the barrier, the consumption sits in the coalesced ≤2s reseal window
+     * while the burn asks the relay to shred the drop: a crash inside that window resurrects the
+     * consumed prekey on disk, and if the burn had NOT landed either, the drop is re-openable —
+     * breaking single-use. On a non-durable flush the burn is SKIPPED (it is best-effort anyway;
+     * the TTL reaps the relay copy), so the relay handoff never outruns the consumption reaching
+     * disk. The message itself renders regardless — delivery is not gated, only the handoff.
+     */
+    suspend fun deliverDurablyThenBurn(pending: PendingLemonDrop) {
+        deliver(pending)
+        val durable = try {
+            flushDurable()
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            false
+        }
+        if (durable) burn(pending)
     }
 
     /** Like [runCatching] but never swallows a coroutine [CancellationException]

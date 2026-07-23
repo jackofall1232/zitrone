@@ -870,6 +870,17 @@ class VaultImageStoreTest {
 
         assertThrows(VaultImageException.DestroyFailed::class.java) { store.destroy() }
         assertTrue("the un-deletable image is (correctly) reported as still present", bin.exists())
+        // Round 8: the failed destroy leaves the destroy-pending marker — boot routing keys on it
+        // to resume FINISHING the deletion instead of offering the unlock gate over a half-deleted
+        // vault (dead-end on a partial unlink; silent re-register on a zeroed one).
+        assertTrue("destroyPending survives the failed unlink", store.destroyPending())
+
+        // The retry converges: once the filesystem cooperates, the SAME store's destroy verifies
+        // and retires the marker.
+        File(bin, "child").delete()
+        store.destroy()
+        assertFalse("retry removed the image", bin.exists())
+        assertFalse("marker retired after the confirmed destroy", store.destroyPending())
     }
 
     @Test
@@ -878,9 +889,11 @@ class VaultImageStoreTest {
         // The verify check is keyed on exists(), NOT the delete() bool: an already-absent file re-stats
         // absent and must NOT be mistaken for a failed unlink. A destroy() on a never-created store is
         // a clean success (no throw), which is what keeps a retried/idempotent destroy safe.
-        newStore(dir).destroy()
+        val store = newStore(dir)
+        store.destroy()
         assertFalse(File(dir, "vault.bin").exists())
         assertFalse(File(dir, "vault.dek").exists())
+        assertFalse("a confirmed destroy leaves no marker", store.destroyPending())
     }
 
     /**

@@ -64,6 +64,7 @@ import com.zitrone.app.ui.components.buildContactExchangePayload
 import com.zitrone.app.ui.screens.AddContactScreen
 import com.zitrone.app.ui.screens.ChatListScreen
 import com.zitrone.app.ui.screens.ChatScreen
+import com.zitrone.app.ui.screens.DeleteIncompleteScreen
 import com.zitrone.app.ui.screens.DiagnosticsScreen
 import com.zitrone.app.ui.screens.KeyVerificationScreen
 import com.zitrone.app.ui.screens.LemonDropAdvocacyScreen
@@ -260,8 +261,9 @@ class MainActivity : FragmentActivity() {
         lemonDropVeil.value =
             LemonDropVeil.Delivered(pending.text, pending.senderLabel, pending.senderVerified)
         container.scope.launch(Dispatchers.IO) {
-            redeemer.deliver(pending)
-            redeemer.burn(pending)
+            // Prekey consumption → durable reseal → burn; the burn is skipped when the flush
+            // can't confirm, so the relay shred order never outruns the consumption on disk.
+            redeemer.deliverDurablyThenBurn(pending)
         }
     }
 
@@ -479,6 +481,15 @@ private sealed interface Route {
     data object Splash : Route
     data object Onboarding : Route
     data object Locked : Route
+
+    /**
+     * Account deletion confirmed the SERVER delete but the local vault unlink did not verify
+     * ([VaultImageException.DestroyFailed] / the boot-time destroy-pending marker). The only exit
+     * is a CONFIRMED destroy → Onboarding. Never the lock gate: a partially-unlinked image no
+     * longer opens (a permanent dead-end for the correct passphrase), and a zeroed one would
+     * unlock empty and silently auto-register a brand-new account.
+     */
+    data object DeleteIncomplete : Route
     data object ChatList : Route
     data class Chat(val conversationId: String) : Route
     data object Settings : Route
@@ -527,6 +538,28 @@ private fun ZitroneRoot(
     var vaultExists by remember { mutableStateOf(container.hasVault()) }
     var creating by remember { mutableStateOf(false) }
     var createError by remember { mutableStateOf<String?>(null) }
+    // Route.DeleteIncomplete retry plumbing: single-flight destroy retry off the main thread.
+    // Success is judged by disk truth (files gone + marker retired), same as the delete handler.
+    var deleteRetrying by remember { mutableStateOf(false) }
+    var deleteRetryFailed by remember { mutableStateOf(false) }
+    val onRetryDestroy: () -> Unit = retry@{
+        if (deleteRetrying) return@retry
+        deleteRetrying = true
+        deleteRetryFailed = false
+        scope.launch {
+            val confirmed = withContext(Dispatchers.IO) {
+                runCatching { container.destroyVaultForAccountDeletion() }
+                !container.hasVault() && !container.vaultDestroyPending()
+            }
+            deleteRetrying = false
+            if (confirmed) {
+                vaultExists = false
+                route = Route.Onboarding
+            } else {
+                deleteRetryFailed = true
+            }
+        }
+    }
     // The biometric-enable OFFER is shown over the LIVE session (post-publish), so it holds NO
     // VaultOpen across recomposition — an Activity recreation drops only the offer (recoverable via
     // Settings), never key material. Set after an onboarding create, and after a passphrase unlock
@@ -757,11 +790,14 @@ private fun ZitroneRoot(
         val live = session ?: return@onDeleteAccount
         container.unlockController.beginTerminalWipe()
         live.coordinator.deleteAccountAndWipe {
-            // Route to Onboarding-as-success ONLY when destroyVault CONFIRMS the on-disk image is gone
-            // (destroy() verify-unlinks and THROWS if a file survives). A throw here means the vault
-            // was NOT destroyed — the full-crypto image is still on disk — so we must not claim the
-            // account is deleted; surface a retry on the lock gate instead (see below).
-            val destroyed = try {
+            // Routing derives from DISK TRUTH after the wipe, not from exception classification:
+            // Onboarding-as-success ONLY when destroy() CONFIRMED both files gone (no image, no
+            // destroy-pending marker); anything else — DestroyFailed, an unexpected teardown
+            // throw, even cancellation — lands on DeleteIncomplete, whose only exit is a
+            // confirmed (idempotent) destroy retry. The finally guarantees routing ALWAYS runs:
+            // without it a throw would strand `route` on a session screen with session == null,
+            // which composes a permanent blank.
+            try {
                 completeTerminalWipe(
                     finishUi = {
                         // Zero the live crypto state BEFORE teardown so that if the session is dirty,
@@ -774,8 +810,6 @@ private fun ZitroneRoot(
                         runCatching { live.signalStore.wipe() }
                         // Synchronous session teardown: runtime.close() reseals the image one last
                         // time. destroyVault (below) then deletes it — ordering is load-bearing.
-                        // Routing is DEFERRED to after destroy confirms, so a failed unlink can no
-                        // longer strand the user on Onboarding while the image survives.
                         container.unlockController.lockIf(live)
                     },
                     // The load-bearing no-remanence step: delete vault.bin/vault.dek + biometric
@@ -784,29 +818,26 @@ private fun ZitroneRoot(
                     destroyVault = { container.destroyVaultForAccountDeletion() },
                     releaseGate = { container.unlockController.endTerminalWipe() },
                 )
-                true
             } catch (c: kotlinx.coroutines.CancellationException) {
                 throw c
             } catch (t: Throwable) {
-                // destroy() reported a surviving file — NOT-deleted. releaseGate already ran in
+                // DestroyFailed (a surviving file) or an unexpected teardown throw — either way
+                // the finally below routes from disk truth. releaseGate already ran in
                 // completeTerminalWipe's outermost finally, so the unlock gate is not stranded.
-                false
-            }
-            identityFingerprint = null
-            unlocked = false
-            if (destroyed) {
-                // Confirmed gone: hasVault() is now false → route to Onboarding (fresh-install state).
-                vaultExists = false
+            } finally {
+                identityFingerprint = null
+                unlocked = false
                 lockError = null
-                route = Route.Onboarding
-            } else {
-                // NOT destroyed: the image survives (hasVault() is still true) and the passphrase
-                // reopens it. Route to the lock gate with a retry message rather than an
-                // Onboarding-as-success lie. The server account is already gone; re-running delete
-                // retries the idempotent local destroy (which succeeds once the transient I/O clears).
-                vaultExists = true
-                lockError = "Couldn't finish deleting your account on this device. Please try again."
-                route = Route.Locked
+                vaultExists = container.hasVault()
+                route = if (!vaultExists && !container.vaultDestroyPending()) {
+                    // Destroy CONFIRMED (files verified gone, marker retired) → fresh-install state.
+                    Route.Onboarding
+                } else {
+                    // The image (or the destroy-pending marker) survives: the server account is
+                    // gone, so the only honest route is "finish deleting" with a direct retry —
+                    // NEVER the lock gate (see Route.DeleteIncomplete).
+                    Route.DeleteIncomplete
+                }
             }
         }
     }
@@ -899,7 +930,14 @@ private fun ZitroneRoot(
             // silent auto-unlock.
             Route.Splash -> SplashScreen(
                 onFinished = {
-                    route = if (vaultExists) Route.Locked else Route.Onboarding
+                    route = when {
+                        // An interrupted account deletion (crash/restart after the server delete
+                        // but before the local unlink verified) resumes FINISHING the deletion —
+                        // never the unlock gate over a half-deleted vault (see Route.DeleteIncomplete).
+                        container.vaultDestroyPending() -> Route.DeleteIncomplete
+                        vaultExists -> Route.Locked
+                        else -> Route.Onboarding
+                    }
                 },
             )
 
@@ -908,6 +946,18 @@ private fun ZitroneRoot(
                 creating = creating,
                 createError = createError,
             )
+
+            // Finish an account deletion whose local vault unlink did not verify. Auto-retries
+            // once on entry (the failure is usually a transient I/O blip), then offers a manual
+            // retry; the ONLY exit is a confirmed destroy → Onboarding via onRetryDestroy.
+            Route.DeleteIncomplete -> {
+                LaunchedEffect(Unit) { onRetryDestroy() }
+                DeleteIncompleteScreen(
+                    retrying = deleteRetrying,
+                    showError = deleteRetryFailed,
+                    onRetry = onRetryDestroy,
+                )
+            }
 
             // Vault unlock gate: passphrase always, biometric iff enabled + available. No
             // auto-prompt — the user types a passphrase or taps biometrics.
@@ -1254,6 +1304,6 @@ private fun SessionUi(
 
         // Pre-session routes never reach [SessionUi] — the root composes them
         // directly, without a session.
-        Route.Splash, Route.Onboarding, Route.Locked -> Unit
+        Route.Splash, Route.Onboarding, Route.Locked, Route.DeleteIncomplete -> Unit
     }
 }

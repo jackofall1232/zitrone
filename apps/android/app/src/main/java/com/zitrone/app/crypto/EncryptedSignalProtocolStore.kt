@@ -265,6 +265,33 @@ class EncryptedSignalProtocolStore internal constructor(
         prefs.edit().putLong(KEY_SIGNED_PREKEY_CREATED_AT, value).apply()
     }
 
+    /** The signed-prekey id pending upload confirmation, default 0 (none) — see the interface. */
+    override fun pendingSignedPreKeyUploadId(): Int =
+        prefs.getInt(KEY_PENDING_SIGNED_PREKEY_UPLOAD, 0)
+
+    override fun setPendingSignedPreKeyUploadId(value: Int) {
+        if (value == 0) {
+            prefs.edit().remove(KEY_PENDING_SIGNED_PREKEY_UPLOAD).apply()
+        } else {
+            prefs.edit().putInt(KEY_PENDING_SIGNED_PREKEY_UPLOAD, value).apply()
+        }
+    }
+
+    /** One-time-prekey ids pending upload confirmation (comma-joined), default empty. */
+    override fun pendingOneTimePreKeyUploadIds(): List<Int> =
+        prefs.getString(KEY_PENDING_PREKEY_UPLOADS, null)
+            ?.split(',')
+            ?.mapNotNull { it.toIntOrNull() }
+            .orEmpty()
+
+    override fun setPendingOneTimePreKeyUploadIds(value: List<Int>) {
+        if (value.isEmpty()) {
+            prefs.edit().remove(KEY_PENDING_PREKEY_UPLOADS).apply()
+        } else {
+            prefs.edit().putString(KEY_PENDING_PREKEY_UPLOADS, value.joinToString(",")).apply()
+        }
+    }
+
     // -- misc -----------------------------------------------------------------
 
     override fun countOneTimePreKeys(): Int =
@@ -346,5 +373,7 @@ class EncryptedSignalProtocolStore internal constructor(
         private const val KEY_NEXT_PREKEY_ID = "next_prekey_id"
         private const val KEY_NEXT_SIGNED_PREKEY_ID = "next_signed_prekey_id"
         private const val KEY_SIGNED_PREKEY_CREATED_AT = "signed_prekey_created_at"
+        private const val KEY_PENDING_SIGNED_PREKEY_UPLOAD = "pending_signed_prekey_upload"
+        private const val KEY_PENDING_PREKEY_UPLOADS = "pending_prekey_uploads"
     }
 }

@@ -355,6 +355,13 @@ class MessageRepository(
         }
     }
 
+    /**
+     * Whether [messageId] is still live in RAM (not TTL-burned/removed). Used by the
+     * coordinator's owed post-ack settling to skip a phantom notification / a blob redemption
+     * whose placeholder is gone.
+     */
+    fun exists(messageId: String): Boolean = find(messageId) != null
+
     private fun find(messageId: String): Message? =
         _messages.value.values.asSequence().flatten().firstOrNull { it.id == messageId }
 

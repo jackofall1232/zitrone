@@ -137,6 +137,14 @@ class AppContainer(private val app: Application) {
     /** Routing truth: a vault image is present → UNLOCK, absent → SETUP (onboarding). */
     fun hasVault(): Boolean = imageStore.exists()
 
+    /**
+     * Routing truth OVERRIDING [hasVault]: an account deletion confirmed the SERVER delete but
+     * not yet the local vault unlink ([VaultImageStore.destroyPending]). The only valid route is
+     * "finish the deletion" (retry [destroyVaultForAccountDeletion]) — never the unlock gate: a
+     * partially-unlinked image no longer opens, and a zeroed one would silently re-register.
+     */
+    fun vaultDestroyPending(): Boolean = imageStore.destroyPending()
+
     // @Volatile so the transport apply-loop (running on Dispatchers.Default) and
     // the construction thread publish/read the current client consistently.
     @Volatile
@@ -586,6 +594,9 @@ class SessionContainer(
                 signalStore = signalStore,
                 conversations = conversationRepository,
                 sodium = LemonDropSodiumOps(SodiumAndroid()),
+                // Flush-before-handoff for the open path: the consumed prekey must reach disk
+                // before the burn hands the relay its shred order (deliverDurablyThenBurn).
+                flushDurable = rt::flushBeforeAck,
             )
             lemonDropCreator = LemonDropCreator(
                 api = apiClient,
@@ -655,17 +666,19 @@ class SessionContainer(
         // (the crypto IS gone from the runtime; it persists on the next flush that fits), NOT a false
         // NOT_APPLIED. Captured across the seal lambda, which runs synchronously.
         var mutateApplied = false
-        val durable = conversationRepository.deleteContactDurably(conversationId, contactId, at) { rosterJson, tombstonesJson ->
+        return conversationRepository.deleteContactDurably(conversationId, contactId, at) { rosterJson, tombstonesJson ->
             // BOTH mutate and flush are contained: a teardown race (forced logout /
             // revocation runs runtime.close() while this delete is mid-seal) makes
             // mutate throw IllegalStateException("closed") — synchronous, so
             // cancellation can't preempt it. Uncaught, that would crash the
             // confined worker (no CoroutineExceptionHandler) AND leave a half-delete
             // (burnAll already ran; the RAM/tombstone reconcile in the caller would
-            // be skipped). Caught, it degrades to a false — but the caller now reads
-            // [mutateApplied] to tell a lost delete from an unconfirmed one. The
-            // removal is never rolled back.
-            sealDurableOrFalse {
+            // be skipped). Caught, it degrades to a false — and [mutateApplied] tells
+            // a lost delete from an unconfirmed one, so the OUTCOME (not just a bool)
+            // is returned to the repository: it keeps its RAM entry + tombstone on
+            // NOT_APPLIED (the contact is still present). The removal, once applied,
+            // is never rolled back.
+            val durable = sealDurableOrFalse {
                 runtime.mutate { state ->
                     vaultSignalStore.removeContactCryptoRecords(state, contactId)
                     rosterJson?.let { state.rosterJson = it }
@@ -677,8 +690,8 @@ class SessionContainer(
                 }
                 runtime.flushBeforeAck()
             }
+            contactDeleteOutcome(durable, mutateApplied)
         }
-        return contactDeleteOutcome(durable, mutateApplied)
     }
 }
 

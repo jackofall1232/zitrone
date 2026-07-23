@@ -73,7 +73,7 @@ class ContactDeleteRaceTest {
                 releaseSeal.await()
                 rosterJson?.let { store.sealedRoster = it }
                 store.sealedTombstones = tomb
-                true
+                ContactDeleteOutcome.DURABLE
             }
         }
 
@@ -130,7 +130,7 @@ class ContactDeleteRaceTest {
                 releaseSeal.await()
                 rosterJson?.let { store.sealedRoster = it }
                 store.sealedTombstones = tomb
-                true
+                ContactDeleteOutcome.DURABLE
             }
         }
 
@@ -154,22 +154,48 @@ class ContactDeleteRaceTest {
     }
 
     /**
-     * The delete's in-memory reconcile MUST run regardless of the seal's durable result — the
-     * contract the seal-side containment (ZitroneApp catches a closed-runtime mutate throw and
-     * returns false, never lets it escape) relies on: a false return still removes the contact
-     * from RAM and returns false, never a crash or a half-delete left in the roster.
+     * The delete's in-memory reconcile runs for every APPLIED outcome — the contract the
+     * seal-side containment (ZitroneApp catches a closed-runtime mutate throw and returns an
+     * outcome, never lets it escape) relies on: APPLIED_UNCONFIRMED still removes the contact
+     * from RAM, never a crash or a half-delete left in the roster.
      */
     @Test
-    fun `an unconfirmed-durable seal still reconciles RAM and reports false`() {
+    fun `an unconfirmed-durable seal still reconciles RAM and reports the outcome`() {
         val store = FakeRosterStore()
         val repo = ConversationRepository(store, clock = { 1_000_000L })
         repo.upsert(convo("alice"))
         repo.upsert(convo("bob"))
 
-        val durable = repo.deleteContactDurably("alice", "alice", 1_000_000L) { _, _ -> false }
+        val outcome = repo.deleteContactDurably("alice", "alice", 1_000_000L) { _, _ ->
+            ContactDeleteOutcome.APPLIED_UNCONFIRMED
+        }
 
-        assertFalse("a false seal is reported as unconfirmed-durable", durable)
+        assertEquals(ContactDeleteOutcome.APPLIED_UNCONFIRMED, outcome)
         assertEquals("alice removed from RAM even when the flush is unconfirmed", setOf("bob"),
             repo.conversations.value.map { it.id }.toSet())
+    }
+
+    /**
+     * Round 8: a NOT_APPLIED seal (closed-runtime teardown race — the mutate never touched live
+     * state) must leave RAM consistent with reality: the contact is STILL PRESENT, so the
+     * conversation row stays and the tombstone is taken back — otherwise the row vanishes for a
+     * session while the caller's outcome gate (correctly) preserved its typing/receipt state,
+     * and a live tombstone would drop-before-decrypt inbound from a contact that still exists.
+     */
+    @Test
+    fun `a NOT_APPLIED seal keeps the conversation and takes back the tombstone`() {
+        val store = FakeRosterStore()
+        val repo = ConversationRepository(store, clock = { 1_000_000L })
+        repo.upsert(convo("alice"))
+        repo.upsert(convo("bob"))
+
+        val outcome = repo.deleteContactDurably("alice", "alice", 1_000_000L) { _, _ ->
+            ContactDeleteOutcome.NOT_APPLIED
+        }
+
+        assertEquals(ContactDeleteOutcome.NOT_APPLIED, outcome)
+        assertEquals("alice kept — the delete did not take", setOf("alice", "bob"),
+            repo.conversations.value.map { it.id }.toSet())
+        assertFalse("the tombstone was taken back", repo.wasRecentlyDeleted("alice"))
     }
 }

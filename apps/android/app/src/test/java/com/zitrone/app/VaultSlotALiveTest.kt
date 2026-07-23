@@ -243,16 +243,16 @@ class VaultSlotALiveTest {
         // seal in ONE mutate + ONE flush, run inside the repo's deleteContactDurably (under its
         // monitor). destroyContactCrypto is NEVER called standalone.
         val at = 1_000_000L
-        val durable = conversations.deleteContactDurably("peer-1", "peer-1", at) { rosterJson, tombstonesJson ->
+        val outcome = conversations.deleteContactDurably("peer-1", "peer-1", at) { rosterJson, tombstonesJson ->
             runtime.mutate { state ->
                 signalStore.removeContactCryptoRecords(state, "peer-1")
                 rosterJson?.let { state.rosterJson = it }
                 state.tombstonesJson = tombstonesJson
             }
             runtime.flushBeforeAck()
-            true
+            ContactDeleteOutcome.DURABLE
         }
-        assertTrue("the single-mutate delete confirmed durable", durable)
+        assertEquals("the single-mutate delete confirmed durable", ContactDeleteOutcome.DURABLE, outcome)
 
         // Decode the single sealed generation the sink was handed: all three changes present.
         val sealedState = VaultStateCodec.decode(openPayload(vaultKey, lastSealed!!, ops)!!)
