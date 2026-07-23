@@ -161,4 +161,12 @@ class UnlockController<S : Any>(
     fun endTerminalWipe() {
         synchronized(lock) { terminalWipe = false }
     }
+
+    /**
+     * Whether a terminal (account-delete) wipe is in progress. The D3 idle auto-lock reads this to
+     * SKIP its timer-fired [lock] while a delete owns teardown — a background timer must not race
+     * the account-delete's ordered teardown (the delete's NonCancellable coroutine + fail-safe
+     * closed-runtime handling would tolerate it, but not racing is cleaner defense-in-depth).
+     */
+    fun isTerminalWipe(): Boolean = synchronized(lock) { terminalWipe }
 }
