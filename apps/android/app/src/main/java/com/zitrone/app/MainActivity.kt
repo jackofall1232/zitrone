@@ -759,6 +759,14 @@ private fun ZitroneRoot(
         live.coordinator.deleteAccountAndWipe {
             completeTerminalWipe(
                 finishUi = {
+                    // Zero the live crypto state BEFORE teardown so that if the session is dirty,
+                    // runtime.close()'s final reseal writes a ZEROED image, not a full-crypto one.
+                    // destroyVault (below) deletes the file regardless, but this shrinks the
+                    // post-reseal/pre-unlink crash window from "full account recoverable by
+                    // passphrase" to "zeroed image" — the device-seizure threat this app targets.
+                    // Tolerated: a runtime already closed by a racing revocation throws here; the
+                    // file deletion still covers that case.
+                    runCatching { live.signalStore.wipe() }
                     identityFingerprint = null
                     unlocked = false
                     vaultExists = false
