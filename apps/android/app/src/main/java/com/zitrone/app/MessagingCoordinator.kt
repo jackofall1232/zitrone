@@ -189,6 +189,17 @@ class MessagingCoordinator(
     private var acceptingDeliveries = false
 
     /**
+     * True while [deleteAccountAndWipe]'s coroutine is running (round 15, R14-1): from the start of
+     * the delete flow through destroy(). While set, [onSessionRevoked] must NOT clear the
+     * vault-backed tokens or tear the session down — the delete flow owns teardown, and stripping
+     * auth in the intent→confirmed window would strand a completed-server-delete vault (the reconcile
+     * could no longer reach the idempotent 404). Written by the confined+NonCancellable delete
+     * coroutine, read on the socket-callback thread. @Volatile for cross-thread visibility.
+     */
+    @Volatile
+    private var deleteInFlight = false
+
+    /**
      * One mutex per contact serializes every Double Ratchet operation on
      * that session — text sends, receipt sends, and inbound decrypts all run
      * on pooled dispatcher threads, and two operations advancing the same
@@ -1361,6 +1372,14 @@ class MessagingCoordinator(
         // started — pre-D2b the process-lifetime scope guaranteed that; this
         // preserves it. Bounded work; onConfirmed's lock() is idempotent.
         scope.launch(confined + NonCancellable) {
+          // deleteInFlight guards the WHOLE flow (round 15, R14-1): while set, no OTHER auth-clearing
+          // path (notably [onSessionRevoked], which runs async on the socket thread) may strip the
+          // vault-backed tokens — clearing them in the intent→confirmed window would defeat the
+          // crash-recovery reconcile that needs auth to reach the idempotent 404. Cleared in the
+          // finally on EVERY exit so a throw can never latch it on. Set BEFORE the DELETE and held
+          // through destroy() (which removes auth with the vault, after which a clear is moot).
+          deleteInFlight = true
+          try {
             // 1. Persist the deletion INTENT durably FIRST — before api.deleteAccount() can leave
             // the device. It means ONLY "delete initiated" and NEVER authorises destruction, so a
             // crash here leaves a fully valid, unlockable vault (round 13). If it can't be made
@@ -1425,6 +1444,9 @@ class MessagingCoordinator(
             // Teardown hook: no re-fire job or fire state survives the wipe.
             notificationScheduler.cancelAll()
             onConfirmed()
+          } finally {
+            deleteInFlight = false
+          }
         }
     }
 
@@ -1794,6 +1816,14 @@ class MessagingCoordinator(
     }
 
     override fun onSessionRevoked() {
+        // R14-1 (round 15): a revoke that RACES an in-flight account delete must NOT clear tokens
+        // or tear the session down. Server-side deletion itself commonly triggers this revoke, and
+        // clearing the vault-backed tokens in the intent→confirmed window would strand a
+        // completed-server-delete vault (its reconcile could no longer authenticate the idempotent
+        // 404). The delete flow owns teardown: on CONFIRMED it destroys everything; on not-confirmed
+        // it keeps the session live (a subsequent 401 / the next-unlock reconcile then handles the
+        // stale session). So during a delete, this revoke is a no-op.
+        if (deleteInFlight) return
         // Fast, thread-safe teardown on the socket callback thread: stop the
         // relink loop, drop tokens, and — BEFORE the UI is bounced to the gate —
         // synchronously cancel every armed reminder job. Re-fire jobs run on

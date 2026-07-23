@@ -401,9 +401,15 @@ class VaultImageStore internal constructor(
                 //  - the old post-write ordering window ("vault durable, marker-clear not yet
                 //    durable" → crash → successor auto-destroyed) is gone: the markers are proven
                 //    absent + durable BEFORE the vault exists.
-                if ((deleteIntentFile.exists() || serverDeletedFile.exists()) &&
-                    !clearBothMarkersDurably()
-                ) {
+                // Decide whether to run the clear on a CONSERVATIVE check (round 15, R14-2): run it
+                // unless BOTH markers are CONFIRMED absent (Files.notExists). A File.exists()==false
+                // from an indeterminate stat must not skip the clear over a present-but-unstatable
+                // marker — that is exactly how a stale confirmed marker would coexist with the new
+                // vault. The clear itself proves absence via the same tristate + a required fsync.
+                val markersConfirmedAbsent =
+                    Files.notExists(deleteIntentFile.toPath()) &&
+                        Files.notExists(serverDeletedFile.toPath())
+                if (!markersConfirmedAbsent && !clearBothMarkersDurably()) {
                     throw VaultImageException.NotDurable()
                 }
                 val newDek = ops.randomBytes(DEK_BYTES)
@@ -661,9 +667,12 @@ class VaultImageStore internal constructor(
      */
     fun clearDeleteIntent() {
         imageLock.withLock {
-            if (!deleteIntentFile.exists()) return@withLock
+            // Tristate (round 15, R14-2): only a CONFIRMED absence (Files.notExists) is a no-op;
+            // present-or-indeterminate falls through to the durable clear + verify below. Using
+            // File.exists() here would skip clearing a present-but-unstatable marker.
+            if (Files.notExists(deleteIntentFile.toPath())) return@withLock
             deleteIntentFile.delete()
-            if (deleteIntentFile.exists() || dirSync(baseDir) != DirSyncResult.DURABLE) {
+            if (!Files.notExists(deleteIntentFile.toPath()) || dirSync(baseDir) != DirSyncResult.DURABLE) {
                 throw VaultImageException.DestroyFailed()
             }
         }
@@ -680,7 +689,14 @@ class VaultImageStore internal constructor(
         deleteIntentFile.delete()
         serverDeletedFile.delete()
         val durable = dirSync(baseDir) == DirSyncResult.DURABLE
-        return durable && !deleteIntentFile.exists() && !serverDeletedFile.exists()
+        // TRISTATE re-stat (round 15, R14-2): File.exists()==false conflates "absent" with "stat
+        // could not be determined" (I/O/permission failure), so trusting it would report a marker
+        // that SURVIVED an unlink as gone. Files.notExists returns true ONLY when the path is
+        // confirmed absent — present OR indeterminate both yield false, so the clear is proven
+        // only on a definite absence (fail-closed).
+        return durable &&
+            Files.notExists(deleteIntentFile.toPath()) &&
+            Files.notExists(serverDeletedFile.toPath())
     }
 
     /** Create [file] + dir-fsync it; throw [VaultImageException.DestroyFailed] if not durable. */
@@ -766,8 +782,9 @@ class VaultImageStore internal constructor(
     /**
      * True while a delete was INITIATED but the server delete is not confirmed (intent marker
      * present, confirmed absent) — a crash/failure mid-delete. The vault is still valid and the
-     * server account may still exist, so boot routes to normal unlock (NOT auto-destroy) and clears
-     * this stale intent; it never authorises destruction.
+     * server account may still exist, so boot routes to normal unlock (NOT auto-destroy) and, on the
+     * next live session, RECONCILES by retrying the authenticated DELETE (round 14). It never
+     * authorises destruction and is retired only by a confirmed [destroy] — never cleared on boot.
      */
     fun deleteIntentPending(): Boolean =
         imageLock.withLock { deleteIntentFile.exists() && !serverDeletedFile.exists() }
