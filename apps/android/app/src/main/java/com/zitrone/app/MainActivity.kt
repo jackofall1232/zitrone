@@ -230,8 +230,14 @@ class MainActivity : FragmentActivity() {
     // "don't keep activities" — where a later launch would otherwise re-render
     // plaintext unauthenticated (the drop is already burned, so a cleared copy
     // is simply gone, never re-shown).
+    override fun onStart() {
+        super.onStart()
+        (application as ZitroneApp).container.activityStarted = true
+    }
+
     override fun onStop() {
         super.onStop()
+        (application as ZitroneApp).container.activityStarted = false
         if (!isChangingConfigurations) {
             (application as ZitroneApp).container.clearDeliveredLemonDropVeil()
         }
@@ -264,21 +270,27 @@ class MainActivity : FragmentActivity() {
         // leaves AwaitUnlock in place: the user re-authenticates on return and the commit
         // re-runs idempotently (the removal no-ops, the flush retries). Run on the PROCESS
         // scope, not the Activity's — rotation or exit must not cancel the commit itself.
-        val expectedVeil = lemonDropVeil.value
+        // NO Activity captures inside the process-scoped coroutine (round 11, Gemini): the veil
+        // and the started-flag are CONTAINER state, so a rotation neither leaks the destroyed
+        // Activity for the coroutine's lifetime nor gates the publish on a stale lifecycle — the
+        // replacement Activity's onStart keeps `activityStarted` current and the publish lands
+        // on the (shared) veil the new composition collects.
+        val veil = container.lemonDropVeil
+        val expectedVeil = veil.value
         container.scope.launch(Dispatchers.IO) {
             val commit = runCatching { redeemer.deliverDurablyCommit(pending) }
                 .getOrDefault(LemonDropRedeemer.DeliveryCommit.NOT_APPLIED)
             val rendered = withContext(Dispatchers.Main) {
                 when {
                     commit == LemonDropRedeemer.DeliveryCommit.NOT_APPLIED -> {
-                        lemonDropVeil.compareAndSet(
+                        veil.compareAndSet(
                             expectedVeil,
                             LemonDropVeil.Advocacy(LemonDropScanOutcome.UNKNOWN),
                         )
                         false
                     }
-                    lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) ->
-                        lemonDropVeil.compareAndSet(
+                    container.activityStarted ->
+                        veil.compareAndSet(
                             expectedVeil,
                             LemonDropVeil.Delivered(pending.text, pending.senderLabel, pending.senderVerified),
                         )
@@ -601,7 +613,10 @@ private fun ZitroneRoot(
     // Routing truth (§0): a vault image present → UNLOCK, absent → SETUP. Flips true the
     // instant a create succeeds; otherwise unchanged for the process lifetime.
     var vaultExists by remember { mutableStateOf(container.hasVault()) }
-    var creating by remember { mutableStateOf(false) }
+    // OBSERVED from the container's process-scoped flow (round 11, Gemini): a rotation
+    // mid-create re-attaches the spinner to the still-running create, and a create that fails
+    // after the rotation releases it here too (a seeded snapshot would strand the spinner).
+    val creating by container.vaultCreating.collectAsState()
     var createError by remember { mutableStateOf<String?>(null) }
     // Route.DeleteIncomplete retry plumbing: single-flight destroy retry off the main thread.
     // Success is judged by disk truth (files gone + marker retired), same as the delete handler.
@@ -847,12 +862,19 @@ private fun ZitroneRoot(
     // re-derive hasVault() and route to unlock — never blindly re-call create() (which would throw
     // "already exists" and error-loop). Creation never bricks.
     val onCreateVault: (String) -> Unit = onCreateVault@{ pass ->
-        if (creating) return@onCreateVault
-        creating = true
+        // PROCESS-scoped single-flight (round 11, Gemini): the composition's own view resets on
+        // rotation while the Argon2 create keeps running — without the container-level claim, a
+        // second tap on the recreated screen would start a CONCURRENT create. A refused claim
+        // means one is already in flight; the collected `creating` flow shows its spinner and
+        // the reconciler routes when its session publishes.
+        if (!container.tryBeginVaultCreate()) return@onCreateVault
         createError = null
-        scope.launch {
+        // Process scope, NOT the composition's: a rotation must neither cancel the create nor
+        // orphan the guard release. State writes below may land on a disposed composition after
+        // rotation — the session→route reconciler owns the success routing in that case.
+        container.scope.launch {
             val result = runCatching { container.createVaultAndPublish(pass) }
-            creating = false
+            container.endVaultCreate()
             result.fold(
                 onSuccess = { published ->
                     vaultExists = true

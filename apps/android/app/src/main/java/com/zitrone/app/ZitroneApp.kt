@@ -134,6 +134,31 @@ class AppContainer(private val app: Application) {
     /** Composable-free unlock decisions (backoff, uniform failure, biometric gating). */
     val unlockRouter = VaultUnlockRouter()
 
+    /**
+     * Whether any Activity is STARTED (foreground-visible) — set from MainActivity's
+     * onStart/onStop. Process-scoped so process-scoped coroutines can gate user-visible
+     * publishes (the lemon-drop Delivered veil) WITHOUT capturing an Activity — capturing one
+     * leaks the destroyed instance across rotation for the coroutine's lifetime and gates on a
+     * stale lifecycle. @Volatile: written on main, read from worker dispatchers.
+     */
+    @Volatile
+    var activityStarted: Boolean = false
+
+    /**
+     * Single-flight vault-creation state, PROCESS-scoped and OBSERVABLE (round 11, Gemini): the
+     * composable's own flag resets on rotation while the Argon2 create keeps running, so a
+     * composition-local guard would let a second tap start a concurrent create — and a plain
+     * seeded bool would strand the recreated spinner if the create then failed. The UI collects
+     * this; [tryBeginVaultCreate] claims (compare-and-set), [endVaultCreate] releases.
+     */
+    val vaultCreating = MutableStateFlow(false)
+
+    fun tryBeginVaultCreate(): Boolean = vaultCreating.compareAndSet(expect = false, update = true)
+
+    fun endVaultCreate() {
+        vaultCreating.value = false
+    }
+
     /** Routing truth: a vault image is present → UNLOCK, absent → SETUP (onboarding). */
     fun hasVault(): Boolean = imageStore.exists()
 

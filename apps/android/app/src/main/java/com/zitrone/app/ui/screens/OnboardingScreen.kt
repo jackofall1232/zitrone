@@ -43,6 +43,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -109,7 +110,9 @@ fun OnboardingScreen(
     createError: String?,
     modifier: Modifier = Modifier,
 ) {
-    var showPassphrase by remember { mutableStateOf(false) }
+    // rememberSaveable: a rotation on the passphrase slide must not kick the user back to the
+    // first onboarding slide (round 11, Gemini).
+    var showPassphrase by rememberSaveable { mutableStateOf(false) }
     if (showPassphrase) {
         PassphraseSetupStep(
             onCreate = onCreateVault,
