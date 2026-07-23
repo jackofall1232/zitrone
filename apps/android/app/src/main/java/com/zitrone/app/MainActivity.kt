@@ -289,8 +289,16 @@ class MainActivity : FragmentActivity() {
             // A must still own the veil BEFORE the irreversible consume — else abort untouched.
             val ownsVeil = withContext(Dispatchers.Main) { veil.value == expectedVeil }
             if (!ownsVeil) return@launch
-            val commit = runCatching { redeemer.deliverDurablyCommit(pending) }
-                .getOrDefault(LemonDropRedeemer.DeliveryCommit.NOT_APPLIED)
+            // Rethrow CancellationException (structured concurrency) — folding it into NOT_APPLIED
+            // would swallow a real teardown of this process-scoped coroutine. Any OTHER throw is
+            // an honest not-committed (nothing consumed → advocacy veil).
+            val commit = try {
+                redeemer.deliverDurablyCommit(pending)
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
+            } catch (_: Throwable) {
+                LemonDropRedeemer.DeliveryCommit.NOT_APPLIED
+            }
             val rendered = withContext(Dispatchers.Main) {
                 when {
                     commit == LemonDropRedeemer.DeliveryCommit.NOT_APPLIED -> {
