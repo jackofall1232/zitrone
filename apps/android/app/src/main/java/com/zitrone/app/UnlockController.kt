@@ -52,16 +52,41 @@ class UnlockController<S : Any>(
     private var terminalWipe = false
 
     /**
-     * Build + publish the session if none is live. Idempotent. Refused while a
-     * terminal wipe is in progress (see [beginTerminalWipe]) — the UI's normal
-     * routing retries once the wipe's completion lifts the gate.
+     * Build + publish the session if none is live, from the default [buildSession].
+     * Idempotent. Refused while a terminal wipe is in progress (see
+     * [beginTerminalWipe]) — the UI's normal routing retries once the wipe's
+     * completion lifts the gate.
      */
-    fun unlock() {
+    fun unlock() = unlock(buildSession)
+
+    /**
+     * As [unlock], but from a caller-[prepared] factory that already carries resolved
+     * credentials — D2c's vault path resolves the [com.zitrone.app.crypto.vault.VaultOpen]
+     * OFF the monitor (Argon2id / biometric happen before this call), then hands the build
+     * in here. Same monitor, same idempotence + terminal-wipe refusal as [unlock].
+     *
+     * A REFUSED build (terminal wipe in progress, or a session already live) never invokes
+     * [prepared], so the credential it closes over would be abandoned — [onRefused] runs
+     * instead so the caller wipes the unused VaultOpen. On an accepted build [prepared] owns
+     * the arrays (VaultSession consumes them); [onRefused] is not called.
+     */
+    fun unlock(prepared: (CoroutineScope) -> S, onRefused: () -> Unit = {}) {
         synchronized(lock) {
-            if (terminalWipe) return
-            if (current != null) return
+            if (terminalWipe) return onRefused()
+            if (current != null) return onRefused()
             val scope = newSessionScope()
-            val session = buildSession(scope)
+            val session = try {
+                prepared(scope)
+            } catch (t: Throwable) {
+                // Spec §4: a FAILED build must wipe the VaultOpen it was handed and must not
+                // strand the freshly created scope. `onRefused` performs the caller's wipe (safe
+                // even if VaultSession already consumed the arrays — a re-wipe of zeroed bytes is
+                // a no-op); the partial session's own runtime, if any was built, is resealed+wiped
+                // by SessionContainer's construction guard before this throw reaches here.
+                scope.cancel()
+                onRefused()
+                throw t
+            }
             sessionScope = scope
             current = session
             publish(session)
@@ -92,7 +117,15 @@ class UnlockController<S : Any>(
 
     private fun lockCurrent() {
         val session = current ?: return
-        stopSession(session)
+        try {
+            stopSession(session)
+        } catch (t: Throwable) {
+            // Teardown must complete even if stopSession throws (D2c: runtime.close()'s final
+            // reseal can throw NotDurable/IO — but it has ALREADY wiped its secrets in a finally).
+            // Swallowing here keeps the ordered teardown going so a dead runtime is never left
+            // published with `current` still set (which would let the next unlock "succeed" onto a
+            // closed runtime and then crash on first use).
+        }
         val job = sessionScope?.coroutineContext?.get(Job)
         sessionScope?.cancel()
         // cancel() returns immediately and cancellation is cooperative: work

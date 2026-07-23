@@ -11,6 +11,8 @@ import android.util.Log
 import com.zitrone.app.crypto.AttachmentCrypto
 import com.zitrone.app.crypto.MessagePadding
 import com.zitrone.app.crypto.SignalProtocolManager
+import com.zitrone.app.crypto.vault.VaultCapacityException
+import com.zitrone.app.crypto.vault.VaultImageException
 import com.zitrone.app.diagnostics.BootDiagnostics
 import com.zitrone.app.data.AttachmentControlPayload
 import com.zitrone.app.data.AttachmentLoadState
@@ -43,6 +45,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.signal.libsignal.protocol.DuplicateMessageException
+import java.io.IOException
 import java.time.Instant
 import java.time.format.DateTimeFormatter
 import java.util.UUID
@@ -89,6 +93,54 @@ class MessagingCoordinator(
     private val settings: SettingsRepository,
     private val diagnostics: BootDiagnostics,
     private val notificationScheduler: NotificationScheduler,
+    /**
+     * Vault-only atomic contact-delete (D2c). When non-null (the vault path), it removes the
+     * contact's crypto records + roster entry + tombstone in ONE runtime.mutate + ONE durable
+     * flush (VaultSignalProtocolStore atomicity contract :222-231) and returns the
+     * [ContactDeleteOutcome] — DURABLE, APPLIED_UNCONFIRMED (removal sticks, flush pending), or
+     * NOT_APPLIED (a closed-runtime race meant the removal never touched live state — the delete
+     * did not take). [deleteContact] then burns messages and commits the in-memory removal. Null on
+     * the legacy path, which keeps its unchanged per-store delete sequence.
+     */
+    private val vaultContactDelete: (suspend (conversationId: String, contactId: String, at: Long) -> ContactDeleteOutcome)? = null,
+    /**
+     * Flush-before-ack barrier (D2c — absorbs D4). Invoked on the inbound path AFTER a decrypt
+     * has advanced the receiving ratchet and BEFORE [WsClient.ackMessage], so the relay's copy is
+     * dropped ONLY once that ratchet advance is durable. On the vault path the SessionContainer
+     * supplies [com.zitrone.app.crypto.vault.VaultRuntime.flushBeforeAck]; the default no-op keeps
+     * every non-vault construction / test (and the pre-decrypt drop-ack, which mutates nothing)
+     * acking immediately as before. A THROW (NotDurable / IO / runtime closed / at-capacity) means
+     * NOT durable: the ack is skipped, the relay redelivers, and no acked message is ever lost.
+     * Called from the confined worker, never inside a persist sink — so the runtime lock order
+     * (runtime.stateLock → session → storage) is preserved.
+     */
+    private val flushBeforeAck: suspend () -> Unit = {},
+    /**
+     * Persist the account-deletion INTENT durably (the `vault.delete-intent` marker) — the FIRST
+     * step of [deleteAccountAndWipe], before the server-delete request leaves the device. Means
+     * ONLY "a delete was initiated"; it NEVER authorises local destruction (round 13). MUST THROW
+     * if it cannot be made durable — the delete then aborts without touching the server. Production
+     * supplies [AppContainer.markVaultDeleteIntent]; default no-op for the legacy path (no vault).
+     */
+    private val persistDeleteIntent: () -> Unit = {},
+    /**
+     * Persist SERVER-DELETE-CONFIRMED durably (the `vault.delete-confirmed` marker) — written ONLY
+     * after [ApiClient.deleteAccount] returns [ApiClient.AccountDeleteResult.CONFIRMED_GONE], and
+     * REQUIRED-durable (round 14, F1): it MUST throw if it cannot be made durable so the caller
+     * never tears down / clears auth over an un-recorded confirmation. This is the ONLY marker that
+     * authorises the unlink-only DeleteIncomplete auto-destroy. Production supplies
+     * [AppContainer.markServerDeleteConfirmed].
+     */
+    private val persistServerDeleteConfirmed: () -> Unit = {},
+    /**
+     * Whether the DURABLE delete-intent marker is present (production:
+     * [AppContainer.hasVaultDeleteIntentMarker]). This is the durable auth-protection signal that
+     * [onSessionRevoked] honors (round 16, R15-P2): its true-window equals the intent marker's
+     * on-disk lifetime — spanning not-confirmed exits AND process restart — which the process-local
+     * [deleteInFlight] flag alone could not. Reads a file stat under the image lock; called only on
+     * the rare revoke path.
+     */
+    private val intentMarkerPresent: () -> Boolean = { false },
 ) : WsClient.Listener {
 
     private val _typingPeers = MutableStateFlow<Set<String>>(emptySet())
@@ -144,6 +196,19 @@ class MessagingCoordinator(
      */
     @Volatile
     private var acceptingDeliveries = false
+
+    /**
+     * True only while [deleteAccountAndWipe]'s coroutine is RUNNING (round 15). It covers the
+     * narrow window BEFORE the intent marker is durable (coroutine start → intent write), which the
+     * durable [intentMarkerPresent] check cannot yet see. The full auth-protection guard is
+     * `deleteInFlight || intentMarkerPresent()` (round 16, R15-P2): the union spans coroutine-start
+     * through the intent marker's retire, so a revoke can never clear tokens across a not-confirmed
+     * exit or a restart while the marker persists — the guard's true-window now EQUALS the marker's
+     * lifetime, not just this coroutine's. Written by the confined+NonCancellable coroutine, read on
+     * the socket-callback thread. @Volatile for cross-thread visibility.
+     */
+    @Volatile
+    private var deleteInFlight = false
 
     /**
      * One mutex per contact serializes every Double Ratchet operation on
@@ -217,6 +282,52 @@ class MessagingCoordinator(
      */
     private val pendingReceipts = ConcurrentHashMap<String, MutableList<String>>()
 
+    /**
+     * Post-ack side effects (delivery receipt / notification / attachment redemption) a display
+     * branch still OWES for a shown-but-not-yet-acked envelope — see [PendingPostAckLedger].
+     * Every display branch registers its owed entry immediately after
+     * [MessageRepository.addIncoming], and [settlePostAck] is the SINGLE execution site, called on
+     * whichever path finally lands the durable ack: the normal branch, or the
+     * duplicate-redelivery ACK_AND_DROP path.
+     */
+    private val pendingPostAck = PendingPostAckLedger()
+
+    /**
+     * Execute + clear the owed post-ack side effects for [envelopeId]. Call ONLY after a DURABLE
+     * ack ([ackDurable] returned true). Same order as the pre-round-7 inline code: receipt,
+     * notification, redemption. Settling is an atomic remove, so the normal path and the
+     * duplicate path can never both run the effects for one envelope.
+     */
+    private fun settlePostAck(envelopeId: String) {
+        // Teardown gate (round 8): the duplicate path can land a durable ack from a coroutine
+        // parked across a revocation/logout — the ack itself is correct (the advance IS durable),
+        // but no side effect may fire after teardown. Claim + DISCARD the entry; stop() also
+        // clears the ledger, this covers the already-queued race.
+        if (!acceptingDeliveries) {
+            pendingPostAck.settle(envelopeId)
+            return
+        }
+        pendingPostAck.settle(envelopeId)?.let { owed ->
+            // Delivery receipt to the SENDER (peer-routed by the relay → their
+            // message.delivered). senderId comes from the decrypted envelope; the relay never
+            // stored it, preserving zero-knowledge. Best-effort: a dropped receipt just means
+            // the sender stays at SENT, never worse. Sent even for a since-burned message —
+            // it WAS displayed, so DELIVERED is the truthful sender state.
+            if (owed.sendReceipt) ws.sendReceived(envelopeId, owed.senderId)
+            // Staleness gate (round 8): a duplicate can land the durable ack long after display
+            // (offline gap) — if the message has since TTL-burned out of RAM, a "New message"
+            // alert would be a phantom and the redeemed bytes would have no placeholder to land
+            // in ([MessageRepository.attachmentLoaded] keys on the message), so both are skipped.
+            if (!messages.exists(envelopeId)) return
+            // Content-free notification: always just "New message". The scheduler
+            // rate-limits + re-fires it per conversation.
+            if (owed.notify) notificationScheduler.onIncomingMessage(owed.conversationId)
+            // One-shot blob redemption — this settling is what keeps it reachable when the
+            // durable ack only lands on the duplicate path (round 7, Codex :1237).
+            owed.attachment?.let { redeemAttachment(envelopeId, it) }
+        }
+    }
+
     init {
         ws.listener = this
         // Local burns (burn-on-read / burn-all) propagate to the other side.
@@ -274,8 +385,17 @@ class MessagingCoordinator(
                 if (api.accountId == null) {
                     if (registration == null) {
                         stage = "generate-prekeys"
-                        val signedPreKey = signal.generateSignedPreKey()
-                        val oneTimePreKeys = signal.generateOneTimePreKeys()
+                        // Reuse a stored-but-unconfirmed signed prekey / NEVER-ATTEMPTED one-time
+                        // batch from a previous attempt before generating fresh (round 8). An
+                        // ATTEMPTED batch (a register request that may have reached the relay) is
+                        // never reused — the same single-use publics must not exist under two
+                        // account ids — and its superseded privates are discarded (safe here ONLY:
+                        // no live account can ever receive a message keyed to them), keeping the
+                        // offline-retry loop net-zero in the vault (round 11, Codex). The signed
+                        // prekey IS reused across attempts: it is multi-use and the relay upserts
+                        // it per-account.
+                        val signedPreKey = signal.pendingSignedPreKeyUpload() ?: signal.generateSignedPreKey()
+                        val oneTimePreKeys = signal.generateOneTimePreKeys(discardAttempted = true)
                         registration = suspend {
                             api.register(
                                 identityKeyBase64 = signal.localIdentityPublicKeyBase64(),
@@ -294,9 +414,64 @@ class MessagingCoordinator(
                     // (public keys only). The client-side null-guard +
                     // single-flight prevents the common case, not this window.
                     stage = "register"
+                    // Prekey durability barrier (D2c round 7). ensureIdentity (above) + the signed
+                    // prekey + the one-time prekeys just STORED their PRIVATE halves in the vault
+                    // (coalesced, ≤2s). Reseal them DURABLE BEFORE api.register publishes their
+                    // PUBLIC halves: were a crash to roll the privates back after the relay already
+                    // serves a bundle whose private half we no longer hold, that peer's first (X3DH)
+                    // message would be permanently undecryptable. On a non-durable flush do NOT
+                    // publish — throw so this boot attempt fails and the loop retries (a later flush
+                    // that lands then registers). Routes through the SAME injected flushBeforeAck as
+                    // the inbound/outbound barriers (no hard vault dep).
+                    if (!flushBeforePreKeyPublish {
+                            diag("boot[$attempt]: prekey reseal not durable — register deferred to retry")
+                        }
+                    ) {
+                        throw PreKeyFlushNotDurableException()
+                    }
+                    // TWO-PHASE attempted marker, same as the top-up path (round 11, Codex): mark
+                    // the batch ATTEMPTED + reseal durable BEFORE the register request can leave.
+                    // A lost response (or crash) then regenerates instead of re-registering the
+                    // same single-use publics under a second account id.
+                    signal.markOneTimePreKeyUploadAttempted()
+                    if (!flushBeforePreKeyPublish {
+                            diag("boot[$attempt]: attempted-marker reseal not durable — register deferred")
+                        }
+                    ) {
+                        throw PreKeyFlushNotDurableException()
+                    }
                     diag("boot[$attempt]: firing POST /api/v1/register")
-                    registration?.invoke()
+                    try {
+                        registration?.invoke()
+                    } catch (t: Throwable) {
+                        // The request MAY have reached the relay (response lost / any ambiguous
+                        // failure): drop the cached closure so the retry regenerates its batch
+                        // (the ATTEMPTED marker makes generateOneTimePreKeys refuse to re-serve
+                        // this one) instead of re-uploading the same publics.
+                        registration = null
+                        throw t
+                    }
+                    // The relay now holds the public halves — retire both pending-upload markers
+                    // (losing this confirm just re-uploads the same records, idempotent).
+                    signal.confirmPreKeysUploaded()
                     diag("boot[$attempt]: registration accepted by server")
+                }
+                // Flush the REGISTRATION STATE durable before minting a session (round 10,
+                // Codex): register stored the assigned account id through the vault-backed
+                // AuthStore as a coalesced mutation only. A crash inside that ≤2s window reopens
+                // the vault with accountId == null, and the next boot registers AGAIN — the
+                // server mints a fresh UUID and the account that may already have been displayed
+                // or shared is orphaned. Deliberately OUTSIDE the register branch: a retry
+                // attempt keeps the RAM accountId (register is skipped), so the gate must re-run
+                // on EVERY attempt until it confirms — inside the branch, a first-flush failure
+                // would never be re-checked. On an already-clean state this is a cheap no-op
+                // flush; the session/socket never outruns the identity reaching disk.
+                stage = "flush-registration"
+                if (!flushBeforePreKeyPublish {
+                        diag("boot[$attempt]: registration-state reseal not durable — session deferred to retry")
+                    }
+                ) {
+                    throw PreKeyFlushNotDurableException()
                 }
                 stage = "create-session"
                 val tokens = api.createSession(signal::signLoginChallenge)
@@ -347,7 +522,20 @@ class MessagingCoordinator(
                 // auth expiry comes back through onAuthExpired().
                 runCatching {
                     signal.rotateSignedPreKeyIfNeeded()?.let { rotated ->
-                        api.uploadPreKeys(emptyList(), rotated)
+                        // Prekey durability barrier (see the register path): the rotation just STORED
+                        // the new signed prekey's PRIVATE half — reseal it DURABLE before publishing
+                        // its PUBLIC half. On a non-durable flush do NOT upload. The retry is REAL
+                        // (round 8): generation marks the id upload-pending, and
+                        // rotateSignedPreKeyIfNeeded re-serves that stored record on every boot
+                        // until the confirm below retires it — the age gate alone would never
+                        // retry (createdAt was already bumped at generation).
+                        if (flushBeforePreKeyPublish {
+                                diag("boot: signed-prekey reseal not durable — rotation upload skipped, retries next boot")
+                            }
+                        ) {
+                            api.uploadPreKeys(emptyList(), rotated)
+                            signal.confirmSignedPreKeyUploaded()
+                        }
                     }
                 }
                 return
@@ -367,6 +555,10 @@ class MessagingCoordinator(
         // Teardown hook: drop all pending re-fire jobs + fire state so nothing
         // carries across an identity switch (see NotificationScheduler).
         notificationScheduler.cancelAll()
+        // Owed post-ack side effects die with the session: a receipt, notification, or blob
+        // redemption must never fire for a locked/logged-out/burned account, and nothing
+        // carries across an identity switch (see PendingPostAckLedger).
+        pendingPostAck.clear()
     }
 
     /**
@@ -379,6 +571,43 @@ class MessagingCoordinator(
         Log.w(TAG, line)
         diagnostics.record(line)
     }
+
+    /**
+     * Durable-ack barrier for the inbound path: reseal the ratchet advance ([flushBeforeAck])
+     * BEFORE telling the relay to drop its copy ([WsClient.ackMessage]). Used only on delivery
+     * branches where a decrypt advanced the receiving ratchet. Returns true when the ack was sent
+     * (flush confirmed durable); returns false when the flush threw — the message is left UN-ACKED
+     * so the relay redelivers it (flush-before-ack window=0, zero acked loss). Runs on the confined
+     * worker (never inside a persist sink), so touching the runtime here respects the lock order.
+     * Delegates to [flushThenAck] so the ordering + fail-closed decision is host-testable without a
+     * live socket.
+     */
+    private suspend fun ackDurable(envelopeId: String): Boolean =
+        flushThenAck(
+            envelopeId = envelopeId,
+            flush = flushBeforeAck,
+            ack = { ws.ackMessage(it) },
+            onNotDurable = {
+                // NotDurable / IO / runtime closed or at-capacity (IllegalStateException): the
+                // ratchet advance did NOT reach disk. No envelope field is ever logged.
+                diag("recv: durable flush failed before ack — inbound left un-acked (relay redelivers)")
+            },
+        )
+
+    /**
+     * Durable barrier BEFORE publishing generated prekeys' PUBLIC halves (D2c round 7). The private
+     * halves — identity ([SignalProtocolManager.ensureIdentity]), signed prekey, and one-time prekeys
+     * — were just generated + STORED in the vault (coalesced reseal, ≤2s). Reseal them DURABLE via the
+     * injected [flushBeforeAck] and report whether it confirmed; the caller uploads the public halves
+     * (api.register / api.uploadPreKeys) ONLY when this returns true. On a non-durable flush the
+     * publics are NOT uploaded, so a crash can never roll the privates back while the relay already
+     * serves a bundle whose private half we no longer hold (→ a peer's first X3DH message permanently
+     * undecryptable). Delegates to [flushSendRatchet] — the SAME injected-barrier, transient-retry,
+     * fail-closed decision the outbound send path uses (host-tested there) — so no new vault dependency
+     * enters the coordinator. Runs on the confined worker, never inside a persist sink (lock order).
+     */
+    private suspend fun flushBeforePreKeyPublish(onNotDurable: () -> Unit): Boolean =
+        flushSendRatchet(flush = flushBeforeAck, onNotDurable = onNotDurable)
 
     // Standard base64 WITH padding (NO_WRAP keeps the `=` pad, strips only line
     // breaks) — the wire format the control payload's length-validated fields
@@ -512,21 +741,39 @@ class MessagingCoordinator(
             }
 
             stage = "ws-send"
-            // Non-suspending publish tail: on the confinement worker this
-            // check→deposit is atomic against deleteContact, so a contact torn
-            // down before this point drops the envelope AND the local plaintext,
-            // and one torn down after this point was still live when we deposited.
+            // Outbound durable barrier BEFORE the non-suspending tail (D2c round 6): reseal the
+            // SENDING ratchet advance encrypt() just made and confirm it durable NOW — the flush's
+            // transient-retry backoff SUSPENDS, so it must complete OUTSIDE the check→send tail,
+            // never between them (a suspension there would let a queued deleteContact interleave and
+            // publish to a just-deleted contact). On a non-durable flush the message is NOT sent:
+            // mark it failed for retry and stop before the tail.
+            if (!flushSendRatchet(
+                    flush = flushBeforeAck,
+                    onNotDurable = {
+                        diag("send: sending-ratchet flush not durable — not sent, marked for retry")
+                    },
+                )
+            ) {
+                diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
+                messages.markFailed(messageId)
+                return@runCatching
+            }
+            // NON-SUSPENDING publish tail: on the confinement worker this check→deposit is atomic
+            // against deleteContact (the durable flush already completed above, OUTSIDE this
+            // window), so a contact torn down before this point drops the envelope AND the local
+            // plaintext, and one torn down after this point was still live when we deposited.
             if (!contactExists(conversation.contactId)) {
                 diag("send: contact deleted mid-send — dropping local copy")
                 messages.discard(messageId)
             } else if (ws.sendMessage(envelope)) {
-                // Enqueued — but honestly still just SENDING. The tick waits
-                // for the relay's message.stored (→SENT) and the recipient's
-                // message.delivered (→DELIVERED); see [MessageState].
+                // Handed to the relay — but honestly still just SENDING. The tick waits for the
+                // relay's message.stored (→SENT) and the recipient's message.delivered (→DELIVERED);
+                // see [MessageState].
             } else {
-                // Socket not open: the send did not reach the relay.
-                // Connection state only — never the envelope.
-                diag("send: hand-off failed — socket not open (${ws.connectionState.value})")
+                // The socket was down: the send did not reach the relay. The ratchet advance is
+                // already durable, so a retry advances cleanly. Connection state only — never the
+                // envelope.
+                diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
                 messages.markFailed(messageId)
             }
         }.onFailure { e ->
@@ -716,18 +963,32 @@ class MessagingCoordinator(
                 mediaType = MessageEnvelope.MEDIA_TEXT,
             )
             stage = "ws-send"
-            // Non-suspending publish tail (see [confined]): the blob upload above
-            // suspended, so re-check the contact still exists — atomically with
-            // the deposit — before handing ciphertext to the relay. If it was
-            // deleted mid-upload, drop the envelope AND the local copy (incl. the
-            // in-memory attachment bytes).
+            // Outbound durable barrier BEFORE the non-suspending tail (see [deliverText]): reseal
+            // the sending-ratchet advance from encrypt() durable NOW — its transient-retry backoff
+            // SUSPENDS, so it must run OUTSIDE the check→send tail (the blob upload above already
+            // suspended; the flush is the last suspension before the atomic deposit). On a
+            // non-durable flush the attachment is NOT sent: mark it failed and stop before the tail.
+            if (!flushSendRatchet(
+                    flush = flushBeforeAck,
+                    onNotDurable = {
+                        diag("send: sending-ratchet flush not durable — not sent, marked for retry")
+                    },
+                )
+            ) {
+                diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
+                messages.markFailed(messageId)
+                return@runCatching
+            }
+            // NON-SUSPENDING publish tail (see [confined]): atomic against deleteContact with the
+            // durable flush already done. If the contact was deleted mid-upload, drop the envelope
+            // AND the local copy (incl. the in-memory attachment bytes).
             if (!contactExists(conversation.contactId)) {
                 diag("send: contact deleted mid-send — dropping local copy")
                 messages.discard(messageId)
             } else if (ws.sendMessage(envelope)) {
-                // Enqueued — honestly still SENDING until the relay/peer acks.
+                // Handed to the relay — honestly still SENDING until the relay/peer acks.
             } else {
-                diag("send: hand-off failed — socket not open (${ws.connectionState.value})")
+                diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
                 messages.markFailed(messageId)
             }
         }.onFailure { e ->
@@ -856,19 +1117,33 @@ class MessagingCoordinator(
                     burnOnRead = false,
                     mediaType = MessageEnvelope.MEDIA_TEXT,
                 )
-                // Non-suspending publish tail (see [confined]): atomic with
-                // deleteContact. A receipt for a just-deleted contact is dropped
-                // (no post-delete ciphertext) and not queued.
+                // Outbound durable barrier BEFORE the non-suspending tail (see [deliverText]): the
+                // receipt's encrypt() advanced the sending ratchet too — reseal it durable NOW, its
+                // suspending backoff OUTSIDE the check→send tail. On a non-durable flush the receipt
+                // is NOT sent: the messages are already READ locally so they never re-enter
+                // onMessagesSeen — queue the ids for the reconnect flush and stop before the tail.
+                if (!flushSendRatchet(
+                        flush = flushBeforeAck,
+                        onNotDurable = {
+                            diag("receipt: sending-ratchet flush not durable — queued for retry")
+                        },
+                    )
+                ) {
+                    diag("receipt: not handed to relay — queued (${ws.connectionState.value})")
+                    queueReceipts(contactId, messageIds)
+                    return@runCatching
+                }
+                // NON-SUSPENDING publish tail (see [confined]): atomic with deleteContact, the
+                // durable flush already done. A receipt for a just-deleted contact is dropped (no
+                // post-delete ciphertext) and not queued.
                 if (!contactExists(contactId)) {
                     diag("receipt: contact deleted mid-send — dropped, not queued")
                 } else if (ws.sendMessage(envelope)) {
                     // Delivered to the socket — nothing more to do.
                 } else {
-                    // Socket down. The messages are already READ locally, so
-                    // they will never re-enter onMessagesSeen — queue the ids
-                    // for the reconnect flush. Connection state only — never
-                    // the envelope.
-                    diag("receipt: hand-off failed — queued (${ws.connectionState.value})")
+                    // Socket down. The messages are already READ locally, so queue the ids for the
+                    // reconnect flush. Connection state only — never the envelope.
+                    diag("receipt: not handed to relay — queued (${ws.connectionState.value})")
                     queueReceipts(contactId, messageIds)
                 }
             }.onFailure { e ->
@@ -942,6 +1217,101 @@ class MessagingCoordinator(
                 return@launch
             }
             val contactId = conversation.contactId
+            val atomicDelete = vaultContactDelete
+            if (atomicDelete != null) {
+                // Vault path. Capture the burn set FIRST (read-only) but fire NOTHING yet: burning
+                // local history and emitting peer burn frames before the delete is known to have
+                // APPLIED would irreversibly destroy the messages of a contact whose deletion then
+                // failed (NOT_APPLIED — teardown race), stranding the user with a kept contact and
+                // vanished history (round 11, Codex). The frames are sent manually with the
+                // captured contactId below because after an applied delete the roster row is gone
+                // and burnAll's per-message hook could no longer resolve the peer.
+                val at = System.currentTimeMillis()
+                val burnIds = messages.messages.value[conversationId].orEmpty()
+                    .filter { it.state != MessageState.BURNING }
+                    .map { it.id }
+                // The atomic teardown: crypto records + roster entry + tombstone seal in ONE
+                // runtime.mutate + ONE durable flush, and the roster RAM reconciles to it — ALL
+                // under the ConversationRepository monitor (the single serialization point), so no
+                // concurrent roster write can resurrect or lose an entry. The removal is applied in
+                // memory + live state REGARDLESS of the durable result (the crypto is already gone
+                // and cannot be un-removed), so a false return is reported honestly as "not yet
+                // confirmed durable" — NEVER "contact kept" (which would lie: its crypto is gone).
+                val outcome = atomicDelete(conversationId, contactId, at)
+                // Gate the per-contact transient cleanup on the outcome (Gemini round 3). The
+                // removal is in live state for DURABLE and APPLIED_UNCONFIRMED (the contact IS gone),
+                // so drop its queued receipts / typing / notification state. On NOT_APPLIED the
+                // removal never took — the contact remains — so leave that state fully INTACT for a
+                // post-unlock retry; stripping it would desync the UI (typing/receipts/notifications
+                // dropped) from a contact that is still present.
+                if (outcome != ContactDeleteOutcome.NOT_APPLIED) {
+                    // RAM-only cleanup — safe regardless of durability, the contact is gone from
+                    // live state. NOTE the irreversible PEER burn is NOT here (round 13, Codex
+                    // P1-B): the local history is RAM-only (gone on any reload), but telling the
+                    // peer to shred its copy must not outrun durable confirmation of the deletion.
+                    messages.burnAll(conversationId, notifyPeer = false)
+                    pendingReceipts.remove(contactId)
+                    // Owed post-ack side effects for this contact's shown-but-unacked envelopes die
+                    // with the contact: their redeliveries now hit the deleted-contact drop (a bare
+                    // ack, never the duplicate path), so the entries would otherwise just leak —
+                    // and a receipt/notification/redemption for a deleted contact must not fire.
+                    pendingPostAck.dropContact(contactId)
+                    _typingPeers.value = _typingPeers.value - contactId
+                    notificationScheduler.onConversationRemoved(conversationId)
+                }
+                when (outcome) {
+                    ContactDeleteOutcome.DURABLE ->
+                        // The deletion is durable — the irreversible peer burn is safe now.
+                        burnIds.forEach { ws.burnMessage(it, contactId) }
+                    ContactDeleteOutcome.APPLIED_UNCONFIRMED -> {
+                        diag("delete: vault teardown applied in memory + live state; durable flush " +
+                            "unconfirmed — retrying in the background before the peer burn")
+                        // Round 13 (Codex P1-B): the removal is applied in RAM + scheduled, but a
+                        // bare failed flush does NOT re-arm the coalesced reseal, so it can sit
+                        // un-durable until an unrelated mutation/teardown; a process kill in that
+                        // window RESURRECTS the contact on the next unlock. The peer burn MUST be
+                        // gated on durability — if the contact can come back, the peer must still
+                        // hold the history (else an empty contact resurrects while the peer lost
+                        // its messages for a delete that never took). Retry the flush; send the
+                        // burn frames ONLY once a flush confirms durable. A still-unconfirmed exit
+                        // (retries exhausted / scope cancelled / process killed) leaves the peer
+                        // un-burned — consistent with a resurrected contact — the documented
+                        // resurrect-on-unlock residual (user re-deletes), never a burnt-but-back
+                        // inconsistency.
+                        scope.launch(confined) {
+                            var backoffMs = 1_000L
+                            repeat(FLUSH_RETRY_ATTEMPTS) {
+                                delay(backoffMs)
+                                backoffMs *= 2
+                                val confirmed = try {
+                                    flushBeforeAck()
+                                    true
+                                } catch (c: CancellationException) {
+                                    throw c
+                                } catch (_: Throwable) {
+                                    false
+                                }
+                                if (confirmed) {
+                                    diag("delete: deferred durable flush confirmed — sending peer burn")
+                                    burnIds.forEach { ws.burnMessage(it, contactId) }
+                                    return@launch
+                                }
+                            }
+                            diag("delete: durable flush still unconfirmed after retries — peer burn " +
+                                "withheld; contact resurrects on unlock with peer history intact")
+                        }
+                    }
+                    ContactDeleteOutcome.NOT_APPLIED ->
+                        // The runtime closed before the mutate applied (a revocation / forced logout
+                        // raced the delete): the removal never reached live state, so the contact is
+                        // NOT durably gone and reappears on the next unlock — surfaced honestly, not
+                        // as an applied-but-unconfirmed removal.
+                        diag("delete: vault runtime closed before teardown applied — delete did not " +
+                            "take; retry after unlock")
+                }
+                onComplete?.invoke()
+                return@launch
+            }
             val wiped = signal.destroyContact(contactId)
             if (!wiped) {
                 // Teardown did not reach disk (I/O error / storage full). Do NOT
@@ -982,24 +1352,112 @@ class MessagingCoordinator(
         }
     }
 
-    /** Wipes the server account AND the local keys/messages. Irreversible. */
-    fun deleteAccountAndWipe(onComplete: () -> Unit) {
-        acceptingDeliveries = false
+    /**
+     * Wipes the server account AND the local keys/messages. Irreversible. Round 13: local
+     * destruction happens ONLY on a DEFINITE server-confirmed deletion — never on a swallowed
+     * transport/HTTP failure (the round-12 P1: destroying the only local keys while the server
+     * account stayed live and orphaned).
+     *
+     *  - [onConfirmed]  — the server account is confirmed gone AND that confirmation is durably
+     *    recorded; RAM state is torn down and the caller destroys the local vault + routes.
+     *  - [onNotConfirmed] — the server did NOT confirm deletion (definiteFailure = true when the
+     *    server refused, false when the outcome is ambiguous/offline). NOTHING is destroyed; the
+     *    session stays live; the intent marker is KEPT (never silently abandoned, round 14 F1); the
+     *    caller lifts the terminal-wipe gate and surfaces a retry (reconciled on the next unlock).
+     *  - [onConfirmedNotDurable] — the server IS gone but the confirmed marker could not be made
+     *    durable (round 14 F1). NOTHING is destroyed and auth is NOT cleared; the intent marker is
+     *    KEPT so the next unlock's reconcile repeats the (now idempotent-404) DELETE and records
+     *    confirmation durably. Caller lifts the gate + surfaces.
+     *  - [onIntentNotDurable] — the intent marker itself could not be made durable; the delete
+     *    never touched the server. Caller lifts the gate.
+     */
+    fun deleteAccountAndWipe(
+        onConfirmed: () -> Unit,
+        onNotConfirmed: (definiteFailure: Boolean) -> Unit = {},
+        onConfirmedNotDurable: () -> Unit = {},
+        onIntentNotDurable: () -> Unit = {},
+    ) {
         // NonCancellable: the session scope this launches on is cancelled by
         // UnlockController.lock() (e.g. a server revocation racing the delete).
         // The server-side delete and the DURABLE roster clear must complete once
         // started — pre-D2b the process-lifetime scope guaranteed that; this
-        // preserves it. Bounded work; onComplete's lock() is idempotent.
+        // preserves it. Bounded work; onConfirmed's lock() is idempotent.
         scope.launch(confined + NonCancellable) {
+          // deleteInFlight guards the WHOLE flow (round 15, R14-1): while set, no OTHER auth-clearing
+          // path (notably [onSessionRevoked], which runs async on the socket thread) may strip the
+          // vault-backed tokens — clearing them in the intent→confirmed window would defeat the
+          // crash-recovery reconcile that needs auth to reach the idempotent 404. Cleared in the
+          // finally on EVERY exit so a throw can never latch it on. Set BEFORE the DELETE and held
+          // through destroy() (which removes auth with the vault, after which a clear is moot).
+          deleteInFlight = true
+          try {
+            // 1. Persist the deletion INTENT durably FIRST — before api.deleteAccount() can leave
+            // the device. It means ONLY "delete initiated" and NEVER authorises destruction, so a
+            // crash here leaves a fully valid, unlockable vault (round 13). If it can't be made
+            // durable, ABORT untouched.
+            val intentDurable = try {
+                persistDeleteIntent()
+                true
+            } catch (c: CancellationException) {
+                throw c
+            } catch (_: Throwable) {
+                false
+            }
+            if (!intentDurable) {
+                onIntentNotDurable()
+                return@launch
+            }
+            // 2. Server delete, session STILL FULLY LIVE (so a not-confirmed outcome can resume
+            // normally, and a retry stays authenticated). Returns a DEFINITE result — never a
+            // swallowed throw.
+            val result = try {
+                api.deleteAccount()
+            } catch (c: CancellationException) {
+                throw c
+            } catch (_: Throwable) {
+                ApiClient.AccountDeleteResult.AMBIGUOUS
+            }
+            if (result != ApiClient.AccountDeleteResult.CONFIRMED_GONE) {
+                // NOT gone: destroy NOTHING and KEEP the intent marker — never silently abandon
+                // (round 14, F1). A DEFINITE failure is an auth/permission problem (the account
+                // still exists); an AMBIGUOUS outcome is offline/5xx. Either way the session stays
+                // live and the intent persists, so the next unlock's reconcile repeats the DELETE.
+                onNotConfirmed(result == ApiClient.AccountDeleteResult.DEFINITE_FAILURE)
+                return@launch
+            }
+            // 3. CONFIRMED gone: record the confirmation REQUIRED-durable (round 14, F1 — no more
+            // best-effort swallow). Until vault.delete-confirmed is durable, a crash would strand a
+            // gone-server-account against a live vault with no auto-destroy authorization. On a
+            // non-durable write, tear down NOTHING and clear NO auth: keep the session + the intent
+            // marker so the next unlock's reconcile repeats the (idempotent-404) DELETE and records
+            // confirmation. Auth is NOT cleared anywhere in this flow now — it is vault-backed and
+            // destroyed with the vault by destroy(), which also keeps it available for the reconcile.
+            val confirmedDurable = try {
+                persistServerDeleteConfirmed()
+                true
+            } catch (c: CancellationException) {
+                throw c
+            } catch (_: Throwable) {
+                false
+            }
+            if (!confirmedDurable) {
+                onConfirmedNotDurable()
+                return@launch
+            }
+            // 4. Confirmation is durable — only now tear the session/RAM down. From here the server
+            // account is gone AND recorded, so destruction is unconditionally safe and recoverable.
+            acceptingDeliveries = false
             _linking.value = false
             linkJob?.cancel()
-            runCatching { api.deleteAccount() }
             ws.disconnect()
             messages.clearAll()
             conversations.clearAll()
             // Teardown hook: no re-fire job or fire state survives the wipe.
             notificationScheduler.cancelAll()
-            onComplete()
+            onConfirmed()
+          } finally {
+            deleteInFlight = false
+          }
         }
     }
 
@@ -1020,7 +1478,14 @@ class MessagingCoordinator(
                 // create an "Unknown contact" below (see isDeletedContact).
                 if (isDeletedContact(envelope.senderId)) {
                     diag("recv: message for deleted contact — dropped before decrypt")
-                    ws.ackMessage(envelope.id)
+                    // The drop happens BEFORE decrypt, so THIS branch mutates nothing — but the
+                    // TOMBSTONE it keys on may itself still be RAM-only (an APPLIED_UNCONFIRMED
+                    // delete whose flush hasn't confirmed). Acking bare would let the relay
+                    // discard the message while a crash restores the pre-delete vault generation:
+                    // contact back, message permanently gone (round 8, Codex). ackDurable forces
+                    // the dirty state (the deletion included) durable first; on a non-durable
+                    // flush the straggler stays un-acked (redelivered → re-dropped here).
+                    ackDurable(envelope.id)
                     return@runCatching
                 }
                 // Decrypt advances the receiving ratchet — serialize it with
@@ -1043,7 +1508,9 @@ class MessagingCoordinator(
                 // and never bumps the conversation or fires a notification.
                 ControlPayload.parseReadReceipt(text)?.let { readIds ->
                     readIds.forEach(messages::onPeerRead)
-                    ws.ackMessage(envelope.id)
+                    // The decrypt above advanced the receiving ratchet — flush it durable before
+                    // acking (a non-durable flush leaves the envelope for redelivery). D4 absorbed.
+                    ackDurable(envelope.id)
                     return@runCatching
                 }
                 // Revocation gate: this coroutine may have been parked at
@@ -1055,22 +1522,32 @@ class MessagingCoordinator(
                 // relay drops its copy.
                 if (!acceptingDeliveries) {
                     diag("recv: delivery resumed after teardown — dropped, not published")
-                    ws.ackMessage(envelope.id)
+                    // The parked decrypt advanced the ratchet before teardown; make that advance
+                    // durable before acking so a non-durable flush redelivers rather than losing it.
+                    ackDurable(envelope.id)
                     return@runCatching
                 }
                 val deliveredAtMs = runCatching {
                     Instant.parse(envelope.timestamp).toEpochMilli()
                 }.getOrDefault(System.currentTimeMillis())
-                val conversation = conversations.onIncomingMessage(envelope.senderId)
+                // Resolve the conversation id with a READ (no roster mutation) so a decrypted
+                // message can be DISPLAYED before the activity/unread bump — a decrypt advanced the
+                // ratchet, and messages are RAM-only so displaying can never fail durably. The bump
+                // ([onIncomingMessage]) then runs post-display, so a post-decrypt roster mutation
+                // that later overflows can never leave a ratchet-advanced message unshown while the
+                // dup-ack-drop path acks it away (round 2). onIncomingMessage assigns exactly this
+                // id (existing entry's id, else the sender id for a fresh "Unknown contact").
+                val conversationId = conversations.conversationIdFor(envelope.senderId)
                 // Attachments ride inside ordinary envelopes too (see
                 // AttachmentControlPayload) — recognize them AFTER receipts but
                 // BEFORE treating the payload as text: the blob is redeemed and
                 // decrypted from memory once the placeholder is on screen.
                 AttachmentControlPayload.parse(text)?.let { attachment ->
+                    // DISPLAY FIRST (RAM-only, cannot fail durably), then the roster bump.
                     messages.addIncoming(
                         Message(
                             id = envelope.id,
-                            conversationId = conversation.id,
+                            conversationId = conversationId,
                             text = "",
                             isMine = false,
                             timestampMs = deliveredAtMs,
@@ -1087,25 +1564,39 @@ class MessagingCoordinator(
                             ),
                         ),
                     )
-                    ws.ackMessage(envelope.id)
-                    // Delivery receipt back to the SENDER (peer-routed by the
-                    // relay → their message.delivered). senderId comes from the
-                    // decrypted envelope; the relay never stored it, preserving
-                    // zero-knowledge. Best-effort: a dropped receipt just means
-                    // the sender stays at SENT, never worse.
-                    ws.sendReceived(envelope.id, envelope.senderId)
-                    notificationScheduler.onIncomingMessage(conversation.id)
-                    redeemAttachment(envelope.id, attachment)
+                    // Owe the post-ack side effects BEFORE the roster bump or the flush can fail:
+                    // if either does, the relay's redelivery decrypts to a DUPLICATE (the ratchet
+                    // is already past it) and the ACK_AND_DROP path — not this branch — lands the
+                    // ack; it settles this entry so the one-shot blob still gets redeemed. See
+                    // [PendingPostAckLedger].
+                    pendingPostAck.owe(
+                        envelope.id,
+                        PendingPostAckLedger.Owed(
+                            senderId = envelope.senderId,
+                            conversationId = conversationId,
+                            sendReceipt = true,
+                            notify = true,
+                            attachment = attachment,
+                        ),
+                    )
+                    conversations.onIncomingMessage(envelope.senderId)
+                    // Durable barrier: the decrypt advanced the ratchet. On a non-durable flush,
+                    // skip the ack AND every post-ack side effect (relay redelivers; the owed
+                    // entry above keeps them retryable on the duplicate path). D4 absorbed.
+                    if (!ackDurable(envelope.id)) return@runCatching
+                    // Receipt → notification → blob redemption, from the owed entry.
+                    settlePostAck(envelope.id)
                     return@runCatching
                 }
                 // A control payload this build can't parse (a newer client's,
                 // or a near-miss attachment) — a generic placeholder, NEVER the
                 // raw text, which may carry key material.
                 if (AttachmentControlPayload.isControlPayload(text)) {
+                    // DISPLAY FIRST (RAM-only), then the roster bump — see the attachment branch.
                     messages.addIncoming(
                         Message(
                             id = envelope.id,
-                            conversationId = conversation.id,
+                            conversationId = conversationId,
                             text = "",
                             isMine = false,
                             timestampMs = deliveredAtMs,
@@ -1115,14 +1606,31 @@ class MessagingCoordinator(
                             unsupported = true,
                         ),
                     )
-                    ws.ackMessage(envelope.id)
-                    notificationScheduler.onIncomingMessage(conversation.id)
+                    // Owe the notification before the bump/flush can fail — see the attachment
+                    // branch and [PendingPostAckLedger]. No receipt: this branch never sends one.
+                    pendingPostAck.owe(
+                        envelope.id,
+                        PendingPostAckLedger.Owed(
+                            senderId = envelope.senderId,
+                            conversationId = conversationId,
+                            sendReceipt = false,
+                            notify = true,
+                            attachment = null,
+                        ),
+                    )
+                    conversations.onIncomingMessage(envelope.senderId)
+                    // Durable barrier: the decrypt advanced the ratchet. On a non-durable flush,
+                    // skip the ack and the notification (relay redelivers; the owed entry above
+                    // keeps it retryable on the duplicate path). D4 absorbed.
+                    if (!ackDurable(envelope.id)) return@runCatching
+                    settlePostAck(envelope.id)
                     return@runCatching
                 }
+                // DISPLAY FIRST (RAM-only), then the roster bump — see the attachment branch.
                 messages.addIncoming(
                     Message(
                         id = envelope.id,
-                        conversationId = conversation.id,
+                        conversationId = conversationId,
                         text = text,
                         isMine = false,
                         timestampMs = deliveredAtMs,
@@ -1131,17 +1639,75 @@ class MessagingCoordinator(
                         state = MessageState.DELIVERED,
                     ),
                 )
-                // Ack AFTER successful decrypt + store: this is what makes
-                // the server delete its copy (store-and-forward, zero
-                // retention).
-                ws.ackMessage(envelope.id)
-                // Delivery receipt to the SENDER (peer-routed → their
-                // message.delivered). See the attachment branch above for the
-                // zero-knowledge rationale.
-                ws.sendReceived(envelope.id, envelope.senderId)
-                // Content-free notification: always just "New message". The
-                // scheduler rate-limits + re-fires it per conversation.
-                notificationScheduler.onIncomingMessage(conversation.id)
+                // Owe the receipt + notification before the bump/flush can fail — see the
+                // attachment branch and [PendingPostAckLedger].
+                pendingPostAck.owe(
+                    envelope.id,
+                    PendingPostAckLedger.Owed(
+                        senderId = envelope.senderId,
+                        conversationId = conversationId,
+                        sendReceipt = true,
+                        notify = true,
+                        attachment = null,
+                    ),
+                )
+                conversations.onIncomingMessage(envelope.senderId)
+                // Ack AFTER successful decrypt + store AND a durable ratchet reseal: the ack is
+                // what makes the server delete its copy (store-and-forward, zero retention), so it
+                // must never outrun the receiving-ratchet advance reaching disk. On a non-durable
+                // flush, skip the ack and the receipt (relay redelivers; the owed entry above
+                // keeps them retryable on the duplicate path). D4 absorbed.
+                if (!ackDurable(envelope.id)) return@runCatching
+                // Receipt → notification, from the owed entry (see settlePostAck for the
+                // zero-knowledge receipt rationale).
+                settlePostAck(envelope.id)
+            }.onFailure { e ->
+                // The decision (rethrow / ack-drop / diagnose / swallow) is factored into the pure
+                // [classifyRecvFailure] so it is host-testable without a live socket; the side
+                // effects (ack, diag, rethrow) stay here. Ordering is load-bearing — see that fn.
+                when (classifyRecvFailure(e)) {
+                    RecvFailureAction.RETHROW -> throw e
+                    RecvFailureAction.ACK_AND_DROP -> {
+                        // A redelivery of a message we already consumed: decrypt threw
+                        // DuplicateMessageException. A forward ratchet can NEVER re-derive it, so
+                        // "skip the ack and rely on redelivery" would loop FOREVER (redeliver → dup →
+                        // no ack → resend), surviving restart — hence we ack so the relay drops its
+                        // copy, then drop.
+                        // Round 7 — flush-before-ack even for a duplicate. DuplicateMessageException
+                        // does NOT prove the FIRST delivery's receiving-ratchet advance is DURABLE:
+                        // the relay can redeliver M while that advance is still only in RAM (the
+                        // coalescing window). So reseal DURABLE before acking, exactly like the normal
+                        // delivery path; on a non-durable flush do NOT ack (ackDurable diag'd it) —
+                        // the relay redelivers → dup again → retry until durable, so a crash can never
+                        // drop M from the relay while the ratchet is still short of it. This remains
+                        // the net that closes the durable-but-unacked loop: a transient flush the
+                        // coalesced reseal later persisted, or a crash after the reseal reached disk
+                        // but before the ack, both resolve to a durable ack here on redelivery.
+                        // No slot/credential data logged; the envelope id is an opaque relay handle.
+                        if (ackDurable(envelope.id)) {
+                            // Settle any post-ack side effects the FIRST delivery still owes for
+                            // this envelope (it displayed the message, then its roster bump threw
+                            // at capacity or its flush was non-durable). This is what keeps an
+                            // attachment's one-shot blob redeemable — without it the placeholder
+                            // stays LOADING forever (round 7, Codex :1237) — and delivers the owed
+                            // receipt + notification. Settling is atomic, so the normal path and
+                            // this one can never both run the effects for the same envelope.
+                            settlePostAck(envelope.id)
+                            diag("recv: duplicate (already consumed) — flushed, acked + dropped")
+                        }
+                    }
+                    RecvFailureAction.DIAGNOSE_AT_CAPACITY ->
+                        // Spec §4: surface a vault-at-capacity overflow as a non-fatal DIAGNOSTIC
+                        // rather than swallowing it. The inbound ratchet persist (facade
+                        // runtime.mutate → encode) threw VaultCapacityException, so the message was
+                        // correctly NEVER acked (fail-closed) and the relay will redeliver — but
+                        // without this the user gets no signal that the vault is full and how to
+                        // recover (delete data).
+                        diag("recv: vault at capacity — inbound left un-acked (relay redelivers); " +
+                            "free space by deleting data")
+                    // Other failures keep their existing swallow-and-redeliver behaviour.
+                    RecvFailureAction.SWALLOW -> Unit
+                }
             }
         }
     }
@@ -1227,12 +1793,51 @@ class MessagingCoordinator(
     override fun onPreKeyLow(remaining: Int) {
         scope.launch(confined) {
             runCatching {
-                api.uploadPreKeys(signal.generateOneTimePreKeys())
+                val oneTimePreKeys = signal.generateOneTimePreKeys()
+                // Prekey durability barrier (see the register path): the top-up just STORED the new
+                // one-time prekeys' PRIVATE halves — reseal them DURABLE before publishing their
+                // PUBLIC halves. On a non-durable flush do NOT upload; the next low-prekey signal
+                // RE-SERVES this same stored batch (upload-pending marker, round 8) rather than
+                // generating another — a fresh batch per failure would pile orphaned private
+                // halves into the fixed-capacity vault. Publishing publics whose privates a crash
+                // could roll back would hand peers bundles we can't complete X3DH for.
+                if (flushBeforePreKeyPublish {
+                        diag("prekey: top-up reseal not durable — upload skipped, retries on next low signal")
+                    }
+                ) {
+                    // TWO-PHASE attempted marker (round 8, Codex): mark the batch ATTEMPTED and
+                    // reseal that durable BEFORE the request leaves — a lost response / crash
+                    // after the upload must never re-serve possibly-consumed ids (the relay
+                    // re-inserts a consumed id). The ordering keeps the flush-gated skip above
+                    // re-servable: the flag is only ever durable for a batch whose request was
+                    // genuinely about to exist. A non-durable second flush skips the upload too
+                    // (the RAM-only flag rolls back on crash → safe re-serve; in-process it
+                    // conservatively generates a fresh batch next signal).
+                    signal.markOneTimePreKeyUploadAttempted()
+                    if (flushBeforePreKeyPublish {
+                            diag("prekey: attempted-marker reseal not durable — upload deferred")
+                        }
+                    ) {
+                        api.uploadPreKeys(oneTimePreKeys)
+                        signal.confirmOneTimePreKeysUploaded()
+                    }
+                }
             }
         }
     }
 
     override fun onSessionRevoked() {
+        // A revoke must NOT clear tokens or tear the session down while a delete is PENDING (round
+        // 16, R15-P2). "Pending" is the DURABLE intent marker's lifetime — from its durable write
+        // until a confirmed destroy() retires it — which persists across DEFINITE_FAILURE /
+        // AMBIGUOUS / confirmed-not-durable exits AND process restart, long after this coroutine
+        // ends. Stripping the vault-backed tokens in that window would strand a completed- (or
+        // ambiguously-) deleted account: the next-unlock reconcile could no longer authenticate the
+        // idempotent 404. `deleteInFlight` additionally covers the sub-window before the intent
+        // marker is durable. The delete flow owns teardown (CONFIRMED → destroy; not-confirmed →
+        // keep the session, a later 401 / reconcile handles the stale session), so during a pending
+        // delete this revoke is a no-op. Server-side deletion itself commonly triggers this revoke.
+        if (deleteInFlight || intentMarkerPresent()) return
         // Fast, thread-safe teardown on the socket callback thread: stop the
         // relink loop, drop tokens, and — BEFORE the UI is bounced to the gate —
         // synchronously cancel every armed reminder job. Re-fire jobs run on
@@ -1288,5 +1893,259 @@ class MessagingCoordinator(
         const val BASE_BACKOFF_MS = 1_000L
         const val MAX_BACKOFF_MS = 60_000L
         const val MAX_BACKOFF_SHIFT = 6
+    }
+}
+
+/** The action [onMessageDeliver] takes when a post-decrypt inbound branch throws. */
+internal enum class RecvFailureAction {
+    /** Cooperative cancellation — rethrow so the scope unwinds; never ack. */
+    RETHROW,
+
+    /**
+     * A redelivery of an already-consumed message ([DuplicateMessageException]) — flush-before-ack
+     * (round 7: a dup does NOT prove the first delivery's ratchet advance is durable) so the relay
+     * drops its copy only once durable, then drop. Recovery by redelivery is impossible (forward
+     * ratchet), so this is the net that breaks the infinite-redelivery loop for a durable-but-unacked
+     * advance — resolving to a durable ack on redelivery once the coalesced reseal has landed.
+     */
+    ACK_AND_DROP,
+
+    /** Vault at capacity ([VaultCapacityException]) — fail-closed (no ack) + a recovery diagnostic. */
+    DIAGNOSE_AT_CAPACITY,
+
+    /** Any other failure — swallow; the relay redelivers (behaviour unchanged from pre-D2c). */
+    SWALLOW,
+}
+
+/**
+ * Classify a post-decrypt inbound failure. Ordering is LOAD-BEARING: cancellation is checked FIRST
+ * (a teardown must unwind, never be folded into a lower branch), then the already-consumed duplicate
+ * (checked BEFORE capacity because a dup is terminal regardless of vault fullness — and because it
+ * is the net that closes the durable-but-unacked loop that a transient/capacity flush failure can
+ * open via VaultSession's coalesced background reseal). Extracted pure so the decision is host-
+ * testable without a live socket; the side effects live in [onMessageDeliver].
+ */
+internal fun classifyRecvFailure(e: Throwable): RecvFailureAction = when {
+    e is CancellationException -> RecvFailureAction.RETHROW
+    e is DuplicateMessageException -> RecvFailureAction.ACK_AND_DROP
+    e is VaultCapacityException -> RecvFailureAction.DIAGNOSE_AT_CAPACITY
+    else -> RecvFailureAction.SWALLOW
+}
+
+/**
+ * Thrown to fail-and-retry a boot attempt whose pre-publish prekey reseal ([flushBeforePreKeyPublish])
+ * was NOT durable. It aborts the attempt BEFORE api.register publishes any public prekey half — the
+ * boot loop's runCatching maps it to a retry with backoff, so a later flush that lands then registers.
+ * NOT a [CancellationException]: a real teardown still unwinds; this only defers a publish.
+ */
+internal class PreKeyFlushNotDurableException :
+    Exception("prekey reseal not confirmed durable — publication deferred to the next boot attempt")
+
+/** Attempts (incl. the first) [flushThenAck] makes at a TRANSIENT durable-flush blip. */
+internal const val FLUSH_MAX_ATTEMPTS = 3
+
+/** Background durability-retry attempts for an APPLIED_UNCONFIRMED contact delete (1s/2s/…). */
+internal const val FLUSH_RETRY_ATTEMPTS = 5
+
+/** Linear backoff step between transient retries — attempt N waits N × this (~50/100 ms). */
+internal const val FLUSH_RETRY_BASE_MS = 50L
+
+/**
+ * A flush failure worth RETRYING in-line rather than deferring to the redelivery + duplicate path.
+ * Only a genuinely transient durability blip qualifies: an unconfirmed image write
+ * ([VaultImageException.NotDurable]) or a raw disk [IOException], which usually clears on the next
+ * attempt. A full vault ([VaultCapacityException]) and a closed runtime (a plain
+ * [IllegalStateException]) are NOT transient — they must fail-closed without an ack (a later encode
+ * that fits, or a fresh session, resolves them, and the duplicate handler backstops any advance
+ * that persisted meanwhile). NOTE [VaultCapacityException] is itself an [IllegalStateException], so
+ * this deliberate allow-list (NOT an IllegalStateException deny-list) keeps capacity out of retry.
+ */
+internal fun isTransientFlushFailure(t: Throwable): Boolean =
+    t is VaultImageException.NotDurable || t is IOException
+
+/**
+ * Flush-before-ack decision (D2c, absorbs D4), extracted so it is host-testable without a live
+ * socket. Runs the durable reseal barrier [flush] and only THEN [ack]s the envelope; if [flush]
+ * throws (NotDurable / IO / runtime closed or at-capacity) the ratchet advance did NOT reach disk,
+ * so it does NOT ack — it invokes [onNotDurable] (diagnostic) and returns false, leaving the
+ * inbound un-acked so the relay redelivers (flush-before-ack window=0, zero acked loss). A
+ * CancellationException is rethrown so cooperative cancellation still unwinds. The default no-op
+ * [flush] on the non-vault path never throws, so the ack always fires there — behaviour-identical
+ * to the pre-D2c immediate ack.
+ *
+ * Round 4: a TRANSIENT flush failure ([isTransientFlushFailure]) is retried up to [maxAttempts]
+ * times with a small [backoff] before giving up. A brief disk hiccup usually clears at once,
+ * resolving to durable + ack IN-LINE rather than deferring to the wasteful redelivery + duplicate-
+ * decrypt path (which is correct — the duplicate handler ack-drops it — but costs a relay round
+ * trip). Non-transient failures (capacity, closed) are NOT retried: they fail-closed immediately,
+ * exactly as before, and the receiving-ratchet advance that VaultSession's coalesced background
+ * reseal may still persist is backstopped by the DuplicateMessageException handler on redelivery.
+ */
+internal suspend fun flushThenAck(
+    envelopeId: String,
+    flush: suspend () -> Unit,
+    ack: (String) -> Unit,
+    onNotDurable: () -> Unit,
+    maxAttempts: Int = FLUSH_MAX_ATTEMPTS,
+    backoff: suspend (attempt: Int) -> Unit = { attempt -> delay(FLUSH_RETRY_BASE_MS * attempt) },
+): Boolean {
+    var attempt = 1
+    while (true) {
+        try {
+            flush()
+        } catch (c: CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            // Retry only a transient blip, and only while attempts remain; a full vault or a
+            // closed runtime falls straight through to the fail-closed no-ack path below.
+            if (attempt < maxAttempts && isTransientFlushFailure(t)) {
+                backoff(attempt)
+                attempt++
+                continue
+            }
+            onNotDurable()
+            return false
+        }
+        ack(envelopeId)
+        return true
+    }
+}
+
+/**
+ * Outbound durable barrier (D2c round 2; round 6 split out the send). signal.encrypt advances the
+ * SENDING ratchet (coalesced reseal via the vault); this reseals it DURABLE via [flush] and reports
+ * whether that flush confirmed — the CALLER then runs its NON-SUSPENDING `contactExists → sendMessage`
+ * tail iff this returned true. Splitting the flush OUT of the send is load-bearing: [flush] SUSPENDS
+ * on its transient-retry backoff, so it must run BEFORE the check→send tail, never between the check
+ * and the send — otherwise a queued deleteContact could interleave on the confined worker and publish
+ * ciphertext to (or resurface plaintext for) a just-deleted contact, breaking delete-atomicity. The
+ * durable-before-handoff crash guarantee is unchanged: [flush] is still after encrypt() and before
+ * the send, so a crash between the eventual hand-off and the background reseal can never roll the
+ * sending ratchet back and re-encrypt a later message at the SAME chain index (key/nonce reuse — a
+ * forward-secrecy break).
+ *
+ * Returns whether the ratchet advance was confirmed DURABLE. false → the caller must NOT send (marks
+ * the message failed / queues it for retry); the in-memory advance the coalesced reseal may still
+ * persist leaves at worst a benign skipped index, which the recipient's ratchet tolerates. A
+ * [CancellationException] is rethrown so cooperative cancellation unwinds. The default no-op [flush]
+ * on the non-vault path never throws, so it always returns true — behaviour-identical to the pre-D2c
+ * immediate send. Transient blips ([isTransientFlushFailure]) are retried up to [maxAttempts] exactly
+ * like the inbound barrier; capacity / closed fail-closed. Extracted top-level (mirroring
+ * [flushThenAck]) so the ordering + fail-closed decision is host-testable without a live socket.
+ */
+internal suspend fun flushSendRatchet(
+    flush: suspend () -> Unit,
+    onNotDurable: () -> Unit,
+    maxAttempts: Int = FLUSH_MAX_ATTEMPTS,
+    backoff: suspend (attempt: Int) -> Unit = { attempt -> delay(FLUSH_RETRY_BASE_MS * attempt) },
+): Boolean {
+    var attempt = 1
+    while (true) {
+        try {
+            flush()
+        } catch (c: CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            // Retry only a transient blip while attempts remain; capacity / closed fail closed and
+            // the caller does NOT send — the message stays un-sent for its retry.
+            if (attempt < maxAttempts && isTransientFlushFailure(t)) {
+                backoff(attempt)
+                attempt++
+                continue
+            }
+            onNotDurable()
+            return false
+        }
+        return true
+    }
+}
+
+/**
+ * Outcome of the vault atomic contact-delete seal (ZitroneApp's `deleteContactAtomically`). Public
+ * because it is the return type of the public [MessagingCoordinator] constructor's vault-delete hook.
+ */
+enum class ContactDeleteOutcome {
+    /** The mutate applied the removal AND the flush confirmed it durable. */
+    DURABLE,
+
+    /**
+     * The mutate applied the removal (the contact's crypto is gone from live state, NEVER rolled
+     * back) but the durable flush was UNCONFIRMED — it persists on the next successful flush.
+     */
+    APPLIED_UNCONFIRMED,
+
+    /**
+     * The runtime was CLOSED before the mutate applied (a revocation / forced logout ran
+     * runtime.close() first): the removal NEVER touched live state, so the delete did not take and
+     * the contact reappears on the next unlock. Distinct from [APPLIED_UNCONFIRMED] — reporting it
+     * as an applied removal would falsely claim the contact is gone.
+     */
+    NOT_APPLIED,
+}
+
+/**
+ * Map the seal's durable result + whether its mutate applied to a [ContactDeleteOutcome]. Extracted
+ * so the closed-runtime (NOT_APPLIED) vs unconfirmed-flush (APPLIED_UNCONFIRMED) distinction is
+ * host-testable. A `durable` result implies the mutate applied.
+ */
+internal fun contactDeleteOutcome(durable: Boolean, mutateApplied: Boolean): ContactDeleteOutcome =
+    when {
+        durable -> ContactDeleteOutcome.DURABLE
+        mutateApplied -> ContactDeleteOutcome.APPLIED_UNCONFIRMED
+        else -> ContactDeleteOutcome.NOT_APPLIED
+    }
+
+/**
+ * The post-ack side effects (delivery receipt / notification / attachment redemption) a display
+ * branch still OWES for a shown-but-not-yet-acked envelope, keyed by envelope id (round 7,
+ * Codex :1237).
+ *
+ * A display branch registers its owed entry via [owe] immediately after
+ * [MessageRepository.addIncoming] — BEFORE the roster bump or the durable flush, either of which
+ * can fail (a `VaultCapacityException` from the bump, or a non-durable flush). If one does, the
+ * envelope stays un-acked and the relay redelivers — but the redelivery decrypts to
+ * `DuplicateMessageException` (the ratchet is already past it), so the duplicate ACK_AND_DROP
+ * path, not the display branch, is what finally lands the durable ack. [settle] hands it the owed
+ * entry so the one-shot attachment blob still gets redeemed (instead of a placeholder stuck
+ * LOADING forever), the sender still sees DELIVERED, and the notification still fires. [settle]
+ * is an atomic remove: exactly ONE path runs the effects for an envelope.
+ *
+ * [dropContact] discards a deleted contact's owed entries — its redeliveries hit the
+ * deleted-contact drop (a bare ack, never the duplicate path), and no effect may fire for a
+ * deleted contact.
+ *
+ * In-memory only, like the messages themselves: after a process death the placeholder is gone
+ * too, so nothing is left to owe (the RAM-only durable-before-ack residual documented in round 4).
+ */
+internal class PendingPostAckLedger {
+    internal data class Owed(
+        val senderId: String,
+        val conversationId: String,
+        val sendReceipt: Boolean,
+        val notify: Boolean,
+        val attachment: AttachmentControlPayload.Attachment?,
+    )
+
+    private val owed = ConcurrentHashMap<String, Owed>()
+
+    /** Register the side effects [envelopeId]'s display branch owes; overwrites any stale entry. */
+    fun owe(envelopeId: String, entry: Owed) {
+        owed[envelopeId] = entry
+    }
+
+    /** Atomically claim [envelopeId]'s owed entry, or null if none/already settled. */
+    fun settle(envelopeId: String): Owed? = owed.remove(envelopeId)
+
+    /** Discard every entry owed for [senderId] (contact deleted — effects must not fire). */
+    fun dropContact(senderId: String) {
+        owed.entries.removeIf { it.value.senderId == senderId }
+    }
+
+    /** Owed envelope ids (test observability). */
+    fun pending(): Set<String> = owed.keys.toSet()
+
+    /** Session teardown: discard every owed entry (no effect may cross an identity switch). */
+    fun clear() {
+        owed.clear()
     }
 }

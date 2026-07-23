@@ -59,6 +59,39 @@ interface ZitroneSignalStore : SignalProtocolStore {
 
     fun setSignedPreKeyCreatedAt(value: Long)
 
+    /**
+     * The signed-prekey id whose PRIVATE half is stored but whose PUBLIC half has not been
+     * confirmed uploaded to the relay yet, or 0 for none. Set at generation, cleared only after
+     * a confirmed register/upload — this is what makes a flush-gated "upload skipped" genuinely
+     * retryable instead of silently lost (generation already bumped [signedPreKeyCreatedAt], so
+     * the age gate alone would never retry).
+     */
+    fun pendingSignedPreKeyUploadId(): Int
+
+    fun setPendingSignedPreKeyUploadId(value: Int)
+
+    /**
+     * Ids of one-time prekeys whose PRIVATE halves are stored but whose PUBLIC halves have not
+     * been confirmed uploaded, empty for none. Same retry contract as
+     * [pendingSignedPreKeyUploadId]; also bounds the orphaned-batch growth in the fixed-capacity
+     * vault — a retry re-serves THIS batch instead of generating a fresh one.
+     */
+    fun pendingOneTimePreKeyUploadIds(): List<Int>
+
+    fun setPendingOneTimePreKeyUploadIds(value: List<Int>)
+
+    /**
+     * Whether the pending one-time batch's upload was ATTEMPTED (the request left the device),
+     * default false. Load-bearing safety split for the retry: a batch whose upload was never
+     * attempted is safe to RE-SERVE (the relay never saw the ids); one whose upload was attempted
+     * but not confirmed must NOT be re-served — the relay may have committed it and peers may
+     * already have consumed ids, and the relay's insert re-creates a consumed id
+     * (`ON CONFLICT DO NOTHING` + consume-by-DELETE), serving the same one-time prekey twice.
+     */
+    fun oneTimePreKeyUploadAttempted(): Boolean
+
+    fun setOneTimePreKeyUploadAttempted(value: Boolean)
+
     // -- contact teardown / repair / wipe -------------------------------------
 
     /**

@@ -5,6 +5,7 @@
 
 package com.zitrone.app.data
 
+import com.zitrone.app.ContactDeleteOutcome
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -106,6 +107,16 @@ class ConversationRepository(
 
     fun findByContact(contactId: String): Conversation? =
         _conversations.value.firstOrNull { it.contactId == contactId }
+
+    /**
+     * The conversation id an inbound message from [contactId] belongs to, resolved with a pure READ
+     * — no activity bump, no persisted entry created. Lets the coordinator DISPLAY a decrypted
+     * message before the (vault-mutating) [onIncomingMessage] bump, so a post-decrypt roster
+     * overflow can never leave a ratchet-advanced message unshown. Matches the id [onIncomingMessage]
+     * assigns: an existing entry's id, else the [contactId] itself for a fresh "Unknown contact".
+     */
+    fun conversationIdFor(contactId: String): String =
+        findByContact(contactId)?.id ?: contactId
 
     @Synchronized
     fun upsert(conversation: Conversation) {
@@ -243,6 +254,61 @@ class ConversationRepository(
 
     private fun serializeTombstones(): String =
         JSONObject().apply { tombstones.forEach { (id, at) -> put(id, at) } }.toString()
+
+    /**
+     * Vault atomic contact-delete under THIS repo's monitor — the SINGLE serialization point that
+     * makes a delete compose atomically with every other roster write (all `@Synchronized` here,
+     * all persisting through the same `runtime.mutate`). The delete's crypto+roster+tombstone must
+     * seal in ONE `runtime.mutate` (VaultSignalProtocolStore :222-231); doing that seal, and
+     * reconciling this in-memory roster to it, WITHOUT releasing the monitor is what closes the
+     * resurrection/loss race the pre-D2c snapshot-then-commit split left open: no concurrent
+     * upsert / markConversationRead / setDisplayName / setVerified can interleave to re-seal the
+     * removed entry (durable resurrection) or overwrite it with a stale full-roster snapshot
+     * (durable loss of a concurrent add).
+     *
+     * Applies the tombstone in memory, derives the post-deletion roster + tombstone blobs from
+     * LIVE state, hands them to [seal] (which folds them plus the crypto-record removal into one
+     * `runtime.mutate` + one `flushBeforeAck`), then drops the roster entry from memory to match
+     * the just-sealed generation. The roster blob is null when [readOnly] (an unreadable stored
+     * blob is never overwritten — matches [persist] / [removeDurably]).
+     *
+     * The in-memory removal + tombstone are RETAINED regardless of [seal]'s result — a delete that
+     * reclaimed crypto is never rolled back (the crypto is already gone from live state and will
+     * persist on the next flush). A `false` return therefore means only that the SYNCHRONOUS
+     * durable flush did not confirm, NOT that the contact was kept. Peer-burn must run BEFORE this
+     * call (while the entry still resolves the peer); it only reads the roster, so it holds no
+     * monitor and does not race the seal.
+     */
+    @Synchronized
+    fun deleteContactDurably(
+        conversationId: String,
+        contactId: String,
+        at: Long,
+        seal: (rosterJson: String?, tombstonesJson: String) -> ContactDeleteOutcome,
+    ): ContactDeleteOutcome {
+        tombstones.entries.removeAll { at - it.value >= TOMBSTONE_WINDOW_MS }
+        val previousTombstone = tombstones.put(contactId, at)
+        val tombstonesJson = serializeTombstones()
+        val rosterJson =
+            if (readOnly) null else serialize(_conversations.value.filterNot { it.id == conversationId })
+        val outcome = seal(rosterJson, tombstonesJson)
+        if (outcome == ContactDeleteOutcome.NOT_APPLIED) {
+            // The seal never touched live state (closed-runtime teardown race): the contact is
+            // STILL PRESENT and reappears on the next unlock, so the RAM state must say so too —
+            // keep the conversation row and take back the tombstone (round 8: removing the row
+            // while the caller's outcome gate preserves typing/receipt/notification state would
+            // desync the UI both ways, and a live tombstone would drop-before-decrypt inbound
+            // messages from a contact that still exists).
+            if (previousTombstone != null) {
+                tombstones[contactId] = previousTombstone
+            } else {
+                tombstones.remove(contactId)
+            }
+        } else {
+            _conversations.value = _conversations.value.filterNot { it.id == conversationId }
+        }
+        return outcome
+    }
 
     @Synchronized
     fun clearAll() {

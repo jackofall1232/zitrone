@@ -5,7 +5,7 @@
 
 package com.zitrone.app.data
 
-import com.zitrone.app.crypto.EncryptedSignalProtocolStore
+import com.zitrone.app.crypto.ZitroneSignalStore
 import com.zitrone.app.crypto.LemonDropOneShot
 import com.zitrone.app.crypto.SafetyNumber
 import com.zitrone.app.net.ApiClient
@@ -24,14 +24,16 @@ import kotlin.coroutines.cancellation.CancellationException
  *    decrypt (key material is readable pre-gate, like the rest of the
  *    encrypted store), but it deletes nothing, burns nothing, and stores
  *    nothing — dismissing at this point leaves the drop fully re-scannable.
- *  - [deliver] runs only after the biometric gate passed and the plaintext is
- *    about to render: it consumes the one-time prekey (single-use by design)
- *    and best-effort burns the drop, the exact side-effect pair the web
- *    client fires at redeem (store.ts redeemQrDrop). Burn failure is
- *    swallowed — TTL is the backstop, same as web.
+ *  - [deliverDurablyCommit] runs only after the biometric gate passed and the
+ *    plaintext is about to render: it consumes the one-time prekey (single-use
+ *    by design) and reseals that consumption durable; the caller renders and
+ *    best-effort [burn]s the drop ONLY on a confirmed commit — the same
+ *    side-effect pair the web client fires at redeem (store.ts redeemQrDrop),
+ *    durability-gated. Burn failure is swallowed — TTL is the backstop, same
+ *    as web.
  *
  * PRIVATE-SCALAR BRIDGE — the deliberate, scoped exception: [recipientKeys]
- * below pulls raw private scalars out of [EncryptedSignalProtocolStore]
+ * below pulls raw private scalars out of the [ZitroneSignalStore]
  * (identity, signed prekeys, one consumed one-time prekey), which ordinary
  * code must never do — SignalProtocolManager's contract is that private key
  * bytes never leave the store. The exception exists because a lemon drop is
@@ -42,9 +44,16 @@ import kotlin.coroutines.cancellation.CancellationException
  */
 class LemonDropRedeemer(
     private val api: ApiClient,
-    private val signalStore: EncryptedSignalProtocolStore,
+    private val signalStore: ZitroneSignalStore,
     private val conversations: ConversationRepository,
     private val sodium: LemonDropOneShot.SodiumOps,
+    /**
+     * Durable-flush barrier sealing the prekey consumption (a coalesced vault mutation) before
+     * the plaintext renders or [burn] hands the relay its shred order — see
+     * [deliverDurablyCommit]. Injected like the coordinator's flush-before-ack (production:
+     * `VaultRuntime::flushBeforeAck`); default no-op for callers without a vault runtime.
+     */
+    private val flushDurable: suspend () -> Unit = {},
 ) {
 
     /** Outcome of the pre-unlock probe phase. */
@@ -156,15 +165,43 @@ class LemonDropRedeemer(
     }
 
     /**
-     * Delivery side effects, fired when (and only when) the plaintext renders:
-     * delete the consumed one-time prekey (single-use — same consumption the
-     * web client does at redeem), then best-effort burn so the relay shreds
-     * its only copy now instead of at TTL.
+     * Outcome of [deliverDurablyCommit], run AFTER the plaintext has already rendered
+     * (render-gated consume, round 13). Only [DURABLE] authorises the relay [burn]; the APPLIED/
+     * NOT_APPLIED distinction now governs only the size of the double-open residual (a
+     * still-consumable prekey means the already-seen drop is re-openable behind a fresh biometric),
+     * never a loss — the message was shown before any consume was attempted.
      */
-    fun deliver(pending: PendingLemonDrop) {
-        pending.usedOneTimePrekeyId?.let { id ->
-            runCatching { signalStore.removePreKey(id) }
-        }
+    enum class DeliveryCommit {
+        /** Consumption confirmed on disk — [burn] the relay copy. */
+        DURABLE,
+
+        /**
+         * The prekey removal APPLIED to live state but the durable flush did not confirm (the
+         * coalesced background reseal typically persists it shortly after). Withhold [burn] until
+         * durable so the relay handoff never outruns disk.
+         */
+        APPLIED_UNCONFIRMED,
+
+        /** The removal never touched live state (closed-runtime teardown race): the prekey is
+         *  intact, so the already-shown drop is re-openable on a re-scan (bounded double-open). */
+        NOT_APPLIED,
+    }
+
+    /**
+     * Commit the delivery: consume the one-time prekey and reseal that consumption DURABLE — the
+     * same flush-before-handoff rule as every other handoff after a vault mutation (D2c round 8).
+     * Called by the caller ONLY after the plaintext has rendered (render-gated consume, round 13),
+     * so a non-durable/non-applied outcome is a bounded double-open of an already-seen message,
+     * never a loss. Fires nothing itself; the caller [burn]s only on [DeliveryCommit.DURABLE].
+     * Idempotent: a re-commit for an already-consumed id no-ops the removal and re-runs the flush.
+     * A drop that used no one-time prekey has nothing to persist → [DeliveryCommit.DURABLE].
+     */
+    suspend fun deliverDurablyCommit(pending: PendingLemonDrop): DeliveryCommit {
+        val id = pending.usedOneTimePrekeyId ?: return DeliveryCommit.DURABLE
+        return classifyDeliveryCommit(
+            consume = { signalStore.removePreKey(id) },
+            flush = flushDurable,
+        )
     }
 
     /** Like [runCatching] but never swallows a coroutine [CancellationException]
@@ -228,5 +265,39 @@ class LemonDropRedeemer(
                 }
             },
         )
+    }
+}
+
+/**
+ * The delivery-commit decision, extracted top-level (mirroring `flushThenAck` /
+ * `sealDurableOrFalse`) so the applied/durable split — the load-bearing part of
+ * [LemonDropRedeemer.deliverDurablyCommit] — is host-testable without an ApiClient:
+ * a [consume] throw means the mutate never applied (closed-runtime teardown →
+ * [LemonDropRedeemer.DeliveryCommit.NOT_APPLIED]); a [flush] throw AFTER an applied consume is
+ * [LemonDropRedeemer.DeliveryCommit.APPLIED_UNCONFIRMED] — never "unapplied", because the removal
+ * is scheduled (or already sealed). Round 13 is render-GATED: the caller has ALREADY rendered
+ * before invoking this, so the outcome governs only the relay [burn] (fired only on [DURABLE]) and
+ * the size of the double-open residual (a still-consumable prekey ⇒ the already-seen drop is
+ * re-openable), never a loss. [CancellationException] propagates from either phase (cooperative
+ * teardown, never folded into an outcome).
+ */
+internal suspend fun classifyDeliveryCommit(
+    consume: () -> Unit,
+    flush: suspend () -> Unit,
+): LemonDropRedeemer.DeliveryCommit {
+    try {
+        consume()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        return LemonDropRedeemer.DeliveryCommit.NOT_APPLIED
+    }
+    return try {
+        flush()
+        LemonDropRedeemer.DeliveryCommit.DURABLE
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        LemonDropRedeemer.DeliveryCommit.APPLIED_UNCONFIRMED
     }
 }

@@ -30,18 +30,27 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.zitrone.app.ui.components.BurnParticles
@@ -51,6 +60,7 @@ import com.zitrone.app.ui.theme.BackgroundElevated
 import com.zitrone.app.ui.theme.BackgroundPrimary
 import com.zitrone.app.ui.theme.BubbleReceivedShape
 import com.zitrone.app.ui.theme.BubbleSentShape
+import com.zitrone.app.ui.theme.ErrorRed
 import com.zitrone.app.ui.theme.Lemon
 import com.zitrone.app.ui.theme.PillShape
 import com.zitrone.app.ui.theme.Rind
@@ -84,12 +94,35 @@ private val Slides = listOf(
     ),
 )
 
-/** Full-screen card stack, swipe through (design_system.screens.onboarding). */
+/**
+ * Full-screen card stack, then the vault passphrase-creation step
+ * (design_system.screens.onboarding). The 4-slide pager is unchanged; "Get started"
+ * / "Skip" advance to passphrase creation rather than completing — a vault-only
+ * install has no app without a created vault.
+ *
+ * @param onCreateVault invoked with the confirmed passphrase; the caller runs the
+ *   off-main create (showing [creating]) and surfaces any retryable failure via [createError].
+ */
 @Composable
 fun OnboardingScreen(
-    onDone: () -> Unit,
+    onCreateVault: (passphrase: String) -> Unit,
+    creating: Boolean,
+    createError: String?,
     modifier: Modifier = Modifier,
 ) {
+    // rememberSaveable: a rotation on the passphrase slide must not kick the user back to the
+    // first onboarding slide (round 11, Gemini).
+    var showPassphrase by rememberSaveable { mutableStateOf(false) }
+    if (showPassphrase) {
+        PassphraseSetupStep(
+            onCreate = onCreateVault,
+            creating = creating,
+            createError = createError,
+            modifier = modifier,
+        )
+        return
+    }
+
     val pagerState = rememberPagerState(pageCount = { Slides.size })
     val scope = rememberCoroutineScope()
 
@@ -164,13 +197,13 @@ fun OnboardingScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = onDone) {
+            TextButton(onClick = { showPassphrase = true }) {
                 Text("Skip", color = TextSecondary)
             }
             Button(
                 onClick = {
                     if (pagerState.currentPage == Slides.lastIndex) {
-                        onDone()
+                        showPassphrase = true
                     } else {
                         scope.launch {
                             pagerState.animateScrollToPage(pagerState.currentPage + 1)
@@ -183,6 +216,111 @@ fun OnboardingScreen(
                 ),
             ) {
                 Text(if (pagerState.currentPage == Slides.lastIndex) "Get started" else "Next")
+            }
+        }
+    }
+}
+
+/** Minimum passphrase length — the only composition rule (no strength-meter theater). */
+private const val MIN_PASSPHRASE_LEN = 8
+
+/**
+ * Vault passphrase creation. Two fields (passphrase + confirm), the minimum-length gate,
+ * and the key-responsibility line: this passphrase is UNRECOVERABLE. Create is disabled
+ * until the two match at [MIN_PASSPHRASE_LEN]+ and while [creating]; [createError] surfaces
+ * a retryable failure (e.g. a non-durable write) without ever bricking.
+ */
+@Composable
+private fun PassphraseSetupStep(
+    onCreate: (passphrase: String) -> Unit,
+    creating: Boolean,
+    createError: String?,
+    modifier: Modifier = Modifier,
+) {
+    var passphrase by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
+    val longEnough = passphrase.length >= MIN_PASSPHRASE_LEN
+    val matches = passphrase == confirm
+    val canCreate = longEnough && matches && !creating
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(BackgroundPrimary)
+            .padding(horizontal = 32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            text = "Create your passphrase",
+            style = MaterialTheme.typography.displaySmall,
+            color = TextPrimary,
+            textAlign = TextAlign.Center,
+        )
+        Text(
+            text = "This passphrase cannot be recovered — losing it loses this vault. " +
+                "There is no reset, no backup, and no one who can let you back in.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextSecondary,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 12.dp, bottom = 24.dp),
+        )
+        OutlinedTextField(
+            value = passphrase,
+            onValueChange = { passphrase = it },
+            label = { Text("Passphrase") },
+            singleLine = true,
+            enabled = !creating,
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            value = confirm,
+            onValueChange = { confirm = it },
+            label = { Text("Confirm passphrase") },
+            singleLine = true,
+            enabled = !creating,
+            isError = confirm.isNotEmpty() && !matches,
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+        )
+        if (passphrase.isNotEmpty() && !longEnough) {
+            Text(
+                text = "Use at least $MIN_PASSPHRASE_LEN characters.",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
+        if (createError != null) {
+            Text(
+                text = createError,
+                style = MaterialTheme.typography.bodySmall,
+                color = ErrorRed,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
+        Button(
+            onClick = { if (canCreate) onCreate(passphrase) },
+            enabled = canCreate,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Lemon,
+                contentColor = TextOnLemon,
+            ),
+            modifier = Modifier.padding(top = 24.dp),
+        ) {
+            if (creating) {
+                CircularProgressIndicator(
+                    color = TextOnLemon,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(20.dp),
+                )
+            } else {
+                Text("Create")
             }
         }
     }

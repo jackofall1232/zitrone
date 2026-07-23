@@ -791,6 +791,305 @@ class VaultImageStoreTest {
         assertThrows(VaultImageException.CorruptImage::class.java) { newStore(dir).open() }
     }
 
+    // ── destroy(): the account-deletion primitive (no remanence) ────────────────────
+
+    @Test
+    fun destroy_removesBothFiles_exitsFalse_andReCreateWorks() {
+        val dir = tmp.newFolder()
+        val store = newStore(dir)
+        store.create(passphrase, "the account crypto".toByteArray(Charsets.UTF_8))
+        assertTrue("image + dek exist after create", store.exists())
+        assertTrue(File(dir, "vault.bin").exists())
+        assertTrue(File(dir, "vault.dek").exists())
+
+        store.destroy()
+
+        // No remanence: BOTH files gone, exists() false — nothing recoverable by a later unlock.
+        assertFalse("exists() is false after destroy", store.exists())
+        assertFalse("vault.bin deleted", File(dir, "vault.bin").exists())
+        assertFalse("vault.dek deleted", File(dir, "vault.dek").exists())
+
+        // destroy() released the single-instance registration, so a fresh store may re-create in the
+        // SAME process (re-onboard after account deletion) and the new vault opens from disk.
+        val reborn = newStore(dir)
+        val fresh = "a brand-new account".toByteArray(Charsets.UTF_8)
+        reborn.create(passphrase, fresh)
+        assertTrue("re-create works after destroy", reborn.exists())
+        reborn.close()
+        val opened = newStore(dir).also { it.open() }.unlock(passphrase)
+        assertNotNull("the re-created vault opens", opened)
+        assertArrayEquals(fresh, opened!!.payloadPlaintext)
+    }
+
+    @Test
+    fun destroy_isIdempotent_onNeverCreatedAndOnAlreadyDestroyed() {
+        val dir = tmp.newFolder()
+        // destroy() on a never-created store is a safe no-op (missing files delete cleanly).
+        val never = newStore(dir)
+        never.destroy()
+        assertFalse(never.exists())
+
+        // A second destroy() after a real create+destroy is also a no-op — no throw, files stay gone.
+        val store = newStore(dir)
+        store.create(passphrase, "x".toByteArray(Charsets.UTF_8))
+        store.destroy()
+        store.destroy()
+        assertFalse("still gone after a second destroy", store.exists())
+        assertFalse(File(dir, "vault.bin").exists())
+        assertFalse(File(dir, "vault.dek").exists())
+    }
+
+    @Test
+    fun destroy_removesLeftoverTmp_soNoWriteRemnantSurvives() {
+        val dir = tmp.newFolder()
+        val store = newStore(dir)
+        store.create(passphrase, "y".toByteArray(Charsets.UTF_8))
+        // Simulate an interrupted-write temp next to the constant-size files.
+        val binTmp = File(dir, "vault.bin.tmp").also { it.writeBytes(ByteArray(16) { 0x7 }) }
+        val dekTmp = File(dir, "vault.dek.tmp").also { it.writeBytes(ByteArray(8) { 0x9 }) }
+
+        store.destroy()
+
+        assertFalse("vault.bin gone", File(dir, "vault.bin").exists())
+        assertFalse("vault.dek gone", File(dir, "vault.dek").exists())
+        assertFalse("vault.bin.tmp leftover gone", binTmp.exists())
+        assertFalse("vault.dek.tmp leftover gone", dekTmp.exists())
+    }
+
+    @Test
+    fun destroy_throwsDestroyFailed_whenAFileSurvivesTheUnlink() {
+        val dir = tmp.newFolder()
+        val store = newStore(dir)
+        // Model a delete() that FAILS to remove the image — File.delete() returns false on an I/O /
+        // filesystem error just as it does on an already-absent file, so the store must not trust its
+        // bool. A NON-EMPTY directory named vault.bin cannot be removed by File.delete(), so it
+        // survives. destroy() must RE-STAT and THROW DestroyFailed so account-delete treats the vault
+        // as NOT destroyed (never routes to Onboarding-as-success while the full-crypto image remains).
+        val bin = File(dir, "vault.bin").also { it.mkdir() }
+        File(bin, "child").writeBytes(ByteArray(4))
+
+        assertThrows(VaultImageException.DestroyFailed::class.java) { store.destroy() }
+        assertTrue("the un-deletable image is (correctly) reported as still present", bin.exists())
+        // Round 13: destroy() writes the SERVER-DELETE-CONFIRMED marker before unlinking, so a
+        // failed unlink leaves it — boot resumes FINISHING the deletion (the account is gone).
+        assertTrue("serverDeleteConfirmed survives the failed unlink", store.serverDeleteConfirmed())
+
+        // The retry converges: once the filesystem cooperates, the SAME store's destroy verifies
+        // and retires the marker.
+        File(bin, "child").delete()
+        store.destroy()
+        assertFalse("retry removed the image", bin.exists())
+        assertFalse("marker retired after the confirmed destroy", store.serverDeleteConfirmed())
+    }
+
+    @Test
+    fun destroy_throwsDestroyFailed_whenAnImageBearingTmpSurvives() {
+        val dir = tmp.newFolder()
+        val store = newStore(dir)
+        // Round 9 (Codex): renameIntoPlace stages the COMPLETE outer image in vault.bin.tmp, so a
+        // surviving temp under a failing filesystem is an encrypted image copy — the survival
+        // check must cover it, not just the primaries. Model an un-deletable temp the same way
+        // as the primary-file case (a non-empty directory).
+        val tmpFile = File(dir, "vault.bin.tmp").also { it.mkdir() }
+        File(tmpFile, "child").writeBytes(ByteArray(4))
+
+        assertThrows(VaultImageException.DestroyFailed::class.java) { store.destroy() }
+        assertTrue("confirmed marker survives — deletion is not complete", store.serverDeleteConfirmed())
+    }
+
+    @Test
+    fun markers_persistDurably_withoutTouchingTheVaultFiles_andDriveOnlyTheirOwnReader() {
+        val dir = tmp.newFolder()
+        val store = newStore(dir)
+        store.create(passphrase, "v".toByteArray(Charsets.UTF_8))
+
+        // Round 13: the delete INTENT is written first and NEVER authorises destruction.
+        store.markDeleteIntent()
+        assertTrue("intent pending", store.deleteIntentPending())
+        assertFalse("intent does NOT authorise destroy", store.serverDeleteConfirmed())
+        assertTrue("vault.bin untouched by intent", File(dir, "vault.bin").exists())
+        assertTrue("vault.dek untouched by intent", File(dir, "vault.dek").exists())
+
+        // The CONFIRMED marker (server gone) is the only destroy authorisation; once present,
+        // deleteIntentPending() reports false (confirmed supersedes intent).
+        store.markServerDeleteConfirmed()
+        assertTrue("confirmed authorises destroy", store.serverDeleteConfirmed())
+        assertFalse("intent superseded by confirmed", store.deleteIntentPending())
+
+        // Idempotent; destroy() confirms + retires BOTH markers.
+        store.destroy()
+        assertFalse("destroy retired confirmed", store.serverDeleteConfirmed())
+        assertFalse("destroy retired intent", store.deleteIntentPending())
+        assertFalse(File(dir, "vault.bin").exists())
+    }
+
+    @Test
+    fun markDeleteIntent_and_markServerDeleteConfirmed_throwWhenNotDurable() {
+        val dir = tmp.newFolder()
+        // Marker writing does not require an existing vault. Fail-closed: a non-durable marker MUST
+        // throw so the caller aborts (intent → never touch the server; confirmed → never unlink).
+        val store = newStore(dir) { DirSyncResult.NOT_DURABLE }
+        assertThrows(VaultImageException.DestroyFailed::class.java) { store.markDeleteIntent() }
+        assertThrows(VaultImageException.DestroyFailed::class.java) { store.markServerDeleteConfirmed() }
+    }
+
+    @Test
+    fun destroy_abortsWithFilesUntouched_whenTheConfirmedMarkerFsyncIsNotDurable() {
+        val dir = tmp.newFolder()
+        val first = newStore(dir)
+        first.create(passphrase, "v".toByteArray(Charsets.UTF_8))
+        first.close()
+        // The confirmed marker is REQUIRED-durable BEFORE any unlink — proceeding without it could
+        // partially unlink, crash, and restart into a marker-less broken vault. A non-durable
+        // marker aborts with the vault files UNTOUCHED.
+        val store = newStore(dir) { DirSyncResult.NOT_DURABLE }
+
+        assertThrows(VaultImageException.DestroyFailed::class.java) { store.destroy() }
+        assertTrue("vault.bin untouched on marker-gate abort", File(dir, "vault.bin").exists())
+        assertTrue("vault.dek untouched on marker-gate abort", File(dir, "vault.dek").exists())
+    }
+
+    @Test
+    fun destroy_throwsDestroyFailed_andKeepsMarker_whenUnlinkFsyncIsNotDurable() {
+        val dir = tmp.newFolder()
+        // exists() proves only the current namespace — the unlinks must be confirmed crash-durable
+        // (dir fsync) BEFORE the markers are retired. Confirmed-marker sync (call 1) is DURABLE;
+        // the pre-retire unlink sync (call 2) is NOT_DURABLE → failed destroy: throw, marker kept.
+        var calls = 0
+        val store = newStore(dir) {
+            if (++calls == 1) DirSyncResult.DURABLE else DirSyncResult.NOT_DURABLE
+        }
+
+        assertThrows(VaultImageException.DestroyFailed::class.java) { store.destroy() }
+        assertTrue("confirmed marker kept until the unlinks are DURABLE", store.serverDeleteConfirmed())
+    }
+
+    @Test
+    fun destroy_throwsDestroyFailed_whenTheMarkerRetirementFsyncIsNotDurable() {
+        val dir = tmp.newFolder()
+        // Round 13 (Grok P1-2): retiring the markers must itself be crash-durable, else a journal
+        // replay can resurrect a marker over a later SUCCESSOR vault → auto-destroy of a valid
+        // re-onboarded vault. Confirmed-write sync (1) + pre-retire unlink sync (2) DURABLE; the
+        // POST-retire sync (3) NOT_DURABLE → failed destroy: throw (marker-present, files-absent is
+        // the safe stuck state; a retry re-syncs).
+        var calls = 0
+        val store = newStore(dir) {
+            if (++calls <= 2) DirSyncResult.DURABLE else DirSyncResult.NOT_DURABLE
+        }
+        assertThrows(VaultImageException.DestroyFailed::class.java) { store.destroy() }
+    }
+
+    @Test
+    fun create_clearsAStaleMarker_soASuccessorVaultIsNotAutoDestroyed() {
+        val dir = tmp.newFolder()
+        // Round 13 (Grok P1-2): a delete-confirmed marker resurrected from a PRIOR account's delete
+        // (its best-effort retire rolled back by a journal replay) must not survive a re-onboard —
+        // otherwise the fresh vault routes to DeleteIncomplete and is auto-destroyed. create() must
+        // clear it durably.
+        File(dir, "vault.delete-confirmed").createNewFile()
+        val store = newStore(dir)
+        store.create(passphrase, "fresh".toByteArray(Charsets.UTF_8))
+
+        assertFalse("stale confirmed marker cleared by create()", store.serverDeleteConfirmed())
+        assertFalse("no lingering intent either", store.deleteIntentPending())
+        assertTrue("the successor vault survives", File(dir, "vault.bin").exists())
+    }
+
+    @Test
+    fun hasDeleteIntentMarker_tracksTheIntentFileLifetime_evenPastConfirmed() {
+        val dir = tmp.newFolder()
+        val store = newStore(dir)
+        store.create(passphrase, "v".toByteArray(Charsets.UTF_8))
+
+        // Round 16 (R15-P2): the auth-protection signal follows the INTENT FILE, from its write
+        // until a confirmed destroy retires it.
+        assertFalse("no marker before any delete", store.hasDeleteIntentMarker())
+
+        store.markDeleteIntent()
+        assertTrue("present after intent write", store.hasDeleteIntentMarker())
+        assertTrue("deleteIntentPending too (confirmed absent)", store.deleteIntentPending())
+
+        // KEY DISTINCTION vs deleteIntentPending: once the confirmed marker exists, the intent is
+        // STILL present, so the auth guard stays true — but deleteIntentPending() (intent && !confirmed)
+        // goes false. Using deleteIntentPending for the guard would drop auth protection here, exactly
+        // the confirmed-not-durable-then-lost gap.
+        store.markServerDeleteConfirmed()
+        assertTrue("intent marker STILL present through the confirmed window", store.hasDeleteIntentMarker())
+        assertFalse("deleteIntentPending is now false (confirmed present)", store.deleteIntentPending())
+
+        // Retired only by a confirmed destroy.
+        store.destroy()
+        assertFalse("intent marker gone after destroy", store.hasDeleteIntentMarker())
+        assertFalse(File(dir, "vault.bin").exists())
+    }
+
+    @Test
+    fun destroy_doesNotThrow_whenFilesAreAlreadyAbsent_idempotencyViaExistsNotDeleteBool() {
+        val dir = tmp.newFolder()
+        // The verify check is keyed on exists(), NOT the delete() bool: an already-absent file re-stats
+        // absent and must NOT be mistaken for a failed unlink. A destroy() on a never-created store is
+        // a clean success (no throw), which is what keeps a retried/idempotent destroy safe.
+        val store = newStore(dir)
+        store.destroy()
+        assertFalse(File(dir, "vault.bin").exists())
+        assertFalse(File(dir, "vault.dek").exists())
+        assertFalse("a confirmed destroy leaves no marker", store.serverDeleteConfirmed())
+    }
+
+    // ── round 14 F2/F3/F4 — re-stat marker discipline ────────────────────────────────
+
+    @Test
+    fun create_failsWithNothingWritten_whenAStaleMarkerSurvivesTheClear() {
+        val dir = tmp.newFolder()
+        // Round 14 (F2): a stale confirmed marker that CANNOT be unlinked (File.delete()==false, an
+        // I/O failure) must fail the create with NO successor vault on disk — never a fresh vault
+        // coexisting with a live confirmed marker (which the next boot would auto-destroy). Model
+        // the un-deletable marker as a non-empty directory (File.delete() returns false, re-stat
+        // finds it present).
+        val marker = File(dir, "vault.delete-confirmed").also { it.mkdir() }
+        File(marker, "child").writeBytes(ByteArray(4))
+
+        val store = newStore(dir)
+        assertThrows(VaultImageException.NotDurable::class.java) {
+            store.create(passphrase, "fresh".toByteArray(Charsets.UTF_8))
+        }
+        assertFalse("no successor vault written when the stale marker can't be cleared", File(dir, "vault.bin").exists())
+        assertFalse("no dek written either", File(dir, "vault.dek").exists())
+    }
+
+    @Test
+    fun create_failsWithNothingWritten_whenTheMarkerClearFsyncIsNotDurable() {
+        val dir = tmp.newFolder()
+        File(dir, "vault.delete-confirmed").createNewFile()
+        // The stale-marker clear runs BEFORE any vault byte and requires a DURABLE fsync; a
+        // non-durable clear fails the create with nothing written (round 14, F2).
+        val store = newStore(dir) { DirSyncResult.NOT_DURABLE }
+        assertThrows(VaultImageException.NotDurable::class.java) {
+            store.create(passphrase, "fresh".toByteArray(Charsets.UTF_8))
+        }
+        assertFalse("no successor vault on a non-durable marker clear", File(dir, "vault.bin").exists())
+    }
+
+    @Test
+    fun clearDeleteIntent_throwsWhenNotDurable_andWhenTheMarkerSurvives() {
+        // Round 14 (F3): clearDeleteIntent checks its dirSync result and re-stats the marker —
+        // it no longer assumes success. Non-durable fsync → throw.
+        val d1 = tmp.newFolder()
+        File(d1, "vault.delete-intent").createNewFile()
+        val s1 = newStore(d1) { DirSyncResult.NOT_DURABLE }
+        assertThrows(VaultImageException.DestroyFailed::class.java) { s1.clearDeleteIntent() }
+
+        // Un-deletable intent marker (File.delete()==false) → re-stat finds it present → throw.
+        val d2 = tmp.newFolder()
+        val marker = File(d2, "vault.delete-intent").also { it.mkdir() }
+        File(marker, "child").writeBytes(ByteArray(4))
+        val s2 = newStore(d2)
+        assertThrows(VaultImageException.DestroyFailed::class.java) { s2.clearDeleteIntent() }
+
+        // An already-absent intent marker is a clean no-op (idempotent).
+        newStore(tmp.newFolder()).clearDeleteIntent()
+    }
+
     /**
      * Fixed-key `javax.crypto` AES-256-GCM stand-in for the Android Keystore device
      * key. Emits the SAME 60-byte `nonce(12) ‖ ct(32) ‖ tag(16)` blob shape the

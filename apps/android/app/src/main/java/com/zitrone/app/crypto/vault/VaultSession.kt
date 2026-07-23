@@ -241,6 +241,26 @@ class VaultSession(
     }
 
     /**
+     * Hand a COPY of this slot's vault key to [block] and wipe the copy in `finally`, so the live
+     * key never escapes and the session keeps sole ownership. The ONLY key-read accessor — added
+     * for D2c biometric enable over a LIVE session (dual-wrap without re-deriving from the
+     * passphrase). The copy is snapshotted under [stateLock] but [block] runs OUTSIDE it (matching
+     * this class's "lock only for fast transitions, never across an alien call" rule). Throws once
+     * closed.
+     */
+    fun <T> withVaultKey(block: (ByteArray) -> T): T {
+        val copy = synchronized(stateLock) {
+            check(!closed) { "vault session is closed" }
+            vaultKey.copyOf()
+        }
+        return try {
+            block(copy)
+        } finally {
+            wipe(copy)
+        }
+    }
+
+    /**
      * Replace the in-memory payload, mark dirty, and — unless one is already armed
      * and still pending — schedule ONE reseal at `firstDirtyAt + cooldownMs`.
      * Non-blocking. A no-op once closed.

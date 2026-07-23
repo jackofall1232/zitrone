@@ -230,20 +230,29 @@ class VaultSignalProtocolStore(
      * roster state; do NOT call it as a standalone contact-delete in PR-D.
      */
     override fun destroyContactCrypto(name: String): Boolean {
-        val prefixes = listOf(KEY_SESSION, KEY_REMOTE_IDENTITY, KEY_SENDER_KEY)
-        runtime.mutate { state ->
-            state.signalRecords.keys
-                // filter() already materializes a fresh ArrayList, detached from the map's
-                // key-set view, so it is safe to iterate while removeRecord mutates the map.
-                .filter { key -> prefixes.any { key.startsWith("$it$name:") } }
-                .forEach { removeRecord(state, it) }
-        }
+        runtime.mutate { state -> removeContactCryptoRecords(state, name) }
         return try {
             runtime.flushBeforeAck()
             true
         } catch (t: Throwable) {
             false
         }
+    }
+
+    /**
+     * The mutate-body half of [destroyContactCrypto] with NO flush: purge [name]'s session,
+     * remote-identity, and sender-key records from [state], zeroing each removed array. Runs
+     * INSIDE a caller-supplied [VaultRuntime.mutate] so the PR-D contact-delete can fold roster
+     * entry + tombstone + these crypto records into ONE mutate + ONE flush (the atomicity
+     * contract above). Never call [destroyContactCrypto] standalone on the wired vault path.
+     */
+    fun removeContactCryptoRecords(state: VaultState, name: String) {
+        val prefixes = listOf(KEY_SESSION, KEY_REMOTE_IDENTITY, KEY_SENDER_KEY)
+        state.signalRecords.keys
+            // filter() already materializes a fresh ArrayList, detached from the map's
+            // key-set view, so it is safe to iterate while removeRecord mutates the map.
+            .filter { key -> prefixes.any { key.startsWith("$it$name:") } }
+            .forEach { removeRecord(state, it) }
     }
 
     // -- Kyber prekeys (post-quantum, required by the store interface) --------
@@ -323,6 +332,60 @@ class VaultSignalProtocolStore(
         runtime.mutate { putRecord(it, KEY_SIGNED_PREKEY_CREATED_AT, value.toBeBytes()) }
     }
 
+    /** The signed-prekey id pending upload confirmation, default 0 (none) — see the interface. */
+    override fun pendingSignedPreKeyUploadId(): Int =
+        runtime.read { it.signalRecords[KEY_PENDING_SIGNED_PREKEY_UPLOAD]?.toInt() } ?: 0
+
+    override fun setPendingSignedPreKeyUploadId(value: Int) {
+        runtime.mutate {
+            if (value == 0) {
+                removeRecord(it, KEY_PENDING_SIGNED_PREKEY_UPLOAD)
+            } else {
+                putRecord(it, KEY_PENDING_SIGNED_PREKEY_UPLOAD, value.toBeBytes())
+            }
+        }
+    }
+
+    /**
+     * One-time-prekey ids pending upload confirmation, default empty — see the interface.
+     * Stored as an ASCII comma-joined id list; ids are public bookkeeping (never key material),
+     * matching the counter records above.
+     */
+    override fun pendingOneTimePreKeyUploadIds(): List<Int> =
+        runtime.read { it.signalRecords[KEY_PENDING_PREKEY_UPLOADS] }
+            ?.toString(Charsets.US_ASCII)
+            ?.split(',')
+            ?.mapNotNull { id -> id.toIntOrNull() }
+            .orEmpty()
+
+    override fun setPendingOneTimePreKeyUploadIds(value: List<Int>) {
+        runtime.mutate {
+            if (value.isEmpty()) {
+                removeRecord(it, KEY_PENDING_PREKEY_UPLOADS)
+            } else {
+                putRecord(
+                    it,
+                    KEY_PENDING_PREKEY_UPLOADS,
+                    value.joinToString(",").toByteArray(Charsets.US_ASCII),
+                )
+            }
+        }
+    }
+
+    /** Attempted-upload flag for the pending batch (presence = true) — see the interface. */
+    override fun oneTimePreKeyUploadAttempted(): Boolean =
+        runtime.read { it.signalRecords.containsKey(KEY_PENDING_PREKEY_UPLOADS_ATTEMPTED) }
+
+    override fun setOneTimePreKeyUploadAttempted(value: Boolean) {
+        runtime.mutate {
+            if (value) {
+                putRecord(it, KEY_PENDING_PREKEY_UPLOADS_ATTEMPTED, byteArrayOf(1))
+            } else {
+                removeRecord(it, KEY_PENDING_PREKEY_UPLOADS_ATTEMPTED)
+            }
+        }
+    }
+
     // -- misc -----------------------------------------------------------------
 
     override fun countOneTimePreKeys(): Int =
@@ -387,6 +450,9 @@ class VaultSignalProtocolStore(
         private const val KEY_NEXT_PREKEY_ID = "next_prekey_id"
         private const val KEY_NEXT_SIGNED_PREKEY_ID = "next_signed_prekey_id"
         private const val KEY_SIGNED_PREKEY_CREATED_AT = "signed_prekey_created_at"
+        private const val KEY_PENDING_SIGNED_PREKEY_UPLOAD = "pending_signed_prekey_upload"
+        private const val KEY_PENDING_PREKEY_UPLOADS = "pending_prekey_uploads"
+        private const val KEY_PENDING_PREKEY_UPLOADS_ATTEMPTED = "pending_prekey_uploads_attempted"
     }
 }
 

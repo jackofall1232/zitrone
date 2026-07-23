@@ -9,26 +9,16 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.zitrone.app.ui.components.LemonSliceLogo
@@ -39,22 +29,20 @@ import com.zitrone.app.ui.theme.TextOnLemon
 import com.zitrone.app.ui.theme.TextSecondary
 
 /**
- * Vault unlock gate (PR-D2c). The PASSPHRASE field is always present — it is the
- * posture-independent factor and the biometric fallback. The biometric affordance
- * appears ONLY when [onBiometricUnlock] is non-null (a wrap is enabled and the platform
- * can authenticate BIOMETRIC_STRONG right now). The error line stays and shows the router's
- * uniform failure / re-enroll note; no field ever names a slot.
+ * Terminal "finish deleting your account" screen (PR-D2c). Shown when the SERVER account is
+ * already deleted but the local vault destroy could not verify its unlink (a surviving file /
+ * the boot-time destroy-pending marker). The ONLY exit is a confirmed destroy — the caller's
+ * [onRetry] routes to Onboarding once it verifies. Deliberately NO unlock affordance: a
+ * half-deleted vault must never be offered a passphrase gate (it either cannot open, or opens
+ * empty and would silently re-register).
  */
 @Composable
-fun LockScreen(
-    onUnlockWithPassphrase: (String) -> Unit,
-    onBiometricUnlock: (() -> Unit)?,
-    errorMessage: String?,
-    unlocking: Boolean,
+fun DeleteIncompleteScreen(
+    retrying: Boolean,
+    showError: Boolean,
+    onRetry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var passphrase by remember { mutableStateOf("") }
-
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -65,59 +53,40 @@ fun LockScreen(
     ) {
         LemonSliceLogo(size = 96.dp)
         Text(
-            text = "Locked",
+            text = "Finishing deletion",
             style = MaterialTheme.typography.headlineLarge,
             color = Lemon,
             modifier = Modifier.padding(top = 24.dp),
         )
         Text(
-            text = "Your keys stay sealed until you unlock.",
+            text = "Your account was deleted from the server, but this device " +
+                "couldn't finish removing your local data yet.",
             style = MaterialTheme.typography.bodyMedium,
             color = TextSecondary,
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(top = 8.dp, bottom = 24.dp),
         )
-        OutlinedTextField(
-            value = passphrase,
-            onValueChange = { passphrase = it },
-            label = { Text("Passphrase") },
-            singleLine = true,
-            enabled = !unlocking,
-            visualTransformation = PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-            modifier = Modifier.fillMaxWidth(),
-        )
         Button(
-            onClick = { if (!unlocking && passphrase.isNotEmpty()) onUnlockWithPassphrase(passphrase) },
-            enabled = !unlocking && passphrase.isNotEmpty(),
+            onClick = { if (!retrying) onRetry() },
+            enabled = !retrying,
             colors = ButtonDefaults.buttonColors(
                 containerColor = Lemon,
                 contentColor = TextOnLemon,
             ),
-            modifier = Modifier.padding(top = 16.dp),
         ) {
-            if (unlocking) {
+            if (retrying) {
                 CircularProgressIndicator(
                     color = TextOnLemon,
                     strokeWidth = 2.dp,
                     modifier = Modifier.size(20.dp),
                 )
             } else {
-                Text("Unlock")
+                Text("Finish deleting")
             }
         }
-        if (onBiometricUnlock != null) {
-            OutlinedButton(
-                onClick = { if (!unlocking) onBiometricUnlock() },
-                enabled = !unlocking,
-                modifier = Modifier.padding(top = 12.dp),
-            ) {
-                Text("Use biometrics", color = Lemon)
-            }
-        }
-        if (errorMessage != null) {
+        if (showError) {
             Text(
-                text = errorMessage,
+                text = "Still couldn't remove the local data. Check storage and try again.",
                 style = MaterialTheme.typography.bodySmall,
                 color = ErrorRed,
                 textAlign = TextAlign.Center,

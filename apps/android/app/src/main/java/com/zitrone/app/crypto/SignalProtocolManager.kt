@@ -148,6 +148,10 @@ class SignalProtocolManager(
         val timestamp = System.currentTimeMillis()
         store.storeSignedPreKey(id, SignedPreKeyRecord(id, timestamp, keyPair, signature))
         store.setSignedPreKeyCreatedAt(timestamp)
+        // Upload-pending until [confirmSignedPreKeyUploaded]: generation bumps createdAt (the age
+        // gate), so without this marker a skipped/failed upload would never retry — the relay
+        // would keep serving the OLD signed prekey a full extra rotation period.
+        store.setPendingSignedPreKeyUploadId(id)
         return SignedPreKeyDto(
             id = id,
             publicKeyBase64 = encode(keyPair.publicKey.getPublicKeyBytes()),
@@ -156,25 +160,122 @@ class SignalProtocolManager(
         )
     }
 
-    /** Returns a fresh signed prekey when the current one is older than 7 days. */
+    /**
+     * The stored signed prekey whose upload was never confirmed, rebuilt from the store — or null
+     * when none is pending. Re-serving the SAME record makes the retry idempotent (re-uploading
+     * an identical signed prekey is safe; generating a fresh one each attempt would orphan
+     * private halves). A pending id whose record has vanished (wiped store) clears itself.
+     */
+    fun pendingSignedPreKeyUpload(): SignedPreKeyDto? {
+        val id = store.pendingSignedPreKeyUploadId()
+        if (id == 0) return null
+        val record = runCatching { store.loadSignedPreKey(id) }.getOrNull()
+        if (record == null) {
+            store.setPendingSignedPreKeyUploadId(0)
+            return null
+        }
+        return SignedPreKeyDto(
+            id = record.id,
+            publicKeyBase64 = encode(record.keyPair.publicKey.getPublicKeyBytes()),
+            signatureBase64 = encode(record.signature),
+            timestampMs = record.timestamp,
+        )
+    }
+
+    /** The relay confirmed it holds the signed prekey's public half — retire the pending marker. */
+    fun confirmSignedPreKeyUploaded() {
+        store.setPendingSignedPreKeyUploadId(0)
+    }
+
+    /**
+     * Returns the signed prekey the relay still needs: a stored-but-unconfirmed one first
+     * (upload retry — see [pendingSignedPreKeyUpload]), else a fresh rotation when the current
+     * one is older than 7 days, else null.
+     */
     fun rotateSignedPreKeyIfNeeded(): SignedPreKeyDto? {
+        pendingSignedPreKeyUpload()?.let { return it }
         val createdAt = store.signedPreKeyCreatedAt()
         val age = System.currentTimeMillis() - createdAt
         return if (createdAt == 0L || age >= SIGNED_PREKEY_MAX_AGE_MS) generateSignedPreKey() else null
     }
 
     /**
-     * Generates a batch of one-time prekeys (default 100 — the upload batch
-     * size from security.encryption.key_types.one_time_prekeys). Private
-     * halves stay in the encrypted store; only public halves are returned.
+     * The one-time prekeys the relay still needs. A stored batch whose upload was NEVER
+     * ATTEMPTED is RE-SERVED (retry after a flush-gated skip — the relay never saw the ids, so
+     * the same ids are safe); otherwise a fresh batch is generated (default 100 — the upload
+     * batch size from security.encryption.key_types.one_time_prekeys) and marked pending +
+     * unattempted. Private halves stay in the store; only public halves are returned.
+     *
+     * The ATTEMPTED split is load-bearing (round 8, Codex): once an upload REQUEST left the
+     * device, a lost response / crash cannot distinguish "relay never got it" from "relay
+     * committed it and a peer already consumed an id" — and the relay's insert re-creates a
+     * consumed id (`ON CONFLICT DO NOTHING` + consume-by-DELETE), which would serve the same
+     * one-time prekey to a second initiator. So an attempted-but-unconfirmed batch is never
+     * re-served: its PRIVATE halves stay in the store (a peer may hold a bundle against them)
+     * and a fresh batch is generated — the bounded-orphan cost is confined to the rare
+     * lost-response window instead of every flush failure. The pending marker is retired by
+     * [confirmOneTimePreKeysUploaded]; ids whose records vanished (wiped store) are dropped.
      */
-    fun generateOneTimePreKeys(count: Int = ONE_TIME_PREKEY_BATCH): List<OneTimePreKeyDto> =
-        (0 until count).map {
+    fun generateOneTimePreKeys(
+        count: Int = ONE_TIME_PREKEY_BATCH,
+        discardAttempted: Boolean = false,
+    ): List<OneTimePreKeyDto> {
+        if (!store.oneTimePreKeyUploadAttempted()) {
+            val pending = store.pendingOneTimePreKeyUploadIds()
+                .mapNotNull { id ->
+                    runCatching { store.loadPreKey(id) }.getOrNull()?.let { record ->
+                        OneTimePreKeyDto(
+                            id = id,
+                            publicKeyBase64 = encode(record.keyPair.publicKey.getPublicKeyBytes()),
+                        )
+                    }
+                }
+            if (pending.isNotEmpty()) return pending
+        } else if (discardAttempted) {
+            // REGISTER-retry only (round 11, Codex): with NO live account (accountId == null), a
+            // maybe-registered batch's private halves are dead weight — a bundle under the orphan
+            // account id can only produce messages addressed TO that orphan, which this client
+            // (about to register a fresh id) will never receive. Discarding them keeps the
+            // offline-retry loop's vault footprint net-zero (each retry destroys the superseded
+            // batch before generating). NEVER valid for the top-up path, where the account is
+            // live and peers may hold bundles against the attempted batch.
+            store.pendingOneTimePreKeyUploadIds().forEach { id ->
+                runCatching { store.removePreKey(id) }
+            }
+        }
+        val fresh = (0 until count).map {
             val id = allocatePreKeyId()
             val keyPair = Curve.generateKeyPair()
             store.storePreKey(id, PreKeyRecord(id, keyPair))
             OneTimePreKeyDto(id = id, publicKeyBase64 = encode(keyPair.publicKey.getPublicKeyBytes()))
         }
+        store.setPendingOneTimePreKeyUploadIds(fresh.map { it.id })
+        store.setOneTimePreKeyUploadAttempted(false)
+        return fresh
+    }
+
+    /**
+     * The pending batch's upload request is about to leave the device. Callers mark this AFTER
+     * the privates' durable flush and reseal it durable BEFORE the actual upload (see
+     * [com.zitrone.app.MessagingCoordinator.onPreKeyLow]) — ordering that keeps both retry
+     * properties: a flush-gated skip stays re-servable (flag never set), while a lost response
+     * can never re-serve possibly-consumed ids (flag durable before the request existed).
+     */
+    fun markOneTimePreKeyUploadAttempted() {
+        store.setOneTimePreKeyUploadAttempted(true)
+    }
+
+    /** The relay confirmed it holds the batch's public halves — retire the pending marker. */
+    fun confirmOneTimePreKeysUploaded() {
+        store.setPendingOneTimePreKeyUploadIds(emptyList())
+        store.setOneTimePreKeyUploadAttempted(false)
+    }
+
+    /** Register confirmed: it uploaded BOTH the signed prekey and the one-time batch. */
+    fun confirmPreKeysUploaded() {
+        confirmSignedPreKeyUploaded()
+        confirmOneTimePreKeysUploaded()
+    }
 
     fun localOneTimePreKeyCount(): Int = store.countOneTimePreKeys()
 

@@ -195,6 +195,31 @@ class ConversationRepositoryPersistenceTest {
     }
 
     @Test
+    fun `conversationIdFor resolves an existing id and derives the contactId for an unknown sender`() {
+        // D2c round 2 capacity-dup fix: the coordinator resolves the conversation id with this pure
+        // READ so a decrypted (ratchet-advanced) message can be DISPLAYED before the vault-mutating
+        // onIncomingMessage bump. The resolver MUST return exactly the id onIncomingMessage would
+        // assign, or the displayed message would attach to a different conversation than the bump
+        // creates.
+        val store = FakeRosterStore()
+        val repo = ConversationRepository(store)
+        repo.upsert(conversation("alice"))
+
+        // Existing entry → its own id, WITHOUT mutating (no unread bump, roster unchanged).
+        assertEquals("alice", repo.conversationIdFor("alice"))
+        assertEquals(0, repo.find("alice")!!.unreadCount)
+
+        // Unknown sender → the contactId itself (matches the fresh "Unknown contact" id
+        // onIncomingMessage assigns), and still WITHOUT creating a persisted entry.
+        assertEquals("mallory", repo.conversationIdFor("mallory"))
+        assertNull("resolving is a pure read — no entry created", repo.find("mallory"))
+
+        // Cross-check the resolver agrees with the actual bump's assignment.
+        val bumped = repo.onIncomingMessage("mallory")
+        assertEquals(repo.conversationIdFor("mallory"), bumped.id)
+    }
+
+    @Test
     fun `sanitizeDisplayName rejects empty and over-long`() {
         assertNull(ConversationRepository.sanitizeDisplayName("   "))
         assertNull(ConversationRepository.sanitizeDisplayName(""))
