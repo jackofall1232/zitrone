@@ -48,6 +48,7 @@ import com.zitrone.app.net.WsClient
 import com.zitrone.app.notifications.MessagingNotifications
 import com.zitrone.app.notifications.NotificationScheduler
 import com.zitrone.app.tor.TorIntegration
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -556,6 +557,9 @@ class SessionContainer(
                 diagnostics = bootDiagnostics,
                 notificationScheduler = notificationScheduler,
                 vaultContactDelete = ::deleteContactAtomically,
+                // Flush-before-ack barrier (D2c, absorbs D4): the coordinator reseals the receiving
+                // ratchet durably before acking each inbound delivery. rt is the live runtime.
+                flushBeforeAck = rt::flushBeforeAck,
             )
         } catch (t: Throwable) {
             runCatching { rt.close() }
@@ -597,6 +601,10 @@ class SessionContainer(
                 }
                 runtime.flushBeforeAck()
                 true
+            } catch (c: CancellationException) {
+                // Preserve cooperative cancellation: a scope teardown must unwind, not be folded
+                // into an "unconfirmed durable" false. The removal is still never rolled back.
+                throw c
             } catch (t: Throwable) {
                 false
             }

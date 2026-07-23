@@ -379,8 +379,15 @@ class MainActivity : FragmentActivity() {
                     // Contain ANY keystore/store throw from the unwrap+open (IllegalBlockSizeException
                     // on an invalidated-key race, KeyStoreException, ProviderException, a bad-slot
                     // require) — an AEAD failure already returns false. A throw must DROP TO THE
-                    // PASSPHRASE FIELD (result FAILED), never crash the coroutine.
-                    val ok = runCatching { container.unlockWithBiometric(cipher, wrap) }.getOrDefault(false)
+                    // PASSPHRASE FIELD (result FAILED), never crash the coroutine — but a
+                    // CancellationException is cooperative teardown and must propagate, not fold.
+                    val ok = try {
+                        container.unlockWithBiometric(cipher, wrap)
+                    } catch (c: kotlinx.coroutines.CancellationException) {
+                        throw c
+                    } catch (t: Throwable) {
+                        false
+                    }
                     onResult(if (ok) VaultBiometricResult.SUCCESS else VaultBiometricResult.FAILED)
                 }
             },
@@ -463,8 +470,16 @@ private fun ZitroneRoot(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
-    var route by remember { mutableStateOf<Route>(Route.Splash) }
-    var unlocked by remember { mutableStateOf(false) }
+    // On an Activity recreation (rotation) the process-scoped session survives, but this `remember`
+    // re-runs from scratch: a LIVE session must route straight to the chat list, never back through
+    // Splash → Locked (which keys on hasVault() and would fake-lock a live, unlocked session and
+    // demand a redundant re-auth on every rotation). A genuine cold start (no session) still lands
+    // on Splash → setup/unlock. The full ProcessLifecycleOwner auto-lock is still D3; this only
+    // stops hiding an already-live session behind a redundant gate.
+    var route by remember {
+        mutableStateOf<Route>(if (container.session.value != null) Route.ChatList else Route.Splash)
+    }
+    var unlocked by remember { mutableStateOf(container.session.value != null) }
     var lockError by remember { mutableStateOf<String?>(null) }
     var unlocking by remember { mutableStateOf(false) }
     // Routing truth (§0): a vault image present → UNLOCK, absent → SETUP. Flips true the

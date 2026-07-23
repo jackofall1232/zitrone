@@ -59,6 +59,29 @@ class BiometricUnlockStoreTest {
     }
 
     @Test
+    fun `a present but malformed blob reads as not-enabled (no dead unlock button)`() {
+        // isEnabled() now validates the wrap (load() != null), so a blob that is present with an
+        // in-range slot but does NOT decode to a BLOB_BYTES array must read as NOT enabled — else
+        // the lock screen advertises a biometric button that load() resolves to null and can never
+        // drive. Two shapes: non-base64 junk, and valid base64 of the wrong length.
+        val prefs = FakeSharedPreferences()
+        val s = BiometricUnlockStore(prefs)
+        s.save(wrap(0))
+        assertTrue(s.isEnabled())
+
+        // Corrupt the blob to non-base64 junk while the slot stays in range.
+        prefs.edit().putString("biometric_vault_blob", "!!! not base64 !!!").apply()
+        assertFalse("malformed base64 blob is not enabled", s.isEnabled())
+        assertNull(s.load())
+
+        // Valid base64 but the wrong length (decodes to fewer than BLOB_BYTES bytes).
+        val shortBlob = java.util.Base64.getEncoder().encodeToString(ByteArray(8))
+        prefs.edit().putString("biometric_vault_blob", shortBlob).apply()
+        assertFalse("wrong-length blob is not enabled", s.isEnabled())
+        assertNull(s.load())
+    }
+
+    @Test
     fun `clear revokes the wrap (disable actually works)`() {
         val s = store()
         s.save(wrap(1))

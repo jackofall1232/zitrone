@@ -98,6 +98,18 @@ class MessagingCoordinator(
      * removal. Null on the legacy path, which keeps its unchanged per-store delete sequence.
      */
     private val vaultContactDelete: (suspend (conversationId: String, contactId: String, at: Long) -> Boolean)? = null,
+    /**
+     * Flush-before-ack barrier (D2c — absorbs D4). Invoked on the inbound path AFTER a decrypt
+     * has advanced the receiving ratchet and BEFORE [WsClient.ackMessage], so the relay's copy is
+     * dropped ONLY once that ratchet advance is durable. On the vault path the SessionContainer
+     * supplies [com.zitrone.app.crypto.vault.VaultRuntime.flushBeforeAck]; the default no-op keeps
+     * every non-vault construction / test (and the pre-decrypt drop-ack, which mutates nothing)
+     * acking immediately as before. A THROW (NotDurable / IO / runtime closed / at-capacity) means
+     * NOT durable: the ack is skipped, the relay redelivers, and no acked message is ever lost.
+     * Called from the confined worker, never inside a persist sink — so the runtime lock order
+     * (runtime.stateLock → session → storage) is preserved.
+     */
+    private val flushBeforeAck: suspend () -> Unit = {},
 ) : WsClient.Listener {
 
     private val _typingPeers = MutableStateFlow<Set<String>>(emptySet())
@@ -388,6 +400,28 @@ class MessagingCoordinator(
         Log.w(TAG, line)
         diagnostics.record(line)
     }
+
+    /**
+     * Durable-ack barrier for the inbound path: reseal the ratchet advance ([flushBeforeAck])
+     * BEFORE telling the relay to drop its copy ([WsClient.ackMessage]). Used only on delivery
+     * branches where a decrypt advanced the receiving ratchet. Returns true when the ack was sent
+     * (flush confirmed durable); returns false when the flush threw — the message is left UN-ACKED
+     * so the relay redelivers it (flush-before-ack window=0, zero acked loss). Runs on the confined
+     * worker (never inside a persist sink), so touching the runtime here respects the lock order.
+     * Delegates to [flushThenAck] so the ordering + fail-closed decision is host-testable without a
+     * live socket.
+     */
+    private suspend fun ackDurable(envelopeId: String): Boolean =
+        flushThenAck(
+            envelopeId = envelopeId,
+            flush = flushBeforeAck,
+            ack = { ws.ackMessage(it) },
+            onNotDurable = {
+                // NotDurable / IO / runtime closed or at-capacity (IllegalStateException): the
+                // ratchet advance did NOT reach disk. No envelope field is ever logged.
+                diag("recv: durable flush failed before ack — inbound left un-acked (relay redelivers)")
+            },
+        )
 
     // Standard base64 WITH padding (NO_WRAP keeps the `=` pad, strips only line
     // breaks) — the wire format the control payload's length-validated fields
@@ -1055,6 +1089,9 @@ class MessagingCoordinator(
                 // create an "Unknown contact" below (see isDeletedContact).
                 if (isDeletedContact(envelope.senderId)) {
                     diag("recv: message for deleted contact — dropped before decrypt")
+                    // No flush barrier: the tombstone check ([isDeletedContact]) is read-only and
+                    // the drop happens BEFORE decrypt, so no ratchet/roster mutation occurred —
+                    // nothing to make durable, ack immediately.
                     ws.ackMessage(envelope.id)
                     return@runCatching
                 }
@@ -1078,7 +1115,9 @@ class MessagingCoordinator(
                 // and never bumps the conversation or fires a notification.
                 ControlPayload.parseReadReceipt(text)?.let { readIds ->
                     readIds.forEach(messages::onPeerRead)
-                    ws.ackMessage(envelope.id)
+                    // The decrypt above advanced the receiving ratchet — flush it durable before
+                    // acking (a non-durable flush leaves the envelope for redelivery). D4 absorbed.
+                    ackDurable(envelope.id)
                     return@runCatching
                 }
                 // Revocation gate: this coroutine may have been parked at
@@ -1090,7 +1129,9 @@ class MessagingCoordinator(
                 // relay drops its copy.
                 if (!acceptingDeliveries) {
                     diag("recv: delivery resumed after teardown — dropped, not published")
-                    ws.ackMessage(envelope.id)
+                    // The parked decrypt advanced the ratchet before teardown; make that advance
+                    // durable before acking so a non-durable flush redelivers rather than losing it.
+                    ackDurable(envelope.id)
                     return@runCatching
                 }
                 val deliveredAtMs = runCatching {
@@ -1122,7 +1163,9 @@ class MessagingCoordinator(
                             ),
                         ),
                     )
-                    ws.ackMessage(envelope.id)
+                    // Durable barrier: the decrypt advanced the ratchet. On a non-durable flush,
+                    // skip the ack AND every post-ack side effect (relay redelivers). D4 absorbed.
+                    if (!ackDurable(envelope.id)) return@runCatching
                     // Delivery receipt back to the SENDER (peer-routed by the
                     // relay → their message.delivered). senderId comes from the
                     // decrypted envelope; the relay never stored it, preserving
@@ -1150,7 +1193,9 @@ class MessagingCoordinator(
                             unsupported = true,
                         ),
                     )
-                    ws.ackMessage(envelope.id)
+                    // Durable barrier: the decrypt advanced the ratchet. On a non-durable flush,
+                    // skip the ack and the notification (relay redelivers). D4 absorbed.
+                    if (!ackDurable(envelope.id)) return@runCatching
                     notificationScheduler.onIncomingMessage(conversation.id)
                     return@runCatching
                 }
@@ -1166,10 +1211,11 @@ class MessagingCoordinator(
                         state = MessageState.DELIVERED,
                     ),
                 )
-                // Ack AFTER successful decrypt + store: this is what makes
-                // the server delete its copy (store-and-forward, zero
-                // retention).
-                ws.ackMessage(envelope.id)
+                // Ack AFTER successful decrypt + store AND a durable ratchet reseal: the ack is
+                // what makes the server delete its copy (store-and-forward, zero retention), so it
+                // must never outrun the receiving-ratchet advance reaching disk. On a non-durable
+                // flush, skip the ack and the receipt (relay redelivers → zero loss). D4 absorbed.
+                if (!ackDurable(envelope.id)) return@runCatching
                 // Delivery receipt to the SENDER (peer-routed → their
                 // message.delivered). See the attachment branch above for the
                 // zero-knowledge rationale.
@@ -1336,4 +1382,32 @@ class MessagingCoordinator(
         const val MAX_BACKOFF_MS = 60_000L
         const val MAX_BACKOFF_SHIFT = 6
     }
+}
+
+/**
+ * Flush-before-ack decision (D2c, absorbs D4), extracted so it is host-testable without a live
+ * socket. Runs the durable reseal barrier [flush] and only THEN [ack]s the envelope; if [flush]
+ * throws (NotDurable / IO / runtime closed or at-capacity) the ratchet advance did NOT reach disk,
+ * so it does NOT ack — it invokes [onNotDurable] (diagnostic) and returns false, leaving the
+ * inbound un-acked so the relay redelivers (flush-before-ack window=0, zero acked loss). A
+ * CancellationException is rethrown so cooperative cancellation still unwinds. The default no-op
+ * [flush] on the non-vault path never throws, so the ack always fires there — behaviour-identical
+ * to the pre-D2c immediate ack.
+ */
+internal suspend fun flushThenAck(
+    envelopeId: String,
+    flush: suspend () -> Unit,
+    ack: (String) -> Unit,
+    onNotDurable: () -> Unit,
+): Boolean {
+    try {
+        flush()
+    } catch (c: CancellationException) {
+        throw c
+    } catch (t: Throwable) {
+        onNotDurable()
+        return false
+    }
+    ack(envelopeId)
+    return true
 }

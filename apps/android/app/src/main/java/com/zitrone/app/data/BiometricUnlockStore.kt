@@ -51,8 +51,13 @@ class BiometricUnlockStore(private val prefs: SharedPreferences) {
         return BiometricWrappedKey(slot, blob)
     }
 
-    /** True when a wrap is present (biometric unlock enabled) with an in-range slot. */
-    fun isEnabled(): Boolean = prefs.contains(KEY_BLOB) && prefs.getInt(KEY_SLOT, -1) in 0 until SLOT_COUNT
+    /**
+     * True only when a VALID wrap is present (biometric unlock enabled). Delegates to [load] so a
+     * present-but-malformed blob (bad base64 / wrong length) or an out-of-range slot reads as NOT
+     * enabled — otherwise the lock screen would advertise a biometric button that [load] resolves
+     * to null and cannot actually drive (it would silently drop to the passphrase either way).
+     */
+    fun isEnabled(): Boolean = load() != null
 
     /** Persist a fresh wrap (enable / re-enable). Constant-size; never logged. */
     fun save(wrap: BiometricWrappedKey) {

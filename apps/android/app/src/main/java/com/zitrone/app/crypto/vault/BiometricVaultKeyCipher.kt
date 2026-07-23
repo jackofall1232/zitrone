@@ -95,14 +95,21 @@ class BiometricVaultKeyCipher(
     /**
      * Recover the vault key from [blob]'s ciphertext region with an already-AUTHENTICATED
      * [decryptCipher] (from [cipherForDecrypt] after a successful prompt). Returns live
-     * key material the CALLER owns and MUST wipe; returns null on AEAD failure (a tampered
-     * blob). The returned array is exactly [VAULT_KEY_BYTES].
+     * key material the CALLER owns and MUST wipe; returns null on ANY decrypt failure (a
+     * tampered blob, or a key invalidated between init and doFinal). The returned array is
+     * exactly [VAULT_KEY_BYTES].
      */
     fun openVaultKey(decryptCipher: Cipher, blob: ByteArray): ByteArray? {
         if (blob.size != BiometricWrappedKey.BLOB_BYTES) return null
         return try {
             decryptCipher.doFinal(blob, NONCE_BYTES, blob.size - NONCE_BYTES)
-        } catch (e: javax.crypto.AEADBadTagException) {
+        } catch (e: Exception) {
+            // Any decrypt failure → null → the router drops to the passphrase, mirroring
+            // KeystoreDeviceKeyCipher.unwrapDek's null-on-ANY-failure posture. Beyond a tampered
+            // blob (AEADBadTagException), a key invalidated between init and doFinal surfaces as
+            // BadPaddingException / IllegalBlockSizeException (KeyStoreException-caused) and a
+            // keystore-daemon glitch as a generic runtime exception — none may crash the unlock.
+            // Only Exception is caught; Error / OutOfMemoryError still propagate.
             null
         }
     }
