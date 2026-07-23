@@ -106,6 +106,39 @@ class FlushBeforeAckBarrierTest {
     }
 
     @Test
+    fun `the duplicate ack-drop routes through the durable barrier and does NOT ack on a throwing flush`() = runTest {
+        // Round 7: the ACK_AND_DROP path acks via `ackDurable` (flushThenAck), NOT a bare ackMessage.
+        // A DuplicateMessageException does not prove the FIRST delivery's ratchet advance is durable —
+        // the relay can redeliver M while it is still RAM-only — so a non-durable flush must leave the
+        // duplicate UN-acked (relay redelivers → dup again → retry until durable). Models the dup site:
+        // `if (ackDurable(id)) diag(...)` with a throwing flush.
+        val acked = mutableListOf<String>()
+        val dupAcked = flushThenAck(
+            envelopeId = "dup-1",
+            flush = { throw IOException("first delivery's advance not yet durable") },
+            ack = { acked += it },
+            onNotDurable = { },
+        )
+        assertFalse("a non-durable duplicate flush must NOT ack", dupAcked)
+        assertTrue("the relay keeps its copy and redelivers", acked.isEmpty())
+    }
+
+    @Test
+    fun `the duplicate ack-drop acks once its flush confirms durable`() = runTest {
+        // The common case: the duplicate's ratchet advance IS already durable, so the flush confirms
+        // and the ack fires — breaking the redelivery loop exactly as before, now durable-gated.
+        val acked = mutableListOf<String>()
+        val dupAcked = flushThenAck(
+            envelopeId = "dup-2",
+            flush = { /* already durable */ },
+            ack = { acked += it },
+            onNotDurable = { },
+        )
+        assertTrue("a durable duplicate flush acks + drops", dupAcked)
+        assertEquals(listOf("dup-2"), acked)
+    }
+
+    @Test
     fun `classifyRecvFailure keeps its load-bearing ordering for the other arms`() {
         assertEquals(RecvFailureAction.RETHROW, classifyRecvFailure(CancellationException("torn down")))
         assertEquals(

@@ -757,30 +757,57 @@ private fun ZitroneRoot(
         val live = session ?: return@onDeleteAccount
         container.unlockController.beginTerminalWipe()
         live.coordinator.deleteAccountAndWipe {
-            completeTerminalWipe(
-                finishUi = {
-                    // Zero the live crypto state BEFORE teardown so that if the session is dirty,
-                    // runtime.close()'s final reseal writes a ZEROED image, not a full-crypto one.
-                    // destroyVault (below) deletes the file regardless, but this shrinks the
-                    // post-reseal/pre-unlink crash window from "full account recoverable by
-                    // passphrase" to "zeroed image" — the device-seizure threat this app targets.
-                    // Tolerated: a runtime already closed by a racing revocation throws here; the
-                    // file deletion still covers that case.
-                    runCatching { live.signalStore.wipe() }
-                    identityFingerprint = null
-                    unlocked = false
-                    vaultExists = false
-                    route = Route.Onboarding
-                    // Synchronous session teardown: runtime.close() reseals the image one last
-                    // time. destroyVault (below) then deletes it — ordering is load-bearing.
-                    container.unlockController.lockIf(live)
-                },
-                // The load-bearing no-remanence step: delete vault.bin/vault.dek + biometric wrap/key
-                // (each tolerant of its own throw). Runs AFTER the reseal, in completeTerminalWipe's
-                // finally, so it can never be skipped.
-                destroyVault = { container.destroyVaultForAccountDeletion() },
-                releaseGate = { container.unlockController.endTerminalWipe() },
-            )
+            // Route to Onboarding-as-success ONLY when destroyVault CONFIRMS the on-disk image is gone
+            // (destroy() verify-unlinks and THROWS if a file survives). A throw here means the vault
+            // was NOT destroyed — the full-crypto image is still on disk — so we must not claim the
+            // account is deleted; surface a retry on the lock gate instead (see below).
+            val destroyed = try {
+                completeTerminalWipe(
+                    finishUi = {
+                        // Zero the live crypto state BEFORE teardown so that if the session is dirty,
+                        // runtime.close()'s final reseal writes a ZEROED image, not a full-crypto one.
+                        // destroyVault (below) deletes the file regardless, but this shrinks the
+                        // post-reseal/pre-unlink crash window from "full account recoverable by
+                        // passphrase" to "zeroed image" — the device-seizure threat this app targets.
+                        // Tolerated: a runtime already closed by a racing revocation throws here; the
+                        // file deletion still covers that case.
+                        runCatching { live.signalStore.wipe() }
+                        // Synchronous session teardown: runtime.close() reseals the image one last
+                        // time. destroyVault (below) then deletes it — ordering is load-bearing.
+                        // Routing is DEFERRED to after destroy confirms, so a failed unlink can no
+                        // longer strand the user on Onboarding while the image survives.
+                        container.unlockController.lockIf(live)
+                    },
+                    // The load-bearing no-remanence step: delete vault.bin/vault.dek + biometric
+                    // wrap/key. Runs AFTER the reseal, in completeTerminalWipe's finally, so it can
+                    // never be skipped. THROWS VaultImageException.DestroyFailed if a file survives.
+                    destroyVault = { container.destroyVaultForAccountDeletion() },
+                    releaseGate = { container.unlockController.endTerminalWipe() },
+                )
+                true
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                // destroy() reported a surviving file — NOT-deleted. releaseGate already ran in
+                // completeTerminalWipe's outermost finally, so the unlock gate is not stranded.
+                false
+            }
+            identityFingerprint = null
+            unlocked = false
+            if (destroyed) {
+                // Confirmed gone: hasVault() is now false → route to Onboarding (fresh-install state).
+                vaultExists = false
+                lockError = null
+                route = Route.Onboarding
+            } else {
+                // NOT destroyed: the image survives (hasVault() is still true) and the passphrase
+                // reopens it. Route to the lock gate with a retry message rather than an
+                // Onboarding-as-success lie. The server account is already gone; re-running delete
+                // retries the idempotent local destroy (which succeeds once the transient I/O clears).
+                vaultExists = true
+                lockError = "Couldn't finish deleting your account on this device. Please try again."
+                route = Route.Locked
+            }
         }
     }
 

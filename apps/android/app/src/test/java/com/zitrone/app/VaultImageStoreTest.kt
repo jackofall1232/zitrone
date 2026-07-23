@@ -856,6 +856,33 @@ class VaultImageStoreTest {
         assertFalse("vault.dek.tmp leftover gone", dekTmp.exists())
     }
 
+    @Test
+    fun destroy_throwsDestroyFailed_whenAFileSurvivesTheUnlink() {
+        val dir = tmp.newFolder()
+        val store = newStore(dir)
+        // Model a delete() that FAILS to remove the image — File.delete() returns false on an I/O /
+        // filesystem error just as it does on an already-absent file, so the store must not trust its
+        // bool. A NON-EMPTY directory named vault.bin cannot be removed by File.delete(), so it
+        // survives. destroy() must RE-STAT and THROW DestroyFailed so account-delete treats the vault
+        // as NOT destroyed (never routes to Onboarding-as-success while the full-crypto image remains).
+        val bin = File(dir, "vault.bin").also { it.mkdir() }
+        File(bin, "child").writeBytes(ByteArray(4))
+
+        assertThrows(VaultImageException.DestroyFailed::class.java) { store.destroy() }
+        assertTrue("the un-deletable image is (correctly) reported as still present", bin.exists())
+    }
+
+    @Test
+    fun destroy_doesNotThrow_whenFilesAreAlreadyAbsent_idempotencyViaExistsNotDeleteBool() {
+        val dir = tmp.newFolder()
+        // The verify check is keyed on exists(), NOT the delete() bool: an already-absent file re-stats
+        // absent and must NOT be mistaken for a failed unlink. A destroy() on a never-created store is
+        // a clean success (no throw), which is what keeps a retried/idempotent destroy safe.
+        newStore(dir).destroy()
+        assertFalse(File(dir, "vault.bin").exists())
+        assertFalse(File(dir, "vault.dek").exists())
+    }
+
     /**
      * Fixed-key `javax.crypto` AES-256-GCM stand-in for the Android Keystore device
      * key. Emits the SAME 60-byte `nonce(12) ‖ ct(32) ‖ tag(16)` blob shape the

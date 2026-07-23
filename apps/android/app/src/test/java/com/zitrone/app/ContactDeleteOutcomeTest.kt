@@ -13,26 +13,32 @@ import org.junit.Test
 import java.io.IOException
 
 /**
- * D2c round 2: the vault contact-delete seal (ZitroneApp's `deleteContactAtomically`) must
- * distinguish a CLOSED-runtime mutate — whose removal NEVER touched live state, so the delete did
- * not take and the contact reappears next unlock — from an APPLIED-mutate-but-unconfirmed-flush,
- * whose removal sticks and persists on the next flush. The round-2 containment folded BOTH into the
- * same `false`, silently losing the closed-runtime delete while reporting it as an applied removal.
+ * D2c: the vault contact-delete seal (ZitroneApp's `deleteContactAtomically`) must distinguish a
+ * CLOSED-runtime mutate — whose removal NEVER touched live state, so the delete did not take and the
+ * contact reappears next unlock (NOT_APPLIED) — from an APPLIED-mutate whose durable flush was
+ * UNCONFIRMED, whose removal sticks and persists on the next flush (APPLIED_UNCONFIRMED).
  *
- * The production seal is `sealDurableOrFalse { runtime.mutate {…}; mutateApplied = true;
- * runtime.flushBeforeAck() }`, whose Boolean + the `mutateApplied` flag map through
- * [contactDeleteOutcome]. [runSeal] reproduces that exact shape (mutate stays INSIDE the containment,
- * the flag is set only after mutate returns) so the closed-vs-unconfirmed distinction is pinned
- * without a live SessionContainer.
+ * Round 7 corrects the flag PLACEMENT. VaultRuntime.mutate applies the block to live state FIRST,
+ * then ENCODES (which can throw [VaultCapacityException]). Production now sets `mutateApplied` from
+ * INSIDE the mutate block (after the removal, before encode):
+ * `sealDurableOrFalse { runtime.mutate { …removal…; mutateApplied = true }; runtime.flushBeforeAck() }`.
+ * So a capacity-during-encode throw — the block already mutated live state — maps to
+ * APPLIED_UNCONFIRMED, not the false NOT_APPLIED the round-2 placement (flag set AFTER mutate
+ * returned) produced. [runSeal] reproduces that exact shape: `mutate` receives a `markApplied`
+ * callback it invokes at the point the live state is mutated, and may THEN throw (an encode
+ * overflow) or return; a closed-runtime mutate throws its `check(!closed)` BEFORE calling it.
  */
 class ContactDeleteOutcomeTest {
 
-    /** Mirrors the production seal lambda exactly. */
-    private fun runSeal(mutate: () -> Unit, flush: () -> Unit): ContactDeleteOutcome {
+    /**
+     * Mirrors the production seal: `mutate` is `runtime.mutate { …; markApplied() }` — it calls
+     * [markApplied] once the removal has touched live state, and may throw AFTER (a capacity encode
+     * overflow) or BEFORE (a closed runtime) that point. `flush` is `runtime.flushBeforeAck()`.
+     */
+    private fun runSeal(mutate: (markApplied: () -> Unit) -> Unit, flush: () -> Unit): ContactDeleteOutcome {
         var mutateApplied = false
         val durable = sealDurableOrFalse {
-            mutate()
-            mutateApplied = true
+            mutate { mutateApplied = true }
             flush()
         }
         return contactDeleteOutcome(durable, mutateApplied)
@@ -40,27 +46,41 @@ class ContactDeleteOutcomeTest {
 
     @Test
     fun `mutate applied and flush durable is DURABLE`() {
-        assertEquals(ContactDeleteOutcome.DURABLE, runSeal(mutate = { }, flush = { }))
+        assertEquals(ContactDeleteOutcome.DURABLE, runSeal(mutate = { it() }, flush = { }))
     }
 
     @Test
     fun `mutate applied but the flush is unconfirmed is APPLIED_UNCONFIRMED (removal sticks)`() {
-        // flushBeforeAck throws NotDurable/IO/capacity AFTER the mutate applied the removal — the
-        // crypto is gone from live state and persists on the next flush.
+        // The mutate applied (markApplied ran); flushBeforeAck then throws NotDurable/IO — the crypto
+        // is gone from live state and persists on the next flush.
         assertEquals(
             ContactDeleteOutcome.APPLIED_UNCONFIRMED,
-            runSeal(mutate = { }, flush = { throw IOException("reseal not durable") }),
+            runSeal(mutate = { it() }, flush = { throw IOException("reseal not durable") }),
         )
+    }
+
+    @Test
+    fun `a capacity throw DURING mutate encode is APPLIED_UNCONFIRMED, not NOT_APPLIED`() {
+        // The round-7 fix. runtime.mutate applies the removal (markApplied) then ENCODES, which throws
+        // VaultCapacityException — so mutate() itself throws AFTER the live state already changed. The
+        // flag is set INSIDE the block, so this is APPLIED_UNCONFIRMED (removal sticks, persists once a
+        // later encode fits), NEVER the false NOT_APPLIED the old after-mutate flag placement gave.
         assertEquals(
             ContactDeleteOutcome.APPLIED_UNCONFIRMED,
-            runSeal(mutate = { }, flush = { throw VaultCapacityException("vault full") }),
+            runSeal(
+                mutate = { markApplied ->
+                    markApplied()
+                    throw VaultCapacityException("state exceeds region after removal encode")
+                },
+                flush = { error("flush must never run when mutate's encode threw") },
+            ),
         )
     }
 
     @Test
     fun `a closed-runtime mutate is NOT_APPLIED (the delete did not take)`() {
-        // runtime.mutate throws its check(!closed) BEFORE applying the removal — the flag never
-        // flips, so this is a lost delete, NOT an applied-but-unconfirmed removal.
+        // runtime.mutate throws its check(!closed) BEFORE applying the removal — markApplied is never
+        // called, so this is a lost delete, NOT an applied-but-unconfirmed removal.
         assertEquals(
             ContactDeleteOutcome.NOT_APPLIED,
             runSeal(

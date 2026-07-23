@@ -320,6 +320,21 @@ class MessagingCoordinator(
                     // (public keys only). The client-side null-guard +
                     // single-flight prevents the common case, not this window.
                     stage = "register"
+                    // Prekey durability barrier (D2c round 7). ensureIdentity (above) + the signed
+                    // prekey + the one-time prekeys just STORED their PRIVATE halves in the vault
+                    // (coalesced, ≤2s). Reseal them DURABLE BEFORE api.register publishes their
+                    // PUBLIC halves: were a crash to roll the privates back after the relay already
+                    // serves a bundle whose private half we no longer hold, that peer's first (X3DH)
+                    // message would be permanently undecryptable. On a non-durable flush do NOT
+                    // publish — throw so this boot attempt fails and the loop retries (a later flush
+                    // that lands then registers). Routes through the SAME injected flushBeforeAck as
+                    // the inbound/outbound barriers (no hard vault dep).
+                    if (!flushBeforePreKeyPublish {
+                            diag("boot[$attempt]: prekey reseal not durable — register deferred to retry")
+                        }
+                    ) {
+                        throw PreKeyFlushNotDurableException()
+                    }
                     diag("boot[$attempt]: firing POST /api/v1/register")
                     registration?.invoke()
                     diag("boot[$attempt]: registration accepted by server")
@@ -373,7 +388,17 @@ class MessagingCoordinator(
                 // auth expiry comes back through onAuthExpired().
                 runCatching {
                     signal.rotateSignedPreKeyIfNeeded()?.let { rotated ->
-                        api.uploadPreKeys(emptyList(), rotated)
+                        // Prekey durability barrier (see the register path): the rotation just STORED
+                        // the new signed prekey's PRIVATE half — reseal it DURABLE before publishing
+                        // its PUBLIC half. On a non-durable flush do NOT upload; the next boot's
+                        // rotation retries. Publishing a signed prekey whose private half a crash
+                        // could roll back would break every peer's X3DH against it.
+                        if (flushBeforePreKeyPublish {
+                                diag("boot: signed-prekey reseal not durable — rotation upload skipped, retries next boot")
+                            }
+                        ) {
+                            api.uploadPreKeys(emptyList(), rotated)
+                        }
                     }
                 }
                 return
@@ -427,6 +452,21 @@ class MessagingCoordinator(
                 diag("recv: durable flush failed before ack — inbound left un-acked (relay redelivers)")
             },
         )
+
+    /**
+     * Durable barrier BEFORE publishing generated prekeys' PUBLIC halves (D2c round 7). The private
+     * halves — identity ([SignalProtocolManager.ensureIdentity]), signed prekey, and one-time prekeys
+     * — were just generated + STORED in the vault (coalesced reseal, ≤2s). Reseal them DURABLE via the
+     * injected [flushBeforeAck] and report whether it confirmed; the caller uploads the public halves
+     * (api.register / api.uploadPreKeys) ONLY when this returns true. On a non-durable flush the
+     * publics are NOT uploaded, so a crash can never roll the privates back while the relay already
+     * serves a bundle whose private half we no longer hold (→ a peer's first X3DH message permanently
+     * undecryptable). Delegates to [flushSendRatchet] — the SAME injected-barrier, transient-retry,
+     * fail-closed decision the outbound send path uses (host-tested there) — so no new vault dependency
+     * enters the coordinator. Runs on the confined worker, never inside a persist sink (lock order).
+     */
+    private suspend fun flushBeforePreKeyPublish(onNotDurable: () -> Unit): Boolean =
+        flushSendRatchet(flush = flushBeforeAck, onNotDurable = onNotDurable)
 
     // Standard base64 WITH padding (NO_WRAP keeps the `=` pad, strips only line
     // breaks) — the wire format the control payload's length-validated fields
@@ -1052,9 +1092,17 @@ class MessagingCoordinator(
                 // and cannot be un-removed), so a false return is reported honestly as "not yet
                 // confirmed durable" — NEVER "contact kept" (which would lie: its crypto is gone).
                 val outcome = atomicDelete(conversationId, contactId, at)
-                pendingReceipts.remove(contactId)
-                _typingPeers.value = _typingPeers.value - contactId
-                notificationScheduler.onConversationRemoved(conversationId)
+                // Gate the per-contact transient cleanup on the outcome (Gemini round 3). The
+                // removal is in live state for DURABLE and APPLIED_UNCONFIRMED (the contact IS gone),
+                // so drop its queued receipts / typing / notification state. On NOT_APPLIED the
+                // removal never took — the contact remains — so leave that state fully INTACT for a
+                // post-unlock retry; stripping it would desync the UI (typing/receipts/notifications
+                // dropped) from a contact that is still present.
+                if (outcome != ContactDeleteOutcome.NOT_APPLIED) {
+                    pendingReceipts.remove(contactId)
+                    _typingPeers.value = _typingPeers.value - contactId
+                    notificationScheduler.onConversationRemoved(conversationId)
+                }
                 when (outcome) {
                     ContactDeleteOutcome.DURABLE -> Unit
                     ContactDeleteOutcome.APPLIED_UNCONFIRMED ->
@@ -1303,18 +1351,25 @@ class MessagingCoordinator(
                 when (classifyRecvFailure(e)) {
                     RecvFailureAction.RETHROW -> throw e
                     RecvFailureAction.ACK_AND_DROP -> {
-                        // A redelivery of a message we ALREADY consumed: the receiving ratchet is
-                        // durably PAST it (our own crash-recovery redelivery, or a replay), so
-                        // decrypt threw DuplicateMessageException. A forward ratchet can NEVER
-                        // re-derive it, so "skip the ack and rely on redelivery" would loop FOREVER
-                        // (redeliver → dup → no ack → resend), surviving restart. ACK so the relay
-                        // drops its copy, then drop. This is the universal net that closes the
-                        // durable-but-unacked loop for EVERY cause: a transient flush the coalesced
-                        // background reseal later persisted, capacity space was later freed for, or
-                        // a crash after the reseal reached disk but before the ack.
+                        // A redelivery of a message we already consumed: decrypt threw
+                        // DuplicateMessageException. A forward ratchet can NEVER re-derive it, so
+                        // "skip the ack and rely on redelivery" would loop FOREVER (redeliver → dup →
+                        // no ack → resend), surviving restart — hence we ack so the relay drops its
+                        // copy, then drop.
+                        // Round 7 — flush-before-ack even for a duplicate. DuplicateMessageException
+                        // does NOT prove the FIRST delivery's receiving-ratchet advance is DURABLE:
+                        // the relay can redeliver M while that advance is still only in RAM (the
+                        // coalescing window). So reseal DURABLE before acking, exactly like the normal
+                        // delivery path; on a non-durable flush do NOT ack (ackDurable diag'd it) —
+                        // the relay redelivers → dup again → retry until durable, so a crash can never
+                        // drop M from the relay while the ratchet is still short of it. This remains
+                        // the net that closes the durable-but-unacked loop: a transient flush the
+                        // coalesced reseal later persisted, or a crash after the reseal reached disk
+                        // but before the ack, both resolve to a durable ack here on redelivery.
                         // No slot/credential data logged; the envelope id is an opaque relay handle.
-                        ws.ackMessage(envelope.id)
-                        diag("recv: duplicate (already consumed) — acked + dropped")
+                        if (ackDurable(envelope.id)) {
+                            diag("recv: duplicate (already consumed) — flushed, acked + dropped")
+                        }
                     }
                     RecvFailureAction.DIAGNOSE_AT_CAPACITY ->
                         // Spec §4: surface a vault-at-capacity overflow as a non-fatal DIAGNOSTIC
@@ -1413,7 +1468,18 @@ class MessagingCoordinator(
     override fun onPreKeyLow(remaining: Int) {
         scope.launch(confined) {
             runCatching {
-                api.uploadPreKeys(signal.generateOneTimePreKeys())
+                val oneTimePreKeys = signal.generateOneTimePreKeys()
+                // Prekey durability barrier (see the register path): the top-up just STORED the new
+                // one-time prekeys' PRIVATE halves — reseal them DURABLE before publishing their
+                // PUBLIC halves. On a non-durable flush do NOT upload; the next low-prekey signal
+                // retries. Publishing publics whose privates a crash could roll back would hand peers
+                // bundles we can't complete X3DH for (permanent first-message undecryptability).
+                if (flushBeforePreKeyPublish {
+                        diag("prekey: top-up reseal not durable — upload skipped, retries on next low signal")
+                    }
+                ) {
+                    api.uploadPreKeys(oneTimePreKeys)
+                }
             }
         }
     }
@@ -1483,9 +1549,11 @@ internal enum class RecvFailureAction {
     RETHROW,
 
     /**
-     * A redelivery of an already-consumed message ([DuplicateMessageException]) — ack so the relay
-     * drops its copy, then drop. Recovery by redelivery is impossible (forward ratchet), so this is
-     * the universal net that breaks the infinite-redelivery loop for a durable-but-unacked advance.
+     * A redelivery of an already-consumed message ([DuplicateMessageException]) — flush-before-ack
+     * (round 7: a dup does NOT prove the first delivery's ratchet advance is durable) so the relay
+     * drops its copy only once durable, then drop. Recovery by redelivery is impossible (forward
+     * ratchet), so this is the net that breaks the infinite-redelivery loop for a durable-but-unacked
+     * advance — resolving to a durable ack on redelivery once the coalesced reseal has landed.
      */
     ACK_AND_DROP,
 
@@ -1510,6 +1578,15 @@ internal fun classifyRecvFailure(e: Throwable): RecvFailureAction = when {
     e is VaultCapacityException -> RecvFailureAction.DIAGNOSE_AT_CAPACITY
     else -> RecvFailureAction.SWALLOW
 }
+
+/**
+ * Thrown to fail-and-retry a boot attempt whose pre-publish prekey reseal ([flushBeforePreKeyPublish])
+ * was NOT durable. It aborts the attempt BEFORE api.register publishes any public prekey half — the
+ * boot loop's runCatching maps it to a retry with backoff, so a later flush that lands then registers.
+ * NOT a [CancellationException]: a real teardown still unwinds; this only defers a publish.
+ */
+internal class PreKeyFlushNotDurableException :
+    Exception("prekey reseal not confirmed durable — publication deferred to the next boot attempt")
 
 /** Attempts (incl. the first) [flushThenAck] makes at a TRANSIENT durable-flush blip. */
 internal const val FLUSH_MAX_ATTEMPTS = 3

@@ -338,11 +338,19 @@ class AppContainer(private val app: Application) {
      * account's crypto on disk) — those are a lock, not a deletion. This MUST run AFTER the session
      * teardown (runtime.close reseals the image); destroy() then deletes it, so NO resealed image
      * survives. After this call [hasVault] is false → the app routes to Onboarding (fresh-install state).
+     *
+     * The IMAGE destroy is the load-bearing no-remanence step and is NOT tolerated: [VaultImageStore.destroy]
+     * verifies the unlink and THROWS [com.zitrone.app.crypto.vault.VaultImageException.DestroyFailed] if a
+     * file survived, and that throw PROPAGATES so the caller does not claim a delete that did not take (it
+     * surfaces a retry rather than routing to Onboarding-as-success). The biometric wrap/key removals are
+     * best-effort hygiene (useless once the image is gone) and run FIRST, tolerated, so a Keystore hiccup
+     * there cannot mask — or pre-empt — the image destroy's success/failure signal.
      */
     fun destroyVaultForAccountDeletion() {
-        tolerateCleanup { imageStore.destroy() }
         tolerateCleanup { biometricStore.clear() }
         tolerateCleanup { biometricCipher.deleteKey() }
+        // NOT tolerated: a DestroyFailed (a surviving file) MUST reach the caller as a NOT-deleted signal.
+        imageStore.destroy()
     }
 
     /**
@@ -639,10 +647,13 @@ class SessionContainer(
         contactId: String,
         at: Long,
     ): ContactDeleteOutcome {
-        // Set ONLY after runtime.mutate returns (the removal reached live state). A closed-runtime
-        // mutate throws its `check(!closed)` BEFORE the block applies, so this stays false — letting
-        // the caller distinguish a NOT_APPLIED (delete did not take) from an APPLIED_UNCONFIRMED
-        // (removal sticks, flush pending). Captured across the seal lambda, which runs synchronously.
+        // Set from INSIDE the mutate block, AFTER the removal has touched live state but BEFORE
+        // encode can throw. That placement is load-bearing for the outcome mapping: a closed-runtime
+        // mutate throws its `check(!closed)` BEFORE the block runs, so this stays false → NOT_APPLIED
+        // (the delete did not take). But a VaultCapacityException thrown by mutate's ENCODE happens
+        // AFTER the block already mutated live state, so this is already true → APPLIED_UNCONFIRMED
+        // (the crypto IS gone from the runtime; it persists on the next flush that fits), NOT a false
+        // NOT_APPLIED. Captured across the seal lambda, which runs synchronously.
         var mutateApplied = false
         val durable = conversationRepository.deleteContactDurably(conversationId, contactId, at) { rosterJson, tombstonesJson ->
             // BOTH mutate and flush are contained: a teardown race (forced logout /
@@ -659,8 +670,11 @@ class SessionContainer(
                     vaultSignalStore.removeContactCryptoRecords(state, contactId)
                     rosterJson?.let { state.rosterJson = it }
                     state.tombstonesJson = tombstonesJson
+                    // Mark applied HERE — the removal is now in live state. A capacity-during-encode
+                    // throw (below, still inside mutate) then reports APPLIED_UNCONFIRMED, not
+                    // NOT_APPLIED; a closed-runtime throw never reaches this line.
+                    mutateApplied = true
                 }
-                mutateApplied = true
                 runtime.flushBeforeAck()
             }
         }

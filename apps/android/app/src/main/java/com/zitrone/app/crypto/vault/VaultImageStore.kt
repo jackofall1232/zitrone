@@ -77,6 +77,18 @@ sealed class VaultImageException(message: String) : Exception(message) {
      * [CorruptImage] — nothing is unreadable; only the rename's durability is unconfirmed.
      */
     class NotDurable : VaultImageException("vault image write not confirmed durable")
+
+    /**
+     * [VaultImageStore.destroy] deleted the files but a re-stat found one of them STILL on disk:
+     * [File.delete] returned false because of an I/O / filesystem error (not an already-absent
+     * file), so the full-crypto image — the account's identity keypair, ratchet records, and
+     * roster — SURVIVES. Account deletion MUST treat this as NOT-deleted: surface an error / retry,
+     * never route to Onboarding-as-success (which would tell the user "deleted" while the image
+     * remains recoverable). Distinct from the read outcomes above — nothing is unreadable; a
+     * removal we asked for did not take. Idempotent-safe: an ALREADY-absent file re-stats absent
+     * and does NOT throw, so a retried destroy() over a partially-succeeded one still completes.
+     */
+    class DestroyFailed : VaultImageException("vault image destruction failed — a file survives")
 }
 
 /**
@@ -589,6 +601,16 @@ class VaultImageStore internal constructor(
      * are best-effort; even if one returns false the RAM state is still wiped and the
      * registration released, leaving the store fully closed. Runs ONLY under [imageLock] and
      * never invokes a VaultSession, so it introduces no reverse lock nesting.
+     *
+     * VERIFY-UNLINK (the no-remanence guarantee): [File.delete] returns false on an I/O /
+     * filesystem error just as it does on an already-absent file, so its boolean cannot be
+     * trusted to mean "gone". After the deletes this RE-STATS `vault.bin` / `vault.dek`; if
+     * either SURVIVES, the full-crypto image is still on disk, so it throws
+     * [VaultImageException.DestroyFailed] — account deletion then treats the vault as NOT
+     * destroyed (never routes to Onboarding-as-success). The check is on [File.exists], NOT the
+     * delete() bool, so an ALREADY-absent file (a second/idempotent destroy) re-stats absent and
+     * does NOT throw. The RAM wipe + registration release still happen before the throw, leaving
+     * the store fully closed and a retry (idempotent) able to re-attempt the unlink.
      */
     fun destroy() {
         imageLock.withLock {
@@ -606,6 +628,15 @@ class VaultImageStore internal constructor(
             // Release the single-instance registration so a fresh create() may re-open this
             // directory in the SAME process (re-onboard after account deletion).
             unregister()
+            // VERIFY the persisted image is actually GONE (see kdoc): delete()'s bool is false on
+            // an I/O error too, so re-stat instead. A surviving file means the full-crypto image
+            // is still on disk — destruction FAILED, so throw and let account-delete treat this as
+            // NOT-deleted. exists()==false (already-absent) does NOT throw, keeping destroy()
+            // idempotent. Temps are variable-size scratch and never carry the image, so they are
+            // not part of the survival check.
+            if (binFile.exists() || dekFile.exists()) {
+                throw VaultImageException.DestroyFailed()
+            }
         }
     }
 

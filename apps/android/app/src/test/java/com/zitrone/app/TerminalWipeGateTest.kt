@@ -72,8 +72,9 @@ class TerminalWipeGateTest {
     @Test
     fun `a destroyVault throw still releases the gate`() {
         val events = mutableListOf<String>()
-        // Defense in depth: the real destroyVault tolerates each step's throw internally, but even a
-        // stray throw must not leave the unlock gate SET forever — releaseGate is the outermost finally.
+        // Round 7: destroyVault (destroyVaultForAccountDeletion) now PROPAGATES a DestroyFailed when a
+        // file survived the unlink, so the throw must still run releaseGate (outermost finally) — the
+        // caller catches it to decide routing (see the routing-gate test below).
         assertThrows(IllegalStateException::class.java) {
             completeTerminalWipe(
                 finishUi = { events += "ui" },
@@ -82,5 +83,40 @@ class TerminalWipeGateTest {
             )
         }
         assertEquals("finishUi ran and the gate was released despite the destroy throw", listOf("ui", "release"), events)
+    }
+
+    // -- round 7: route to Onboarding-as-success ONLY when the destroy is CONFIRMED ----------------
+
+    /**
+     * Models MainActivity.onDeleteAccount's routing gate: run [completeTerminalWipe], and route to
+     * Onboarding ONLY when it returned normally (destroy confirmed the image is gone). A destroyVault
+     * throw (a surviving file) means NOT-deleted → do not claim success. Cancellation still propagates.
+     */
+    private fun routeAfterDelete(destroyVault: () -> Unit): String {
+        val destroyed = try {
+            completeTerminalWipe(finishUi = { }, destroyVault = destroyVault, releaseGate = { })
+            true
+        } catch (c: CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            false
+        }
+        return if (destroyed) "Onboarding" else "Locked"
+    }
+
+    @Test
+    fun `a confirmed destroy routes to Onboarding-as-success`() {
+        assertEquals("Onboarding", routeAfterDelete(destroyVault = { /* image confirmed gone */ }))
+    }
+
+    @Test
+    fun `a destroy that throws does NOT route to Onboarding — it surfaces a retry on the lock gate`() {
+        // The core of the fix: destroy() verify-unlink throws when the full-crypto image survives, so
+        // the app must NOT tell the user "deleted" (route to Onboarding) while the image is still on
+        // disk — it routes back to the lock gate with a retry instead.
+        assertEquals(
+            "Locked",
+            routeAfterDelete(destroyVault = { throw com.zitrone.app.crypto.vault.VaultImageException.DestroyFailed() }),
+        )
     }
 }
