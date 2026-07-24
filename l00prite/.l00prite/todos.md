@@ -169,9 +169,26 @@ User intent recorded 2026-07-24: "at some point we need to cut 0.9.1 apk and fli
       website build green. (Distinct from the broken-semgrep SAST item below — different scanner.)
 
 ## Standing hygiene — owed before external testers (outside the release gate)
-- [ ] **CI SAST silently broken:** `semgrep-action@v1` exits 0 even on crash — SAST has not been
-      running. Fix PR owed.
-- [ ] **`release-apk.yml` shell-injection:** one real workflow-shell-injection ERROR to fix.
+- [x] **CI SAST silently broken + `release-apk.yml` shell-injection — ✅ FIXED (PR #59, branch
+      `feat/ci-security-hardening`).** SAST: replaced `semgrep-action@v1` (exit 0 on crash/registry-fetch)
+      with a DIGEST-pinned `semgrep/semgrep` container + `--config .semgrep --error --strict` in a run: step
+      (findings/config-errors/crash all fail the job); rules VENDORED under `.semgrep/` (no registry fetch) =
+      official github-actions security + Go security + a local `no-run-block-interpolation` rule (flags ANY
+      `${{ }}`→run, closing the derived-`steps.*.outputs.*` + multiline-span variants the upstream rule
+      misses). Injection: env-var indirection for every `${{ }}`→run (zero remain) + validate-first tag gate
+      + `::error::` sanitize. POSITIVE CI PROOF: a throwaway PR with a planted injection FAILED Security
+      scanning (exit 1) — the gate fires in CI, not just locally. 6-round-equiv paired-blind loop → clean
+      convergence round 3. No version bump.
+- [ ] **FOLLOW-UP 1 (from CI-security unit, UNSEQUENCED — user prioritizes): pin all `uses: @vN` actions to
+      SHAs + add Dependabot.** The now-working SAST flags `github-actions-mutable-action-tag` (a mutable tag
+      can be repointed to malicious code — real supply-chain hardening). Deferred from the injection unit as
+      its own unit; deliberately omitted from the current gate (documented in `.semgrep/README.md`). Pairs
+      naturally with the injection fix. Not blocking.
+- [ ] **FOLLOW-UP 2 (from CI-security unit, UNSEQUENCED — user prioritizes): expand SAST language coverage
+      (Kotlin/TS/JS) with CURATED per-language subsets.** CONSTRAINT: the full semgrep language packs
+      false-positive on the vault's CORRECT AES-GCM (`gcm-detection`) and are audit-noisy (TS alone ~244
+      findings) — this needs curation, NOT a bulk enable. Do NOT suppress a rule that's flagging correct
+      crypto to force a noisy pack green. Not blocking.
 - [ ] **Website web-overclaim:** the site presents an undeployed web client as available. Correct
       to the platform honesty hierarchy.
 - [ ] **Storage-format stability GATE:** before external testers, either commit to storage-format

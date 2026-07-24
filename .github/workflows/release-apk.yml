@@ -55,10 +55,30 @@ jobs:
           # a Release named for a different tag — a release-integrity bug.
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - name: Resolve release tag
+      - name: Resolve & validate release tag
         id: meta
+        # FIRST run step, and the ONLY place the raw tag is read. Resolve it from env-var'd inputs — NOT
+        # `${{ … }}` interpolated into the script, which would be shell injection (github.event.inputs.tag
+        # and github.ref_name are attacker-influenceable). VALIDATE its format here, BEFORE it is used
+        # anywhere or emitted as a step output: only a well-formed tag becomes steps.meta.outputs.tag, and
+        # every downstream step consumes THAT validated value via `env:`, never a raw `${{ … }}`. A check
+        # that ran after the raw tag had already flowed into a derived output would gate nothing.
+        # (The checkout above takes the raw ref as an action `with:` input — not a shell; actions/checkout
+        # validates it as a git ref — and must run first to fetch the code; that is not a shell/derivation
+        # use of the tag.)
+        env:
+          TAG_INPUT: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        shell: bash
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          TAG="${TAG_INPUT:-$REF_NAME}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta)?$ ]]; then
+            # Sanitize the rejected (untrusted) tag before echoing it: strip CR/LF and cap the length so a
+            # newline in a dispatch input can't inject extra `::workflow-command::` lines on this step's stdout.
+            SAFE_TAG=$(printf '%s' "$TAG" | tr -d '\r\n' | cut -c1-64)
+            echo "::error::Refusing to build release tag '$SAFE_TAG' — not a valid release tag (expected vX.Y.Z or vX.Y.Z-beta)."
+            exit 1
+          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-java@v4
@@ -75,9 +95,10 @@ jobs:
 
       - name: Assert tag matches app versionName
         working-directory: apps/android
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
         run: |
           VN=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
-          TAG="${{ steps.meta.outputs.tag }}"
           case "$TAG" in
             "v$VN"|"v$VN-beta")
               echo "Tag $TAG matches versionName $VN." ;;
@@ -114,10 +135,12 @@ jobs:
       - name: Stage APK + checksum
         id: stage
         working-directory: apps/android
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          SIGNED: ${{ steps.signing.outputs.signed }}
         run: |
-          TAG="${{ steps.meta.outputs.tag }}"
           mkdir -p "$RUNNER_TEMP/dist"
-          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+          if [ "$SIGNED" = "true" ]; then
             SRC=app/build/outputs/apk/release/app-release.apk
             OUT="zitrone-$TAG.apk"
           else
@@ -134,9 +157,10 @@ jobs:
         if: steps.signing.outputs.signed == 'true'
         env:
           EXPECTED_CERT_SHA256: ${{ secrets.ANDROID_SIGNING_CERT_SHA256 }}
+          APK_NAME: ${{ steps.stage.outputs.apk }}
         run: |
           APKSIGNER="$ANDROID_HOME/build-tools/34.0.0/apksigner"
-          APK="$RUNNER_TEMP/dist/${{ steps.stage.outputs.apk }}"
+          APK="$RUNNER_TEMP/dist/$APK_NAME"
           "$APKSIGNER" verify --print-certs "$APK"
           norm() { printf '%s' "$1" | tr 'A-F' 'a-f' | tr -cd '0-9a-f'; }
           ACTUAL=$("$APKSIGNER" verify --print-certs "$APK" \
@@ -161,13 +185,15 @@ jobs:
 
       - name: Emit website pointer values (signed builds)
         if: steps.signing.outputs.signed == 'true'
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          SHA256: ${{ steps.stage.outputs.sha256 }}
         run: |
-          TAG="${{ steps.meta.outputs.tag }}"
           {
             echo "### Website update — website/src/lib/links.ts"
             echo '```ts'
             echo "export const ANDROID_BETA_VERSION = \"$TAG\";"
-            echo "export const ANDROID_BETA_SHA256 = \"${{ steps.stage.outputs.sha256 }}\";"
+            echo "export const ANDROID_BETA_SHA256 = \"$SHA256\";"
             echo '```'
             echo "Then stage the same file into onion-site/ (SELF_HOSTING.md) so both mirrors match."
           } >> "$GITHUB_STEP_SUMMARY"
@@ -176,20 +202,23 @@ jobs:
         if: steps.signing.outputs.signed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          APK: ${{ steps.stage.outputs.apk }}
+          SHA256: ${{ steps.stage.outputs.sha256 }}
+          CERT_SHA256: ${{ steps.verify.outputs.cert_sha256 }}
+          REPO: ${{ github.repository }}
         run: |
-          TAG="${{ steps.meta.outputs.tag }}"
-          APK="${{ steps.stage.outputs.apk }}"
           {
             echo "Zitrone Android ${TAG}."
             echo ""
             echo "Verify before installing:"
-            echo "- APK SHA-256: \`${{ steps.stage.outputs.sha256 }}\` (\`sha256sum ${APK}\`)"
-            echo "- Signing certificate SHA-256: \`${{ steps.verify.outputs.cert_sha256 }}\` (\`apksigner verify --print-certs ${APK}\`)"
+            echo "- APK SHA-256: \`${SHA256}\` (\`sha256sum ${APK}\`)"
+            echo "- Signing certificate SHA-256: \`${CERT_SHA256}\` (\`apksigner verify --print-certs ${APK}\`)"
           } > "$RUNNER_TEMP/notes.md"
           if gh release create "$TAG" \
                 "$RUNNER_TEMP/dist/${APK}" \
                 "$RUNNER_TEMP/dist/SHA256SUMS" \
-                --repo "${{ github.repository }}" --title "$TAG" --prerelease --verify-tag --notes-file "$RUNNER_TEMP/notes.md"; then
+                --repo "$REPO" --title "$TAG" --prerelease --verify-tag --notes-file "$RUNNER_TEMP/notes.md"; then
             echo "Published release $TAG."
           else
             echo "::error::Could not create release $TAG. If a release for this tag already exists, its APK + checksum are live download assets — delete it deliberately (gh release delete $TAG) or cut a new tag rather than clobbering live assets in place. If the tag is missing, create and push it first."
@@ -206,8 +235,9 @@ jobs:
 
       - name: Manual signing instructions (no keystore configured)
         if: steps.signing.outputs.signed == 'false'
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
         run: |
-          TAG="${{ steps.meta.outputs.tag }}"
           {
             echo "### Unsigned build — sign locally, then create the Release"
             echo "Download the \`zitrone-${TAG}-unsigned\` artifact, then on trusted hardware:"

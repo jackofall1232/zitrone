@@ -131,10 +131,18 @@ jobs:
     needs: [desktop-linux]
     steps:
       - uses: actions/checkout@v4
-      - name: Semgrep
-        uses: semgrep/semgrep-action@v1
-        with:
-          config: auto
+      - name: Semgrep (vendored rules, gating)
+        # PINNED image (never a floating tag) + vendored `.semgrep/` rules (no registry fetch, so the
+        # gate is a function of repo contents alone). `--error` fails the build on a real finding;
+        # `--strict` makes a broken/empty ruleset a hard error (not a false "0 findings"); and running
+        # semgrep in a `run:` step means ANY non-zero exit — including a semgrep CRASH — fails the job.
+        # This replaces `semgrep/semgrep-action@v1 config: auto`, which exited 0 on its own crash / a
+        # registry-fetch failure, so SAST was silently green without running. See .semgrep/README.md.
+        run: |
+          # DIGEST-pinned (not just the mutable :1.90.0 tag) so the scanner can't be silently repointed.
+          docker run --rm -v "$PWD:/src" -w /src \
+            semgrep/semgrep:1.90.0@sha256:7b625711ba9b6d1a543e308967b18c01b59932490a5536a06422666474bf6ee4 \
+            semgrep scan --config /src/.semgrep --error --strict --disable-version-check /src
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
