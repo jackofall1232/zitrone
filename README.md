@@ -4,7 +4,7 @@
 
 # Zitrone
 
-**Nothing lasts. That's the point.**
+**Privacy with ZEST — Nothing lasts. That's the point.**
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-F5E642.svg)](LICENSE)
 [![Build](https://img.shields.io/github/actions/workflow/status/jackofall1232/zitrone/ci.yml?branch=main)](.github/workflows/ci.yml)
@@ -14,11 +14,7 @@
 </div>
 
 > [!IMPORTANT]
-> **Production (CX23) runs zitrone's code on infrastructure still named
-> `sublemonable` — on purpose.** The compose project, volumes, Postgres DB,
-> onion address, and keystore keep the `sublemonable` identity for continuity;
-> renaming them regenerates onion keys and destroys data. Do **not** "fix" the
-> naming. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) before touching production.
+> **. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) before touching production.**
 
 ## What is Zitrone?
 
