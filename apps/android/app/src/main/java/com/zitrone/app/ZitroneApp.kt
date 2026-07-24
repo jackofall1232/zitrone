@@ -191,6 +191,27 @@ class AppContainer(private val app: Application) {
         vaultCreating.value = false
     }
 
+    /**
+     * PROCESS-scoped single-flight for a passphrase unlock attempt. The lock screen's `unlocking`
+     * guard is COMPOSITION-local, so it resets to false on an Activity recreation (rotation) and
+     * cannot stop the recreated screen from launching a SECOND [attemptPassphrase] while a
+     * rotation-cancelled first one's UNINTERRUPTIBLE store call (holding `imageLock`) is still
+     * finishing. That overlap let the cancelled attempt's triple-entry streak be READ + advanced by
+     * the next entry (latching `create=true`) BEFORE the cancelled attempt's [resetCandidate] landed
+     * — creating after fewer than 3 uninterrupted entries (paired-blind review round 5, BOTH
+     * reviewers). This flag is process-scoped (survives recreation) so [attemptPassphrase] serializes
+     * end-to-end: a cancelled attempt's rollback completes before any next attempt can read the
+     * streak. Reject-based, mirroring [tryBeginVaultCreate]; no UI observation needed (the
+     * composition-local `unlocking` already drives the spinner). RAM-only → process death clears it.
+     */
+    private val unlockInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    fun tryBeginUnlock(): Boolean = unlockInFlight.compareAndSet(false, true)
+
+    fun endUnlock() {
+        unlockInFlight.set(false)
+    }
+
     /** Routing truth: a vault image is present → UNLOCK, absent → SETUP (onboarding). */
     fun hasVault(): Boolean = imageStore.exists()
 
@@ -404,6 +425,13 @@ class AppContainer(private val app: Application) {
      * returns, so a cancellation can never strand it. Never logs anything credential-shaped.
      */
     suspend fun attemptPassphrase(passphrase: String): PassphraseOutcome {
+        // PROCESS-scoped single-flight (see [unlockInFlight]): refuse a concurrent attempt BEFORE any
+        // decideCreate, so a rotation that starts a second attempt while a cancelled first one's
+        // uninterruptible store is still finishing can never advance the triple-entry streak. A busy
+        // reject is uniform (like a wrong password) and touches neither the streak nor the backoff.
+        // The composition-local `unlocking` guard already blocks concurrent submits WITHIN one Activity;
+        // this closes only the cross-recreation race the two round-5 reviewers converged on.
+        if (!tryBeginUnlock()) return PassphraseOutcome.Rejected
         // The triple-entry candidate is advanced inside decideCreate (a side effect that persists even
         // when the attempt is later cancelled). ANY cancellation of this attempt must undo that advance —
         // an interrupted entry is never one of the 3 uninterrupted identical entries. The reset lives in
@@ -411,6 +439,9 @@ class AppContainer(private val app: Application) {
         // guarantee can DISCARD the block's already-computed Rejected result and throw CancellationException
         // at the boundary — after the `when` kept the streak — where no catch INSIDE the block (having
         // already returned) can ever see it. The inner catch only covers a CE thrown DURING the store call.
+        // endUnlock() is in the OUTER finally: it runs AFTER the CE-reset catch, so the single-flight is
+        // released only once this attempt's rollback (or commit) is complete — a next attempt that claims
+        // the flight therefore always reads a settled streak.
         return try {
             withContext(Dispatchers.Default) {
                 val create = unlockRouter.decideCreate(passphrase)
@@ -479,6 +510,10 @@ class AppContainer(private val app: Application) {
             // withContext boundary (block already returned; streak kept) OR re-thrown from the inner catch.
             unlockRouter.resetCandidate()
             throw c
+        } finally {
+            // Release the single-flight AFTER the CE-reset catch above, so no concurrent attempt can claim
+            // the flight until this one's streak rollback/commit has settled.
+            endUnlock()
         }
     }
 
