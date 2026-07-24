@@ -19,16 +19,19 @@ disagrees with this document, that is a bug (same convention as `SECURITY_MODEL.
 | Crypto primitive — **Android** (Argon2id + no-early-exit `tryPassphrase` + fixed-size blind payload/image) | **Built + wired** — `apps/android/.../crypto/vault/` (`VaultSodiumOps`, `VaultSlots`, `VaultPayload`, `VaultImage`), byte-mirrored from the web reference, unit-tested (no-early-exit, wipe discipline, NIST AES-GCM KAT). As of **0.9.1-beta** it backs the live storage — no longer isolated. |
 | Notification-parity structure (single-id, content-free, extra-free intent, teardown hook) | **Built** on Android as of the notification re-fire work (0.9.0-beta) — see §7 |
 | Android vault RUNTIME — **everyday (single) vault**: session-over-vault unlock (biometric + PIN/passphrase fallback via `VaultUnlockRouter`), per-slot stores/coordinator, flush-before-ack durability, atomic contact delete, two-marker no-remanence account delete, idle auto-lock (`VaultLockManager`) | **Built as of 0.9.1-beta** (the P1b-2 / PR-D arc). The app runs over the vault image; onboarding sets a passphrase and the ordinary lock screen opens it. |
-| Android vault RUNTIME — **second (decoy) vault**: user path to CREATE a second slot, setup wizard, teardown-on-switch, destruction | **NOT built yet.** The unlock router is slot-agnostic and *would* open a second vault if one existed, but 0.9.1 ships **no way to create one** — so plausible deniability is not yet a usable guarantee on Android. This is P2 (second slot + teardown-on-switch) and P3 (setup wizard + destruction). |
+| Android vault RUNTIME — **second (decoy) vault**: user path to CREATE a second slot | **Built as of 0.9.2-beta.** Vault B is created through the PIN/passphrase router itself (no setup wizard) — the **triple-entry** ceremony (§3.3): three consecutive identical entries of a never-before-used passphrase create and open slot B. Blind placement over the vault pool (slots 1..`SLOT_COUNT`-1; slot 0 reserved for the Pucker Burn credential). Biometric stays bound to a single vault and can never be repointed (0.9.2 A-only guard). So plausible deniability is now a usable guarantee on Android, subject to the documented limits (blind-overwrite, triple-entry consequences, biometric A-only) — see `SECURITY_MODEL.md`. |
+| Android vault RUNTIME — second-vault **per-vault destruction**, and Pucker Burn **setup + wipe** | **NOT built yet.** Whole-image account delete exists, but there is no primitive to destroy one vault's slot alone (§3.4). The Pucker Burn duress credential's slot (slot 0) is reserved and the store is burn-*aware*, but the burn setup UX and wipe execution are separate future PRs. |
 | Migration from a pre-vault Android install into the vault format | **Dropped — not built.** 0.9.1 is a **fresh-install-only** cut; there is no in-place migration and no commitment to storage-format stability yet (wipe-on-breaking-change is disclosed in the release notes). |
 | Decoy traffic (§8) | Deferred to a later release (0.10.0-beta) — specced adjacent, not built |
 
-> **Documentation-accuracy note (updated 0.9.1-beta).** The Android **everyday-vault** runtime
-> is now built and live (see the table above). The part that delivers deniability — a **second
-> (decoy) vault** — is **not** creatable yet, so any statement that Android has "two vaults" or
-> real duress resistance today is still an overclaim. `SECURITY_MODEL.md` and `README.md` are
-> reconciled to this per-platform status (Android: one vault reachable, second not yet
-> creatable) — see §9.
+> **Documentation-accuracy note (updated 0.9.2-beta).** The Android everyday-vault runtime
+> (0.9.1-beta) and now the **second-vault creation path** (0.9.2-beta, the silent triple-entry
+> router of §3.3) are both built and live. Android can therefore create and reveal a second
+> (decoy) vault, so plausible deniability is a **usable** guarantee here — bounded by the
+> limitations documented in `SECURITY_MODEL.md` (blind-overwrite on creation, the triple-entry
+> gate's consequences, biometric bound to a single vault). What is **not** yet built: per-vault
+> destruction (whole-image delete only) and the Pucker Burn setup/wipe UX (§3.4). Do not describe
+> those as shipped. `SECURITY_MODEL.md` and `README.md` are reconciled to this status.
 
 ---
 
@@ -103,17 +106,40 @@ The lock screen is **visually and structurally unchanged** — no new screen, bu
   memorability, but the app derives and stores its **own independent key** — it does not defer
   to or depend on the OS credential store. This keeps A and B symmetric in implementation (same
   mechanism, same code path, same guarantees) rather than A being OS-backed and B app-backed.
-- Vault B's passphrase is set in a dedicated, explicit **setup wizard** that must clearly warn:
-  - the passphrase is **not recoverable** — no reset, no account recovery, no support path;
-  - this is a **separate vault** — separate contacts, messages, identity.
-- The wizard copy needs careful review before ship: it must convey real stakes without the
-  onboarding flow *itself* becoming the tell for users who never touch vault B again.
+- Vault B is created through the **PIN/passphrase router itself — there is no setup wizard, and
+  there must not be one** (a dedicated "create second vault" flow would be exactly the
+  discoverable tell §2 forbids). The entire ceremony (0.9.2-beta, Android) is: at the ordinary
+  lock screen, enter the **same never-before-used passphrase three times, consecutively and
+  uninterrupted**. The third consecutive identical entry of a passphrase that matches no existing
+  slot creates vault B and unlocks straight into it — indistinguishable, to any observer, from a
+  user who mistyped twice and got in on the third try.
+  - **Uninterrupted** is enforced: backgrounding the app, the lock cycle, or process death resets
+    the streak (`VaultLockManager.onStop` / the RAM-only candidate in `VaultUnlockRouter`), so a
+    stray sequence cannot accumulate across sessions.
+  - There is **intentionally no confirmation dialog and no warning copy** — a "you are creating a
+    hidden vault, its passphrase is unrecoverable" prompt would itself be the tell. The
+    non-recoverability is inherent (no reset, no account recovery, no support path) and is
+    disclosed here and in `SECURITY_MODEL.md`, not in an in-flow dialog that would out the feature.
+  - Consequence to accept (see `SECURITY_MODEL.md`): because the gate triggers on three *identical
+    consecutive* entries of a never-matching passphrase, a coercer who forces you to type one
+    chosen wrong passphrase three times in a row will create an (empty) vault; conversely,
+    systematic enumeration of *different* wrong guesses never creates one (any differing entry
+    resets the streak). Slot 0 is reserved for the Pucker Burn duress credential and is never a
+    creation target; blind placement is over the vault pool (slots 1..`SLOT_COUNT`-1) only.
 
 ### 3.4 Destruction
 
+**Status (0.9.2-beta): per-vault destruction is NOT built.** This subsection is a locked design
+for a future phase, not shipped behavior. What ships today is whole-image destruction only
+(account delete removes the entire device image — all vaults, all identities — via the two-marker
+no-remanence delete state machine); there is no primitive that overwrites *one* vault's slot while
+leaving the others intact, so a user cannot yet destroy vault B alone. `destroy()` stays
+whole-image and is documented as such. The per-vault design below stands until that primitive and
+its adversarial review land.
+
 - There is no "disable vault" toggle — the capability is structural and always present (§3.1),
   so there is nothing to disable.
-- The real, supportable action is **destroying a specific vault's contents and identity
+- The real, supportable action (future) is **destroying a specific vault's contents and identity
   entirely** — held to the same rigor already established for contact deletion (0.8.4–0.8.6):
   - explicit confirmation (irreversible, destructive);
   - full cryptographic teardown — identity key, all sessions, all message keys, roster, and (once

@@ -397,17 +397,20 @@ the others.
 
 ### Plausible deniability (key-slot vaults)
 
-> **Status (0.9.1-beta), read first.** This section describes the key-slot **design** and the
-> **web/desktop** reference implementation. On **Android as of 0.9.1-beta**, the everyday
-> (single) vault runtime is shipped — the app runs over the vault image, with dual-wrap
-> biometric unlock, the slot-agnostic PIN/passphrase unlock router, and the no-remanence
-> delete state machine — but **there is no way to create a second (decoy) vault yet.** The
-> unlock router and crypto primitives are built to support one once the second-slot creation
-> flow (PR_C2) and the slot-B setup wizard (PR_C3) land, but until they do, an Android user has
-> exactly one vault. **Plausible deniability is therefore not yet a usable guarantee on
-> Android** — do not rely on this build for duress/coercion resistance. See the
-> "Implementation status" note at the end of this section and
-> [`docs/VAULT_ARCHITECTURE.md`](VAULT_ARCHITECTURE.md).
+> **Status (0.9.2-beta), read first.** This section describes the key-slot **design**, the
+> **web/desktop** reference implementation, and — as of **0.9.2-beta** — the **Android**
+> runtime, which now supports **creating a second (decoy) vault**. On Android today: the everyday
+> vault runs over the sealed image with dual-wrap biometric unlock, the slot-agnostic
+> PIN/passphrase unlock router, and the no-remanence delete state machine (0.9.1-beta); and a
+> second vault is now creatable through the router itself via the **triple-entry** ceremony —
+> three consecutive identical entries of a never-before-used passphrase at the ordinary lock
+> screen create and open it (no setup wizard; see `VAULT_ARCHITECTURE.md` §3.3). **Plausible
+> deniability is therefore a usable guarantee on Android**, subject to the deliberately-accepted
+> limits enumerated below (single-snapshot only; blind overwrite on creation; the triple-entry
+> gate's coercion consequence; fail-closed while a delete is pending; biometric bound to a single
+> vault). **Not yet shipped:** per-vault destruction (whole-image account delete only) and the
+> Pucker Burn setup/wipe UX — do not rely on those. See the "Implementation status" note at the
+> end of this section and [`docs/VAULT_ARCHITECTURE.md`](VAULT_ARCHITECTURE.md).
 
 Two (expandable to four) completely separate encrypted vaults sit behind two different passphrases.
 There is no cryptographic evidence that a second vault exists.
@@ -448,10 +451,31 @@ Two VeraCrypt-analogous caveats apply, and are accepted deliberately:
   snapshot — the compelled-disclosure scenario the design targets — reveals nothing. This is the
   same bound VeraCrypt hidden volumes accept.
 - **Blind overwrite on vault creation.** Which slots hold live vaults is unknowable from storage —
-  that is the point — so creating a new vault into an existing image picks a random slot and can
-  destroy a vault whose passphrase is not currently entered, exactly as writing to a VeraCrypt
-  outer volume without mounting the hidden one can. Creating a vault on a device that may hold
-  others is a deliberate, documented risk.
+  that is the point — so creating a new vault into an existing image picks a **uniformly random**
+  slot from the vault pool and can destroy a vault whose passphrase is not currently entered,
+  exactly as writing to a VeraCrypt outer volume without mounting the hidden one can. Concretely on
+  Android (0.9.2): the pool is slots `1..SLOT_COUNT-1` (slot 0 is reserved for the Pucker Burn
+  credential and is never a target), i.e. **3 slots** at `SLOT_COUNT = 4`. Creation blind-writes one
+  of those 3 at random with **no occupancy check**, so each creation has a **~1/3 (~33%) chance of
+  overwriting any one given existing vault**; with all 3 pool slots occupied, a creation
+  **certainly overwrites an existing vault**. There is no "the pool is full, refuse" guard — a full
+  pool silently overwrites. Creating a vault on a device that may hold others is a deliberate,
+  documented, and potentially destructive risk.
+- **Triple-entry creation gate, and its coercion consequence.** A second vault is created only by
+  entering the **same never-before-used passphrase three times, consecutively and uninterrupted**
+  (`CREATE_THRESHOLD = 3`); any differing entry, or a backgrounding/lock/process-death between
+  entries, resets the streak. Two consequences follow, both accepted: (1) **systematic enumeration
+  is safe** — an adversary trying many *different* wrong passwords never trips creation, because the
+  streak resets on every change; but (2) **a chosen repeated wrong passphrase does create** — a
+  coercer who forces you to type one specific wrong string three times in a row will create a new
+  (empty) vault, blind-overwriting a pool slot per the bullet above. The gate holds no stored
+  attempt count and leaks nothing: a creating third entry is indistinguishable, in behaviour and
+  timing, from an ordinary unlock.
+- **Biometric is bound to a single vault (A-only).** There is exactly **one** biometric wrap on the
+  device, and it can never be repointed to a different slot (0.9.2 A-only guard, enforced on the
+  write path). Biometric unlock therefore always opens the one vault that enabled it (the everyday
+  vault); a second vault is **passphrase-only**. The enrollment UI is slot-agnostic — it renders and
+  behaves identically whichever vault is open — so the restriction is not itself a distinguisher.
 - **Vault creation silently fails while an account deletion is pending (0.9.2, Android).** Account
   deletion is a durable two-phase state machine (a `delete-intent` marker, then a `delete-confirmed`
   marker). While either marker is present, attempting to create a new vault does nothing and is
@@ -474,21 +498,24 @@ and unless they implement the same key-slot scheme independently — a device
 without the feature simply has one vault, which is itself indistinguishable from
 a device that has more.
 
-**Implementation status, stated honestly (0.9.1-beta).** The key-slot crypto primitive above is
+**Implementation status, stated honestly (0.9.2-beta).** The key-slot crypto primitive above is
 built and tested in `packages/crypto` (web/desktop storage layer) and byte-mirrored on Android.
-On Android, the **everyday (single) vault runtime is now shipped** (0.9.1-beta): the app runs
-over the vault image, with dual-wrap biometric unlock, the slot-agnostic PIN/passphrase unlock
-router (no-early-exit timing parity, RAM-only backoff), flush-before-ack durability, atomic
-contact delete, the two-marker no-remanence account-delete state machine, and configurable idle
-auto-lock. **What is NOT built yet is the ability to create a second (decoy) vault** — the
-second-slot creation flow (PR_C2), the slot-B setup wizard (PR_C3), teardown-on-switch, and
-destruction. The unlock router is slot-agnostic and *would* open a second vault if one existed,
-but 0.9.1 ships **no way to create one**, so an Android user has exactly one vault and
-**plausible deniability is not yet a usable guarantee on Android.** The remaining design
-(dual-slot model in full, teardown-on-switch, setup and destruction) stays a **locked design**
-in [`docs/VAULT_ARCHITECTURE.md`](VAULT_ARCHITECTURE.md), landing as its own adversarially-
-reviewed track. **No release before PR_C2 + PR_C3 land should be described as having a usable
-second vault.**
+On Android, the **everyday (single) vault runtime shipped in 0.9.1-beta** (app over the vault
+image, dual-wrap biometric unlock, slot-agnostic PIN/passphrase unlock router with no-early-exit
+timing parity and RAM-only backoff, flush-before-ack durability, atomic contact delete, the
+two-marker no-remanence account-delete state machine, configurable idle auto-lock). **As of
+0.9.2-beta, creating a second (decoy) vault is now shipped**: the fused writer
+(`VaultImageStore.attemptUnlockOrAdd`, burn-aware, blind placement over the pool, fail-closed
+while a delete is pending, self-verifying seal), the silent **triple-entry** router
+(`VaultUnlockRouter` + `attemptPassphrase`, no setup wizard), and the biometric **A-only** guard
+(the single wrap is never repointed). An Android user can therefore create and reveal a second
+vault, and plausible deniability is a **usable** guarantee here, within the limits above. **What
+is NOT built yet:** per-vault destruction (whole-image account delete only — there is no
+single-slot destroy primitive) and the **Pucker Burn** setup/wipe UX (slot 0 is reserved and the
+store is burn-*aware*, but the credential is not yet user-settable and the wipe is a fail-closed
+stub). Those, plus the full dual-slot destruction design, remain a **locked design** in
+[`docs/VAULT_ARCHITECTURE.md`](VAULT_ARCHITECTURE.md) §3.4, landing as their own adversarially-
+reviewed PRs. **Do not describe per-vault destruction or a working Pucker Burn as shipped.**
 
 Two invariants from that architecture are restated here because they are permanent
 security properties, not implementation details:

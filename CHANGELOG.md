@@ -9,6 +9,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Android: second (decoy) vault is now creatable — plausible deniability becomes usable.**
+  0.9.1-beta shipped only the everyday vault; 0.9.2-beta adds the second-vault creation path, so
+  an Android user can create and reveal a decoy account under coercion. There is **no setup
+  wizard and no discoverable UI** (that would be the tell): the ceremony is the **triple-entry**
+  gate — at the ordinary lock screen, enter the same never-before-used passphrase **three times,
+  consecutively and uninterrupted**, and the third entry creates and opens the new vault. Built
+  on the burn-aware fused writer (`attemptUnlockOrAdd`), the silent unlock router
+  (`VaultUnlockRouter`), and a biometric **A-only** guard (the single biometric wrap is bound to
+  one vault and never repointed). Read the accepted limitations before relying on it
+  (`docs/SECURITY_MODEL.md`): creation **blind-overwrites** a uniformly-random pool slot — ~1/3
+  chance of destroying a given existing vault per creation, and a certainty once the 3-slot pool
+  is full; the triple-entry gate means a coercer who makes you type one chosen wrong passphrase
+  three times will create an (empty) vault (while systematic *different* guesses never do);
+  creation **fails closed** (silently, like a wrong passphrase) while an account deletion is
+  pending; biometric unlocks only the everyday vault, so a second vault is passphrase-only.
+  **Not yet included:** per-vault destruction (only whole-image account delete exists) and the
+  Pucker Burn duress credential's setup/wipe (slot 0 is reserved and the store is burn-aware, but
+  it is not yet user-settable). No version bump yet — the 0.9.2 phase is still in progress.
+
 - **iOS: full contact deletion (cryptographic teardown, not soft-delete).**
   Long-press / context-menu on a conversation → confirm to burn known local
   messages (best-effort peer burn), destroy the Double Ratchet session and
