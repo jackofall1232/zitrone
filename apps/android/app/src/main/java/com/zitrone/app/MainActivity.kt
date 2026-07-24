@@ -657,6 +657,25 @@ private fun ZitroneRoot(
         BiometricManager.from(context).canAuthenticate(BIOMETRIC_STRONG) ==
             BiometricManager.BIOMETRIC_SUCCESS
 
+    // 0.9.2 upgrade safety: a PRIOR-format (v2 / 0.9.1) image is unsafe to unlock under the burn-slot
+    // reservation, so route it to fresh onboarding instead of the lock screen. Computed ONCE, off-main
+    // (a ~1 MiB outer decrypt, no Argon2id), only at a cold start with no live session. Safety does not
+    // depend on this — open() throws LegacyImage before any slot interpretation, and onUnlockPassphrase
+    // below also routes LegacyImage to onboarding as a backstop — this just avoids showing a dead lock
+    // screen. Treat a legacy image as "no usable vault" (vaultExists=false) so onboarding proceeds; the
+    // create there retires the old image.
+    LaunchedEffect(Unit) {
+        if (vaultExists && container.session.value == null) {
+            val legacy = withContext(Dispatchers.IO) {
+                runCatching { container.isLegacyImage() }.getOrDefault(false)
+            }
+            if (legacy && (route == Route.Splash || route == Route.Locked)) {
+                vaultExists = false
+                route = Route.Onboarding
+            }
+        }
+    }
+
     var identityFingerprint by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(session) {
         val live = session
@@ -769,6 +788,15 @@ private fun ZitroneRoot(
                 onFailure = { e ->
                     when {
                         e is kotlinx.coroutines.CancellationException -> throw e
+                        e is com.zitrone.app.crypto.vault.VaultImageException.LegacyImage -> {
+                            // A PRIOR-format (v2 / 0.9.1) image is unsafe to unlock under the burn-slot
+                            // reservation; open() threw BEFORE any slot was interpreted (never a burn
+                            // wipe). Route to fresh onboarding (the create there retires the old image).
+                            // Backstop for the cold-start precompute above; no backoff bump (not a guess).
+                            vaultExists = false
+                            route = Route.Onboarding
+                            unlocking = false
+                        }
                         e is com.zitrone.app.crypto.vault.VaultImageException.CorruptImage ||
                             e is com.zitrone.app.crypto.vault.VaultImageException.MissingImage -> {
                             // A damaged/unreadable IMAGE is device state, NOT a passphrase guess —

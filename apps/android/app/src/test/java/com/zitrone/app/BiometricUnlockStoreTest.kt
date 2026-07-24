@@ -30,22 +30,22 @@ class BiometricUnlockStoreTest {
         assertFalse(s.isEnabled())
         assertNull(s.load())
 
-        val w = wrap(0)
+        val w = wrap(1) // a VAULT-POOL slot; slot 0 is the burn credential, not biometric-wrappable (F9)
         s.save(w)
         assertTrue(s.isEnabled())
         val loaded = s.load()!!
-        assertEquals(0, loaded.slotIndex)
+        assertEquals(1, loaded.slotIndex)
         assertArrayEquals(w.blob, loaded.blob)
     }
 
     @Test
     fun `a tampered out-of-range slot reads as not-enabled and never reaches unlockWithKey`() {
-        // A corrupted/tampered prefs int (slot >= SLOT_COUNT, or negative) must read as "not
-        // enabled" here, NOT be handed to unlockWithKey's require(slotIndex in 0 until SLOT_COUNT)
-        // where it would crash the unlock coroutine.
+        // A corrupted/tampered prefs int (slot >= SLOT_COUNT, negative, OR slot 0 = the burn credential)
+        // must read as "not enabled" here, NOT be handed to unlockWithKey's require(slotIndex in
+        // VAULT_SLOT_RANGE) where it would crash the unlock coroutine.
         val prefs = FakeSharedPreferences()
         val s = BiometricUnlockStore(prefs)
-        s.save(wrap(0))
+        s.save(wrap(1))
         assertTrue(s.isEnabled())
 
         // Tamper the persisted slot to an out-of-range value.
@@ -56,6 +56,11 @@ class BiometricUnlockStoreTest {
         prefs.edit().putInt("biometric_vault_slot", -1).apply()
         assertFalse(s.isEnabled())
         assertNull(s.load())
+
+        // Slot 0 (burn) is not a biometric-wrappable vault slot (F9): tampering to it reads not-enabled.
+        prefs.edit().putInt("biometric_vault_slot", 0).apply()
+        assertFalse("slot 0 (burn) is not enabled", s.isEnabled())
+        assertNull("slot 0 loads null (never reaches unlockWithKey)", s.load())
     }
 
     @Test
@@ -66,7 +71,7 @@ class BiometricUnlockStoreTest {
         // drive. Two shapes: non-base64 junk, and valid base64 of the wrong length.
         val prefs = FakeSharedPreferences()
         val s = BiometricUnlockStore(prefs)
-        s.save(wrap(0))
+        s.save(wrap(1))
         assertTrue(s.isEnabled())
 
         // Corrupt the blob to non-base64 junk while the slot stays in range.

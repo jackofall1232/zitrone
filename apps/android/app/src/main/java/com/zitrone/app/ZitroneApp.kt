@@ -163,6 +163,15 @@ class AppContainer(private val app: Application) {
     fun hasVault(): Boolean = imageStore.exists()
 
     /**
+     * Routing signal (0.9.2): a present image is the PRIOR (v2 / 0.9.1) format, which the burn-slot
+     * reservation makes unsafe to unlock — route to fresh onboarding instead of the lock screen. A
+     * cheap Argon2id-free peek (see [VaultImageStore.isLegacyImage]); call off-main. Safety does NOT
+     * depend on this routing: [VaultImageStore.open] throws [VaultImageException.LegacyImage] before any
+     * slot is interpreted, so a v2 image can never be misread as a burn wipe even if it reaches unlock.
+     */
+    fun isLegacyImage(): Boolean = imageStore.isLegacyImage()
+
+    /**
      * Routing truth OVERRIDING [hasVault]: the SERVER account is CONFIRMED gone and the local
      * vault destroy is owed ([VaultImageStore.serverDeleteConfirmed]). The only valid route is
      * "finish the deletion" (retry [destroyVaultForAccountDeletion]) — never the unlock gate. This
@@ -301,6 +310,11 @@ class AppContainer(private val app: Application) {
      * retry (or re-derive [hasVault] and route to unlock) — creation NEVER bricks.
      */
     suspend fun createVaultAndPublish(passphrase: String): Boolean = withContext(Dispatchers.Default) {
+        // A prior-format (v2 / 0.9.1) image is RETIRED here, on the deliberate onboarding action, so a
+        // fresh v3 vault can be created (create() requires no existing image). retireLegacyImage()
+        // re-proves the image is v2 and refuses to touch a valid current-version vault, so this is a
+        // no-op unless an actual legacy image is present. Not silent: it happens only on create.
+        if (imageStore.isLegacyImage()) imageStore.retireLegacyImage()
         val initial = VaultStateCodec.encode(VaultState.empty())
         val open = try {
             imageStore.create(passphrase, initial)

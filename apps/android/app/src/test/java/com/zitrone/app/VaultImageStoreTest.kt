@@ -7,6 +7,7 @@ package com.zitrone.app
 
 import com.goterl.lazysodium.SodiumJava
 import com.zitrone.app.crypto.vault.AEAD_TAG_BYTES
+import com.zitrone.app.crypto.vault.BURN_SLOT_INDEX
 import com.zitrone.app.crypto.vault.DeviceKeyCipher
 import com.zitrone.app.crypto.vault.DirSyncResult
 import com.zitrone.app.crypto.vault.IMAGE_BYTES
@@ -20,6 +21,7 @@ import com.zitrone.app.crypto.vault.SLOT_COUNT
 import com.zitrone.app.crypto.vault.SLOT_PAYLOAD_BYTES
 import com.zitrone.app.crypto.vault.VAULT_IMAGE_OUTER_AD
 import com.zitrone.app.crypto.vault.VAULT_KEY_BYTES
+import com.zitrone.app.crypto.vault.VAULT_SLOT_RANGE
 import com.zitrone.app.crypto.vault.VaultImageException
 import com.zitrone.app.crypto.vault.VaultImageStore
 import com.zitrone.app.crypto.vault.VaultSession
@@ -201,12 +203,15 @@ class VaultImageStoreTest {
         keyInput.fill(0)
         assertFalse("returned key is an independent copy", opened.vaultKey.all { it == 0.toByte() })
 
-        // Wrong index (a filler region) → null; wrong key → null.
-        val wrongIndex = (0 until SLOT_COUNT).first { it != slotIndex }
+        // Wrong POOL index (a filler region) → null; wrong key → null.
+        val wrongIndex = VAULT_SLOT_RANGE.first { it != slotIndex }
         assertNull("wrong index yields null", store.unlockWithKey(open.vaultKey, wrongIndex))
         assertNull("wrong key yields null", store.unlockWithKey(ByteArray(VAULT_KEY_BYTES) { 0x42 }, slotIndex))
 
-        // Out-of-range index is a caller bug, not a corruption surface.
+        // Slot 0 (burn) is NOT a vault-open target (F9): a caller bug, never a corruption/open surface —
+        // so a future biometric wrap naming slot 0 can't surface the burn payload as a vault.
+        assertThrows(IllegalArgumentException::class.java) { store.unlockWithKey(open.vaultKey, BURN_SLOT_INDEX) }
+        // Out-of-range index is likewise a caller bug.
         assertThrows(IllegalArgumentException::class.java) { store.unlockWithKey(open.vaultKey, SLOT_COUNT) }
     }
 

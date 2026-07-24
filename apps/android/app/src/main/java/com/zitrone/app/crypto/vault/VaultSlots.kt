@@ -20,6 +20,36 @@ class CreatedVault(
 )
 
 /**
+ * Slot 0 is RESERVED for the Pucker Burn duress credential (0.9.2). It is sealed
+ * byte-identically to any vault slot — same Argon2id, same structure, same timing —
+ * so an examiner cannot tell from structure whether it is armed; only a MATCH on it
+ * triggers a wipe (handled by the store/app), never an unlock. Arm-state is stored
+ * NOWHERE: "armed" simply means a passphrase can match slot 0, exactly what
+ * [tryPassphrase] already tests, so an unarmed slot 0 is uniformly-random filler,
+ * indistinguishable from a real one.
+ *
+ * The reservation is a placement-only convention (the byte format is unchanged): no
+ * everyday vault and no created vault ever lands here, so vault creation can never
+ * clobber the burn credential. This is an ACCEPTED, documented disclosure — it reveals
+ * only that a burn FEATURE exists (public), never how many vaults slots 1..N-1 hold.
+ */
+const val BURN_SLOT_INDEX: Int = 0
+
+/** The vault pool — slots that may hold a real vault. Slot 0 (burn) is excluded. */
+val VAULT_SLOT_RANGE: IntRange = (BURN_SLOT_INDEX + 1) until SLOT_COUNT
+
+/**
+ * A uniformly-random index into the VAULT pool (never [BURN_SLOT_INDEX]). The SINGLE
+ * source of truth for slot-0 reservation, used by BOTH the everyday-vault placement
+ * ([createVaultSlots]) and blind second-vault creation
+ * ([VaultImageStore.attemptUnlockOrAdd]). Draws the same 4 CSPRNG bytes as [randomIndex]
+ * (plus one integer add), so it carries no timing/I-O signature distinct from ordinary
+ * placement.
+ */
+fun randomVaultSlotIndex(ops: VaultSodiumOps): Int =
+    VAULT_SLOT_RANGE.first + randomIndex(VAULT_SLOT_RANGE.count(), ops)
+
+/**
  * A filler slot: a random salt and random bytes the exact length of a real
  * wrapped key. Indistinguishable from an occupied slot. No passphrase will ever
  * unwrap it (a random 16-byte tail is a valid GCM tag with probability 2^-128).
@@ -46,10 +76,56 @@ fun sealSlot(
 }
 
 /**
+ * Like [sealSlot] but SELF-VERIFYING: immediately after wrapping, it decrypts the wrapped key back under
+ * the SAME derived master key and constant-time-compares it to [vaultKey], then wipes the master key. This
+ * costs ZERO extra Argon2id (one 60-byte GCM decrypt) and the master key never outlives the verify — its
+ * lifetime is identical to [sealSlot]'s.
+ *
+ * It proves the produced slot is actually openable with [vaultKey] BEFORE the caller persists it and hands
+ * a live session the in-memory key. The live [VaultImageStore.attemptUnlockOrAdd] add-path CANNOT verify by
+ * re-opening the persisted image the way [VaultImageStore.create] does (that would add SLOT_COUNT Argon2id
+ * and break the plausible-deniability timing parity), so this is the parity-preserving substitute: it
+ * catches a miscomputing [VaultSodiumOps] that returned a size-correct but wrong-content / wrong-key wrapped
+ * blob (which would otherwise be written durably and leave the new vault permanently unopenable after
+ * process death). Throws [IllegalStateException] on a self-verify failure — a broken AEAD provider, which
+ * would equally break every other slot operation; failing closed here is correct.
+ */
+fun sealSlotSelfVerifying(
+    passphrase: String,
+    vaultKey: ByteArray,
+    ops: VaultSodiumOps,
+    deriver: KeyDeriver = argon2idDeriver(ops),
+): KeySlot {
+    require(vaultKey.size == VAULT_KEY_BYTES) { "vault key must be $VAULT_KEY_BYTES bytes" }
+    val salt = ops.randomBytes(SALT_BYTES)
+    val masterKey = deriver(passphrase, salt)
+    try {
+        val wrapped = ops.aeadEncrypt(masterKey, vaultKey, SLOT_AD)
+        val recovered = ops.aeadDecrypt(masterKey, wrapped, SLOT_AD)
+            ?: throw IllegalStateException("sealed slot failed self-verify (wrapped key did not unwrap)")
+        try {
+            // Constant-time equality (both are VAULT_KEY_BYTES) — MessageDigest.isEqual is the platform
+            // constant-time compare. A mismatch means the AEAD provider does not round-trip: fail closed.
+            check(java.security.MessageDigest.isEqual(recovered, vaultKey)) {
+                "sealed slot failed self-verify (recovered key mismatch)"
+            }
+        } finally {
+            wipe(recovered)
+        }
+        return KeySlot(salt = salt, wrapped = wrapped)
+    } finally {
+        wipe(masterKey)
+    }
+}
+
+/**
  * Initialize a fresh set of slots: SLOT_COUNT slots, exactly one of which is the
  * real vault sealed under [passphrase]. The rest are random filler. The returned
  * vaultKey is the random key the caller should use to encrypt the vault's data.
- * The real slot is placed at a CSPRNG-random index so position leaks nothing.
+ * The real slot is placed at a CSPRNG-random index IN THE VAULT POOL
+ * ([randomVaultSlotIndex], slots 1..SLOT_COUNT-1) so position leaks nothing AND slot 0
+ * stays reserved for the burn credential (see [BURN_SLOT_INDEX]). Slot 0 is left as
+ * filler on a fresh onboarding (unarmed burn), indistinguishable from any other slot.
  */
 fun createVaultSlots(
     passphrase: String,
@@ -62,7 +138,7 @@ fun createVaultSlots(
     try {
         val slots = ArrayList<KeySlot>(SLOT_COUNT)
         for (i in 0 until SLOT_COUNT) slots.add(randomSlot(ops))
-        val slotIndex = randomIndex(SLOT_COUNT, ops)
+        val slotIndex = randomVaultSlotIndex(ops) // 1..SLOT_COUNT-1 — slot 0 reserved for burn
         slots[slotIndex] = sealSlot(passphrase, vaultKey, ops, deriver)
         return CreatedVault(slots = slots, vaultKey = vaultKey, slotIndex = slotIndex)
     } catch (t: Throwable) {
@@ -82,6 +158,13 @@ fun createVaultSlots(
  * an empty set reproduces the web's overwrite-tolerant behavior (storage.ts
  * createVault, the documented VeraCrypt outer-volume tradeoff); passing the
  * known-occupied indices avoids clobbering a live vault.
+ *
+ * ⚠️ BURN-UNAWARE (0.9.2): this primitive picks freely over ALL slots incl.
+ * [BURN_SLOT_INDEX], so it must NOT be wired into a creation path without excluding
+ * slot 0 (add 0 to [occupied], or use [randomVaultSlotIndex]). The live Android
+ * creation path is [VaultImageStore.attemptUnlockOrAdd], which reimplements placement
+ * over the vault pool and does NOT call this; this and [addVaultToImage] are retained
+ * as the web-mirrored primitive + tests only.
  */
 fun addVaultSlot(
     slots: List<KeySlot>,

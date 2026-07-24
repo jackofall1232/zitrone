@@ -452,6 +452,16 @@ Two VeraCrypt-analogous caveats apply, and are accepted deliberately:
   destroy a vault whose passphrase is not currently entered, exactly as writing to a VeraCrypt
   outer volume without mounting the hidden one can. Creating a vault on a device that may hold
   others is a deliberate, documented risk.
+- **Vault creation silently fails while an account deletion is pending (0.9.2, Android).** Account
+  deletion is a durable two-phase state machine (a `delete-intent` marker, then a `delete-confirmed`
+  marker). While either marker is present, attempting to create a new vault does nothing and is
+  reported exactly like a wrong passphrase — indistinguishable in behaviour and timing. This is a
+  deliberate fail-closed choice: with a live image on disk, nothing observable can tell a *stale*
+  marker (cleanup that did not finish) from a *live* one (a deletion still owed), so vault creation
+  never acts on that distinction rather than risk cancelling a real account deletion or stranding a
+  server-deleted account's local image. The condition is rare and transient (it clears when the
+  deletion completes or is retired), and it leaks nothing — an observer cannot distinguish it from an
+  ordinary failed unlock.
 
 **Per-device scope, and why Android-only is safe.** Plausible-deniability (decoy)
 vaults are a **per-device** feature. Because each install is an independent

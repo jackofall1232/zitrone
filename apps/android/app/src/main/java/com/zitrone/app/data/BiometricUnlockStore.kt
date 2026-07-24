@@ -11,7 +11,7 @@ package com.zitrone.app.data
 import android.content.SharedPreferences
 import com.zitrone.app.crypto.KeyStoreManager
 import com.zitrone.app.crypto.vault.BiometricWrappedKey
-import com.zitrone.app.crypto.vault.SLOT_COUNT
+import com.zitrone.app.crypto.vault.VAULT_SLOT_RANGE
 import java.util.Base64
 
 /**
@@ -38,10 +38,11 @@ class BiometricUnlockStore(private val prefs: SharedPreferences) {
     fun load(): BiometricWrappedKey? {
         val encoded = prefs.getString(KEY_BLOB, null) ?: return null
         val slot = prefs.getInt(KEY_SLOT, -1)
-        // Validate the FULL slot range, not just >= 0: a corrupted/tampered prefs int must read as
-        // "not enabled" here, never reach unlockWithKey's require(slotIndex in 0 until SLOT_COUNT)
-        // and crash the unlock coroutine.
-        if (slot !in 0 until SLOT_COUNT) return null
+        // Validate against the VAULT POOL (1..SLOT_COUNT-1), not just >= 0: a corrupted/tampered prefs int
+        // — including slot 0, the burn credential, which is NOT a biometric-wrappable vault (F9) — must
+        // read as "not enabled" here, never reach unlockWithKey's require(slotIndex in VAULT_SLOT_RANGE)
+        // and crash the unlock coroutine. Biometric is A-only, and A always lives in the pool.
+        if (slot !in VAULT_SLOT_RANGE) return null
         val blob = try {
             Base64.getDecoder().decode(encoded)
         } catch (e: IllegalArgumentException) {
