@@ -46,29 +46,33 @@ import javax.crypto.spec.GCMParameterSpec
  * assembly. It never logs and its work never varies with key contents. Exercised
  * only on device (the host tests use a fake DeviceKeyCipher-style cipher).
  */
-class BiometricVaultKeyCipher(
-    private val alias: String = ALIAS,
-) {
+class BiometricVaultKeyCipher {
     /**
-     * Generate a FRESH auth-gated key (replacing any prior one — enable overwrites)
-     * and return an ENCRYPT-mode [Cipher] to bind into a CryptoObject. The caller
-     * authenticates it via BiometricPrompt, then hands it to [sealVaultKey].
+     * ATOMIC ENABLE (0.9.2 enable-atomicity): generate a fresh auth-gated key under this enable's
+     * OWN unique alias `PREFIX + aliasId` and return an ENCRYPT-mode [Cipher] to bind into a
+     * CryptoObject. Unlike the pre-0.9.2 single-alias design, this **does NOT delete any other key**,
+     * so a concurrent or interrupted enable can never destroy an existing binding, and the wrap that
+     * a later successful enable persists always references its own just-created alias (INV-1: no
+     * orphan). Stale aliases from superseded/abandoned enables are reaped by [deleteAllAliasesExcept]
+     * at cold start / disable. The caller authenticates the cipher via BiometricPrompt, then hands it
+     * to [sealVaultKey] and persists `{slot, aliasId, blob}`.
      */
-    fun newEncryptCipher(): Cipher {
-        deleteKey()
-        val key = generateKey()
+    fun newEncryptCipher(aliasId: String): Cipher {
+        val key = generateKey(aliasFor(aliasId))
         return Cipher.getInstance(AES_GCM_TRANSFORM).apply { init(Cipher.ENCRYPT_MODE, key) }
     }
 
     /**
-     * A DECRYPT-mode [Cipher] over the existing key for the nonce recovered from a
-     * stored blob ([BiometricWrappedKey.nonce]), to bind into a CryptoObject for the
-     * unlock prompt. Throws [android.security.keystore.KeyPermanentlyInvalidatedException]
-     * when a new biometric was enrolled since enable (the router catches it and drops to
-     * the passphrase field); returns null when the key is absent.
+     * A DECRYPT-mode [Cipher] over the key at THIS wrap's own alias (`PREFIX + aliasId`) for the
+     * nonce recovered from its stored blob ([BiometricWrappedKey.nonce]). Because each wrap names a
+     * unique alias that only its own enable ever created (INV-1), a present key here is ALWAYS the key
+     * that sealed the blob — so an AEAD-open failure with a present key cannot arise from a
+     * concurrent-enable orphan. Throws [android.security.keystore.KeyPermanentlyInvalidatedException]
+     * when a new biometric was enrolled since enable (the router catches it → passphrase field);
+     * returns null when the key is absent.
      */
-    fun cipherForDecrypt(nonce: ByteArray): Cipher? {
-        val key = existingKey() ?: return null
+    fun cipherForDecrypt(aliasId: String, nonce: ByteArray): Cipher? {
+        val key = existingKey(aliasFor(aliasId)) ?: return null
         return Cipher.getInstance(AES_GCM_TRANSFORM).apply {
             init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(AEAD_TAG_BYTES * 8, nonce))
         }
@@ -114,22 +118,42 @@ class BiometricVaultKeyCipher(
         }
     }
 
-    /** Whether the auth-gated key currently exists (enable created it; disable/invalidate deletes it). */
-    fun keyExists(): Boolean = existingKey() != null
+    /** Whether the key for [aliasId] currently exists. */
+    fun keyExists(aliasId: String): Boolean = existingKey(aliasFor(aliasId)) != null
 
-    /** Delete the key (disable / re-enable / permanent invalidation). Idempotent. */
-    fun deleteKey() {
+    /** Delete ONE enable's key (an abandoned/refused enable's own alias). Idempotent. */
+    fun deleteKey(aliasId: String) = deleteAlias(aliasFor(aliasId))
+
+    /**
+     * Reap stale biometric aliases (GC): delete every `PREFIX*` Keystore entry EXCEPT the one the
+     * current persisted wrap references ([keepAliasId], or null to delete ALL — used by disable /
+     * account-delete). Best-effort and idempotent. MUST be called only at quiescent points (cold-start
+     * init; disable) — never concurrently with an in-flight enable — so it can never delete the alias
+     * the current wrap references (INV-1). Leftover aliases it fails to reap are harmless: unlock uses
+     * the wrap's own alias, not an enumeration.
+     */
+    fun deleteAllAliasesExcept(keepAliasId: String?) {
+        val keep = keepAliasId?.let { aliasFor(it) }
+        val toDelete = try {
+            keyStore.aliases().toList().filter { it.startsWith(PREFIX) && it != keep }
+        } catch (e: Exception) {
+            return // enumeration hiccup → best-effort; leftover aliases are harmless
+        }
+        toDelete.forEach { deleteAlias(it) }
+    }
+
+    private fun deleteAlias(alias: String) {
         try {
             keyStore.deleteEntry(alias)
         } catch (e: Exception) {
-            // A missing / already-cleared entry is fine — disable is idempotent and must
+            // A missing / already-cleared entry is fine — deletion is idempotent and must
             // never throw. Errors (OOM / LinkageError) still propagate.
         }
     }
 
     private val keyStore: KeyStore by lazy { KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) } }
 
-    private fun existingKey(): SecretKey? = try {
+    private fun existingKey(alias: String): SecretKey? = try {
         (keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.secretKey
     } catch (e: Exception) {
         // A corrupted / invalidated entry (getEntry throwing UnrecoverableEntryException /
@@ -138,19 +162,19 @@ class BiometricVaultKeyCipher(
         null
     }
 
-    private fun generateKey(): SecretKey {
+    private fun generateKey(alias: String): SecretKey {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             try {
-                return generate(strongBox = true)
+                return generate(alias, strongBox = true)
             } catch (e: Exception) {
                 // Broad fallback mirrors KeystoreDeviceKeyCipher / KeyStoreManager: a
                 // persistently-buggy StrongBox must never make biometric enable fail forever.
             }
         }
-        return generate(strongBox = false)
+        return generate(alias, strongBox = false)
     }
 
-    private fun generate(strongBox: Boolean): SecretKey {
+    private fun generate(alias: String, strongBox: Boolean): SecretKey {
         val builder = KeyGenParameterSpec.Builder(
             alias,
             KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
@@ -178,27 +202,55 @@ class BiometricVaultKeyCipher(
         return generator.generateKey()
     }
 
-    private companion object {
-        const val ANDROID_KEYSTORE = "AndroidKeyStore"
+    private fun aliasFor(aliasId: String): String {
+        require(aliasId.matches(ALIAS_ID_SHAPE)) { "invalid biometric aliasId" }
+        return PREFIX + aliasId
+    }
 
-        /** The single auth-gated key that wraps this install's slot-A vault key. */
-        const val ALIAS = "zitrone_vault_biometric_key"
+    companion object {
+        private const val ANDROID_KEYSTORE = "AndroidKeyStore"
 
-        const val AES_GCM_TRANSFORM = "AES/GCM/NoPadding"
+        /**
+         * Prefix for this install's per-enable auth-gated keys. Each enable appends its own random
+         * [ALIAS_ID_BYTES]-byte hex id (0.9.2 enable-atomicity — was a single fixed alias pre-0.9.2).
+         */
+        const val PREFIX = "zitrone_vault_biometric_key_"
+
+        private const val AES_GCM_TRANSFORM = "AES/GCM/NoPadding"
+
+        /** Bytes of CSPRNG entropy in an enable's aliasId — 16 bytes = 128 bits, collision-negligible. */
+        const val ALIAS_ID_BYTES = 16
+
+        /** A fresh, unique alias id (lowercase hex) for one enable. */
+        fun newAliasId(): String {
+            val b = ByteArray(ALIAS_ID_BYTES)
+            java.security.SecureRandom().nextBytes(b)
+            return b.joinToString("") { "%02x".format(it) }
+        }
+
+        /** Exactly `2 * ALIAS_ID_BYTES` lowercase hex chars — validated before it ever reaches a Keystore alias. */
+        private val ALIAS_ID_SHAPE = Regex("^[0-9a-f]{" + (ALIAS_ID_BYTES * 2) + "}$")
+
+        /** Whether [aliasId] is a well-formed alias id (defends the persisted field against tampering). */
+        fun isValidAliasId(aliasId: String): Boolean = aliasId.matches(ALIAS_ID_SHAPE)
     }
 }
 
 /**
- * The persisted biometric wrap: `{ slotIndex, blob }` — the ONLY evidence a biometric
- * enable leaves. The [blob] is a constant [BLOB_BYTES] (60) `nonce ‖ ct ‖ tag`; the
- * [slotIndex] is which image slot the wrapped key opens. Neither is ever logged.
+ * The persisted biometric wrap: `{ slotIndex, aliasId, blob }` — the ONLY evidence a biometric
+ * enable leaves. The [blob] is a constant [BLOB_BYTES] (60) `nonce ‖ ct ‖ tag`; the [slotIndex] is
+ * which image slot the wrapped key opens; [aliasId] (0.9.2 enable-atomicity) names the per-enable
+ * Keystore key that sealed this blob (`PREFIX + aliasId`), so each wrap references its OWN key and no
+ * concurrent/interrupted enable can orphan it. None is ever logged.
  */
 class BiometricWrappedKey(
     val slotIndex: Int,
+    val aliasId: String,
     val blob: ByteArray,
 ) {
     init {
         require(blob.size == BLOB_BYTES) { "biometric blob must be $BLOB_BYTES bytes" }
+        require(BiometricVaultKeyCipher.isValidAliasId(aliasId)) { "invalid biometric aliasId" }
     }
 
     /** The GCM nonce prefix — hand to [BiometricVaultKeyCipher.cipherForDecrypt]. */

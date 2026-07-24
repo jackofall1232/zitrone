@@ -50,6 +50,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.lifecycleScope
+import com.zitrone.app.crypto.vault.BiometricVaultKeyCipher
 import com.zitrone.app.data.Conversation
 import com.zitrone.app.data.LemonDropRedeemer
 import com.zitrone.app.data.LemonDropScanOutcome
@@ -413,7 +414,7 @@ class MainActivity : FragmentActivity() {
                 val wrap = container.biometricStore.load()
                     ?: return@withContext null to VaultBiometricResult.UNAVAILABLE
                 try {
-                    val cipher = container.biometricCipher.cipherForDecrypt(wrap.nonce)
+                    val cipher = container.biometricCipher.cipherForDecrypt(wrap.aliasId, wrap.nonce)
                         ?: return@withContext null to VaultBiometricResult.UNAVAILABLE
                     (cipher to wrap) to VaultBiometricResult.SUCCESS
                 } catch (e: android.security.keystore.KeyPermanentlyInvalidatedException) {
@@ -472,33 +473,35 @@ class MainActivity : FragmentActivity() {
     private fun startBiometricEnableFromSession(onResult: (Boolean) -> Unit) {
         val container = (application as ZitroneApp).container
         // Enable is valid ONLY when NO wrap exists yet. This gate is GLOBAL (isEnabled() is the same in
-        // an A- and a B-session), so it is NOT a slot oracle — and it refuses BEFORE newEncryptCipher()
-        // below deletes the existing auth-gated Keystore key. That single condition closes all of
-        // round-2: (HIGH) no cross-slot refuse can differ in timing from an allowed enable, because
-        // enable while a wrap exists is refused identically regardless of slot; (MEDIUM) newEncryptCipher
-        // runs only when no valid wrap exists, so there is never a working key to destroy; (F1) the
-        // refuse is side-effect-free. A stale/desynced UI that reaches here self-resyncs via the result
-        // callback (which re-reads isEnabled()). enableBiometricFromSession keeps the per-slot
-        // never-repoint belt guard for the mid-flight case. Also covers session == null (isEnabled can't
-        // be true without a prior enable, and the belt guard refuses a null/changed session at seal).
+        // an A- and a B-session), so it is NOT a slot oracle and keeps the never-repoint-while-exists
+        // property (a second enable can't start while a wrap lives). A stale/desynced UI that reaches
+        // here self-resyncs via the result callback (which re-reads isEnabled()). enableBiometricFromSession
+        // keeps the per-slot never-repoint belt for a session that changed mid-flight. NOTE (0.9.2
+        // enable-atomicity): newEncryptCipher is now NON-destructive — each enable creates its own unique
+        // alias and deletes nothing else — so even a concurrent/interrupted enable can never orphan a wrap
+        // or destroy an existing binding (INV-1); the isEnabled() gate is now about UX/never-repoint, not
+        // about protecting a shared alias from destruction.
         if (container.biometricStore.isEnabled()) return onResult(false)
-        // Keystore keygen off the main thread (round 11, Codex): newEncryptCipher deletes the
-        // prior alias and generates a hardware-backed key — a slow TEE/StrongBox can take long
-        // enough on these binder calls to jank or ANR. Only the prompt launch returns to main.
+        // 0.9.2 enable-atomicity: each enable gets its OWN unique alias, so newEncryptCipher(aliasId)
+        // creates that key WITHOUT deleting any other — a concurrent/interrupted enable can no longer
+        // orphan a wrap or destroy an existing binding. Keystore keygen runs off the main thread (round
+        // 11, Codex): a slow TEE/StrongBox can jank/ANR these binder calls. Only the prompt returns to main.
+        val aliasId = BiometricVaultKeyCipher.newAliasId()
         lifecycleScope.launch {
             val cipher = try {
-                withContext(Dispatchers.IO) { container.biometricCipher.newEncryptCipher() }
+                withContext(Dispatchers.IO) { container.biometricCipher.newEncryptCipher(aliasId) }
             } catch (e: Exception) {
                 onResult(false)
                 return@launch
             }
-            startBiometricEnablePrompt(container, cipher, onResult)
+            startBiometricEnablePrompt(container, cipher, aliasId, onResult)
         }
     }
 
     private fun startBiometricEnablePrompt(
         container: AppContainer,
         cipher: javax.crypto.Cipher,
+        aliasId: String,
         onResult: (Boolean) -> Unit,
     ) {
         authenticateCrypto(
@@ -506,12 +509,13 @@ class MainActivity : FragmentActivity() {
             onSuccess = { authenticatedCipher ->
                 val session = container.session.value
                 val ok = session != null &&
-                    runCatching { container.enableBiometricFromSession(authenticatedCipher, session) }.getOrDefault(false)
-                if (!ok) container.biometricCipher.deleteKey()
+                    runCatching { container.enableBiometricFromSession(authenticatedCipher, session, aliasId) }.getOrDefault(false)
+                // On failure/refusal, delete ONLY this enable's own alias (never a live binding's).
+                if (!ok) container.biometricCipher.deleteKey(aliasId)
                 onResult(ok)
             },
             onError = {
-                container.biometricCipher.deleteKey()
+                container.biometricCipher.deleteKey(aliasId)
                 onResult(false)
             },
         )

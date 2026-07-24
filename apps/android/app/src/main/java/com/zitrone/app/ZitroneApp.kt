@@ -551,6 +551,7 @@ class AppContainer(private val app: Application) {
     fun enableBiometricFromSession(
         encryptCipher: javax.crypto.Cipher,
         session: SessionContainer,
+        aliasId: String,
     ): Boolean {
         // A-BOUND SINGLE WRAP (OQ4, "one wrap, never repointed"): there is exactly one biometric wrap
         // and it must NEVER be repointed to a different slot. Allow the write ONLY when no wrap exists
@@ -567,15 +568,33 @@ class AppContainer(private val app: Application) {
         }
         return session.withVaultKey { key ->
             val blob = biometricCipher.sealVaultKey(encryptCipher, key)
-            biometricStore.save(com.zitrone.app.crypto.vault.BiometricWrappedKey(session.slotIndex, blob))
+            // [aliasId] names the key `newEncryptCipher(aliasId)` just created for THIS enable; the wrap
+            // therefore references its own alias (INV-1). Superseded aliases are reaped by cold-start GC.
+            biometricStore.save(
+                com.zitrone.app.crypto.vault.BiometricWrappedKey(session.slotIndex, aliasId, blob),
+            )
             true
         }
     }
 
-    /** Disable biometric unlock: delete the persisted wrap AND the auth-gated Keystore key. */
+    /**
+     * Disable biometric unlock: drop the persisted wrap AND reap EVERY per-enable auth-gated Keystore
+     * key (`deleteAllAliasesExcept(null)`), so no stale alias survives a disable. Idempotent.
+     */
     fun disableBiometric() {
         biometricStore.clear()
-        biometricCipher.deleteKey()
+        biometricCipher.deleteAllAliasesExcept(null)
+    }
+
+    /**
+     * Reap stale biometric Keystore aliases at a QUIESCENT point (called once at cold-start container
+     * init, before any enable UI): delete every per-enable alias except the one the current wrap
+     * references. Bounds accumulation from superseded/abandoned enables; best-effort (leftover aliases
+     * are harmless — unlock uses the wrap's own alias). Never runs concurrently with an in-flight
+     * enable, so it can never delete the live wrap's alias (INV-1).
+     */
+    fun reapStaleBiometricAliases() {
+        biometricCipher.deleteAllAliasesExcept(biometricStore.boundAliasId())
     }
 
     /**
@@ -600,7 +619,7 @@ class AppContainer(private val app: Application) {
      */
     fun destroyVaultForAccountDeletion() {
         tolerateCleanup { biometricStore.clear() }
-        tolerateCleanup { biometricCipher.deleteKey() }
+        tolerateCleanup { biometricCipher.deleteAllAliasesExcept(null) }
         // NOT tolerated: a DestroyFailed (a surviving file) MUST reach the caller as a NOT-deleted signal.
         imageStore.destroy()
     }
@@ -701,6 +720,9 @@ class AppContainer(private val app: Application) {
         scope.launch {
             transportResolver.state.collect(::applyTransport)
         }
+        // Cold-start GC of superseded/abandoned per-enable biometric aliases (0.9.2 enable-atomicity),
+        // off-main and at a quiescent point (no enable UI yet), keeping the live wrap's alias.
+        scope.launch(Dispatchers.IO) { runCatching { reapStaleBiometricAliases() } }
     }
 
     private fun applyTransport(state: TransportState) =

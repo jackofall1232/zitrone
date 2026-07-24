@@ -500,18 +500,16 @@ Two VeraCrypt-analogous caveats apply, and are accepted deliberately:
   after which a *different* vault — including a second (decoy) vault — may become bound by being the
   next to enable. At any moment **only one vault is biometric-openable; the other(s) are
   passphrase-only.** The enrollment UI is slot-agnostic — it renders and behaves identically
-  whichever vault is open — so the restriction is not itself a distinguisher. *Known robustness gap
-  (tracked, Android):* the enable flow is not yet serialized, so two overlapping first-enables
-  (a double-tap, or the offer racing the Settings toggle) can race the shared Keystore alias and
-  leave the single wrap **orphaned** — its stored blob sealed under one key while the alias now holds
-  another. It does **not** self-heal: a subsequent biometric unlock finds the (present) key, so its
-  cipher initialises but AEAD opening fails, yielding a plain `FAILED` that leaves the wrap in place
-  and does not re-offer enrollment; **recovery is a passphrase unlock followed by a manual disable and
-  re-enable of biometric.** (Only a *missing*/invalidated key auto-clears and re-offers.) This never
-  **repoints an already-established wrap** to a different slot (the write-path guard refuses that),
-  never destroys a pre-existing valid binding, and exposes no which-vault or second-vault information
-  — it is a self-inflicted availability glitch, not a deniability break, and its atomicity fix is a
-  scheduled follow-up.
+  whichever vault is open — so the restriction is not itself a distinguisher. *Enable is atomic
+  (0.9.2, Android):* each enable generates its key under its **own unique Keystore alias**, and the
+  persisted wrap records which alias sealed it, so an enable never deletes or overwrites another's key.
+  Two overlapping enables (a double-tap, or the offer racing the Settings toggle) therefore cannot
+  orphan the wrap or destroy an existing binding — the persisted wrap always references its own,
+  existing key. The only ways a biometric unlock can fail are a **missing** key (e.g. a superseded
+  alias reaped, or Keystore eviction) or an **invalidated** key (a new fingerprint enrolled) — and
+  BOTH auto-clear the wrap and re-offer enrollment, so there is no stuck state and no manual recovery
+  step. Enrollment stays never-repointed (an established wrap is never moved to a different slot) and
+  slot-agnostic in the UI.
 - **Vault creation silently fails while an account deletion is pending (0.9.2, Android).** Account
   deletion is a durable two-phase state machine (a `delete-intent` marker, then a `delete-confirmed`
   marker). While either marker is present, attempting to create a new vault does nothing and is

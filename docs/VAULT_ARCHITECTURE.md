@@ -111,7 +111,11 @@ The lock screen is **visually and structurally unchanged** — no new screen, bu
   majority enable biometric there and never touch a second vault); "A" names that role, not a fixed
   slot. Disabling biometric frees the binding for a different vault to claim later. This is the
   intentional, accepted asymmetry: only one vault is reachable by biometric convenience; the rest
-  are passphrase-only.
+  are passphrase-only. **Enable is atomic** (0.9.2): each enable seals under its own unique Keystore
+  alias and the wrap records which alias sealed it, so an enable never destroys another's key — a
+  concurrent or interrupted enable cannot orphan the wrap or break an existing binding, and the only
+  unlock failures (a reaped/evicted key, or a new-enrollment invalidation) both auto-clear and
+  re-offer enrollment, needing no manual recovery.
 - **"Use PIN" (the existing fallback) → is the vault router.** The entered passphrase is checked
   **locally** against the derived key for **every** vault slot (the no-early-exit sweep), not just
   two:
