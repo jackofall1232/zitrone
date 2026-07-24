@@ -4,7 +4,7 @@
 
 # Zitrone
 
-**Nothing lasts. That's the point.**
+**privacy with ZEST. Nothing Lasts—that's the point!**
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-F5E642.svg)](LICENSE)
 [![Build](https://img.shields.io/github/actions/workflow/status/jackofall1232/zitrone/ci.yml?branch=main)](.github/workflows/ci.yml)
