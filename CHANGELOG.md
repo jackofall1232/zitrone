@@ -9,25 +9,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **Android: in-memory vault session with a bounded reseal flush policy
-  (isolated, not yet wired).** `VaultSession` holds one unlocked slot's keystore
-  plaintext in memory and reseals it as a whole fixed-size payload back into the
-  vault image under a committed flush policy: a synchronous `flushNow()` for
-  flush-before-ack durability (window 0), a ≤2s coalescing ceiling measured from
-  the first unflushed mutation (a max-wait, not a trailing debounce), and a
-  final forced flush + key/payload wipe on close. Adds a slot-agnostic,
-  constant-length payload-splice helper to the image codec. New files under
-  `crypto/vault/` plus tests only — deliberately NOT connected to any store,
-  unlock UI, or coordinator; that integration is a later sub-phase.
-- **Android: plausible-deniability key-slot vault primitive (isolated, not yet
-  wired).** A self-contained Kotlin port of the web reference
-  (`packages/crypto/src/vault.ts` + the `apps/web` storage payload/image codec):
-  fixed SLOT_COUNT key slots, one real slot at a random index with the rest
-  uniformly-random filler, Argon2id (64 MiB / 3 iterations) slot wrapping and
-  fixed-size AES-256-GCM payload regions, and a no-early-exit `tryPassphrase`
-  that derives and attempts every slot for wall-clock timing parity. New files
-  under `crypto/vault/` plus tests only — deliberately NOT connected to any
-  store or unlock flow; that integration is a later phase.
 - **iOS: full contact deletion (cryptographic teardown, not soft-delete).**
   Long-press / context-menu on a conversation → confirm to burn known local
   messages (best-effort peer burn), destroy the Double Ratchet session and
@@ -38,6 +19,78 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Xcode/iOS toolchain in CI, and iOS has no distributed build yet, so this
   needs an Xcode build + on-device test before it ships to users. Held out of
   the 0.8.6-beta release notes for that reason.
+
+## [0.9.1-beta] - 2026-07-24
+
+The Android plausible-deniability **vault runtime goes live** — but only for the
+**everyday (single) vault**. This release moves the Android keystore and identity
+inside the sealed vault image and hardens the ordinary unlock and delete paths over
+it. It does **not** yet let you create a second (decoy) vault, so the
+plausible-deniability *guarantee* — a decoy account to reveal under coercion — is
+**not yet deliverable on Android**. Read "Scope and honest limits" below before
+relying on this build for anything.
+
+**Fresh install required — there is no upgrade path.** This build changes where
+Android stores its keys (into the vault image) and no automatic migration is built.
+An existing Zitrone install (0.9.0-beta or any earlier beta) will **not** carry its
+identity, contacts, or history forward. Install this as a clean install (uninstall
+first, or wipe app data); your prior on-device account does not survive.
+
+### Added
+
+- **Android: the app now runs over the plausible-deniability vault (everyday
+  vault).** On a fresh install, onboarding sets a **vault passphrase**; the ordinary
+  lock screen — biometric with a **"Use PIN"/passphrase** fallback — decrypts the
+  vault image and builds the app session over it (session-over-vault). The unlock
+  path is **slot-agnostic with no-early-exit timing parity** (every attempt does the
+  same Argon2id work whether it opens a vault or nothing, so a stopwatch cannot tell
+  a hit from a miss) and a RAM-only attempt backoff (no persisted lockout). Keys and
+  identity live in memory only while unlocked and are wiped on lock.
+- **Android: durable vault writes — flush-before-ack.** A received message is only
+  acknowledged after the vault state that records it has been persisted, so a crash
+  cannot silently lose an acked message. Reseal/flush is bounded (a synchronous flush
+  for the ack path; a ≤2s coalescing ceiling for background churn) and always wipes
+  key material on close.
+- **Android: atomic contact deletion over the vault.** Deleting a contact removes the
+  roster entry, writes the straggler tombstone, and destroys that peer's Double
+  Ratchet session and pinned identity as **one** vault mutation, then flushes before
+  reporting success — the roster and the crypto can never disagree after a crash.
+- **Android: no-remanence account delete (two-marker state machine).** Account
+  deletion is driven by two distinct durable markers (`vault.delete-intent` →
+  `vault.delete-confirmed`); a plain lock or auto-lock **never** clears auth tokens
+  or writes a delete marker, so an ordinary lock can never be mistaken for a delete.
+- **Android: user-configurable idle auto-lock (D3).** Settings → a device-level idle
+  timeout (Immediate / 1 / 5 / 15 minutes, **default 5**) locks the vault after the
+  app is backgrounded for that long. Because Zitrone has **no push service**, it only
+  receives messages while unlocked and connected; the picker carries honest copy about
+  that delivery tradeoff (a shorter auto-lock is more private but delays message
+  delivery until you next open the app). Auto-lock only **locks** — it is not a new
+  writer to the delete/token state and never races an account delete.
+
+### Scope and honest limits
+
+- **The second (decoy) vault is not creatable yet — plausible deniability is not yet
+  a usable guarantee on Android.** This release ships the vault *machinery*: the image
+  can hold multiple key slots, and the unlock router would open a second vault if one
+  existed. But there is **no user-facing way to create a second vault** in this build
+  (that is the setup wizard + second-slot flow in a later release). With one vault,
+  there is no decoy to reveal under coercion. Do **not** rely on this build for
+  duress/coercion resistance. See `docs/VAULT_ARCHITECTURE.md` (implementation-status
+  table) and `docs/SECURITY_MODEL.md` (plausible-deniability status).
+- **Storage format is not frozen.** The vault on-disk format may still change, and no
+  in-place migration exists. If it changes in a breaking way, upgrading will again
+  require a **fresh install (a data wipe)** — your on-device identity and history will
+  not carry across such a change. We will call out any such break explicitly in the
+  release notes for that version. We are **not** committing to storage-format
+  stability yet; we are disclosing the wipe-on-breaking-change reality instead.
+- **Contact deletion is immediate and permanently irreversible.** Destroying the
+  session, the pinned identity, and the roster entry cannot be undone; re-adding the
+  same person requires a completely fresh X3DH handshake. (Unchanged in intent from
+  prior releases; restated here because deletion now commits through the vault.)
+- Decoy traffic, the second-slot setup wizard, and vault destruction remain future
+  work (see `docs/VAULT_ARCHITECTURE.md`). iOS and web/desktop are unaffected by this
+  release; their plausible-deniability status is documented per-platform in
+  `docs/SECURITY_MODEL.md`.
 
 ## [0.9.0-beta] - 2026-07-21
 

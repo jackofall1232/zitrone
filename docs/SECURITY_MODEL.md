@@ -397,6 +397,18 @@ the others.
 
 ### Plausible deniability (key-slot vaults)
 
+> **Status (0.9.1-beta), read first.** This section describes the key-slot **design** and the
+> **web/desktop** reference implementation. On **Android as of 0.9.1-beta**, the everyday
+> (single) vault runtime is shipped — the app runs over the vault image, with dual-wrap
+> biometric unlock, the slot-agnostic PIN/passphrase unlock router, and the no-remanence
+> delete state machine — but **there is no way to create a second (decoy) vault yet.** The
+> unlock router and crypto primitives are built to support one once the second-slot creation
+> flow (PR_C2) and the slot-B setup wizard (PR_C3) land, but until they do, an Android user has
+> exactly one vault. **Plausible deniability is therefore not yet a usable guarantee on
+> Android** — do not rely on this build for duress/coercion resistance. See the
+> "Implementation status" note at the end of this section and
+> [`docs/VAULT_ARCHITECTURE.md`](VAULT_ARCHITECTURE.md).
+
 Two (expandable to four) completely separate encrypted vaults sit behind two different passphrases.
 There is no cryptographic evidence that a second vault exists.
 
@@ -452,14 +464,21 @@ and unless they implement the same key-slot scheme independently — a device
 without the feature simply has one vault, which is itself indistinguishable from
 a device that has more.
 
-**Implementation status, stated honestly.** The key-slot crypto primitive above is
-built and tested in `packages/crypto` (web/desktop storage layer). The **Android
-vault runtime is not yet implemented** — its full architecture (dual-slot model,
-PIN-fallback unlock routing, teardown-on-switch, setup and destruction flows) is a
-**locked design**, specified in [`docs/VAULT_ARCHITECTURE.md`](VAULT_ARCHITECTURE.md),
-and lands as its own dedicated, adversarially-reviewed track. What ships ahead of it
-is the **vault-ready notification structure** (below). No release before that track
-completes should be described as having a usable second vault.
+**Implementation status, stated honestly (0.9.1-beta).** The key-slot crypto primitive above is
+built and tested in `packages/crypto` (web/desktop storage layer) and byte-mirrored on Android.
+On Android, the **everyday (single) vault runtime is now shipped** (0.9.1-beta): the app runs
+over the vault image, with dual-wrap biometric unlock, the slot-agnostic PIN/passphrase unlock
+router (no-early-exit timing parity, RAM-only backoff), flush-before-ack durability, atomic
+contact delete, the two-marker no-remanence account-delete state machine, and configurable idle
+auto-lock. **What is NOT built yet is the ability to create a second (decoy) vault** — the
+second-slot creation flow (PR_C2), the slot-B setup wizard (PR_C3), teardown-on-switch, and
+destruction. The unlock router is slot-agnostic and *would* open a second vault if one existed,
+but 0.9.1 ships **no way to create one**, so an Android user has exactly one vault and
+**plausible deniability is not yet a usable guarantee on Android.** The remaining design
+(dual-slot model in full, teardown-on-switch, setup and destruction) stays a **locked design**
+in [`docs/VAULT_ARCHITECTURE.md`](VAULT_ARCHITECTURE.md), landing as its own adversarially-
+reviewed track. **No release before PR_C2 + PR_C3 land should be described as having a usable
+second vault.**
 
 Two invariants from that architecture are restated here because they are permanent
 security properties, not implementation details:
