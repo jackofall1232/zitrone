@@ -15,6 +15,7 @@ import com.zitrone.app.crypto.vault.KeyDeriver
 import com.zitrone.app.crypto.vault.LEGACY_IMAGE_VERSION
 import com.zitrone.app.crypto.vault.LibsodiumVaultOps
 import com.zitrone.app.crypto.vault.OUTER_IMAGE_BYTES
+import com.zitrone.app.crypto.vault.PAYLOAD_AD
 import com.zitrone.app.crypto.vault.PAYLOAD_PLAINTEXT_BYTES
 import com.zitrone.app.crypto.vault.SLOT_AD
 import com.zitrone.app.crypto.vault.SLOT_COUNT
@@ -314,6 +315,25 @@ class AttemptUnlockOrAddTest {
         assertArrayEquals("a failed self-verify persists nothing", before, bin(dir).readBytes())
     }
 
+    @Test
+    fun create_selfVerifiesThePayload_throwsAndPersistsNothing_onAMisSealingPayloadProvider() {
+        // G3: a miscomputing PAYLOAD aeadEncrypt producing a SELF-CONSISTENT but WRONG-content box (it
+        // decrypts fine, just not to genesisPayload) must be caught by the payload self-verify's
+        // CONSTANT-TIME CONTENT compare BEFORE anything is persisted — otherwise a full working session runs
+        // over a vault that is permanently unopenable after process death. A "decryption succeeded" check
+        // alone would NOT catch this.
+        val dir = tmp.newFolder()
+        store(dir).also { it.create("passA", "A".toByteArray(Charsets.UTF_8)); it.close() }
+        val misSealing = MisSealingPayloadOps(realOps)
+        val s = store(dir, ops = misSealing)
+        s.open()
+        val before = bin(dir).readBytes()
+        assertThrows(IllegalStateException::class.java) {
+            s.attemptUnlockOrAdd("passB", genesis, create = true)
+        }
+        assertArrayEquals("a failed payload self-verify persists nothing", before, bin(dir).readBytes())
+    }
+
     // ─────────────────────────── durability ───────────────────────────
 
     @Test
@@ -332,12 +352,13 @@ class AttemptUnlockOrAddTest {
     // ─────────────────────────── crypto-budget PARITY (load-bearing) ───────────────────────────
 
     @Test
-    fun cryptoBudgetParity_5derivations_1payloadGcm_6wrappedGcm_acrossAllOutcomes() {
-        // Each outcome must issue IDENTICAL heavy crypto: 5 Argon2id (4-slot sweep + 1 candidate seal),
-        // exactly one 256 KiB payload GCM, and 6 wrapped-key GCM (4 unwrap + 1 candidate seal encrypt +
-        // 1 candidate self-verify decrypt, B2). Only a SUCCESSFUL create additionally does one ~1 MiB
-        // outer GCM (the documented persist residual); the marker-present create FAILS CLOSED to the
-        // reject budget (no outer GCM), so it is indistinguishable from an ordinary wrong password.
+    fun cryptoBudgetParity_5argon2id_6wrappedGcm_acrossOutcomes_createAloneDoublesPayloadAndOuter() {
+        // Every outcome issues IDENTICAL heavy crypto: 5 Argon2id (4-slot sweep + 1 candidate seal) and
+        // 6 wrapped-key GCM (4 unwrap + 1 candidate seal encrypt + 1 candidate self-verify decrypt, B2).
+        // Payload GCM is 1 on every outcome EXCEPT a SUCCESSFUL create, which does 2 (seal + a self-verify
+        // open, G3) and also the one ~1 MiB outer GCM — both create-only persist residuals. The
+        // marker-present create FAILS CLOSED to the exact reject budget (1 payload GCM, no outer), so it is
+        // indistinguishable from an ordinary wrong password.
         fun measure(outcome: String, prep: (File) -> Unit, call: (VaultImageStore) -> Unit) {
             val dir = tmp.newFolder()
             prep(dir)
@@ -348,9 +369,11 @@ class AttemptUnlockOrAddTest {
             counting.reset(); counter.calls = 0 // measure ONLY the attempt
             call(s)
             assertEquals("$outcome: 5 Argon2id (4 sweep + 1 candidate)", 5, counter.calls)
-            assertEquals("$outcome: exactly one 256 KiB payload GCM", 1, counting.payloadOps)
             // 4 sweep unwraps + 1 candidate seal encrypt + 1 candidate self-verify decrypt = 6 (B2).
             assertEquals("$outcome: 6 wrapped-key GCM (4 unwrap + 1 seal + 1 self-verify)", 6, counting.wrappedOps)
+            // A successful create seals genesis AND self-verifies it (G3) = 2; every other outcome = 1.
+            val expectedPayload = if (outcome == "create") 2 else 1
+            assertEquals("$outcome: payload GCM (create seals+verifies=2, else 1)", expectedPayload, counting.payloadOps)
             val expectedOuter = if (outcome == "create") 1 else 0
             assertEquals("$outcome: outer GCM only on create", expectedOuter, counting.outerOps)
         }
@@ -498,6 +521,25 @@ class AttemptUnlockOrAddTest {
             val out = inner.aeadEncrypt(key, plaintext, associatedData)
             if (associatedData.contentEquals(SLOT_AD)) out[out.size - 1] = (out[out.size - 1].toInt() xor 0x01).toByte()
             return out
+        }
+    }
+
+    /**
+     * Miscomputes ONLY the payload layer (`PAYLOAD_AD`): flips the first CONTENT byte of the plaintext (just
+     * past the 4-byte length prefix) before encrypting, so the box decrypts SUCCESSFULLY but to the wrong
+     * content. Every other AEAD op is the real byte path. Exercises the G3 payload self-verify's constant-
+     * time CONTENT compare — which a "decryption succeeded" check alone would not.
+     */
+    private class MisSealingPayloadOps(private val inner: VaultSodiumOps) : VaultSodiumOps {
+        override fun argon2idDeriveKey(password: ByteArray, salt: ByteArray) = inner.argon2idDeriveKey(password, salt)
+        override fun randomBytes(length: Int) = inner.randomBytes(length)
+        override fun aeadDecrypt(key: ByteArray, box: ByteArray, associatedData: ByteArray) =
+            inner.aeadDecrypt(key, box, associatedData)
+        override fun aeadEncrypt(key: ByteArray, plaintext: ByteArray, associatedData: ByteArray): ByteArray {
+            if (!associatedData.contentEquals(PAYLOAD_AD)) return inner.aeadEncrypt(key, plaintext, associatedData)
+            val p = plaintext.copyOf() // don't mutate the caller's buffer
+            p[4] = (p[4].toInt() xor 0x01).toByte() // flip content[0] (index 4 = just past the length prefix)
+            return inner.aeadEncrypt(key, p, associatedData)
         }
     }
 }

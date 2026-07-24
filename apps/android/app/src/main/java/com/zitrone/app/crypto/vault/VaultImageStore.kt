@@ -607,7 +607,10 @@ class VaultImageStore internal constructor(
      *   - ONE unconditional candidate-slot seal ([sealSlotSelfVerifying]) — 1 more Argon2id + TWO
      *     wrapped-key GCM (the seal encrypt + a same-master-key verify decrypt, 0 extra Argon2id); real
      *     vault-B material on create, pure timing filler otherwise. Total: 5 Argon2id + 6 wrapped-key GCM;
-     *   - EXACTLY ONE 256 KiB payload GCM (open on a match, seal on create/reject).
+     *   - EXACTLY ONE 256 KiB payload GCM on EVERY outcome (open on a match, seal on create/reject). A
+     *     SUCCESSFUL create additionally does a SECOND payload GCM (a self-verify open, see DELETE MARKERS /
+     *     the create branch) — a create-only residual, alongside the outer GCM + write, not a per-outcome
+     *     distinguisher (the marker-present create fails closed to the single-payload-GCM reject budget).
      *
      * A SLOT MATCH (0..SLOT_COUNT-1) ALWAYS wins over [create]. A match on slot 0
      * ([BURN_SLOT_INDEX]) returns [UnlockOrAdd.Burn] (the app wipes; this method writes nothing
@@ -618,10 +621,11 @@ class VaultImageStore internal constructor(
      * (see DELETE MARKERS below), in which case it FAILS CLOSED to [UnlockOrAdd.Rejected]. With [create]
      * false it returns [UnlockOrAdd.Rejected] having written nothing.
      *
-     * TIMING RESIDUAL (documented, accepted): only the create path additionally PERSISTS (the ~1 MiB
-     * outer GCM + atomic write + dir-fsync that gate a durable [UnlockOrAdd.Created]). That work is
-     * post-outcome and dwarfed by the SLOT_COUNT+1 Argon2id; it is the same class as the payload-open
-     * asymmetry and is NOT a per-attempt KDF-level distinguisher.
+     * TIMING RESIDUAL (documented, accepted): only the SUCCESSFUL create path additionally PERSISTS (a
+     * second payload GCM = the self-verify open, the ~1 MiB outer GCM, an atomic write + dir-fsync that
+     * gate a durable [UnlockOrAdd.Created]). That work is post-outcome and dwarfed by the SLOT_COUNT+1
+     * Argon2id; it is the same class as the payload-open asymmetry and is NOT a per-attempt KDF-level
+     * distinguisher. A marker-present create fails closed to the exact single-payload-GCM reject budget.
      *
      * BLIND OVERWRITE (~1/(SLOT_COUNT-1) ≈ 33%): placement is over the vault pool with an EMPTY
      * occupied set (occupancy is unknowable by design), so a create can overwrite an existing vault in
@@ -725,8 +729,28 @@ class VaultImageStore internal constructor(
                             wipe(throwaway)
                             UnlockOrAdd.Rejected
                         } else {
-                            // The 1×256 KiB payload GCM for the create branch.
+                            // Payload GCM #1 (the seal). A SUCCESSFUL create is the one outcome that persists,
+                            // so it is also the one that gets a second, create-only payload GCM below — inside
+                            // the already-accepted create-persist residual (alongside the outer GCM + write),
+                            // touching no other outcome, so cross-outcome parity + the 5-Argon2id invariant hold.
                             val sealedGenesis = sealPayload(candKey, genesisPayload, ops)
+                            // B2 PAYLOAD HALF (G3): prove the sealed PAYLOAD actually opens to genesisPayload
+                            // with candKey BEFORE persisting. The wrapped-key self-verify (sealSlotSelfVerifying)
+                            // covers the key; this covers the payload. It must CONSTANT-TIME-COMPARE the recovered
+                            // plaintext to genesisPayload — not merely confirm decryption succeeded — so a
+                            // miscomputing AEAD that produced a self-consistent-but-WRONG-content box is caught.
+                            // The failure it closes is the worst shape for this feature: silent, surfacing only
+                            // after process death, leaving a full working session over a vault that is then
+                            // permanently unopenable. Throws before ANY write, exactly like B2's wrapped verify.
+                            val verifyPt = openPayload(candKey, sealedGenesis, ops)
+                                ?: throw IllegalStateException("sealed payload failed self-verify (did not open)")
+                            try {
+                                check(java.security.MessageDigest.isEqual(verifyPt, genesisPayload)) {
+                                    "sealed payload failed self-verify (recovered plaintext mismatch)"
+                                }
+                            } finally {
+                                wipe(verifyPt)
+                            }
                             val newSlots = decoded.slots.toMutableList().also { it[candSlotIndex] = candSlot }
                             val newPayloads =
                                 decoded.payloads.toMutableList().also { it[candSlotIndex] = sealedGenesis }
