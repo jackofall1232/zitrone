@@ -765,6 +765,15 @@ private fun ZitroneRoot(
     // Passphrase unlock (§2): ALWAYS available. Enforce the RAM backoff BEFORE the off-main
     // attempt, then surface only a uniform generic failure (no per-slot / per-factor branch) —
     // EXCEPT a damaged image, which escalates distinctly (it is not a passphrase guess).
+    // Pucker Burn (slot 0) match handler. FAIL-CLOSED STUB (0.9.2 PR-2): the duress WIPE is a sibling
+    // Pucker Burn PR and slot 0 is unarmed until burn-setup ships, so Burn is currently UNREACHABLE — and
+    // until the wipe lands, a burn match is surfaced exactly like a wrong passphrase (uniform failure), a
+    // deniable no-op. When the burn-wipe PR lands, this becomes the wipe trigger.
+    val onBurn: () -> Unit = {
+        lockError = VaultUnlockRouter.UNIFORM_FAILURE
+        unlocking = false
+    }
+
     val onUnlockPassphrase: (String) -> Unit = onUnlockPassphrase@{ pass ->
         if (unlocking) return@onUnlockPassphrase
         unlocking = true
@@ -772,47 +781,46 @@ private fun ZitroneRoot(
         scope.launch {
             val backoff = container.unlockRouter.backoffDelayMs()
             if (backoff > 0) delay(backoff)
-            runCatching { container.unlockWithPassphrase(pass) }.fold(
-                onSuccess = { published ->
-                    if (published) {
-                        onUnlockSuccess()
-                    } else {
-                        // No match (wrong passphrase) OR a refused build (which already wiped the
-                        // VaultOpen). Reporting success would land on a null session, so treat both
-                        // as a non-success: uniform failure + backoff.
-                        container.unlockRouter.recordFailure()
-                        lockError = VaultUnlockRouter.UNIFORM_FAILURE
-                        unlocking = false
-                    }
-                },
-                onFailure = { e ->
-                    when {
-                        e is kotlinx.coroutines.CancellationException -> throw e
-                        e is com.zitrone.app.crypto.vault.VaultImageException.LegacyImage -> {
+            runCatching { container.attemptPassphrase(pass) }.fold(
+                onSuccess = { outcome ->
+                    // The router (attemptPassphrase) owns the triple-entry ritual + the backoff counter;
+                    // this only maps the outcome to UI. Unlocked/Created publish a session → the session
+                    // collector flips route/unlocking. Rejected is indistinguishable from a wrong password.
+                    when (outcome) {
+                        PassphraseOutcome.Unlocked, PassphraseOutcome.Created -> onUnlockSuccess()
+                        PassphraseOutcome.Burn -> onBurn()
+                        PassphraseOutcome.LegacyImage -> {
                             // A PRIOR-format (v2 / 0.9.1) image is unsafe to unlock under the burn-slot
-                            // reservation; open() threw BEFORE any slot was interpreted (never a burn
+                            // reservation; the store threw before any slot was interpreted (never a burn
                             // wipe). Route to fresh onboarding (the create there retires the old image).
-                            // Backstop for the cold-start precompute above; no backoff bump (not a guess).
                             vaultExists = false
                             route = Route.Onboarding
                             unlocking = false
                         }
-                        e is com.zitrone.app.crypto.vault.VaultImageException.CorruptImage ||
-                            e is com.zitrone.app.crypto.vault.VaultImageException.MissingImage -> {
-                            // A damaged/unreadable IMAGE is device state, NOT a passphrase guess —
-                            // surface a distinct honest error, never the wrong-passphrase uniform
-                            // failure (no oracle at stake), and do not bump the backoff.
+                        PassphraseOutcome.ImageUnreadable -> {
+                            // A damaged/unreadable IMAGE is device state, NOT a passphrase guess — a
+                            // distinct honest error, never the wrong-passphrase uniform failure.
                             lockError = VaultUnlockRouter.IMAGE_UNREADABLE_NOTE
                             unlocking = false
                         }
-                        else -> {
-                            // Any other throw (a state decode/version failure from the build, a
-                            // transient IO error) → uniform failure; never leak the cause.
-                            container.unlockRouter.recordFailure()
+                        PassphraseOutcome.Rejected, PassphraseOutcome.Retry -> {
+                            // Wrong passphrase / no match / fail-closed create (Rejected), or a create whose
+                            // durability was unconfirmed (Retry — a re-entry unlocks the now-present vault).
+                            // Both surface the same uniform failure so neither is an oracle.
                             lockError = VaultUnlockRouter.UNIFORM_FAILURE
                             unlocking = false
                         }
                     }
+                },
+                onFailure = { e ->
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    // attemptPassphrase maps every expected image/durability case to an outcome; an
+                    // unexpected throw (e.g. a publishSession build-refuse) is a failure — bump the
+                    // backoff (parity with the pre-fusion path) and surface a uniform failure, never
+                    // leaking the cause.
+                    container.unlockRouter.recordFailure()
+                    lockError = VaultUnlockRouter.UNIFORM_FAILURE
+                    unlocking = false
                 },
             )
         }

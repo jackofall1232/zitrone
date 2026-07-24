@@ -81,6 +81,12 @@ fun shouldAutoLockAtFireTime(sessionLive: Boolean, terminalWipe: Boolean): Boole
  * @param sessionLive whether a session is currently unlocked.
  * @param terminalWipe whether an account-delete wipe owns teardown right now.
  * @param lock the canonical session teardown ([UnlockController.lock]); idempotent.
+ * @param resetRitual the uninterrupted-sequence guard for the 0.9.2 triple-entry creation gate
+ *   ([VaultUnlockRouter.resetCandidate]): invoked UNCONDITIONALLY on every [onStop] — independent of
+ *   whether a session is live — because the ritual runs at the lock screen (no session), so a session
+ *   gate would miss it. Backgrounding the app breaks any in-progress ritual; process death clears the
+ *   RAM candidate on its own. REQUIRED (no default): a silent no-op would disable the
+ *   uninterrupted-sequence guard while auto-lock still runs, so every construction must wire it.
  */
 class VaultLockManager(
     private val scope: CoroutineScope,
@@ -88,6 +94,7 @@ class VaultLockManager(
     private val sessionLive: () -> Boolean,
     private val terminalWipe: () -> Boolean,
     private val lock: () -> Unit,
+    private val resetRitual: () -> Unit,
 ) : DefaultLifecycleObserver {
 
     private var pending: Job? = null
@@ -98,7 +105,11 @@ class VaultLockManager(
     }
 
     override fun onStop(owner: LifecycleOwner) {
-        // App backgrounded. Cancel any stale timer, then schedule per the pure decision.
+        // App backgrounded. FIRST, unconditionally break any in-progress triple-entry creation ritual
+        // (0.9.2 uninterrupted-sequence guard) — this is independent of session state and of the
+        // auto-lock decision below, because the ritual runs at the lock screen with no live session.
+        resetRitual()
+        // Cancel any stale timer, then schedule the auto-lock per the pure decision.
         pending?.cancel()
         pending = when (val action = autoLockOnBackground(sessionLive(), terminalWipe(), timeoutSeconds())) {
             AutoLockAction.None -> null

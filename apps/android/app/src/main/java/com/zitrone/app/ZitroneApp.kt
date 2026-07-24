@@ -17,6 +17,8 @@ import com.zitrone.app.crypto.vault.BiometricVaultKeyCipher
 import com.zitrone.app.crypto.vault.KeystoreDeviceKeyCipher
 import com.zitrone.app.crypto.vault.LibsodiumVaultOps
 import com.zitrone.app.crypto.vault.VaultImageStore
+import com.zitrone.app.crypto.vault.UnlockOrAdd
+import com.zitrone.app.crypto.vault.VaultImageException
 import com.zitrone.app.crypto.vault.VaultOpen
 import com.zitrone.app.crypto.vault.VaultRuntime
 import com.zitrone.app.crypto.vault.VaultSession
@@ -98,6 +100,36 @@ class ZitroneApp : Application() {
  * The legacy store CLASSES stay in the tree (still compiled + test-covered); only
  * the runtime WIRING here is the vault path.
  */
+
+/**
+ * The outcome of a passphrase entry through [AppContainer.attemptPassphrase] (0.9.2 second-vault
+ * router). SLOT-AGNOSTIC: the UI learns only which of these happened, never which slot or how many
+ * vaults exist. [Rejected] is indistinguishable (behaviour + timing) from a wrong passphrase, and it
+ * is the outcome a create-refused-because-a-delete-is-pending also returns (fail-closed).
+ */
+sealed interface PassphraseOutcome {
+    /** An existing vault slot matched — a session was published. Route to the chat. */
+    data object Unlocked : PassphraseOutcome
+
+    /** No slot matched, the triple-entry gate fired, a new vault was created + published. */
+    data object Created : PassphraseOutcome
+
+    /** The Pucker Burn slot matched — the app performs the duress wipe (a sibling feature). */
+    data object Burn : PassphraseOutcome
+
+    /** No match (or a refused build, or a fail-closed create): a wrong-passphrase equivalent. */
+    data object Rejected : PassphraseOutcome
+
+    /** The stored image is present but unreadable (corrupt / missing DEK) — a distinct honest error. */
+    data object ImageUnreadable : PassphraseOutcome
+
+    /** The stored image is a prior (v2 / 0.9.1) format — route to fresh onboarding (it retires there). */
+    data object LegacyImage : PassphraseOutcome
+
+    /** A create wrote but its durability was unconfirmed — surface a generic retry (a re-entry recovers). */
+    data object Retry : PassphraseOutcome
+}
+
 class AppContainer(private val app: Application) {
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -157,6 +189,27 @@ class AppContainer(private val app: Application) {
 
     fun endVaultCreate() {
         vaultCreating.value = false
+    }
+
+    /**
+     * PROCESS-scoped single-flight for a passphrase unlock attempt. The lock screen's `unlocking`
+     * guard is COMPOSITION-local, so it resets to false on an Activity recreation (rotation) and
+     * cannot stop the recreated screen from launching a SECOND [attemptPassphrase] while a
+     * rotation-cancelled first one's UNINTERRUPTIBLE store call (holding `imageLock`) is still
+     * finishing. That overlap let the cancelled attempt's triple-entry streak be READ + advanced by
+     * the next entry (latching `create=true`) BEFORE the cancelled attempt's [resetCandidate] landed
+     * — creating after fewer than 3 uninterrupted entries (paired-blind review round 5, BOTH
+     * reviewers). This flag is process-scoped (survives recreation) so [attemptPassphrase] serializes
+     * end-to-end: a cancelled attempt's rollback completes before any next attempt can read the
+     * streak. Reject-based, mirroring [tryBeginVaultCreate]; no UI observation needed (the
+     * composition-local `unlocking` already drives the spinner). RAM-only → process death clears it.
+     */
+    private val unlockInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    fun tryBeginUnlock(): Boolean = unlockInFlight.compareAndSet(false, true)
+
+    fun endUnlock() {
+        unlockInFlight.set(false)
     }
 
     /** Routing truth: a vault image is present → UNLOCK, absent → SETUP (onboarding). */
@@ -295,6 +348,12 @@ class AppContainer(private val app: Application) {
         sessionLive = { _session.value != null },
         terminalWipe = { unlockController.isTerminalWipe() },
         lock = { unlockController.lock() },
+        // Uninterrupted-sequence guard (0.9.2 triple-entry, spec §3): backgrounding the app breaks any
+        // in-progress triple-entry ritual. Reset UNCONDITIONALLY on every onStop (independent of the
+        // auto-lock decision, which is session-gated — the ritual runs at the LOCK screen with no live
+        // session). Process death clears the RAM candidate on its own; a lock cycle cannot interrupt a
+        // ritual because the ritual only runs while already at the lock screen.
+        resetRitual = { unlockRouter.resetCandidate() },
     ).also { it.register(androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle) }
 
     // ── Vault unlock / create orchestration (all off-main; caller drives the UI) ──
@@ -348,15 +407,114 @@ class AppContainer(private val app: Application) {
     }
 
     /**
-     * Attempt [passphrase] against the vault (off-main; both slots, no early exit) and, on a
-     * match, PUBLISH the session — both in the SAME off-main block so a cancellation that fires as
-     * the block ends cannot strand the materialized [VaultOpen] unwiped ([publishSession] consumes
-     * or wipes it synchronously before the block returns). Returns whether a session was published
-     * (false on no match OR on a refused build). Never logs anything credential-shaped.
+     * The 0.9.2 fused passphrase entry point (router). Off-main. In ONE block: run the triple-entry
+     * gate to decide `create`, then [com.zitrone.app.crypto.vault.VaultImageStore.attemptUnlockOrAdd]
+     * (identical heavy crypto every outcome — the plausible-deniability + duress timing contract), then
+     * map the outcome and manage the router's RAM state:
+     *  - a slot MATCH publishes the session ([UnlockOrAdd.Unlocked]) — discards the ritual, clears backoff;
+     *  - a BURN slot match ([UnlockOrAdd.Burn]) — discards the ritual, leaves backoff untouched (not a
+     *    wrong password); the caller performs the duress wipe;
+     *  - a no-match CREATE ([UnlockOrAdd.Created]) publishes the new vault — discards the ritual, clears backoff;
+     *  - a [UnlockOrAdd.Rejected] (no match, or a fail-closed create over a pending delete) KEEPS the
+     *    triple-entry streak and advances the backoff — indistinguishable from a wrong passphrase.
+     *
+     * The `create` decision is computed on EVERY attempt so its SHA-256 + constant-time compare is
+     * constant work (never a distinguisher). `genesis` (an empty [VaultState]) is encoded per attempt and
+     * WIPED in `finally`; the store copies it only on a create and never wipes the caller's copy. The
+     * materialized [VaultOpen] is consumed-or-wiped by [publishSession] synchronously before this block
+     * returns, so a cancellation can never strand it. Never logs anything credential-shaped.
      */
-    suspend fun unlockWithPassphrase(passphrase: String): Boolean = withContext(Dispatchers.Default) {
-        val open = imageStore.unlock(passphrase) ?: return@withContext false
-        publishSession(open)
+    suspend fun attemptPassphrase(passphrase: String): PassphraseOutcome {
+        // PROCESS-scoped single-flight (see [unlockInFlight]): refuse a concurrent attempt BEFORE any
+        // decideCreate, so a rotation that starts a second attempt while a cancelled first one's
+        // uninterruptible store is still finishing can never advance the triple-entry streak. A busy
+        // reject is uniform (like a wrong password) and touches neither the streak nor the backoff.
+        // The composition-local `unlocking` guard already blocks concurrent submits WITHIN one Activity;
+        // this closes only the cross-recreation race the two round-5 reviewers converged on.
+        if (!tryBeginUnlock()) return PassphraseOutcome.Rejected
+        // The triple-entry candidate is advanced inside decideCreate (a side effect that persists even
+        // when the attempt is later cancelled). ANY cancellation of this attempt must undo that advance —
+        // an interrupted entry is never one of the 3 uninterrupted identical entries. The reset lives in
+        // the OUTER catch, around the whole withContext, because withContext's prompt-cancellation
+        // guarantee can DISCARD the block's already-computed Rejected result and throw CancellationException
+        // at the boundary — after the `when` kept the streak — where no catch INSIDE the block (having
+        // already returned) can ever see it. The inner catch only covers a CE thrown DURING the store call.
+        // endUnlock() is in the OUTER finally: it runs AFTER the CE-reset catch, so the single-flight is
+        // released only once this attempt's rollback (or commit) is complete — a next attempt that claims
+        // the flight therefore always reads a settled streak.
+        return try {
+            withContext(Dispatchers.Default) {
+                val create = unlockRouter.decideCreate(passphrase)
+                val genesis = VaultStateCodec.encode(VaultState.empty())
+                try {
+                    val result = try {
+                        imageStore.attemptUnlockOrAdd(passphrase, genesis, create)
+                    } catch (c: CancellationException) {
+                        // Re-throw untouched so (a) the Throwable catch below can't swallow it into Rejected
+                        // and (b) the OUTER catch performs the single candidate reset for every CE path.
+                        throw c
+                    } catch (e: VaultImageException.LegacyImage) {
+                        unlockRouter.resetCandidate()
+                        return@withContext PassphraseOutcome.LegacyImage
+                    } catch (e: VaultImageException.CorruptImage) {
+                        unlockRouter.resetCandidate()
+                        return@withContext PassphraseOutcome.ImageUnreadable
+                    } catch (e: VaultImageException.MissingImage) {
+                        unlockRouter.resetCandidate()
+                        return@withContext PassphraseOutcome.ImageUnreadable
+                    } catch (e: VaultImageException.NotDurable) {
+                        // Create wrote but durability unconfirmed; the new vault IS in canonical, so a later
+                        // single entry unlocks it via the match path. Spend the ritual, bump backoff, retry.
+                        unlockRouter.resetCandidate()
+                        unlockRouter.recordFailure()
+                        return@withContext PassphraseOutcome.Retry
+                    } catch (t: Throwable) {
+                        // Any other throw (a self-verify IllegalState, a transient IO) → generic; never leak it.
+                        unlockRouter.resetCandidate()
+                        unlockRouter.recordFailure()
+                        return@withContext PassphraseOutcome.Rejected
+                    }
+                    when (result) {
+                        is UnlockOrAdd.Unlocked -> {
+                            unlockRouter.resetCandidate()
+                            if (publishSession(result.open)) {
+                                unlockRouter.recordSuccess(); PassphraseOutcome.Unlocked
+                            } else {
+                                unlockRouter.recordFailure(); PassphraseOutcome.Rejected
+                            }
+                        }
+                        is UnlockOrAdd.Created -> {
+                            unlockRouter.resetCandidate()
+                            if (publishSession(result.open)) {
+                                unlockRouter.recordSuccess(); PassphraseOutcome.Created
+                            } else {
+                                unlockRouter.recordFailure(); PassphraseOutcome.Rejected
+                            }
+                        }
+                        UnlockOrAdd.Burn -> {
+                            unlockRouter.resetCandidate()
+                            PassphraseOutcome.Burn
+                        }
+                        UnlockOrAdd.Rejected -> {
+                            // KEEP the streak (do NOT reset) so a genuine ritual can complete; advance backoff.
+                            unlockRouter.recordFailure()
+                            PassphraseOutcome.Rejected
+                        }
+                    }
+                } finally {
+                    wipe(genesis)
+                }
+            }
+        } catch (c: CancellationException) {
+            // Deferred-boundary reset: undoes the decideCreate advance for a cancellation delivered at the
+            // withContext boundary (block already returned; streak kept) OR re-thrown from the inner catch.
+            unlockRouter.resetCandidate()
+            throw c
+        } finally {
+            // Release the single-flight AFTER the CE-reset catch above, so no concurrent attempt can claim
+            // the flight until this one's streak rollback/commit has settled.
+            endUnlock()
+        }
     }
 
     /**
@@ -463,15 +621,26 @@ class AppContainer(private val app: Application) {
      */
     fun publishSession(vaultOpen: VaultOpen): Boolean {
         var published = false
-        unlockController.unlock(
-            prepared = { sessionScope ->
-                buildVaultSession(sessionScope, vaultOpen).also { published = true }
-            },
-            onRefused = {
-                wipe(vaultOpen.vaultKey)
-                wipe(vaultOpen.payloadPlaintext)
-            },
-        )
+        try {
+            unlockController.unlock(
+                prepared = { sessionScope ->
+                    buildVaultSession(sessionScope, vaultOpen).also { published = true }
+                },
+                onRefused = {
+                    wipe(vaultOpen.vaultKey)
+                    wipe(vaultOpen.payloadPlaintext)
+                },
+            )
+        } finally {
+            // Any live session ENDS/interrupts an in-progress triple-entry ritual — reset here so the
+            // guard covers EVERY unlock path uniformly (passphrase, BIOMETRIC, onboarding create), not
+            // just the passphrase path. In a `finally` keyed on `published` so it runs EVEN IF a
+            // post-publish step (afterPublish / the settings write below) throws AFTER the session went
+            // live: without this, a soft exception on the biometric path could leave a mid-ritual
+            // candidate alive over a published session, to be completed by one lock-screen entry after a
+            // later non-background re-lock. A refused (non-published) build must NOT reset — no session.
+            if (published) unlockRouter.resetCandidate()
+        }
         if (published) settingsRepository.setOnboardingDone(true)
         return published
     }
