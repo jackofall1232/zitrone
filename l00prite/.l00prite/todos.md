@@ -8,10 +8,10 @@
 - [x] Migrated zitrone to the new nested `l00prite/` layout (payload under `l00prite/.l00prite/`,
       root pointers + vendor adapters, fully TRACKED). Old flat `.l00prite/` retired (backup at
       `/root/l00prite/zitrone-l00prite-premigration-backup`). Memory repopulated to current state.
-- [ ] Add the `security-review-loop.md` prompt to `l00prite/.l00prite/prompts/` + the prompt index
-      (the original request, now with a clean home in the new layout). Awaiting go-ahead.
+- [x] Added the `security-review-loop.md` prompt to `l00prite/.l00prite/prompts/` + the prompt index
+      (PR #52 `b8eb652` / PR #53, merged). It drove PR-2's paired-blind loop to clean convergence.
 
-## Now — 0.9.2-beta SECOND VAULT (slot B) + PUCKER BURN, Android — PR-1 MERGED; PR-2 SPEC AWAITING REVIEW
+## Now — 0.9.2-beta SECOND VAULT (slot B) + PUCKER BURN, Android — PR-1 MERGED; PR-2 PUSHED (PR #54, CI running, held for merge); PR-3 NEXT
 Closes the PD gap (0.9.1 shipped ONE vault). Locked: slot-B creation ONLY via the PIN/passphrase router,
 NO discoverable UI. **Full decision record (REVISED 2026-07-24, supersedes the earlier double-entry/25%
 version): `/root/l00prite/zitrone-vault-ledger.md` top block.** Key deltas from the earlier plan:
@@ -24,9 +24,17 @@ credential in reserved slot 0** (replaces rejected "N wrong passwords wipes"); *
 - [x] **PR-1 — ✅ MERGED** (user-approved 2026-07-24). PR #51 → squash `2de2bac` on main; all 8 CI checks
       green; remote branch deleted. **Version UNCHANGED (vc17/0.9.1-beta)** — 0.9.2 stays unbumped until the
       phase completes. Store-layer only; no user-reachable behavior change (create has no caller until PR-2).
-- [ ] **PR-2 — SPEC DELIVERED, awaiting user review before impl.** `/root/l00prite/pr2-router-triple-entry-spec.md`
-      (router fusion + triple-entry gate + uninterrupted-sequence guard; invariant table first; 3 open Qs).
-      SEQUENCING: PR-2 before PR-3 (never reverse). NO impl until spec reviewed.
+- [ ] **PR-2 — ✅ IMPLEMENTED + REVIEW-CLEAN → PR #54 OPEN, CI running, HELD for user's merge call.**
+      Branch `feat/0.9.2-vault-pr2-router` (7 commits `63b0762`..`30a6c33`), PUSHED. Units 1–4: router
+      fusion + triple-entry gate + uninterrupted-sequence guard. Paired-blind security-review-loop
+      (Codex+Grok) ran to **clean convergence at round 6** (both CLEAN, no Crit/High/Med, adjudicated vs
+      source). Big catches: R4 deferred-`withContext`-boundary cancellation → outer-catch CE reset
+      (`81def41`); R5 rotation re-entry race (process-scoped streak vs composition-local `unlocking`) →
+      process single-flight `tryBeginUnlock`/`endUnlock` (`30a6c33`), mirroring onboarding's `vaultCreating`.
+      2 accepted Info residuals (busy-reject timing; no post-rotation busy spinner). NO version bump.
+      **NEXT: watch CI green → explicit merge call → squash-merge; if any check fails STOP + report.**
+      Detail: `/root/l00prite/zitrone-vault-ledger.md` + `pr2-fix{,2,3,4,5}-review-{codex,grok}.md`.
+      PR #54: https://github.com/jackofall1232/zitrone/pull/54
 - [x] ~~PR-1 — FULLY REVIEW-CLEAN, awaiting merge call.~~ (merged; superseded above.) Branch `feat/0.9.2-vault-slotb-pr1` =
       `321b358`+`9ab8cb0`+`296ebc6`+`8f4545d`+`be18911`, LOCAL only, NOT pushed, no version bump. EVERY
       reviewed seam PASSED both blind reviewers (Codex+Grok): the fix round `321b358..296ebc6` and the G3
@@ -58,11 +66,10 @@ credential in reserved slot 0** (replaces rejected "N wrong passwords wipes"); *
       **Review amendments recorded:** (1) invariant 6 gets FULL marker writer/reader enumeration incl.
       mid-write crash states (rounds-13–16 discipline); (2) explicit verdict on dropped re-verify.
       After implementation: STOP, report, user dispatches review.
-- [ ] **PR-2 — router fusion + TRIPLE-entry gate + timing parity.** Every attempt = 5 Argon2id + 1×256KiB
-      GCM, unconditional. Router RAM: `candidateHash` (SHA-256, constant-time compare) + `candidateCount`
-      (identical-string streak; reset to 1 on any different string; cleared on unlock/create; **reset to 0
-      on background / lock cycle / process death** = uninterrupted-sequence guard) — SEPARATE from the
-      backoff `failedAttempts`. Parity tests across unlock/burn/create/reject AND attempt-1/2/3.
+- [x] ~~**PR-2 — router fusion + TRIPLE-entry gate + timing parity** (design detail).~~ BUILT + review-clean;
+      see the live PR-2 entry above (PR #54). Router RAM `candidateHash`/`candidateCount` with the
+      uninterrupted-sequence guard implemented as specified; store-side 5-Argon2id + 256KiB-GCM parity
+      from PR-1 preserved.
 - [ ] **PR-3 — UI + docs (light).** MainActivity no-match → create branch; biometric A-only guard (OQ4);
       reconcile VAULT_ARCHITECTURE §3.3/§3.4 + PR_C3 wizard ref → silent-router+triple-entry (OQ5); flip
       SECURITY_MODEL to "two vaults creatable" + NEW disclosures (full-pool-overwrite certainty, ~33%
