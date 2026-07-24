@@ -403,68 +403,82 @@ class AppContainer(private val app: Application) {
      * materialized [VaultOpen] is consumed-or-wiped by [publishSession] synchronously before this block
      * returns, so a cancellation can never strand it. Never logs anything credential-shaped.
      */
-    suspend fun attemptPassphrase(passphrase: String): PassphraseOutcome = withContext(Dispatchers.Default) {
-        val create = unlockRouter.decideCreate(passphrase)
-        val genesis = VaultStateCodec.encode(VaultState.empty())
-        try {
-            val result = try {
-                imageStore.attemptUnlockOrAdd(passphrase, genesis, create)
-            } catch (c: CancellationException) {
-                // A cancelled attempt (e.g. Activity recreation) must NOT count toward the streak — an
-                // interrupted entry is not one of the 3 uninterrupted identical entries. Reset like every
-                // other exception path (the store's Argon2id is uninterruptible, so this runs after it).
-                unlockRouter.resetCandidate()
-                throw c
-            } catch (e: VaultImageException.LegacyImage) {
-                unlockRouter.resetCandidate()
-                return@withContext PassphraseOutcome.LegacyImage
-            } catch (e: VaultImageException.CorruptImage) {
-                unlockRouter.resetCandidate()
-                return@withContext PassphraseOutcome.ImageUnreadable
-            } catch (e: VaultImageException.MissingImage) {
-                unlockRouter.resetCandidate()
-                return@withContext PassphraseOutcome.ImageUnreadable
-            } catch (e: VaultImageException.NotDurable) {
-                // Create wrote but durability unconfirmed; the new vault IS in canonical, so a later single
-                // entry unlocks it via the match path. Spend the ritual, bump backoff, surface a retry.
-                unlockRouter.resetCandidate()
-                unlockRouter.recordFailure()
-                return@withContext PassphraseOutcome.Retry
-            } catch (t: Throwable) {
-                // Any other throw (a self-verify IllegalState, a transient IO) → generic; never leak it.
-                unlockRouter.resetCandidate()
-                unlockRouter.recordFailure()
-                return@withContext PassphraseOutcome.Rejected
-            }
-            when (result) {
-                is UnlockOrAdd.Unlocked -> {
-                    unlockRouter.resetCandidate()
-                    if (publishSession(result.open)) {
-                        unlockRouter.recordSuccess(); PassphraseOutcome.Unlocked
-                    } else {
-                        unlockRouter.recordFailure(); PassphraseOutcome.Rejected
+    suspend fun attemptPassphrase(passphrase: String): PassphraseOutcome {
+        // The triple-entry candidate is advanced inside decideCreate (a side effect that persists even
+        // when the attempt is later cancelled). ANY cancellation of this attempt must undo that advance —
+        // an interrupted entry is never one of the 3 uninterrupted identical entries. The reset lives in
+        // the OUTER catch, around the whole withContext, because withContext's prompt-cancellation
+        // guarantee can DISCARD the block's already-computed Rejected result and throw CancellationException
+        // at the boundary — after the `when` kept the streak — where no catch INSIDE the block (having
+        // already returned) can ever see it. The inner catch only covers a CE thrown DURING the store call.
+        return try {
+            withContext(Dispatchers.Default) {
+                val create = unlockRouter.decideCreate(passphrase)
+                val genesis = VaultStateCodec.encode(VaultState.empty())
+                try {
+                    val result = try {
+                        imageStore.attemptUnlockOrAdd(passphrase, genesis, create)
+                    } catch (c: CancellationException) {
+                        // Re-throw untouched so (a) the Throwable catch below can't swallow it into Rejected
+                        // and (b) the OUTER catch performs the single candidate reset for every CE path.
+                        throw c
+                    } catch (e: VaultImageException.LegacyImage) {
+                        unlockRouter.resetCandidate()
+                        return@withContext PassphraseOutcome.LegacyImage
+                    } catch (e: VaultImageException.CorruptImage) {
+                        unlockRouter.resetCandidate()
+                        return@withContext PassphraseOutcome.ImageUnreadable
+                    } catch (e: VaultImageException.MissingImage) {
+                        unlockRouter.resetCandidate()
+                        return@withContext PassphraseOutcome.ImageUnreadable
+                    } catch (e: VaultImageException.NotDurable) {
+                        // Create wrote but durability unconfirmed; the new vault IS in canonical, so a later
+                        // single entry unlocks it via the match path. Spend the ritual, bump backoff, retry.
+                        unlockRouter.resetCandidate()
+                        unlockRouter.recordFailure()
+                        return@withContext PassphraseOutcome.Retry
+                    } catch (t: Throwable) {
+                        // Any other throw (a self-verify IllegalState, a transient IO) → generic; never leak it.
+                        unlockRouter.resetCandidate()
+                        unlockRouter.recordFailure()
+                        return@withContext PassphraseOutcome.Rejected
                     }
-                }
-                is UnlockOrAdd.Created -> {
-                    unlockRouter.resetCandidate()
-                    if (publishSession(result.open)) {
-                        unlockRouter.recordSuccess(); PassphraseOutcome.Created
-                    } else {
-                        unlockRouter.recordFailure(); PassphraseOutcome.Rejected
+                    when (result) {
+                        is UnlockOrAdd.Unlocked -> {
+                            unlockRouter.resetCandidate()
+                            if (publishSession(result.open)) {
+                                unlockRouter.recordSuccess(); PassphraseOutcome.Unlocked
+                            } else {
+                                unlockRouter.recordFailure(); PassphraseOutcome.Rejected
+                            }
+                        }
+                        is UnlockOrAdd.Created -> {
+                            unlockRouter.resetCandidate()
+                            if (publishSession(result.open)) {
+                                unlockRouter.recordSuccess(); PassphraseOutcome.Created
+                            } else {
+                                unlockRouter.recordFailure(); PassphraseOutcome.Rejected
+                            }
+                        }
+                        UnlockOrAdd.Burn -> {
+                            unlockRouter.resetCandidate()
+                            PassphraseOutcome.Burn
+                        }
+                        UnlockOrAdd.Rejected -> {
+                            // KEEP the streak (do NOT reset) so a genuine ritual can complete; advance backoff.
+                            unlockRouter.recordFailure()
+                            PassphraseOutcome.Rejected
+                        }
                     }
-                }
-                UnlockOrAdd.Burn -> {
-                    unlockRouter.resetCandidate()
-                    PassphraseOutcome.Burn
-                }
-                UnlockOrAdd.Rejected -> {
-                    // KEEP the streak (do NOT reset) so a genuine ritual can complete; advance backoff.
-                    unlockRouter.recordFailure()
-                    PassphraseOutcome.Rejected
+                } finally {
+                    wipe(genesis)
                 }
             }
-        } finally {
-            wipe(genesis)
+        } catch (c: CancellationException) {
+            // Deferred-boundary reset: undoes the decideCreate advance for a cancellation delivered at the
+            // withContext boundary (block already returned; streak kept) OR re-thrown from the inner catch.
+            unlockRouter.resetCandidate()
+            throw c
         }
     }
 
