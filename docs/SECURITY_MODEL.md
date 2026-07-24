@@ -426,11 +426,14 @@ cryptographic evidence that a second vault exists.
   byte-for-byte indistinguishable from a real wrapped key. The integer number of vaults is never
   stored anywhere; a slot that fails to decrypt is indistinguishable from a wrong passphrase.
 - **Timing parity.** `tryPassphrase` derives a key for, and attempts to unwrap, **every** slot with
-  no early exit. The wall-clock time of that KDF-and-unwrap **sweep** is identical whether a passphrase
-  matches slot 0, slot 1, or nothing — a stopwatch cannot distinguish a decoy unlock from a real one,
-  nor tell a match from a miss by the sweep. (See the timing-parity test in `packages/crypto`.) Two
-  residuals sit *outside* the sweep and are disclosed separately: the winning vault's post-decrypt
-  parse (the "one residue" below), and — on Android — a vault **creation** persisting to disk.
+  no early exit. What the timing-parity test in `packages/crypto` pins is the **operation count** — the
+  same number of per-slot Argon2id derivations whether a passphrase matches slot 0, slot 1, or nothing
+  (no early exit on a match). Since Argon2id dominates the KDF-and-unwrap **sweep**, that fixed count
+  makes the sweep's wall-clock effectively constant across match/miss — so a stopwatch does not
+  distinguish a decoy unlock from a real one — but note the guarantee is the fixed derivation count;
+  constant wall-clock is its practical consequence, not a separately-measured claim. Two residuals sit
+  *outside* the sweep and are disclosed separately: the winning vault's post-decrypt parse (the "one
+  residue" below), and — on Android — a vault **creation** persisting to disk.
 - **Independence.** Each vault has its own random vault key and its own server account, identity key,
   and prekey bundle. The server cannot link them. Decrypted vault contents live in memory only and
   are zeroed on background.
@@ -441,9 +444,11 @@ cryptographic evidence that a second vault exists.
   is the vault's keystore padded to the region's full plaintext capacity and **then** encrypted
   (pad-then-encrypt — the length prefix sits inside the AEAD ciphertext, so no plaintext structure
   ever reaches disk); a filler payload is uniform CSPRNG output, indistinguishable from ciphertext.
-  The image size is a compile-time constant regardless of vault count. Deleting a vault overwrites
-  its slot and payload with fresh random bytes — the image never shrinks, moves, or records that a
-  vault was ever there. Because every payload region is the same size, unlocking any vault performs
+  The image size is a compile-time constant regardless of vault count. In the **web/desktop reference**,
+  deleting a single vault overwrites its slot and payload with fresh random bytes — the image never
+  shrinks, moves, or records that a vault was ever there. (**On Android this single-slot destroy is not
+  yet shipped** — see the implementation-status note below; Android deletion is whole-image only, and
+  per-vault destruction is a future phase.) Because every payload region is the same size, unlocking any vault performs
   identical cryptographic work (per-slot Argon2id and a constant-size payload decrypt), preserving
   the timing-parity contract. The one residue: post-decrypt JSON parsing of the winning vault scales
   with its contents — low single-digit milliseconds against seconds of fixed KDF work, and it occurs

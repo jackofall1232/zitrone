@@ -80,9 +80,12 @@ built on it.
   is defined only by which one the user treats as theirs.
 - Every vault derives its unlock key with **identical Argon2id parameters**, and the unlock
   *attempt* runs the same fixed **no-early-exit sweep** — derive and attempt-unwrap **every** slot,
-  regardless of outcome (mirroring `vault.ts`'s `tryPassphrase`). So the sweep's **cryptographic-work
-  budget** (its wall-clock time and per-slot access) is fixed whether the entered passphrase matches
-  slot A, slot B, or nothing: the sweep leaks neither *which* slot matched nor *whether* any did.
+  regardless of outcome (mirroring `vault.ts`'s `tryPassphrase`). The guarantee the tests pin is that
+  the sweep does the **same number of per-slot Argon2id derivations and unwrap attempts** whether the
+  entered passphrase matches slot A, slot B, or nothing — no early exit on a match. Because that KDF
+  cost dominates the unlock, the sweep's wall-clock does not meaningfully vary with the outcome (the
+  practical consequence of the fixed derivation count, not a separately-measured guarantee), so the
+  sweep leaks neither *which* slot matched nor *whether* any did.
   What the sweep does **not** hide — because it is inherent to unlocking, not a second-vault tell — is
   the **success branch**: a match then retains its key and opens its vault, a miss stays denied. That
   visible outcome (opened vs still-denied) reveals nothing about a hidden vault — a wrong guess looks
@@ -113,8 +116,9 @@ The lock screen is **visually and structurally unchanged** — no new screen, bu
   **locally** against the derived key for **every** vault slot (the no-early-exit sweep), not just
   two:
   - matches a live slot's derivation → unlock into that vault (A, B, or a third pool vault);
-  - matches none → access denied, with **identical unlock-attempt behaviour and timing** regardless
-    of which vaults exist or which was "closer".
+  - matches none → access denied, with the **same unlock-attempt behaviour and the same fixed
+    no-early-exit work budget** (equal per-slot derivation count) regardless of which vaults exist or
+    which was "closer".
 - The observable *outcome* of course differs between a match (the app opens) and a miss (still
   denied) — that is inherent to any unlock and reveals nothing about a hidden vault. What the design
   guarantees is narrower and is the part that matters: an observer watching or forcing an unlock
