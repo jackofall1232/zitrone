@@ -1070,7 +1070,10 @@ private fun ZitroneRoot(
     // recreation drops only the offer, never key material). Shown after an onboarding create, or
     // after a passphrase unlock that followed a biometric invalidation. Enable dual-wraps the live
     // session's vault key (withVaultKey); skipping proceeds passphrase-only. Short-circuits routing.
-    if (offerBiometricEnroll && session != null) {
+    // SLOT-FREE by construction (VaultUnlockRouter.biometricEnrollOffered takes no slot): the enroll
+    // offer renders identically in an A-session and a B-session — the A-only rule is enforced only on
+    // the write path (enableBiometricFromSession), never here.
+    if (container.unlockRouter.biometricEnrollOffered(offerBiometricEnroll, session != null)) {
         BiometricEnrollOffer(
             onEnable = {
                 startBiometricEnable {

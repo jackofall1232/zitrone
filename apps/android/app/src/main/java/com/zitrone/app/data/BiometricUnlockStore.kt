@@ -60,6 +60,15 @@ class BiometricUnlockStore(private val prefs: SharedPreferences) {
      */
     fun isEnabled(): Boolean = load() != null
 
+    /**
+     * The vault slot the CURRENT wrap is bound to, or null when there is no valid wrap. Reads the
+     * SAME plaintext slot metadata [load]/`unlockWithBiometric` already use (adds no new persisted
+     * field, no biometric auth, no new artifact) — so `AppContainer.enableBiometricFromSession` can
+     * enforce the single-wrap, never-repointed invariant (OQ4) at the WRITE layer: enable is allowed
+     * only when this is null (first-enable-wins, OQ-A) or equals the enabling session's slot.
+     */
+    fun boundSlotIndex(): Int? = load()?.slotIndex
+
     /** Persist a fresh wrap (enable / re-enable). Constant-size; never logged. */
     fun save(wrap: BiometricWrappedKey) {
         prefs.edit()

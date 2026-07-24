@@ -96,4 +96,29 @@ class BiometricUnlockStoreTest {
         assertFalse("disable must revoke the persisted wrap", s.isEnabled())
         assertNull(s.load())
     }
+
+    @Test
+    fun `boundSlotIndex reports the bound slot, null when absent or malformed`() {
+        // The read that the A-bound single-wrap enable guard (OQ4) uses: it must return the slot a
+        // VALID wrap names, and null in every not-enabled case (no wrap, out-of-range/burn slot,
+        // malformed blob) — so the guard treats a corrupt wrap as "no binding" (first-enable-wins),
+        // never as a binding to a bogus slot.
+        val prefs = FakeSharedPreferences()
+        val s = BiometricUnlockStore(prefs)
+        assertNull("no wrap → no binding", s.boundSlotIndex())
+
+        s.save(wrap(2))
+        assertEquals(2, s.boundSlotIndex())
+
+        // Tracks load(): a tampered out-of-range/burn slot or malformed blob reads as no binding.
+        prefs.edit().putInt("biometric_vault_slot", 0).apply()
+        assertNull("burn slot 0 is not a valid binding", s.boundSlotIndex())
+        prefs.edit().putInt("biometric_vault_slot", 2).apply()
+        prefs.edit().putString("biometric_vault_blob", "!!! not base64 !!!").apply()
+        assertNull("malformed blob is not a valid binding", s.boundSlotIndex())
+
+        s.save(wrap(3))
+        s.clear()
+        assertNull("cleared wrap → no binding", s.boundSlotIndex())
+    }
 }
