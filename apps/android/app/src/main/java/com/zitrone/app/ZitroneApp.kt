@@ -603,17 +603,15 @@ class AppContainer(private val app: Application) {
     }
 
     /**
-     * Reap stale biometric Keystore aliases at a QUIESCENT point (called once at cold-start container
-     * init, before any enable UI): delete every per-enable alias except the one the current wrap
-     * references. Bounds accumulation from superseded/abandoned enables; best-effort (leftover aliases
-     * are harmless — unlock uses the wrap's own alias). Never runs concurrently with an in-flight
-     * enable, so it can never delete the live wrap's alias (INV-1).
+     * Reap stale biometric Keystore aliases (called once at cold-start container init, off-main):
+     * delete every per-enable alias except the one the current wrap references. Bounds accumulation
+     * from superseded/abandoned enables; best-effort (leftover aliases are harmless — unlock uses the
+     * wrap's own alias). SAFE to run concurrently with an in-flight enable: under [biometricWriteLock]
+     * it reads the live wrap's alias and deletes the others atomically, so a concurrent enable either
+     * has its just-saved wrap's alias kept (it is `keep`) or aborts at its own `keyExists` re-check
+     * under the same lock — it can never delete the alias the current wrap references (INV-1).
      */
     fun reapStaleBiometricAliases() {
-        // Under the lock, read the live wrap's alias and delete every other biometric alias atomically —
-        // so a concurrent enable can neither have its just-saved wrap's alias reaped (it is `keep`) nor
-        // save between the read and the deletes (the enable-commit takes the same lock and re-checks
-        // keyExists). GC never deletes the alias the current wrap references (INV-1).
         synchronized(biometricWriteLock) {
             biometricCipher.deleteAllAliasesExcept(biometricStore.boundAliasId())
         }
