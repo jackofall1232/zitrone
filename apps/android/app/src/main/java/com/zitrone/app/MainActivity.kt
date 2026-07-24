@@ -110,18 +110,6 @@ class MainActivity : FragmentActivity() {
         }
 
     /**
-     * Single-flight for the biometric ENABLE action. Enable mutates the SHARED Keystore alias
-     * (`newEncryptCipher` deletes+regenerates it) and the single persisted wrap, so two overlapping
-     * attempts (a double-tap on the offer, or the offer racing the Settings toggle) could race the
-     * alias and orphan or destroy a wrap (round-3, both reviewers). This claims exclusivity for the
-     * whole enable — keygen → prompt → seal → save. Activity-scoped (an instance field): a recreation
-     * (rotation) makes a fresh instance with a fresh flag, and the cancelled coroutine cannot strand it
-     * — unlike a process-scoped flag, which a mid-prompt cancellation with no callback could leave set.
-     * Slot-agnostic → no A/B tell.
-     */
-    private val biometricEnabling = java.util.concurrent.atomic.AtomicBoolean(false)
-
-    /**
      * The lemon-drop veil's state (see [LemonDropVeil]); null means hidden. The
      * veil raises immediately as advocacy/[LemonDropScanOutcome.UNKNOWN] and
      * refines to the probe's honest outcome when (and only if) it lands while
@@ -483,22 +471,17 @@ class MainActivity : FragmentActivity() {
      */
     private fun startBiometricEnableFromSession(onResult: (Boolean) -> Unit) {
         val container = (application as ZitroneApp).container
-        // SINGLE-FLIGHT the whole enable (keygen → prompt → seal → save): overlapping attempts would
-        // race the shared Keystore alias and orphan/destroy a wrap (round-3). A concurrent attempt is
-        // refused here, slot-agnostically. Released on EVERY terminal path via [release] below.
-        if (!biometricEnabling.compareAndSet(false, true)) return onResult(false)
-        val release: (Boolean) -> Unit = { ok -> biometricEnabling.set(false); onResult(ok) }
         // Enable is valid ONLY when NO wrap exists yet. This gate is GLOBAL (isEnabled() is the same in
         // an A- and a B-session), so it is NOT a slot oracle — and it refuses BEFORE newEncryptCipher()
-        // below deletes the existing auth-gated Keystore key. That single condition closes round-2:
-        // (HIGH) no cross-slot refuse can differ in timing from an allowed enable, because enable while a
-        // wrap exists is refused identically regardless of slot; (MEDIUM) newEncryptCipher runs only when
-        // no valid wrap exists, so there is never a working key to destroy; (F1) the refuse is
-        // side-effect-free. A stale/desynced UI that reaches here self-resyncs via the result callback
-        // (which re-reads isEnabled()). enableBiometricFromSession keeps the per-slot never-repoint belt
-        // guard for the mid-flight case. Also covers session == null (isEnabled can't be true without a
-        // prior enable, and the belt guard refuses a null/changed session at seal).
-        if (container.biometricStore.isEnabled()) return release(false)
+        // below deletes the existing auth-gated Keystore key. That single condition closes all of
+        // round-2: (HIGH) no cross-slot refuse can differ in timing from an allowed enable, because
+        // enable while a wrap exists is refused identically regardless of slot; (MEDIUM) newEncryptCipher
+        // runs only when no valid wrap exists, so there is never a working key to destroy; (F1) the
+        // refuse is side-effect-free. A stale/desynced UI that reaches here self-resyncs via the result
+        // callback (which re-reads isEnabled()). enableBiometricFromSession keeps the per-slot
+        // never-repoint belt guard for the mid-flight case. Also covers session == null (isEnabled can't
+        // be true without a prior enable, and the belt guard refuses a null/changed session at seal).
+        if (container.biometricStore.isEnabled()) return onResult(false)
         // Keystore keygen off the main thread (round 11, Codex): newEncryptCipher deletes the
         // prior alias and generates a hardware-backed key — a slow TEE/StrongBox can take long
         // enough on these binder calls to jank or ANR. Only the prompt launch returns to main.
@@ -506,10 +489,10 @@ class MainActivity : FragmentActivity() {
             val cipher = try {
                 withContext(Dispatchers.IO) { container.biometricCipher.newEncryptCipher() }
             } catch (e: Exception) {
-                release(false)
+                onResult(false)
                 return@launch
             }
-            startBiometricEnablePrompt(container, cipher, release)
+            startBiometricEnablePrompt(container, cipher, onResult)
         }
     }
 
