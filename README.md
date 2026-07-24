@@ -64,10 +64,16 @@ Full details in [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md).
 
 Five layered defenses, each built as if the one beneath it has already failed:
 
-- 🤷‍♂️ **Plausible deniability** — two separate vaults behind two passphrases, with no cryptographic
-  evidence the second exists and identical unlock timing for both (a **per-device** feature, safe
-  because there is no cross-device account access; crypto primitive built, Android runtime is a
-  locked design landing as its own track — see [docs/VAULT_ARCHITECTURE.md](docs/VAULT_ARCHITECTURE.md))
+- 🤷‍♂️ **Plausible deniability** — the *design* is two separate vaults behind two passphrases, with
+  no cryptographic evidence the second exists and identical unlock timing for both (a **per-device**
+  feature, safe because there is no cross-device account access). Status: the crypto primitive is
+  built (web/desktop + Android), and on **Android the everyday (single) vault runtime ships as of
+  0.9.1-beta** (the app runs over the vault, with dual-wrap unlock, the PIN/passphrase unlock
+  router, and the no-remanence delete state machine). **Creating a second (decoy) vault is not
+  available yet** — that is planned work (second-slot creation + setup wizard), so plausible
+  deniability is **not yet a usable guarantee on Android**. See
+  [docs/VAULT_ARCHITECTURE.md](docs/VAULT_ARCHITECTURE.md) and
+  [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md)
 - 🕵‍♂️💼 **Dead-drop mode** — anonymous, account-free message deposit; no metadata links the two parties
 - 🌫️ **Decoy traffic** — continuous cover traffic makes a real send indistinguishable from idle
 - 🧅 **Multi-hop relay** — 3-hop onion routing; no single relay knows both ends

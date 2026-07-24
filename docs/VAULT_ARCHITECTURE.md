@@ -16,15 +16,19 @@ disagrees with this document, that is a bug (same convention as `SECURITY_MODEL.
 | Layer | State |
 | --- | --- |
 | Crypto primitive (key-slot vaults, timing parity) — web/desktop | **Built** — `packages/crypto/src/vault.ts`, unit-tested incl. timing-parity |
-| Crypto primitive — **Android** (Argon2id + no-early-exit `tryPassphrase` + fixed-size blind payload/image) | **Built** as of 0.9.1 P1a — `apps/android/.../crypto/vault/` (`VaultSodiumOps`, `VaultSlots`, `VaultPayload`, `VaultImage`), byte-mirrored from the web reference, unit-tested (no-early-exit, wipe discipline, NIST AES-GCM KAT). **Isolated — not yet wired into unlock/storage.** |
+| Crypto primitive — **Android** (Argon2id + no-early-exit `tryPassphrase` + fixed-size blind payload/image) | **Built + wired** — `apps/android/.../crypto/vault/` (`VaultSodiumOps`, `VaultSlots`, `VaultPayload`, `VaultImage`), byte-mirrored from the web reference, unit-tested (no-early-exit, wipe discipline, NIST AES-GCM KAT). As of **0.9.1-beta** it backs the live storage — no longer isolated. |
 | Notification-parity structure (single-id, content-free, extra-free intent, teardown hook) | **Built** on Android as of the notification re-fire work (0.9.0-beta) — see §7 |
-| Android vault RUNTIME (dual-wrap unlock, PIN router, per-slot stores/coordinator, migration, teardown-on-switch) | **NOT built yet.** The 0.9.1 P1b/P2/P3 phases wire the P1a primitive into the app. This document is the spec for that work. |
+| Android vault RUNTIME — **everyday (single) vault**: session-over-vault unlock (biometric + PIN/passphrase fallback via `VaultUnlockRouter`), per-slot stores/coordinator, flush-before-ack durability, atomic contact delete, two-marker no-remanence account delete, idle auto-lock (`VaultLockManager`) | **Built as of 0.9.1-beta** (the P1b-2 / PR-D arc). The app runs over the vault image; onboarding sets a passphrase and the ordinary lock screen opens it. |
+| Android vault RUNTIME — **second (decoy) vault**: user path to CREATE a second slot, setup wizard, teardown-on-switch, destruction | **NOT built yet.** The unlock router is slot-agnostic and *would* open a second vault if one existed, but 0.9.1 ships **no way to create one** — so plausible deniability is not yet a usable guarantee on Android. This is P2 (second slot + teardown-on-switch) and P3 (setup wizard + destruction). |
+| Migration from a pre-vault Android install into the vault format | **Dropped — not built.** 0.9.1 is a **fresh-install-only** cut; there is no in-place migration and no commitment to storage-format stability yet (wipe-on-breaking-change is disclosed in the release notes). |
 | Decoy traffic (§8) | Deferred to a later release (0.10.0-beta) — specced adjacent, not built |
 
-> **Documentation-accuracy note.** `SECURITY_MODEL.md` and `README.md` currently describe
-> Android plausible deniability in present/near-tense ("being built for the current Android
-> release"). As of this document's date the Android runtime is **not** built. Those claims
-> should be reconciled to "design locked; implementation in progress" — see §9.
+> **Documentation-accuracy note (updated 0.9.1-beta).** The Android **everyday-vault** runtime
+> is now built and live (see the table above). The part that delivers deniability — a **second
+> (decoy) vault** — is **not** creatable yet, so any statement that Android has "two vaults" or
+> real duress resistance today is still an overclaim. `SECURITY_MODEL.md` and `README.md` are
+> reconciled to this per-platform status (Android: one vault reachable, second not yet
+> creatable) — see §9.
 
 ---
 
