@@ -334,6 +334,21 @@ class AttemptUnlockOrAddTest {
         assertArrayEquals("a failed payload self-verify persists nothing", before, bin(dir).readBytes())
     }
 
+    @Test
+    fun create_selfVerifiesThePayload_throwsOnNonAuthenticatingBox_persistsNothing() {
+        // The OTHER arm of the payload self-verify (the "did not open" path): a payload box that does not
+        // AUTHENTICATE (openPayload returns null) must also fail closed with a throw before any persist.
+        val dir = tmp.newFolder()
+        store(dir).also { it.create("passA", "A".toByteArray(Charsets.UTF_8)); it.close() }
+        val s = store(dir, ops = CorruptPayloadBoxOps(realOps))
+        s.open()
+        val before = bin(dir).readBytes()
+        assertThrows(IllegalStateException::class.java) {
+            s.attemptUnlockOrAdd("passB", genesis, create = true)
+        }
+        assertArrayEquals("a non-authenticating payload box persists nothing", before, bin(dir).readBytes())
+    }
+
     // ─────────────────────────── durability ───────────────────────────
 
     @Test
@@ -540,6 +555,22 @@ class AttemptUnlockOrAddTest {
             val p = plaintext.copyOf() // don't mutate the caller's buffer
             p[4] = (p[4].toInt() xor 0x01).toByte() // flip content[0] (index 4 = just past the length prefix)
             return inner.aeadEncrypt(key, p, associatedData)
+        }
+    }
+
+    /**
+     * Corrupts the CIPHERTEXT (tag byte) of the payload layer (`PAYLOAD_AD`) so the box no longer
+     * authenticates: `openPayload` returns null. Exercises the "did not open" arm of the G3 payload verify.
+     */
+    private class CorruptPayloadBoxOps(private val inner: VaultSodiumOps) : VaultSodiumOps {
+        override fun argon2idDeriveKey(password: ByteArray, salt: ByteArray) = inner.argon2idDeriveKey(password, salt)
+        override fun randomBytes(length: Int) = inner.randomBytes(length)
+        override fun aeadDecrypt(key: ByteArray, box: ByteArray, associatedData: ByteArray) =
+            inner.aeadDecrypt(key, box, associatedData)
+        override fun aeadEncrypt(key: ByteArray, plaintext: ByteArray, associatedData: ByteArray): ByteArray {
+            val out = inner.aeadEncrypt(key, plaintext, associatedData)
+            if (associatedData.contentEquals(PAYLOAD_AD)) out[out.size - 1] = (out[out.size - 1].toInt() xor 0x01).toByte()
+            return out
         }
     }
 }

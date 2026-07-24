@@ -609,8 +609,10 @@ class VaultImageStore internal constructor(
      *     vault-B material on create, pure timing filler otherwise. Total: 5 Argon2id + 6 wrapped-key GCM;
      *   - EXACTLY ONE 256 KiB payload GCM on EVERY outcome (open on a match, seal on create/reject). A
      *     SUCCESSFUL create additionally does a SECOND payload GCM (a self-verify open, see DELETE MARKERS /
-     *     the create branch) — a create-only residual, alongside the outer GCM + write, not a per-outcome
-     *     distinguisher (the marker-present create fails closed to the single-payload-GCM reject budget).
+     *     the create branch). That extra op IS observable post-outcome, but only as part of the already-
+     *     accepted create-persist residual (the outer GCM + atomic write already reveal that "a create
+     *     happened"); it is NOT a KDF-level distinguisher, and a marker-present create fails closed to the
+     *     single-payload-GCM reject budget, so it never distinguishes a REFUSED create from a wrong password.
      *
      * A SLOT MATCH (0..SLOT_COUNT-1) ALWAYS wins over [create]. A match on slot 0
      * ([BURN_SLOT_INDEX]) returns [UnlockOrAdd.Burn] (the app wipes; this method writes nothing
