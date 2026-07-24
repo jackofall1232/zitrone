@@ -551,10 +551,25 @@ class AppContainer(private val app: Application) {
     fun enableBiometricFromSession(
         encryptCipher: javax.crypto.Cipher,
         session: SessionContainer,
-    ): Boolean = session.withVaultKey { key ->
-        val blob = biometricCipher.sealVaultKey(encryptCipher, key)
-        biometricStore.save(com.zitrone.app.crypto.vault.BiometricWrappedKey(session.slotIndex, blob))
-        true
+    ): Boolean {
+        // A-BOUND SINGLE WRAP (OQ4, "one wrap, never repointed"): there is exactly one biometric wrap
+        // and it must NEVER be repointed to a different slot. Allow the write ONLY when no wrap exists
+        // (first-enable-wins, OQ-A(i) — binds this slot) OR the existing wrap already names THIS
+        // session's slot (a same-vault re-enable/refresh). A session on any OTHER slot is refused
+        // FAIL-CLOSED: return false, seal nothing, write nothing, no repoint. The PRIMARY gate is the
+        // slot-agnostic isEnabled() check at the enable entrypoint (which also runs before the
+        // destructive newEncryptCipher, so a disallowed enable is side-effect-free); this per-slot check
+        // is the mid-flight BELT — it catches a session that changed between that entrypoint gate and
+        // this seal. The A-only restriction is therefore purely a write-path property; every enroll UI
+        // surface stays slot-agnostic so an A-session and a B-session render identically.
+        if (!unlockRouter.biometricEnableAllowed(biometricStore.boundSlotIndex(), session.slotIndex)) {
+            return false
+        }
+        return session.withVaultKey { key ->
+            val blob = biometricCipher.sealVaultKey(encryptCipher, key)
+            biometricStore.save(com.zitrone.app.crypto.vault.BiometricWrappedKey(session.slotIndex, blob))
+            true
+        }
     }
 
     /** Disable biometric unlock: delete the persisted wrap AND the auth-gated Keystore key. */

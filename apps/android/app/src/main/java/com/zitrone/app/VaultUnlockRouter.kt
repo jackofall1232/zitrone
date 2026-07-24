@@ -142,6 +142,36 @@ class VaultUnlockRouter {
     fun biometricOffered(enabled: Boolean, canAuthenticateStrong: Boolean): Boolean =
         enabled && canAuthenticateStrong
 
+    /**
+     * Whether to render the biometric ENROLL offer over a live session. Deliberately SLOT-FREE: every
+     * input is global/transient — [offerPending], [sessionPresent], and [alreadyEnabled] (the GLOBAL
+     * `biometricStore.isEnabled()`, identical in an A- and a B-session) — and NONE is a vault slot, so
+     * the enroll surface renders IDENTICALLY in every vault session. The A-only restriction on biometric
+     * (OQ4) lives ONLY on the write path (`AppContainer.enableBiometricFromSession` refuses to repoint
+     * the single wrap), never in what the UI shows, so the enroll affordance can never be a real-vs-decoy
+     * distinguisher. [alreadyEnabled] makes the "enable only when no wrap exists" gate STRUCTURAL (round-2
+     * F2): with a wrap present the offer is hidden — in BOTH sessions — so a cross-slot enable can never
+     * be tapped, which is what removes the enable-action timing tell and the destructive re-enable
+     * (round-2 HIGH/MEDIUM). Keeping this slot-parameterless makes the render-identity invariant
+     * structural: a slot term would change the signature and break its test.
+     */
+    fun biometricEnrollOffered(
+        offerPending: Boolean,
+        sessionPresent: Boolean,
+        alreadyEnabled: Boolean,
+    ): Boolean = offerPending && sessionPresent && !alreadyEnabled
+
+    /**
+     * Whether a session on [sessionSlot] may WRITE the single biometric wrap, given the slot the
+     * current wrap is bound to ([boundSlot], null when none). The A-bound single-wrap rule (OQ4):
+     * allow ONLY when there is no wrap yet (first-enable-wins, OQ-A(i) — this slot becomes the
+     * binding) OR the existing wrap already names this slot (same-vault re-enable). A different slot
+     * is refused — the one wrap is never REPOINTED. Pure + slot-explicit so the enable guard is
+     * host-testable; the real writer (`AppContainer.enableBiometricFromSession`) fail-closes on false.
+     */
+    fun biometricEnableAllowed(boundSlot: Int?, sessionSlot: Int): Boolean =
+        boundSlot == null || boundSlot == sessionSlot
+
     companion object {
         /** Uniform, generic failure — never names a slot, a count, or which factor failed. */
         const val UNIFORM_FAILURE = "Couldn't unlock. Check your passphrase and try again."

@@ -471,7 +471,17 @@ class MainActivity : FragmentActivity() {
      */
     private fun startBiometricEnableFromSession(onResult: (Boolean) -> Unit) {
         val container = (application as ZitroneApp).container
-        if (container.session.value == null) return onResult(false)
+        // Enable is valid ONLY when NO wrap exists yet. This gate is GLOBAL (isEnabled() is the same in
+        // an A- and a B-session), so it is NOT a slot oracle — and it refuses BEFORE newEncryptCipher()
+        // below deletes the existing auth-gated Keystore key. That single condition closes all of
+        // round-2: (HIGH) no cross-slot refuse can differ in timing from an allowed enable, because
+        // enable while a wrap exists is refused identically regardless of slot; (MEDIUM) newEncryptCipher
+        // runs only when no valid wrap exists, so there is never a working key to destroy; (F1) the
+        // refuse is side-effect-free. A stale/desynced UI that reaches here self-resyncs via the result
+        // callback (which re-reads isEnabled()). enableBiometricFromSession keeps the per-slot
+        // never-repoint belt guard for the mid-flight case. Also covers session == null (isEnabled can't
+        // be true without a prior enable, and the belt guard refuses a null/changed session at seal).
+        if (container.biometricStore.isEnabled()) return onResult(false)
         // Keystore keygen off the main thread (round 11, Codex): newEncryptCipher deletes the
         // prior alias and generates a hardware-backed key — a slow TEE/StrongBox can take long
         // enough on these binder calls to jank or ANR. Only the prompt launch returns to main.
@@ -1070,7 +1080,15 @@ private fun ZitroneRoot(
     // recreation drops only the offer, never key material). Shown after an onboarding create, or
     // after a passphrase unlock that followed a biometric invalidation. Enable dual-wraps the live
     // session's vault key (withVaultKey); skipping proceeds passphrase-only. Short-circuits routing.
-    if (offerBiometricEnroll && session != null) {
+    // SLOT-FREE by construction (VaultUnlockRouter.biometricEnrollOffered takes no slot): the enroll
+    // offer renders identically in an A-session and a B-session — the A-only rule is enforced only on
+    // the write path (enableBiometricFromSession), never here. The live global isEnabled() gate hides
+    // the offer whenever a wrap already exists (in BOTH sessions), so a cross-slot enable is never
+    // tappable — closing the enable-action timing tell and the destructive re-enable (round-2).
+    if (container.unlockRouter.biometricEnrollOffered(
+            offerBiometricEnroll, session != null, container.biometricStore.isEnabled(),
+        )
+    ) {
         BiometricEnrollOffer(
             onEnable = {
                 startBiometricEnable {

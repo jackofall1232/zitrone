@@ -114,4 +114,39 @@ class VaultUnlockRouterTest {
         assertTrue(router.decideCreate("p")) // 3 → create
         assertTrue("4th identical still requests create", router.decideCreate("p"))
     }
+
+    // ── OQ4 biometric A-only guard (PR-3 Unit 1) ────────────────────────────────────────────────
+
+    @Test
+    fun `biometricEnableAllowed binds when no wrap, allows the same slot, refuses a different slot`() {
+        val router = VaultUnlockRouter()
+        // First-enable-wins (OQ-A(i)): no wrap yet → any slot may bind.
+        assertTrue("no wrap → first-enable binds", router.biometricEnableAllowed(null, 1))
+        assertTrue(router.biometricEnableAllowed(null, 3))
+        // Same-vault re-enable: allowed.
+        assertTrue("wrap bound to this slot → re-enable ok", router.biometricEnableAllowed(2, 2))
+        // The single wrap is NEVER repointed: a session on a different slot is refused.
+        assertFalse("wrap bound to slot 1, session on slot 2 → refuse", router.biometricEnableAllowed(1, 2))
+        assertFalse(router.biometricEnableAllowed(3, 1))
+    }
+
+    @Test
+    fun `enroll-offer visibility is a pure function of global state and takes no vault slot (A and B render identically)`() {
+        // The A-only restriction lives ONLY on the write path (biometricEnableAllowed); the enroll
+        // SURFACE must be slot-agnostic so an A-session and a B-session render identically. This
+        // predicate structurally cannot vary by slot — it has no slot parameter, only the three GLOBAL
+        // inputs. The full truth table IS the render-identity proof: an A- and a B-session (differing
+        // solely in slot) cannot produce different visibility for the same global state, and any future
+        // slot term would have to change this signature and break the call site.
+        val router = VaultUnlockRouter()
+        // Shown ONLY when an offer is pending, a session is live, AND no wrap already exists.
+        assertTrue(router.biometricEnrollOffered(offerPending = true, sessionPresent = true, alreadyEnabled = false))
+        assertFalse(router.biometricEnrollOffered(offerPending = false, sessionPresent = true, alreadyEnabled = false))
+        assertFalse(router.biometricEnrollOffered(offerPending = true, sessionPresent = false, alreadyEnabled = false))
+        // STRUCTURAL "enable only when no wrap exists" gate (round-2): a present wrap hides the offer —
+        // in BOTH sessions — so a cross-slot enable is never tappable (no timing tell, no destructive
+        // re-enable). alreadyEnabled is global (isEnabled()), so this stays slot-agnostic.
+        assertFalse("wrap present hides the offer", router.biometricEnrollOffered(offerPending = true, sessionPresent = true, alreadyEnabled = true))
+        assertFalse(router.biometricEnrollOffered(offerPending = false, sessionPresent = false, alreadyEnabled = true))
+    }
 }

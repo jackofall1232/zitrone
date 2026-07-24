@@ -96,4 +96,52 @@ class BiometricUnlockStoreTest {
         assertFalse("disable must revoke the persisted wrap", s.isEnabled())
         assertNull(s.load())
     }
+
+    @Test
+    fun `boundSlotIndex reports the bound slot, null when absent or malformed`() {
+        // The read that the A-bound single-wrap enable guard (OQ4) uses: it must return the slot a
+        // VALID wrap names, and null in every not-enabled case (no wrap, out-of-range/burn slot,
+        // malformed blob) — so the guard treats a corrupt wrap as "no binding" (first-enable-wins),
+        // never as a binding to a bogus slot.
+        val prefs = FakeSharedPreferences()
+        val s = BiometricUnlockStore(prefs)
+        assertNull("no wrap → no binding", s.boundSlotIndex())
+
+        s.save(wrap(2))
+        assertEquals(2, s.boundSlotIndex())
+
+        // Tracks load(): a tampered out-of-range/burn slot or malformed blob reads as no binding.
+        prefs.edit().putInt("biometric_vault_slot", 0).apply()
+        assertNull("burn slot 0 is not a valid binding", s.boundSlotIndex())
+        prefs.edit().putInt("biometric_vault_slot", 2).apply()
+        prefs.edit().putString("biometric_vault_blob", "!!! not base64 !!!").apply()
+        assertNull("malformed blob is not a valid binding", s.boundSlotIndex())
+
+        s.save(wrap(3))
+        s.clear()
+        assertNull("cleared wrap → no binding", s.boundSlotIndex())
+    }
+
+    @Test
+    fun `enable decision composes the real store binding with the never-repoint guard`() {
+        // The end-to-end enable DECISION (as the entrypoint's pre-check and the writer both compute it):
+        // VaultUnlockRouter.biometricEnableAllowed(store.boundSlotIndex(), sessionSlot). Exercises the
+        // two components together against a REAL store, not just the predicate in isolation (round-1 F4).
+        val router = VaultUnlockRouter()
+        val s = store()
+
+        // No wrap → first-enable-wins: allowed for any session slot.
+        assertTrue(router.biometricEnableAllowed(s.boundSlotIndex(), 2))
+        assertTrue(router.biometricEnableAllowed(s.boundSlotIndex(), 1))
+
+        // Wrap bound to slot 1: same-slot re-enable allowed; a DIFFERENT slot is refused (never repoint).
+        s.save(wrap(1))
+        assertTrue("same-slot re-enable", router.biometricEnableAllowed(s.boundSlotIndex(), 1))
+        assertFalse("cross-slot enable refused against the real binding", router.biometricEnableAllowed(s.boundSlotIndex(), 2))
+
+        // Disable → enable in a B (slot-2) session: cleared binding → allowed as a FRESH bind, not a
+        // silent A→B repoint (the wrap was cleared first; boundSlotIndex() is null at the write).
+        s.clear()
+        assertTrue("clear then enable in B is a fresh bind, not a repoint", router.biometricEnableAllowed(s.boundSlotIndex(), 2))
+    }
 }

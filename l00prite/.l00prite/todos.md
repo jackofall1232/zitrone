@@ -11,7 +11,7 @@
 - [x] Added the `security-review-loop.md` prompt to `l00prite/.l00prite/prompts/` + the prompt index
       (PR #52 `b8eb652` / PR #53, merged). It drove PR-2's paired-blind loop to clean convergence.
 
-## Now — 0.9.2-beta SECOND VAULT (slot B) + PUCKER BURN, Android — PR-1 MERGED; PR-2 PUSHED (PR #54, CI running, held for merge); PR-3 NEXT
+## Now — 0.9.2-beta SECOND VAULT (slot B) + PUCKER BURN, Android — PR-1 + PR-2 MERGED; PR-3 Unit 1 (A-only guard) in review round 5; Unit 2 (docs) + enable-atomicity follow-up queued
 Closes the PD gap (0.9.1 shipped ONE vault). Locked: slot-B creation ONLY via the PIN/passphrase router,
 NO discoverable UI. **Full decision record (REVISED 2026-07-24, supersedes the earlier double-entry/25%
 version): `/root/l00prite/zitrone-vault-ledger.md` top block.** Key deltas from the earlier plan:
@@ -24,7 +24,7 @@ credential in reserved slot 0** (replaces rejected "N wrong passwords wipes"); *
 - [x] **PR-1 — ✅ MERGED** (user-approved 2026-07-24). PR #51 → squash `2de2bac` on main; all 8 CI checks
       green; remote branch deleted. **Version UNCHANGED (vc17/0.9.1-beta)** — 0.9.2 stays unbumped until the
       phase completes. Store-layer only; no user-reachable behavior change (create has no caller until PR-2).
-- [ ] **PR-2 — ✅ IMPLEMENTED + REVIEW-CLEAN → PR #54 OPEN, CI running, HELD for user's merge call.**
+- [x] **PR-2 — ✅ MERGED** (squash `374bd44`, PR #54, all CI green). Was: IMPLEMENTED + REVIEW-CLEAN → open →
       Branch `feat/0.9.2-vault-pr2-router` (7 commits `63b0762`..`30a6c33`), PUSHED. Units 1–4: router
       fusion + triple-entry gate + uninterrupted-sequence guard. Paired-blind security-review-loop
       (Codex+Grok) ran to **clean convergence at round 6** (both CLEAN, no Crit/High/Med, adjudicated vs
@@ -70,10 +70,32 @@ credential in reserved slot 0** (replaces rejected "N wrong passwords wipes"); *
       see the live PR-2 entry above (PR #54). Router RAM `candidateHash`/`candidateCount` with the
       uninterrupted-sequence guard implemented as specified; store-side 5-Argon2id + 256KiB-GCM parity
       from PR-1 preserved.
-- [ ] **PR-3 — UI + docs (light).** MainActivity no-match → create branch; biometric A-only guard (OQ4);
-      reconcile VAULT_ARCHITECTURE §3.3/§3.4 + PR_C3 wizard ref → silent-router+triple-entry (OQ5); flip
-      SECURITY_MODEL to "two vaults creatable" + NEW disclosures (full-pool-overwrite certainty, ~33%
-      blind-overwrite, triple-entry gate + systematic-entry limitation, burn permanence).
+- [ ] **FOLLOW-UP (new, from PR-3 Unit 1 round-4 scope decision): make biometric-ENABLE atomic/idempotent.**
+      The enable flow (`newEncryptCipher` deletes+regenerates the SINGLE Keystore alias → BiometricPrompt
+      → seal → save the single prefs wrap) is not concurrency-safe: two overlapping enables (double-tap,
+      offer-vs-Settings, rotation mid-prompt) or an interrupted enable can ORPHAN a wrap. Blast radius is
+      BOUNDED and NON-security (NO repoint, NO destruction of a pre-existing valid binding, NO A/B tell, NO
+      passphrase/vault brick) — so correctly kept OUT of the A-only-guard PR. **Recovery is NOT uniformly
+      automatic (round-5 Codex, adjudicated correct vs source):** the key-ABSENT orphan self-heals (biometric
+      unlock → `cipherForDecrypt` null → UNAVAILABLE → `disableBiometricThen` clears + re-offers), BUT the
+      key-REPLACED orphan — the actual concurrent-enable outcome, where a peer's `newEncryptCipher` put a
+      DIFFERENT key in the shared alias — makes `cipherForDecrypt` succeed and GCM `doFinal` fail (bad tag) →
+      VaultBiometricResult.FAILED, which does NOT clear the wrap. That leaves biometric stuck failing until the
+      user passphrase-unlocks + manually disables. The follow-up should (a) make enable atomic/idempotent so the
+      orphan can't form, and consider (b) treating a persistent decrypt-FAILED wrap as clearable (careful: don't
+      clear on a mere transient auth failure). Fix needs PROCESS-correct serialization or atomic keygen (NOT Activity-scoped — see
+      failures.md: the round-3 Activity-scoped single-flight was reverted). Also fold in the disable-∥-enable
+      race (disable/account-delete not synchronized with enable's seal/save). Own spec + invariant table +
+      paired-blind loop. Pre-existing (predates 0.9.2); not release-blocking.
+- [ ] **PR-3 Unit 2 (docs) — SEPARATE PR, must land AFTER Unit 1 merges.** VAULT_ARCHITECTURE §3.3/§3.4
+      wizard→silent triple-entry; SECURITY_MODEL flip to "two vaults creatable" + disclosures (triple-entry/
+      systematic-entry limit, ~33% blind-overwrite, biometric A-only, burn permanence deferred to burn PR
+      per OQ-C). The SECURITY_MODEL "two vaults creatable" flip must NOT land before Unit 1 (else it claims a
+      capability whose stated biometric-A-only safety property is unenforced). Spec: `/root/l00prite/pr3-spec.md`.
+- [x] ~~**PR-3 — UI + docs (light)** (original single-PR framing).~~ SUPERSEDED/SPLIT: create-wiring
+      (MainActivity no-match→create) already shipped in PR-2; biometric A-only guard (OQ4) = **Unit 1**
+      (in review, above); docs (OQ5) = **Unit 2** (separate, after Unit 1, above). Enable-atomicity =
+      the new follow-up above.
 - [ ] **PUCKER BURN sibling PRs (0.9.2):** (a) burn SETUP UX — settings "Pucker Burn Password Setup"
       above "Delete Account", disappears once set, actively-acked permanence warning (3 points); (b) burn
       WIPE execution. Scope/sequencing TBD. PR-1 only makes the store burn-AWARE, not setup/wipe.
