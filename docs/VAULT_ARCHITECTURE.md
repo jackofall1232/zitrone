@@ -19,7 +19,7 @@ disagrees with this document, that is a bug (same convention as `SECURITY_MODEL.
 | Crypto primitive — **Android** (Argon2id + no-early-exit `tryPassphrase` + fixed-size blind payload/image) | **Built + wired** — `apps/android/.../crypto/vault/` (`VaultSodiumOps`, `VaultSlots`, `VaultPayload`, `VaultImage`), byte-mirrored from the web reference, unit-tested (no-early-exit, wipe discipline, NIST AES-GCM KAT). As of **0.9.1-beta** it backs the live storage — no longer isolated. |
 | Notification-parity structure (single-id, content-free, extra-free intent, teardown hook) | **Built** on Android as of the notification re-fire work (0.9.0-beta) — see §7 |
 | Android vault RUNTIME — **everyday (single) vault**: session-over-vault unlock (biometric + PIN/passphrase fallback via `VaultUnlockRouter`), per-slot stores/coordinator, flush-before-ack durability, atomic contact delete, two-marker no-remanence account delete, idle auto-lock (`VaultLockManager`) | **Built as of 0.9.1-beta** (the P1b-2 / PR-D arc). The app runs over the vault image; onboarding sets a passphrase and the ordinary lock screen opens it. |
-| Android vault RUNTIME — **second (decoy) vault**: user path to CREATE a second slot | **Built as of 0.9.2-beta.** Vault B is created through the PIN/passphrase router itself (no setup wizard) — the **triple-entry** ceremony (§3.3): three consecutive identical entries of a never-before-used passphrase create and open slot B. Blind placement over the vault pool (slots 1..`SLOT_COUNT`-1; slot 0 reserved for the Pucker Burn credential). Biometric stays bound to a single vault and can never be repointed (0.9.2 A-only guard). So plausible deniability is now a usable guarantee on Android, subject to the documented limits (blind-overwrite, triple-entry consequences, biometric A-only) — see `SECURITY_MODEL.md`. |
+| Android vault RUNTIME — **second (decoy) vault**: user path to CREATE a second slot | **Built as of 0.9.2-beta.** A second vault is created through the PIN/passphrase router itself (no setup wizard) — the **triple-entry** ceremony (§3.3): three consecutive identical entries of a never-before-used passphrase create and open it, **blind-placed in a random slot** of the vault pool (slots 1..`SLOT_COUNT`-1; slot 0 reserved for the Pucker Burn credential). Biometric binds to one vault at a time on a **first-enable-wins** basis and its wrap is never repointed while it exists (0.9.2 A-only guard). So plausible deniability is now a usable guarantee on Android, subject to the documented limits (blind-overwrite, triple-entry coercion consequence, create-persistence timing residual, first-enable-wins biometric) — see `SECURITY_MODEL.md`. |
 | Android vault RUNTIME — second-vault **per-vault destruction**, and Pucker Burn **setup + wipe** | **NOT built yet.** Whole-image account delete exists, but there is no primitive to destroy one vault's slot alone (§3.4). The Pucker Burn duress credential's slot (slot 0) is reserved and the store is burn-*aware*, but the burn setup UX and wipe execution are separate future PRs. |
 | Migration from a pre-vault Android install into the vault format | **Dropped — not built.** 0.9.1 is a **fresh-install-only** cut; there is no in-place migration and no commitment to storage-format stability yet (wipe-on-breaking-change is disclosed in the release notes). |
 | Decoy traffic (§8) | Deferred to a later release (0.10.0-beta) — specced adjacent, not built |
@@ -28,8 +28,9 @@ disagrees with this document, that is a bug (same convention as `SECURITY_MODEL.
 > (0.9.1-beta) and now the **second-vault creation path** (0.9.2-beta, the silent triple-entry
 > router of §3.3) are both built and live. Android can therefore create and reveal a second
 > (decoy) vault, so plausible deniability is a **usable** guarantee here — bounded by the
-> limitations documented in `SECURITY_MODEL.md` (blind-overwrite on creation, the triple-entry
-> gate's consequences, biometric bound to a single vault). What is **not** yet built: per-vault
+> limitations documented in `SECURITY_MODEL.md` (single-snapshot only, blind-overwrite on creation,
+> the triple-entry gate's coercion consequence, a create-persistence timing residual, biometric
+> bound to one vault at a time on first-enable-wins). What is **not** yet built: per-vault
 > destruction (whole-image delete only) and the Pucker Burn setup/wipe UX (§3.4). Do not describe
 > those as shipped. `SECURITY_MODEL.md` and `README.md` are reconciled to this status.
 
@@ -87,10 +88,16 @@ built on it.
 
 The lock screen is **visually and structurally unchanged** — no new screen, button, or copy.
 
-- **Biometric (fingerprint/face) → always routes to vault slot A, unconditionally.** Biometrics
-  cannot encode a distinct secret the way a typed passphrase can, so no attempt is made to make
-  biometric unlock ambiguous. This is an intentional, accepted asymmetry: slot A is the only
-  vault reachable by biometric convenience, serving the majority who never touch vault B.
+- **Biometric (fingerprint/face) → routes to the single biometric-bound vault.** Biometrics cannot
+  encode a distinct secret the way a typed passphrase can, so no attempt is made to make biometric
+  unlock ambiguous: there is exactly one biometric wrap at a time and it opens exactly one vault.
+  *Which* vault is **first-enable-wins** (0.9.2, §3.3 / `SECURITY_MODEL.md`) — whichever vault first
+  enables biometric while no wrap exists becomes bound, and the wrap can never be repointed to
+  another slot while it exists (the A-only guard). In practice that vault is the everyday one (the
+  majority enable biometric there and never touch a second vault); "A" names that role, not a fixed
+  slot. Disabling biometric frees the binding for a different vault to claim later. This is the
+  intentional, accepted asymmetry: only one vault is reachable by biometric convenience; the rest
+  are passphrase-only.
 - **"Use PIN" (the existing fallback) → is the vault router.** The entered passphrase is checked
   **locally** against the derived key for *both* slots:
   - matches slot A's derivation → unlock into A;
@@ -111,11 +118,15 @@ The lock screen is **visually and structurally unchanged** — no new screen, bu
   discoverable tell §2 forbids). The entire ceremony (0.9.2-beta, Android) is: at the ordinary
   lock screen, enter the **same never-before-used passphrase three times, consecutively and
   uninterrupted**. The third consecutive identical entry of a passphrase that matches no existing
-  slot creates vault B and unlocks straight into it — indistinguishable, to any observer, from a
-  user who mistyped twice and got in on the third try.
-  - **Uninterrupted** is enforced: backgrounding the app, the lock cycle, or process death resets
-    the streak (`VaultLockManager.onStop` / the RAM-only candidate in `VaultUnlockRouter`), so a
-    stray sequence cannot accumulate across sessions.
+  slot creates vault B (blind-placed in a random pool slot) and unlocks straight into it, following
+  the same lock-screen success path as an ordinary unlock — like a user who mistyped twice and got in
+  on the third try. (Caveat, see `SECURITY_MODEL.md`: a successful create also *persists* to disk, an
+  accepted observable timing residual that a plain unlock does not incur — so it is not claimed to be
+  wall-clock identical to an unlock, only to share the UI path and KDF budget.)
+  - **Uninterrupted** is enforced: backgrounding the app (which includes auto-lock), any session
+    publish, or process death resets the streak (`VaultLockManager.onStop` and the RAM-only candidate
+    in `VaultUnlockRouter`, cleared on publish/cancellation too), so a stray sequence cannot
+    accumulate across sessions.
   - There is **intentionally no confirmation dialog and no warning copy** — a "you are creating a
     hidden vault, its passphrase is unrecoverable" prompt would itself be the tell. The
     non-recoverability is inherent (no reset, no account recovery, no support path) and is

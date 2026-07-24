@@ -406,14 +406,20 @@ the others.
 > three consecutive identical entries of a never-before-used passphrase at the ordinary lock
 > screen create and open it (no setup wizard; see `VAULT_ARCHITECTURE.md` §3.3). **Plausible
 > deniability is therefore a usable guarantee on Android**, subject to the deliberately-accepted
-> limits enumerated below (single-snapshot only; blind overwrite on creation; the triple-entry
-> gate's coercion consequence; fail-closed while a delete is pending; biometric bound to a single
-> vault). **Not yet shipped:** per-vault destruction (whole-image account delete only) and the
+> limits enumerated below — read them before relying on it: single-snapshot only (multi-snapshot
+> diffing still reveals a live slot); blind overwrite on creation (a create can destroy an existing
+> vault); the triple-entry gate's coercion consequence (a chosen wrong passphrase entered three times
+> creates an empty vault); fail-closed while a delete is pending; **a successful create carries an
+> accepted disk-persistence timing residual** (it is not wall-clock identical to an unlock); and
+> biometric binds to **one vault at a time on a first-enable-wins basis** (never repointed while it
+> exists — not a fixed "everyday-vault-only" property). **Not yet shipped:** per-vault destruction (whole-image account delete only) and the
 > Pucker Burn setup/wipe UX — do not rely on those. See the "Implementation status" note at the
 > end of this section and [`docs/VAULT_ARCHITECTURE.md`](VAULT_ARCHITECTURE.md).
 
-Two (expandable to four) completely separate encrypted vaults sit behind two different passphrases.
-There is no cryptographic evidence that a second vault exists.
+Two or more completely separate encrypted vaults sit behind different passphrases — up to **three
+live vaults** in the Android pool (`SLOT_COUNT = 4`: slots 1–3 are the vault pool; **slot 0 is
+reserved for the Pucker Burn duress credential** and is never a vault-creation target). There is no
+cryptographic evidence that a second vault exists.
 
 - **Key slots.** Every disk image holds a fixed `SLOT_COUNT` slots, each a 16-byte salt plus an
   AES-256-GCM-wrapped 32-byte vault key. Unused slots hold uniformly random bytes that are
@@ -451,8 +457,9 @@ Two VeraCrypt-analogous caveats apply, and are accepted deliberately:
   snapshot — the compelled-disclosure scenario the design targets — reveals nothing. This is the
   same bound VeraCrypt hidden volumes accept.
 - **Blind overwrite on vault creation.** Which slots hold live vaults is unknowable from storage —
-  that is the point — so creating a new vault into an existing image picks a **uniformly random**
-  slot from the vault pool and can destroy a vault whose passphrase is not currently entered,
+  that is the point — so creating a new vault into an existing image picks a **pseudorandom**
+  (CSPRNG, approximately uniform — a negligible mod-3 bias) slot from the vault pool and can destroy a
+  vault whose passphrase is not currently entered,
   exactly as writing to a VeraCrypt outer volume without mounting the hidden one can. Concretely on
   Android (0.9.2): the pool is slots `1..SLOT_COUNT-1` (slot 0 is reserved for the Pucker Burn
   credential and is never a target), i.e. **3 slots** at `SLOT_COUNT = 4`. Creation blind-writes one
@@ -469,23 +476,39 @@ Two VeraCrypt-analogous caveats apply, and are accepted deliberately:
   streak resets on every change; but (2) **a chosen repeated wrong passphrase does create** — a
   coercer who forces you to type one specific wrong string three times in a row will create a new
   (empty) vault, blind-overwriting a pool slot per the bullet above. The gate holds no stored
-  attempt count and leaks nothing: a creating third entry is indistinguishable, in behaviour and
-  timing, from an ordinary unlock.
-- **Biometric is bound to a single vault (A-only).** There is exactly **one** biometric wrap on the
-  device, and it can never be repointed to a different slot (0.9.2 A-only guard, enforced on the
-  write path). Biometric unlock therefore always opens the one vault that enabled it (the everyday
-  vault); a second vault is **passphrase-only**. The enrollment UI is slot-agnostic — it renders and
-  behaves identically whichever vault is open — so the restriction is not itself a distinguisher.
+  attempt count. A creating third entry follows the **same lock-screen success path** as an ordinary
+  unlock (both route through the identical success UI) and the **same fixed per-slot Argon2id sweep**,
+  so it is not separable by the unlock-attempt timing parity that hides match-vs-reject. It is **not**
+  claimed to be wall-clock identical to an unlock, though: a successful create additionally *persists*
+  — it seals and writes the new image (payload self-verify, outer-image encryption, atomic write,
+  directory fsync) — an accepted, documented observable timing residual that an ordinary unlock (a
+  read) does not incur.
+- **Biometric binds to exactly one vault (first-enable-wins, never repointed).** There is exactly
+  **one** biometric wrap on the device at a time, and while it exists it can never be repointed to a
+  different slot (0.9.2 A-only guard, enforced on the write path) — so biometric consistently opens
+  the one vault currently bound. *Which* vault that is follows **first-enable-wins**: whichever vault
+  first enables biometric while no wrap exists becomes bound. There is deliberately **no durable
+  "real vs decoy" slot label** — a slot is not intrinsically "the everyday vault," so which vault
+  holds biometric is the user's choice, not a fixed property. Disabling biometric clears the wrap,
+  after which a *different* vault — including a second (decoy) vault — may become bound by being the
+  next to enable. At any moment **only one vault is biometric-openable; the other(s) are
+  passphrase-only.** The enrollment UI is slot-agnostic — it renders and behaves identically
+  whichever vault is open — so the restriction is not itself a distinguisher.
 - **Vault creation silently fails while an account deletion is pending (0.9.2, Android).** Account
   deletion is a durable two-phase state machine (a `delete-intent` marker, then a `delete-confirmed`
   marker). While either marker is present, attempting to create a new vault does nothing and is
-  reported exactly like a wrong passphrase — indistinguishable in behaviour and timing. This is a
-  deliberate fail-closed choice: with a live image on disk, nothing observable can tell a *stale*
-  marker (cleanup that did not finish) from a *live* one (a deletion still owed), so vault creation
-  never acts on that distinction rather than risk cancelling a real account deletion or stranding a
-  server-deleted account's local image. The condition is rare and transient (it clears when the
-  deletion completes or is retired), and it leaks nothing — an observer cannot distinguish it from an
-  ordinary failed unlock.
+  reported exactly like a wrong passphrase: the **same rejection and success-less UI result**, and the
+  **same heavy cryptographic-work budget** (the full per-slot Argon2id sweep, the candidate seal, and
+  the one 256-KiB payload GCM every outcome performs). It is not claimed to be wall-clock identical to
+  the last stat: the pending-delete create path additionally performs two `Files.notExists` marker
+  checks a plain wrong-passphrase attempt does not — filesystem stats that are sub-microsecond against
+  seconds of KDF work, so not a practical timing oracle, but named for precision. This is a deliberate
+  fail-closed choice: with a live image on disk, nothing observable can tell a *stale* marker (cleanup
+  that did not finish) from a *live* one (a deletion still owed), so vault creation never acts on that
+  distinction rather than risk cancelling a real account deletion or stranding a server-deleted
+  account's local image. The condition is rare and transient (it clears when the deletion completes or
+  is retired), and it leaks nothing an observer could use to distinguish it from an ordinary failed
+  unlock.
 
 **Per-device scope, and why Android-only is safe.** Plausible-deniability (decoy)
 vaults are a **per-device** feature. Because each install is an independent

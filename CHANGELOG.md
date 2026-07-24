@@ -18,12 +18,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on the burn-aware fused writer (`attemptUnlockOrAdd`), the silent unlock router
   (`VaultUnlockRouter`), and a biometric **A-only** guard (the single biometric wrap is bound to
   one vault and never repointed). Read the accepted limitations before relying on it
-  (`docs/SECURITY_MODEL.md`): creation **blind-overwrites** a uniformly-random pool slot — ~1/3
+  (`docs/SECURITY_MODEL.md`): creation **blind-overwrites** a pseudorandom pool slot — ~1/3
   chance of destroying a given existing vault per creation, and a certainty once the 3-slot pool
   is full; the triple-entry gate means a coercer who makes you type one chosen wrong passphrase
   three times will create an (empty) vault (while systematic *different* guesses never do);
   creation **fails closed** (silently, like a wrong passphrase) while an account deletion is
-  pending; biometric unlocks only the everyday vault, so a second vault is passphrase-only.
+  pending; a successful create carries an accepted **disk-persistence timing residual** (it shares
+  the unlock UI path and KDF budget but is not wall-clock identical to a read-only unlock); and
+  biometric binds to **one vault at a time on a first-enable-wins basis** (never repointed while it
+  exists), so only whichever vault enabled biometric is biometric-openable and the rest are
+  passphrase-only.
   **Not yet included:** per-vault destruction (only whole-image account delete exists) and the
   Pucker Burn duress credential's setup/wipe (slot 0 is reserved and the store is burn-aware, but
   it is not yet user-settable). No version bump yet — the 0.9.2 phase is still in progress.

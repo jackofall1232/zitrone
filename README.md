@@ -72,8 +72,8 @@ Five layered defenses, each built as if the one beneath it has already failed:
   the tell), just the **triple-entry** ceremony at the ordinary lock screen (enter the same
   never-before-used passphrase three times in a row). Plausible deniability is now a **usable**
   guarantee on Android, within documented limits (creation blind-overwrites a random pool slot;
-  biometric is bound to a single vault; a chosen wrong passphrase entered three times creates an
-  empty vault). Not yet shipped: per-vault destruction (whole-image account delete only) and the
+  biometric binds to one vault at a time, first-enable-wins; a chosen wrong passphrase entered three
+  times creates an empty vault). Not yet shipped: per-vault destruction (whole-image account delete only) and the
   Pucker Burn duress credential's setup/wipe. See
   [docs/VAULT_ARCHITECTURE.md](docs/VAULT_ARCHITECTURE.md) and
   [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md)
