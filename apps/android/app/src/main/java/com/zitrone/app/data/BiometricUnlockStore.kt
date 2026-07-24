@@ -69,7 +69,14 @@ class BiometricUnlockStore(private val prefs: SharedPreferences) {
      */
     fun boundSlotIndex(): Int? = load()?.slotIndex
 
-    /** Persist a fresh wrap (enable / re-enable). Constant-size; never logged. */
+    /**
+     * Persist a fresh wrap (enable / re-enable). Constant-size; never logged. Low-level primitive:
+     * it does NOT itself enforce the A-bound never-repoint invariant (OQ4). That invariant is enforced
+     * by the SOLE production caller, `AppContainer.enableBiometricFromSession`, which fail-closes via
+     * [boundSlotIndex]/`biometricEnableAllowed` before calling here (and the entrypoint pre-checks
+     * before the Keystore key is even touched). Any NEW caller of `save` MUST apply the same guard —
+     * do not repoint the single wrap to a different slot without a prior [clear].
+     */
     fun save(wrap: BiometricWrappedKey) {
         prefs.edit()
             .putInt(KEY_SLOT, wrap.slotIndex)

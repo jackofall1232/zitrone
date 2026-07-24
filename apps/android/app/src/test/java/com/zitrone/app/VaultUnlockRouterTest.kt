@@ -137,16 +137,15 @@ class VaultUnlockRouterTest {
         // predicate structurally cannot vary by slot — it has no slot parameter. Assert the full
         // truth table so any future slot dependence would have to change the signature and break here.
         val router = VaultUnlockRouter()
+        // The full truth table IS the render-identity proof: visibility is a function of ONLY these two
+        // global inputs. The predicate has no slot/session-identity parameter, so an A-session and a
+        // B-session (which differ solely in slot) cannot produce different visibility for the same
+        // global state — slot-independence is structural, and any future slot term would have to change
+        // this signature and break the call site. (round-1 F4: the prior "assert same boolean twice"
+        // addendum was tautological and is removed.)
         assertTrue(router.biometricEnrollOffered(offerPending = true, sessionPresent = true))
         assertFalse(router.biometricEnrollOffered(offerPending = false, sessionPresent = true))
         assertFalse(router.biometricEnrollOffered(offerPending = true, sessionPresent = false))
         assertFalse(router.biometricEnrollOffered(offerPending = false, sessionPresent = false))
-
-        // "Render identically for A and B" is exactly slot-independence: for identical global state,
-        // the visibility is one value regardless of which vault (slot) the live session opened —
-        // there is no slot input through which the two could ever differ.
-        val visibleForAnySession = router.biometricEnrollOffered(offerPending = true, sessionPresent = true)
-        assertTrue("slot-A session shows the offer", visibleForAnySession)
-        assertTrue("slot-B session shows the identical offer", visibleForAnySession)
     }
 }

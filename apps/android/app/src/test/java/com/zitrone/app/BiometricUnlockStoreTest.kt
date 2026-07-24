@@ -121,4 +121,27 @@ class BiometricUnlockStoreTest {
         s.clear()
         assertNull("cleared wrap → no binding", s.boundSlotIndex())
     }
+
+    @Test
+    fun `enable decision composes the real store binding with the never-repoint guard`() {
+        // The end-to-end enable DECISION (as the entrypoint's pre-check and the writer both compute it):
+        // VaultUnlockRouter.biometricEnableAllowed(store.boundSlotIndex(), sessionSlot). Exercises the
+        // two components together against a REAL store, not just the predicate in isolation (round-1 F4).
+        val router = VaultUnlockRouter()
+        val s = store()
+
+        // No wrap → first-enable-wins: allowed for any session slot.
+        assertTrue(router.biometricEnableAllowed(s.boundSlotIndex(), 2))
+        assertTrue(router.biometricEnableAllowed(s.boundSlotIndex(), 1))
+
+        // Wrap bound to slot 1: same-slot re-enable allowed; a DIFFERENT slot is refused (never repoint).
+        s.save(wrap(1))
+        assertTrue("same-slot re-enable", router.biometricEnableAllowed(s.boundSlotIndex(), 1))
+        assertFalse("cross-slot enable refused against the real binding", router.biometricEnableAllowed(s.boundSlotIndex(), 2))
+
+        // Disable → enable in a B (slot-2) session: cleared binding → allowed as a FRESH bind, not a
+        // silent A→B repoint (the wrap was cleared first; boundSlotIndex() is null at the write).
+        s.clear()
+        assertTrue("clear then enable in B is a fresh bind, not a repoint", router.biometricEnableAllowed(s.boundSlotIndex(), 2))
+    }
 }

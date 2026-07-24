@@ -548,6 +548,20 @@ class AppContainer(private val app: Application) {
      * onboarding enable offer (post-publish) and the Settings toggle, so no live [VaultOpen] is ever
      * held across a recomposition.
      */
+    /**
+     * The A-bound single-wrap guard ([VaultUnlockRouter.biometricEnableAllowed]) evaluated for the
+     * CURRENT live session. The enable ENTRYPOINT must call this BEFORE `newEncryptCipher()` — that
+     * call deletes+regenerates the sole auth-gated Keystore key, so gating here keeps a disallowed
+     * (different-slot) enable truly SIDE-EFFECT-FREE: the destructive key-delete never runs and the
+     * existing binding's crypto root survives. Returns false when there is no live session. This is
+     * the write path, not the render path — the enroll AFFORDANCE stays slot-agnostic; only the ACTION
+     * on tap differs. [enableBiometricFromSession] re-checks (belt) in case the session changed since.
+     */
+    fun biometricEnableAllowedNow(): Boolean {
+        val slot = session.value?.slotIndex ?: return false
+        return unlockRouter.biometricEnableAllowed(biometricStore.boundSlotIndex(), slot)
+    }
+
     fun enableBiometricFromSession(
         encryptCipher: javax.crypto.Cipher,
         session: SessionContainer,

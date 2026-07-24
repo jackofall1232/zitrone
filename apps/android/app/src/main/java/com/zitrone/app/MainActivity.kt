@@ -471,7 +471,11 @@ class MainActivity : FragmentActivity() {
      */
     private fun startBiometricEnableFromSession(onResult: (Boolean) -> Unit) {
         val container = (application as ZitroneApp).container
-        if (container.session.value == null) return onResult(false)
+        // A-BOUND SINGLE WRAP (OQ4): refuse a disallowed enable HERE, BEFORE newEncryptCipher() below
+        // deletes the existing auth-gated Keystore key — so a cross-slot (non-A) attempt is truly
+        // side-effect-free and never destroys the current binding's crypto root (round-1 F1). Also
+        // covers session == null. enableBiometricFromSession re-checks as belt-and-suspenders.
+        if (!container.biometricEnableAllowedNow()) return onResult(false)
         // Keystore keygen off the main thread (round 11, Codex): newEncryptCipher deletes the
         // prior alias and generates a hardware-backed key — a slow TEE/StrongBox can take long
         // enough on these binder calls to jank or ANR. Only the prompt launch returns to main.
