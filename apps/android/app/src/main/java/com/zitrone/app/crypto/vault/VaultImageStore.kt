@@ -64,6 +64,23 @@ sealed class VaultImageException(message: String) : Exception(message) {
     class CorruptImage : VaultImageException("vault image is unreadable")
 
     /**
+     * The image is present, the outer layer authenticated, and the inner image is a
+     * VALID but PRIOR format version ([LEGACY_IMAGE_VERSION] = v2, the 0.9.1 format).
+     * This is DISTINCT from [CorruptImage] on purpose and is SAFETY-CRITICAL: a v2 image
+     * could hold the everyday vault at slot 0, which v3's burn-slot reservation would
+     * misread as a burn credential and WIPE on the user's own correct passphrase. So a v2
+     * image is NEVER unlocked, NEVER slot-interpreted, and NEVER auto-destroyed at boot —
+     * [open] throws this before any slot material is used, the caller routes to fresh
+     * onboarding, and the retirement of the old file happens only on the deliberate
+     * onboarding action via [VaultImageStore.retireLegacyImage]. An UNKNOWN (neither
+     * current nor [LEGACY_IMAGE_VERSION]) version stays [CorruptImage] (escalate, never
+     * recreate). 0.9.1 was fresh-install-only with no real users, so the blast radius is
+     * test devices — but "we happened to have no users" is not a safety property, so this
+     * fail-closed distinction ships regardless.
+     */
+    class LegacyImage : VaultImageException("vault image is a prior, retired format")
+
+    /**
      * A payload write's bytes ARE on disk (the atomic rename — the commit point —
      * landed and its content was fsynced), but the directory-entry fsync that would
      * make the rename itself crash-durable did NOT confirm success — either a real
@@ -120,6 +137,29 @@ internal const val OUTER_IMAGE_BYTES: Int = IMAGE_BYTES + NONCE_BYTES + AEAD_TAG
  * `internal` so the storage tests can inject a forced result to drive each branch.
  */
 internal enum class DirSyncResult { DURABLE, NOT_DURABLE }
+
+/**
+ * The four outcomes of [VaultImageStore.attemptUnlockOrAdd] — the fused
+ * unlock / burn-detect / maybe-create passphrase operation (0.9.2). SLOT-AGNOSTIC:
+ * the CALLER learns only which of the four happened, never which slot or how many exist.
+ */
+sealed interface UnlockOrAdd {
+    /** An existing VAULT slot (1..SLOT_COUNT-1) matched — a normal unlock. */
+    data class Unlocked(val open: VaultOpen) : UnlockOrAdd
+
+    /**
+     * Slot 0 ([BURN_SLOT_INDEX]) matched — the Pucker Burn duress credential was entered.
+     * The APP performs the wipe (a sibling feature); the store performs NO wipe here and
+     * exposes nothing about the burn slot's contents or arm-state.
+     */
+    data object Burn : UnlockOrAdd
+
+    /** No slot matched AND create was requested — a new vault was created + persisted durably. */
+    data class Created(val open: VaultOpen) : UnlockOrAdd
+
+    /** No slot matched AND create was not requested — an indistinguishable wrong passphrase. */
+    data object Rejected : UnlockOrAdd
+}
 
 /**
  * The device-level storage layer for the plausible-deniability vault image. Owns
@@ -225,6 +265,17 @@ class VaultImageStore internal constructor(
     fun exists(): Boolean = imageLock.withLock { binFile.exists() }
 
     /**
+     * True iff a present image is the PRIOR [LEGACY_IMAGE_VERSION] (v2) format — the boot-routing
+     * signal to send a 0.9.1 install to fresh onboarding instead of the lock screen (see
+     * [VaultImageException.LegacyImage] / [retireLegacyImage]). A cheap, Argon2id-free peek: it reads
+     * the outer layer and checks the inner version byte only. Returns false for a current-version image,
+     * a missing image, or anything unreadable (a corrupt image is NOT "legacy" — it routes through the
+     * normal unlock → [CorruptImage] escalation, never to a retire). Does NOT alter store state.
+     */
+    fun isLegacyImage(): Boolean =
+        imageLock.withLock { readInnerVersionOrNull() == LEGACY_IMAGE_VERSION }
+
+    /**
      * Read `vault.bin` + `vault.dek`, unwrap the DEK, decrypt the outer layer, and
      * hold the validated inner image as [canonical]. A leftover `.tmp` from an
      * interrupted write is deleted first (the main file is the last durable state).
@@ -317,10 +368,19 @@ class VaultImageStore internal constructor(
                     inner = ops.aeadDecrypt(unwrapped, binBytes, VAULT_IMAGE_OUTER_AD)
                         ?: throw VaultImageException.CorruptImage()
                     if (inner.size != IMAGE_BYTES) throw VaultImageException.CorruptImage()
-                    // Validate the inner VERSION too, not just the size: an unknown version reads
-                    // as CorruptImage for THIS build. A future format bump MUST add its migration
-                    // path here BEFORE [IMAGE_VERSION] changes, or existing images stop opening.
-                    if (inner[0].toInt() and 0xff != IMAGE_VERSION) throw VaultImageException.CorruptImage()
+                    // Validate the inner VERSION too, not just the size. Three cases (order matters):
+                    //  - current [IMAGE_VERSION] → fall through, install as canonical.
+                    //  - [LEGACY_IMAGE_VERSION] (v2, the 0.9.1 format) → [VaultImageException.LegacyImage],
+                    //    thrown HERE before any slot is decoded/interpreted. SAFETY-CRITICAL: a v2 image
+                    //    may hold the everyday vault at slot 0, which v3 would misread as a burn wipe. The
+                    //    caller routes to fresh onboarding; retirement is deliberate ([retireLegacyImage]).
+                    //  - any OTHER version → [CorruptImage] (unknown/tampered; escalate, never recreate).
+                    // A future format bump MUST add its own branch here BEFORE changing [IMAGE_VERSION].
+                    val innerVersion = inner[0].toInt() and 0xff
+                    if (innerVersion != IMAGE_VERSION) {
+                        if (innerVersion == LEGACY_IMAGE_VERSION) throw VaultImageException.LegacyImage()
+                        throw VaultImageException.CorruptImage()
+                    }
                 } catch (t: Throwable) {
                     wipe(unwrapped)
                     throw t
@@ -533,6 +593,152 @@ class VaultImageStore internal constructor(
     }
 
     /**
+     * FUSED unlock / burn-detect / maybe-create — the single passphrase entry point for the
+     * 0.9.2 second-vault router. Under [imageLock] (opening from disk first if needed). ALWAYS
+     * does IDENTICAL heavy crypto regardless of outcome, so a stopwatch cannot tell the four
+     * cases apart (the plausible-deniability + duress-credential timing contract):
+     *
+     *   - [tryPassphrase] over ALL SLOT_COUNT slots (incl. slot 0), no early exit — SLOT_COUNT Argon2id;
+     *   - ONE unconditional candidate-slot seal ([sealSlot]) — 1 more Argon2id + 1 tiny wrapped-key GCM
+     *     (real vault-B material on create, pure timing filler otherwise);
+     *   - EXACTLY ONE 256 KiB payload GCM (open on a match, seal on create/reject).
+     *
+     * A SLOT MATCH (0..SLOT_COUNT-1) ALWAYS wins over [create]. A match on slot 0
+     * ([BURN_SLOT_INDEX]) returns [UnlockOrAdd.Burn] (the app wipes; this method writes nothing
+     * and never treats slot 0 as a vault). A match on 1..SLOT_COUNT-1 returns [UnlockOrAdd.Unlocked].
+     * No match with [create] true seals a NEW vault into a random VAULT-POOL slot
+     * ([randomVaultSlotIndex], never slot 0) sealing [genesisPayload], writes it durably (reusing the
+     * EXISTING DEK — no dek write), and returns [UnlockOrAdd.Created]; with [create] false it returns
+     * [UnlockOrAdd.Rejected] having written nothing.
+     *
+     * TIMING RESIDUAL (documented, accepted): only the create path additionally PERSISTS (the ~1 MiB
+     * outer GCM + atomic write + dir-fsync that gate a durable [UnlockOrAdd.Created]). That work is
+     * post-outcome and dwarfed by the SLOT_COUNT+1 Argon2id; it is the same class as the payload-open
+     * asymmetry and is NOT a per-attempt KDF-level distinguisher.
+     *
+     * BLIND OVERWRITE (~1/(SLOT_COUNT-1) ≈ 33%): placement is over the vault pool with an EMPTY
+     * occupied set (occupancy is unknowable by design), so a create can overwrite an existing vault in
+     * slots 1..SLOT_COUNT-1 — the documented VeraCrypt-outer-volume tradeoff. Slot 0 (burn) is never a
+     * target, so duress protection survives even a full pool.
+     *
+     * DELETE MARKERS: a create clears BOTH delete markers durably FIRST (mirrors [create]'s F2/round-14
+     * discipline) — safety-critical so a stale confirmed marker cannot auto-destroy the new vault and a
+     * stale intent cannot resurrect a reconcile against it. A non-durable clear throws before any write.
+     *
+     * The [create] flag is the CALLER's decision (the router's triple-entry gate); this method holds no
+     * cross-call state. [genesisPayload] is the plaintext to seal into a new vault (caller owns+wipes it,
+     * as with [create]'s initialPayload); [UnlockOrAdd.Created] carries an independent copy.
+     *
+     * CPU-heavy (SLOT_COUNT+1 Argon2id): caller MUST be off-main. Throws [VaultImageException.MissingImage]
+     * / [VaultImageException.CorruptImage] / [VaultImageException.LegacyImage] from [open]; [CorruptImage]
+     * if a MATCHED VAULT slot's payload is unreadable; [NotDurable] if the pre-create marker clear or the
+     * create write is not confirmed durable.
+     */
+    fun attemptUnlockOrAdd(passphrase: String, genesisPayload: ByteArray, create: Boolean): UnlockOrAdd {
+        imageLock.withLock {
+            val image = canonical ?: run { open(); canonical!! }
+            val activeDek = dek ?: throw IllegalStateException("vault image not open")
+            val decoded = decodeImage(image)
+
+            // (1) SWEEP — ALWAYS. SLOT_COUNT Argon2id over slots 0..SLOT_COUNT-1, no early exit.
+            val unlock: VaultUnlock? = tryPassphrase(passphrase, decoded.slots, ops, deriver)
+
+            // (2) CANDIDATE SEAL — ALWAYS. 1 Argon2id + 1 tiny wrapped-key GCM. Real vault-B material on
+            //     the create branch; pure timing filler (wiped) otherwise. Placement is over the VAULT
+            //     POOL (never slot 0) so a create can never clobber the burn credential.
+            val candKey = ops.randomBytes(VAULT_KEY_BYTES)
+            val candSlotIndex = randomVaultSlotIndex(ops)
+            val candSlot = sealSlot(passphrase, candKey, ops, deriver)
+
+            try {
+                return when {
+                    // ── BURN (slot 0 match) — wins over everything. Store writes nothing. ──
+                    unlock != null && unlock.slotIndex == BURN_SLOT_INDEX -> {
+                        wipe(candKey)
+                        // Parity GCM: open slot 0's payload exactly as a vault unlock opens its payload,
+                        // then discard. runCatching so a CORRUPT burn payload still fires the wipe — a
+                        // duress credential must never be suppressed by a damaged marker (spec §6).
+                        runCatching { openPayload(unlock.vaultKey, decoded.payloads[BURN_SLOT_INDEX], ops) }
+                            .getOrNull()?.let { wipe(it) }
+                        wipe(unlock.vaultKey)
+                        UnlockOrAdd.Burn
+                    }
+
+                    // ── VAULT MATCH (slot 1..SLOT_COUNT-1) — wins over create. ──
+                    unlock != null -> {
+                        wipe(candKey)
+                        val pt = try {
+                            openPayload(unlock.vaultKey, decoded.payloads[unlock.slotIndex], ops)
+                        } catch (t: Throwable) {
+                            wipe(unlock.vaultKey)
+                            throw VaultImageException.CorruptImage()
+                        }
+                        if (pt == null) {
+                            wipe(unlock.vaultKey)
+                            throw VaultImageException.CorruptImage()
+                        }
+                        UnlockOrAdd.Unlocked(VaultOpen(unlock.vaultKey, unlock.slotIndex, pt))
+                    }
+
+                    // ── CREATE a new vault into a vault-pool slot. ──
+                    create -> {
+                        // Clear stale delete markers durably BEFORE any write (OQ3; mirrors create()).
+                        // Conservative tristate: run the clear unless BOTH are CONFIRMED absent.
+                        val markersConfirmedAbsent =
+                            Files.notExists(deleteIntentFile.toPath()) &&
+                                Files.notExists(serverDeletedFile.toPath())
+                        if (!markersConfirmedAbsent && !clearBothMarkersDurably()) {
+                            throw VaultImageException.NotDurable()
+                        }
+                        // The 1×256 KiB payload GCM for this branch.
+                        val sealedGenesis = sealPayload(candKey, genesisPayload, ops)
+                        val newSlots = decoded.slots.toMutableList().also { it[candSlotIndex] = candSlot }
+                        val newPayloads =
+                            decoded.payloads.toMutableList().also { it[candSlotIndex] = sealedGenesis }
+                        val newInner = encodeImage(VaultImage(newSlots, newPayloads))
+                        // Reuse the EXISTING DEK (no dek write) → the {bin-present, dek-absent} brick is
+                        // unreachable by construction; the dek is already durable on disk from create().
+                        val outer = ops.aeadEncrypt(activeDek, newInner, VAULT_IMAGE_OUTER_AD)
+                        // atomicWrite throws ONLY pre-rename (canonical untouched); a RETURN means the
+                        // rename landed, the result reporting the rename's durability.
+                        val sync = atomicWrite(binFile, outer)
+                        // Rename committed → advance canonical BEFORE the durability check so a later
+                        // splice/attempt never works from stale state even on the NotDurable throw.
+                        canonical = newInner
+                        if (sync != DirSyncResult.DURABLE) {
+                            // On disk but durability unconfirmed: fail CLOSED so the caller does NOT ack a
+                            // create. candKey is wiped (the caller gets no VaultOpen); the new vault IS in
+                            // canonical, so a later single entry of its passphrase unlocks it via the
+                            // match path (no write needed) — or, if the rename did not survive a crash, it
+                            // is simply absent and re-creatable.
+                            wipe(candKey)
+                            throw VaultImageException.NotDurable()
+                        }
+                        // candKey is now the new vault's live key — HANDED to the session, NOT wiped here.
+                        UnlockOrAdd.Created(VaultOpen(candKey, candSlotIndex, genesisPayload.copyOf()))
+                    }
+
+                    // ── REJECT — no match, no create. Nothing written. ──
+                    else -> {
+                        // LOAD-BEARING timing filler: one 256 KiB payload GCM, identical to the create /
+                        // match payload op, then discarded. Do NOT optimize away (breaks timing parity).
+                        val throwaway = sealPayload(candKey, ByteArray(0), ops)
+                        wipe(candKey)
+                        wipe(throwaway)
+                        UnlockOrAdd.Rejected
+                    }
+                }
+            } catch (t: Throwable) {
+                // Defensive: ensure no live candidate key is abandoned on any throw. On the Created
+                // (return) path this is not reached; on every other path candKey was already wiped, and a
+                // re-wipe of zeroed bytes is a no-op.
+                wipe(candKey)
+                throw t
+            }
+        }
+    }
+
+    /**
      * The session persist sink and the flush-before-ack DURABILITY POINT. Splices
      * an already-sealed [sealedPayload] region into [canonical] at [slotIndex]
      * (every other region byte-unchanged), outer-encrypts the result with a fresh
@@ -599,6 +805,80 @@ class VaultImageStore internal constructor(
             dek = null
             canonical = null
             unregister()
+        }
+    }
+
+    /**
+     * Retire a PRIOR-FORMAT ([LEGACY_IMAGE_VERSION], v2) image so a fresh [create] can re-onboard this
+     * device in the SAME process. The 0.9.2 slot-0 (burn) reservation makes a v2 image unsafe to unlock
+     * (its everyday vault may sit at slot 0, which v3 would misread as a burn wipe), so a v2 image is
+     * never opened/unlocked — it is retired here on the DELIBERATE onboarding action (NOT silently at
+     * boot).
+     *
+     * RE-PROVES the version first: reads the outer layer and requires the inner version ==
+     * [LEGACY_IMAGE_VERSION]; if it is the CURRENT version (or unreadable/missing) it throws
+     * [IllegalStateException] and deletes NOTHING — a misrouted call can never destroy a valid v3 vault.
+     * Only on a proven-v2 image does it unlink `vault.bin` + `vault.dek` (+ tmp leftovers), drop RAM, and
+     * release the single-instance registration.
+     *
+     * DISTINCT FROM [destroy] (load-bearing): this is FORMAT retirement, NOT an account delete. It writes
+     * and clears NO delete markers and never touches the D2c delete-state machine — a retired v2 image has
+     * no server account this device is responsible for deleting (0.9.1 was fresh-install-only). Verify-
+     * unlink + dir-fsync as [destroy] does; throws [VaultImageException.DestroyFailed] if a file survives
+     * or the retire is not durable (retry re-runs it — idempotent once the files are gone).
+     */
+    fun retireLegacyImage() {
+        imageLock.withLock {
+            // Re-prove v2 BEFORE deleting anything — never destroy a current-version vault on a misroute.
+            val version = readInnerVersionOrNull()
+            check(version == LEGACY_IMAGE_VERSION) {
+                "retireLegacyImage refused: not a legacy image (inner version=$version)"
+            }
+            // Drop any RAM we hold (a v2 image was never installed as canonical, but be defensive).
+            dek?.let { wipe(it) }
+            dek = null
+            canonical = null
+            binFile.delete()
+            dekFile.delete()
+            deleteLeftoverTmp(binFile)
+            deleteLeftoverTmp(dekFile)
+            unregister()
+            // Verify the unlink took (delete() returns false on an I/O error too), then make it durable.
+            if (binFile.exists() || dekFile.exists() ||
+                leftoverTmp(binFile).exists() || leftoverTmp(dekFile).exists()
+            ) {
+                throw VaultImageException.DestroyFailed()
+            }
+            if (dirSync(baseDir) != DirSyncResult.DURABLE) {
+                throw VaultImageException.DestroyFailed()
+            }
+        }
+    }
+
+    /**
+     * Best-effort peek at the inner image version: reads `vault.dek` + `vault.bin`, unwraps the DEK,
+     * decrypts the outer layer, and returns the inner version byte — or null if the image is missing,
+     * the wrong size, or unreadable (outer auth / unwrap failure). Argon2id-free (one outer AEAD decrypt).
+     * Wipes the unwrapped DEK on every path. Caller MUST hold [imageLock]. Used by [isLegacyImage] and
+     * [retireLegacyImage]; deliberately NON-throwing so those callers get a clean tristate.
+     */
+    private fun readInnerVersionOrNull(): Int? {
+        if (!binFile.exists() || !dekFile.exists()) return null
+        return try {
+            val dekBlob = dekFile.readBytes()
+            if (dekBlob.size != WRAPPED_KEY_BYTES) return null
+            val binBytes = binFile.readBytes()
+            if (binBytes.size != OUTER_IMAGE_BYTES) return null
+            val unwrapped = deviceCipher.unwrapDek(dekBlob) ?: return null
+            try {
+                val inner = ops.aeadDecrypt(unwrapped, binBytes, VAULT_IMAGE_OUTER_AD) ?: return null
+                if (inner.size != IMAGE_BYTES) return null
+                inner[0].toInt() and 0xff
+            } finally {
+                wipe(unwrapped)
+            }
+        } catch (t: Throwable) {
+            null
         }
     }
 

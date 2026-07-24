@@ -19,8 +19,24 @@ package com.zitrone.app.crypto.vault
  * store, unlock flow, or persistence backend — that is a later phase.
  */
 
-/** On-disk image format version. Mirrors storage.ts IMAGE_VERSION. */
-const val IMAGE_VERSION: Int = 2
+/**
+ * On-disk image format version.
+ *
+ * **v3 (0.9.2):** slot 0 is reserved for the Pucker Burn credential and vaults live in
+ * slots 1..SLOT_COUNT-1 (see [BURN_SLOT_INDEX]). The BYTE layout is unchanged from v2 —
+ * only the placement CONVENTION changed — but the version is bumped anyway because the
+ * change is SAFETY-CRITICAL to distinguish: a v2 image (0.9.1) could hold the everyday
+ * vault at slot 0, which under v3's rules would be read as a BURN match and WIPE on the
+ * user's own correct passphrase. So [VaultImageStore.open] treats a v2 inner image as a
+ * distinct [VaultImageException.LegacyImage] (route to fresh onboarding + retire), NEVER
+ * as an unlockable image and NEVER slot-interpreted. v2 had no reserved slot (vaults at
+ * any index 0..SLOT_COUNT-1). Any FUTURE bump must add its migration/retire branch in
+ * [VaultImageStore.open] BEFORE changing this constant.
+ */
+const val IMAGE_VERSION: Int = 3
+
+/** The immediately-prior format ([VaultImageStore] retires it to fresh onboarding). */
+const val LEGACY_IMAGE_VERSION: Int = 2
 
 private const val HEADER_BYTES: Int = 1
 private const val SLOT_ENTRY_BYTES: Int = SALT_BYTES + WRAPPED_KEY_BYTES
