@@ -107,6 +107,13 @@ wrap), so there is never a valid binding to destroy; the worst case is a **self-
 Grok's lower-severity scoping was **correct against source**. **Adjudicate to source; the more
 alarming label does not win by default, and you do not split the difference.** Verify the load-bearing
 premise of a severity claim (here: "a binding exists to destroy") against the actual control flow.
+CODA (round 5): the SAME resolve-to-source rule then cut the OTHER way — Codex correctly refuted MY
+"self-healing" claim. The concurrent-enable orphan is a key-REPLACED wrap (peer put a different key in
+the shared alias), so `cipherForDecrypt` succeeds and GCM `doFinal` fails → FAILED (not UNAVAILABLE),
+which does NOT auto-clear; recovery is passphrase-unlock + manual disable. Only the key-ABSENT orphan
+self-heals. **Don't over-claim "self-healing" — trace the exact failure result (FAILED vs UNAVAILABLE
+vs INVALIDATED) and which of them actually clears the wrap.** The reviewer with the less convenient
+fact was right both times; source, not severity or self-interest, decides.
 
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final

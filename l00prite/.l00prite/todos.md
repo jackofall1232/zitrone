@@ -73,10 +73,17 @@ credential in reserved slot 0** (replaces rejected "N wrong passwords wipes"); *
 - [ ] **FOLLOW-UP (new, from PR-3 Unit 1 round-4 scope decision): make biometric-ENABLE atomic/idempotent.**
       The enable flow (`newEncryptCipher` deletes+regenerates the SINGLE Keystore alias → BiometricPrompt
       → seal → save the single prefs wrap) is not concurrency-safe: two overlapping enables (double-tap,
-      offer-vs-Settings, rotation mid-prompt) or an interrupted enable can ORPHAN a wrap. Worst case is
-      self-healing (next biometric-unlock finds the dead key → clears → re-offers), NO repoint, NO valid-
-      binding destruction, NO A/B tell — so it is NOT a security defect and was correctly kept OUT of the
-      A-only-guard PR. Fix needs PROCESS-correct serialization or atomic keygen (NOT Activity-scoped — see
+      offer-vs-Settings, rotation mid-prompt) or an interrupted enable can ORPHAN a wrap. Blast radius is
+      BOUNDED and NON-security (NO repoint, NO destruction of a pre-existing valid binding, NO A/B tell, NO
+      passphrase/vault brick) — so correctly kept OUT of the A-only-guard PR. **Recovery is NOT uniformly
+      automatic (round-5 Codex, adjudicated correct vs source):** the key-ABSENT orphan self-heals (biometric
+      unlock → `cipherForDecrypt` null → UNAVAILABLE → `disableBiometricThen` clears + re-offers), BUT the
+      key-REPLACED orphan — the actual concurrent-enable outcome, where a peer's `newEncryptCipher` put a
+      DIFFERENT key in the shared alias — makes `cipherForDecrypt` succeed and GCM `doFinal` fail (bad tag) →
+      VaultBiometricResult.FAILED, which does NOT clear the wrap. That leaves biometric stuck failing until the
+      user passphrase-unlocks + manually disables. The follow-up should (a) make enable atomic/idempotent so the
+      orphan can't form, and consider (b) treating a persistent decrypt-FAILED wrap as clearable (careful: don't
+      clear on a mere transient auth failure). Fix needs PROCESS-correct serialization or atomic keygen (NOT Activity-scoped — see
       failures.md: the round-3 Activity-scoped single-flight was reverted). Also fold in the disable-∥-enable
       race (disable/account-delete not synchronized with enable's seal/save). Own spec + invariant table +
       paired-blind loop. Pre-existing (predates 0.9.2); not release-blocking.
