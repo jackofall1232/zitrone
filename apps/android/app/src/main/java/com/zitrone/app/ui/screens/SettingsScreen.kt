@@ -423,9 +423,11 @@ fun SettingsScreen(
 }
 
 /** Human label for an idle auto-lock timeout (seconds). 0 = immediate. */
-private fun autoLockLabel(seconds: Int): String = when (seconds) {
-    0 -> "Immediate"
-    60 -> "1 minute"
+// Any value <= 0 is "Immediate" — mirrors autoLockOnBackground's `timeoutSeconds <= 0 -> LockNow`,
+// so a negative value ever loaded from settings never renders as "-1 minutes".
+private fun autoLockLabel(seconds: Int): String = when {
+    seconds <= 0 -> "Immediate"
+    seconds == 60 -> "1 minute"
     else -> "${seconds / 60} minutes"
 }
 

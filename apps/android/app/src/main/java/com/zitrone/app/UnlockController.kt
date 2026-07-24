@@ -49,7 +49,12 @@ class UnlockController<S : Any>(
     private val lock = Any()
     private var current: S? = null
     private var sessionScope: CoroutineScope? = null
-    private var terminalWipe = false
+    // @Volatile so [isTerminalWipe] can read it WITHOUT taking [lock] — that read happens on the
+    // main thread (VaultLockManager.onStop), and a background lockCurrent() can hold [lock] while
+    // blocked up to drainTimeoutMs in runBlocking; a synchronized read would then stall the main
+    // thread → ANR. Writes stay under [lock] (they are compound with other state); the volatile
+    // guarantees the lock-free reader sees them.
+    @Volatile private var terminalWipe = false
 
     /**
      * Build + publish the session if none is live, from the default [buildSession].
@@ -167,6 +172,10 @@ class UnlockController<S : Any>(
      * SKIP its timer-fired [lock] while a delete owns teardown — a background timer must not race
      * the account-delete's ordered teardown (the delete's NonCancellable coroutine + fail-safe
      * closed-runtime handling would tolerate it, but not racing is cleaner defense-in-depth).
+     *
+     * Lock-free [terminalWipe] volatile read: this is an advisory gate (the delete's ordered
+     * teardown is the real safety bar), and it is called on the main thread — taking [lock] here
+     * could block behind a background lockCurrent()'s bounded drain and ANR the UI.
      */
-    fun isTerminalWipe(): Boolean = synchronized(lock) { terminalWipe }
+    fun isTerminalWipe(): Boolean = terminalWipe
 }

@@ -48,6 +48,12 @@ class AutoLockDecisionTest {
             AutoLockAction.LockNow,
             autoLockOnBackground(sessionLive = true, terminalWipe = false, timeoutSeconds = 0),
         )
+        // A negative value ever loaded from settings is still "immediate", never a negative delay
+        // (matches the `timeoutSeconds <= 0` branch and autoLockLabel's `<= 0 -> "Immediate"`).
+        assertEquals(
+            AutoLockAction.LockNow,
+            autoLockOnBackground(sessionLive = true, terminalWipe = false, timeoutSeconds = -1),
+        )
     }
 
     @Test
@@ -74,5 +80,7 @@ class AutoLockDecisionTest {
         assertFalse(shouldAutoLockAtFireTime(sessionLive = true, terminalWipe = true))
         // The session was already torn down (forced logout) during the interval.
         assertFalse(shouldAutoLockAtFireTime(sessionLive = false, terminalWipe = false))
+        // Both at once (session gone AND a delete owns teardown) → still do not fire.
+        assertFalse(shouldAutoLockAtFireTime(sessionLive = false, terminalWipe = true))
     }
 }
