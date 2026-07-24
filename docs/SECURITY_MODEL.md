@@ -503,11 +503,15 @@ Two VeraCrypt-analogous caveats apply, and are accepted deliberately:
   whichever vault is open — so the restriction is not itself a distinguisher. *Known robustness gap
   (tracked, Android):* the enable flow is not yet serialized, so two overlapping first-enables
   (a double-tap, or the offer racing the Settings toggle) can race the shared Keystore alias and
-  leave the single wrap **orphaned** (its key mismatched) until the next biometric unlock is retried
-  and the user re-enrolls. This never **repoints an already-established wrap** to a different slot
-  (the write-path guard refuses that), never destroys a pre-existing valid binding, and exposes no
-  which-vault or second-vault information — it is a self-inflicted availability glitch, not a
-  deniability break, and its atomicity fix is a scheduled follow-up.
+  leave the single wrap **orphaned** — its stored blob sealed under one key while the alias now holds
+  another. It does **not** self-heal: a subsequent biometric unlock finds the (present) key, so its
+  cipher initialises but AEAD opening fails, yielding a plain `FAILED` that leaves the wrap in place
+  and does not re-offer enrollment; **recovery is a passphrase unlock followed by a manual disable and
+  re-enable of biometric.** (Only a *missing*/invalidated key auto-clears and re-offers.) This never
+  **repoints an already-established wrap** to a different slot (the write-path guard refuses that),
+  never destroys a pre-existing valid binding, and exposes no which-vault or second-vault information
+  — it is a self-inflicted availability glitch, not a deniability break, and its atomicity fix is a
+  scheduled follow-up.
 - **Vault creation silently fails while an account deletion is pending (0.9.2, Android).** Account
   deletion is a durable two-phase state machine (a `delete-intent` marker, then a `delete-confirmed`
   marker). While either marker is present, attempting to create a new vault does nothing and is
