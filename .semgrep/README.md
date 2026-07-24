@@ -13,8 +13,9 @@ is a silent-no-op failure point — exactly the class of bug this replaced (the 
 `semgrep/semgrep-action@v1` with `config: auto` exited 0 on its own crash / a registry-fetch failure,
 so static analysis was silently green without running).
 
-CI runs a **pinned** Semgrep container (`semgrep/semgrep:<version>` in `ci.yml`) with
-`--config .semgrep --error --strict`:
+CI runs a **digest-pinned** Semgrep container (`semgrep/semgrep:<version>@sha256:<digest>` in
+`ci.yml` — pinned to the immutable digest, not just the mutable tag, so it can't be silently
+repointed) with `--config .semgrep --error --strict`:
 - `--error` → non-zero exit when there are findings (gates the build on a real result).
 - `--strict` → rule/parse/config problems are errors (non-zero), so a broken or empty ruleset can't
   masquerade as "0 findings".

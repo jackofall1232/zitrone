@@ -73,7 +73,10 @@ jobs:
         run: |
           TAG="${TAG_INPUT:-$REF_NAME}"
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta)?$ ]]; then
-            echo "::error::Refusing to build release tag '$TAG' — not a valid release tag (expected vX.Y.Z or vX.Y.Z-beta)."
+            # Sanitize the rejected (untrusted) tag before echoing it: strip CR/LF and cap the length so a
+            # newline in a dispatch input can't inject extra `::workflow-command::` lines on this step's stdout.
+            SAFE_TAG=$(printf '%s' "$TAG" | tr -d '\r\n' | cut -c1-64)
+            echo "::error::Refusing to build release tag '$SAFE_TAG' — not a valid release tag (expected vX.Y.Z or vX.Y.Z-beta)."
             exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"

@@ -139,7 +139,9 @@ jobs:
         # This replaces `semgrep/semgrep-action@v1 config: auto`, which exited 0 on its own crash / a
         # registry-fetch failure, so SAST was silently green without running. See .semgrep/README.md.
         run: |
-          docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:1.90.0 \
+          # DIGEST-pinned (not just the mutable :1.90.0 tag) so the scanner can't be silently repointed.
+          docker run --rm -v "$PWD:/src" -w /src \
+            semgrep/semgrep:1.90.0@sha256:7b625711ba9b6d1a543e308967b18c01b59932490a5536a06422666474bf6ee4 \
             semgrep scan --config /src/.semgrep --error --strict --disable-version-check /src
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@v0.36.0
