@@ -64,8 +64,8 @@ Full details in [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md).
 
 Five layered defenses, each built as if the one beneath it has already failed:
 
-- 🤷‍♂️ **Plausible deniability** — two separate vaults behind two passphrases, with no cryptographic
-  evidence the second exists and identical unlock timing for both (a **per-device** feature, safe
+- 🤷‍♂️ **Plausible deniability** — two (up to three) separate vaults behind different passphrases,
+  with no cryptographic evidence a second exists and identical unlock-attempt timing (a **per-device** feature, safe
   because there is no cross-device account access). Status: the crypto primitive is built
   (web/desktop + Android); the **Android everyday vault runtime shipped in 0.9.1-beta**; and as of
   **0.9.2-beta, creating a second (decoy) vault is live** — there is no setup wizard (that would be

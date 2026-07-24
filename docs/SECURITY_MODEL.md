@@ -499,16 +499,17 @@ Two VeraCrypt-analogous caveats apply, and are accepted deliberately:
   marker). While either marker is present, attempting to create a new vault does nothing and is
   reported exactly like a wrong passphrase: the **same rejection and success-less UI result**, and the
   **same heavy cryptographic-work budget** (the full per-slot Argon2id sweep, the candidate seal, and
-  the one 256-KiB payload GCM every outcome performs). It is not claimed to be wall-clock identical to
-  the last stat: the pending-delete create path additionally performs two `Files.notExists` marker
-  checks a plain wrong-passphrase attempt does not — filesystem stats that are sub-microsecond against
-  seconds of KDF work, so not a practical timing oracle, but named for precision. This is a deliberate
-  fail-closed choice: with a live image on disk, nothing observable can tell a *stale* marker (cleanup
-  that did not finish) from a *live* one (a deletion still owed), so vault creation never acts on that
-  distinction rather than risk cancelling a real account deletion or stranding a server-deleted
-  account's local image. The condition is rare and transient (it clears when the deletion completes or
-  is retired), and it leaks nothing an observer could use to distinguish it from an ordinary failed
-  unlock.
+  the one 256-KiB payload GCM every outcome performs). It is **not** claimed to be wall-clock
+  identical to a wrong-passphrase attempt: the pending-delete create path additionally performs two
+  `Files.notExists` marker checks that a plain wrong attempt does not, and their timing is not claimed
+  identical or negligible — the parity guarantee here is over the heavy cryptographic budget, not
+  those filesystem stats. This is a deliberate fail-closed choice: with a live image on disk, nothing
+  observable can tell a *stale* marker (cleanup that did not finish) from a *live* one (a deletion
+  still owed), so vault creation never acts on that distinction rather than risk cancelling a real
+  account deletion or stranding a server-deleted account's local image. The condition is rare and
+  transient (it clears when the deletion completes or is retired), and its outcome is the ordinary
+  uniform failure — it exposes no vault-existence or which-vault information beyond the marker-stat
+  timing noted above.
 
 **Per-device scope, and why Android-only is safe.** Plausible-deniability (decoy)
 vaults are a **per-device** feature. Because each install is an independent

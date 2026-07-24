@@ -67,18 +67,27 @@ built on it.
 
 ### 3.1 Structural symmetry
 
-- Every install **always** has structural capacity for two vaults, in every build, for every
-  user. There is **no** "enable vault" setting, toggle, or feature flag anywhere in UI, Settings,
-  or code paths that a decompiler could correlate to "vault feature on/off".
+- Every install **always** has structural capacity for **up to three** vaults, in every build, for
+  every user (the vault pool is slots `1..SLOT_COUNT-1` — three at `SLOT_COUNT = 4`; slot 0 is
+  reserved for the Pucker Burn duress credential and is never a vault). The deniability model below
+  is written around two vaults (A and B) because that is the decoy scenario that matters, but the
+  pool holds three. There is **no** "enable vault" setting, toggle, or feature flag anywhere in UI,
+  Settings, or code paths that a decompiler could correlate to "vault feature on/off".
 - Both vaults are **fully independent identities** — each its own identity keypair, contacts,
   message store, relay account, and (once decoy traffic ships) its own dummy pinned account.
   Internally they are **vault slot A** and **vault slot B** — never labeled "real" / "decoy" in
   UI copy, code, string resources, comments, or logs. There is no canonical "which is real": it
   is defined only by which one the user treats as theirs.
-- Both vaults derive their unlock keys with **identical Argon2id parameters and timing**, so no
-  local side-channel — timing, memory-access pattern, storage layout, UI latency — can
-  distinguish "correct password for A" from "for B" from "wrong entirely". This mirrors
-  `vault.ts`'s `tryPassphrase`, which derives-and-attempts **every** slot with no early exit.
+- Every vault derives its unlock key with **identical Argon2id parameters**, and the unlock
+  *attempt* runs the same no-early-exit sweep over **every** slot regardless of outcome (mirroring
+  `vault.ts`'s `tryPassphrase`). So the **cryptographic work** — its timing, memory-access pattern,
+  and per-slot storage access — is identical whether the entered passphrase matches slot A, slot B,
+  or nothing: the *computation* leaks neither which vault opened nor whether a second vault exists.
+  What is of course visible is the **outcome** — a correct passphrase opens the app, a wrong one
+  stays denied — but that reveals nothing about a hidden vault (a wrong guess looks the same whether
+  or not a vault B exists), and the two *success* cases (A and B) are mutually indistinguishable.
+  One deliberate exception: *creating* a vault additionally persists to disk (see §3.3 /
+  `SECURITY_MODEL.md`), an accepted timing residual an ordinary unlock does not incur.
 - A hidden vault's contents must not be constrained to "sensitive" material only. If vault B
   only ever held high-stakes conversations, its *contents* become the tell the moment anyone
   gains access. Both vaults hold an ordinary mix; deniability comes from the vault's *existence*
@@ -99,13 +108,17 @@ The lock screen is **visually and structurally unchanged** — no new screen, bu
   intentional, accepted asymmetry: only one vault is reachable by biometric convenience; the rest
   are passphrase-only.
 - **"Use PIN" (the existing fallback) → is the vault router.** The entered passphrase is checked
-  **locally** against the derived key for *both* slots:
-  - matches slot A's derivation → unlock into A;
-  - matches slot B's derivation → unlock into B;
-  - matches neither → access denied, with **identical failure behavior and timing** regardless
+  **locally** against the derived key for **every** vault slot (the no-early-exit sweep), not just
+  two:
+  - matches a live slot's derivation → unlock into that vault (A, B, or a third pool vault);
+  - matches none → access denied, with **identical unlock-attempt behaviour and timing** regardless
     of which vaults exist or which was "closer".
-- To any external observer — watching an unlock, or forcing one under duress — nothing
-  distinguishes these three outcomes: same screen, same flow, same apparent behavior every time.
+- The observable *outcome* of course differs between a match (the app opens) and a miss (still
+  denied) — that is inherent to any unlock and reveals nothing about a hidden vault. What the design
+  guarantees is narrower and is the part that matters: an observer watching or forcing an unlock
+  **cannot tell which vault opened, nor whether more than one vault exists** — the two success cases
+  are identical (same screen, same flow), and a miss looks the same whether or not a second vault is
+  present. (A *creating* third entry additionally persists to disk; see §3.3.)
 
 ### 3.3 Setup
 
@@ -224,7 +237,9 @@ introduce server involvement in vault unlock without recognizing it breaks this 
 - **Blind overwrite on vault creation:** creating a vault into an existing image picks a random
   slot and can destroy a vault whose passphrase is not currently entered (as with a VeraCrypt
   outer volume). Deliberate, documented risk.
-- **Biometric → A asymmetry (§3.2):** accepted. A compelled biometric unlock only ever opens A.
+- **Biometric → single-bound-vault asymmetry (§3.2):** accepted. A compelled biometric unlock only
+  ever opens the one biometric-bound vault ("A" — the first-enable-wins role, never repointed while
+  the wrap exists), never a second vault; a second vault is reachable only by its passphrase.
 - **Compromised device / OS keylogger / second camera:** outside any app's power. Not claimed.
 
 ## 7. Notification parity (permanent security requirement)
