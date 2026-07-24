@@ -17,6 +17,8 @@ import com.zitrone.app.crypto.vault.BiometricVaultKeyCipher
 import com.zitrone.app.crypto.vault.KeystoreDeviceKeyCipher
 import com.zitrone.app.crypto.vault.LibsodiumVaultOps
 import com.zitrone.app.crypto.vault.VaultImageStore
+import com.zitrone.app.crypto.vault.UnlockOrAdd
+import com.zitrone.app.crypto.vault.VaultImageException
 import com.zitrone.app.crypto.vault.VaultOpen
 import com.zitrone.app.crypto.vault.VaultRuntime
 import com.zitrone.app.crypto.vault.VaultSession
@@ -98,6 +100,36 @@ class ZitroneApp : Application() {
  * The legacy store CLASSES stay in the tree (still compiled + test-covered); only
  * the runtime WIRING here is the vault path.
  */
+
+/**
+ * The outcome of a passphrase entry through [AppContainer.attemptPassphrase] (0.9.2 second-vault
+ * router). SLOT-AGNOSTIC: the UI learns only which of these happened, never which slot or how many
+ * vaults exist. [Rejected] is indistinguishable (behaviour + timing) from a wrong passphrase, and it
+ * is the outcome a create-refused-because-a-delete-is-pending also returns (fail-closed).
+ */
+sealed interface PassphraseOutcome {
+    /** An existing vault slot matched — a session was published. Route to the chat. */
+    data object Unlocked : PassphraseOutcome
+
+    /** No slot matched, the triple-entry gate fired, a new vault was created + published. */
+    data object Created : PassphraseOutcome
+
+    /** The Pucker Burn slot matched — the app performs the duress wipe (a sibling feature). */
+    data object Burn : PassphraseOutcome
+
+    /** No match (or a refused build, or a fail-closed create): a wrong-passphrase equivalent. */
+    data object Rejected : PassphraseOutcome
+
+    /** The stored image is present but unreadable (corrupt / missing DEK) — a distinct honest error. */
+    data object ImageUnreadable : PassphraseOutcome
+
+    /** The stored image is a prior (v2 / 0.9.1) format — route to fresh onboarding (it retires there). */
+    data object LegacyImage : PassphraseOutcome
+
+    /** A create wrote but its durability was unconfirmed — surface a generic retry (a re-entry recovers). */
+    data object Retry : PassphraseOutcome
+}
+
 class AppContainer(private val app: Application) {
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -295,6 +327,12 @@ class AppContainer(private val app: Application) {
         sessionLive = { _session.value != null },
         terminalWipe = { unlockController.isTerminalWipe() },
         lock = { unlockController.lock() },
+        // Uninterrupted-sequence guard (0.9.2 triple-entry, spec §3): backgrounding the app breaks any
+        // in-progress triple-entry ritual. Reset UNCONDITIONALLY on every onStop (independent of the
+        // auto-lock decision, which is session-gated — the ritual runs at the LOCK screen with no live
+        // session). Process death clears the RAM candidate on its own; a lock cycle cannot interrupt a
+        // ritual because the ritual only runs while already at the lock screen.
+        resetRitual = { unlockRouter.resetCandidate() },
     ).also { it.register(androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle) }
 
     // ── Vault unlock / create orchestration (all off-main; caller drives the UI) ──
@@ -348,15 +386,82 @@ class AppContainer(private val app: Application) {
     }
 
     /**
-     * Attempt [passphrase] against the vault (off-main; both slots, no early exit) and, on a
-     * match, PUBLISH the session — both in the SAME off-main block so a cancellation that fires as
-     * the block ends cannot strand the materialized [VaultOpen] unwiped ([publishSession] consumes
-     * or wipes it synchronously before the block returns). Returns whether a session was published
-     * (false on no match OR on a refused build). Never logs anything credential-shaped.
+     * The 0.9.2 fused passphrase entry point (router). Off-main. In ONE block: run the triple-entry
+     * gate to decide `create`, then [com.zitrone.app.crypto.vault.VaultImageStore.attemptUnlockOrAdd]
+     * (identical heavy crypto every outcome — the plausible-deniability + duress timing contract), then
+     * map the outcome and manage the router's RAM state:
+     *  - a slot MATCH publishes the session ([UnlockOrAdd.Unlocked]) — discards the ritual, clears backoff;
+     *  - a BURN slot match ([UnlockOrAdd.Burn]) — discards the ritual, leaves backoff untouched (not a
+     *    wrong password); the caller performs the duress wipe;
+     *  - a no-match CREATE ([UnlockOrAdd.Created]) publishes the new vault — discards the ritual, clears backoff;
+     *  - a [UnlockOrAdd.Rejected] (no match, or a fail-closed create over a pending delete) KEEPS the
+     *    triple-entry streak and advances the backoff — indistinguishable from a wrong passphrase.
+     *
+     * The `create` decision is computed on EVERY attempt so its SHA-256 + constant-time compare is
+     * constant work (never a distinguisher). `genesis` (an empty [VaultState]) is encoded per attempt and
+     * WIPED in `finally`; the store copies it only on a create and never wipes the caller's copy. The
+     * materialized [VaultOpen] is consumed-or-wiped by [publishSession] synchronously before this block
+     * returns, so a cancellation can never strand it. Never logs anything credential-shaped.
      */
-    suspend fun unlockWithPassphrase(passphrase: String): Boolean = withContext(Dispatchers.Default) {
-        val open = imageStore.unlock(passphrase) ?: return@withContext false
-        publishSession(open)
+    suspend fun attemptPassphrase(passphrase: String): PassphraseOutcome = withContext(Dispatchers.Default) {
+        val create = unlockRouter.decideCreate(passphrase)
+        val genesis = VaultStateCodec.encode(VaultState.empty())
+        try {
+            val result = try {
+                imageStore.attemptUnlockOrAdd(passphrase, genesis, create)
+            } catch (c: CancellationException) {
+                throw c
+            } catch (e: VaultImageException.LegacyImage) {
+                unlockRouter.resetCandidate()
+                return@withContext PassphraseOutcome.LegacyImage
+            } catch (e: VaultImageException.CorruptImage) {
+                unlockRouter.resetCandidate()
+                return@withContext PassphraseOutcome.ImageUnreadable
+            } catch (e: VaultImageException.MissingImage) {
+                unlockRouter.resetCandidate()
+                return@withContext PassphraseOutcome.ImageUnreadable
+            } catch (e: VaultImageException.NotDurable) {
+                // Create wrote but durability unconfirmed; the new vault IS in canonical, so a later single
+                // entry unlocks it via the match path. Spend the ritual, bump backoff, surface a retry.
+                unlockRouter.resetCandidate()
+                unlockRouter.recordFailure()
+                return@withContext PassphraseOutcome.Retry
+            } catch (t: Throwable) {
+                // Any other throw (a self-verify IllegalState, a transient IO) → generic; never leak it.
+                unlockRouter.resetCandidate()
+                unlockRouter.recordFailure()
+                return@withContext PassphraseOutcome.Rejected
+            }
+            when (result) {
+                is UnlockOrAdd.Unlocked -> {
+                    unlockRouter.resetCandidate()
+                    if (publishSession(result.open)) {
+                        unlockRouter.recordSuccess(); PassphraseOutcome.Unlocked
+                    } else {
+                        unlockRouter.recordFailure(); PassphraseOutcome.Rejected
+                    }
+                }
+                is UnlockOrAdd.Created -> {
+                    unlockRouter.resetCandidate()
+                    if (publishSession(result.open)) {
+                        unlockRouter.recordSuccess(); PassphraseOutcome.Created
+                    } else {
+                        unlockRouter.recordFailure(); PassphraseOutcome.Rejected
+                    }
+                }
+                UnlockOrAdd.Burn -> {
+                    unlockRouter.resetCandidate()
+                    PassphraseOutcome.Burn
+                }
+                UnlockOrAdd.Rejected -> {
+                    // KEEP the streak (do NOT reset) so a genuine ritual can complete; advance backoff.
+                    unlockRouter.recordFailure()
+                    PassphraseOutcome.Rejected
+                }
+            }
+        } finally {
+            wipe(genesis)
+        }
     }
 
     /**
