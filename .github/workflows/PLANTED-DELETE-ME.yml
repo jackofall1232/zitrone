@@ -1,0 +1,9 @@
+# THROWAWAY — proves the SAST gate fails CI on a re-introduced injection. NEVER merge; delete after CI red.
+name: PLANTED-DELETE-ME
+on: workflow_dispatch
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    steps:
+      - name: deliberate derived-output shell injection (must trip semgrep)
+        run: echo "building ${{ steps.meta.outputs.tag }}"
