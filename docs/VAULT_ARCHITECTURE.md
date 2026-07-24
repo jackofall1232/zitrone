@@ -304,11 +304,12 @@ parity-ready from day one:
 - **Invariant comments** at the scheduler and at `showNewMessage` state requirement 6 explicitly,
   so a future edit that would break parity is caught in review.
 
-**What remains gated on the Android vault runtime (not yet built):** the *verification* of
+**Cross-vault parity verification (now unblocked by 0.9.2's second vault):** the *verification* of
 cross-vault parity — firing a notification from vault A, then vault B, and confirming an automated
-diff cannot distinguish them (requirement 5) — cannot be executed until a second vault/coordinator
-exists. When the vault runtime lands, that test becomes: instantiate both, fire from each, assert
-byte-identical notification construction and behavior. The structure above makes that assertion
+diff cannot distinguish them (requirement 5) — previously could not be executed with only one vault.
+Now that a second vault is creatable (0.9.2-beta), it can: instantiate both, fire from each, assert
+byte-identical notification construction and behavior (this dedicated cross-vault parity test should
+be added if not already present). The structure above makes that assertion
 hold by construction; the test is the proof.
 
 ## 8. Decoy traffic (adjacent; separate release — 0.10.0-beta)
@@ -340,9 +341,11 @@ design (full spec is out of scope for this document):
 - `SECURITY_MODEL.md` — the "Plausible deniability (key-slot vaults)" section is the security
   promise; this document is the implementation architecture behind it. The §5 zero-knowledge
   invariant and the §7 notification-parity requirement must be re-stated in `SECURITY_MODEL.md`.
-  The present/near-tense "being built for the current Android release" language should be
-  reconciled to the honest state in this document's status table (design locked; crypto primitive
-  built on web; Android runtime pending) rather than implying a shipped Android vault.
+  All vault language should be reconciled to the honest state in this document's status table:
+  the Android everyday-vault runtime shipped in 0.9.1-beta and second-vault **creation** shipped in
+  0.9.2-beta (crypto primitive built on web + Android; second vault creatable via the silent
+  triple-entry router), while per-vault destruction and the Pucker Burn setup/wipe remain unbuilt —
+  rather than implying either that no Android vault ships or that the unshipped pieces do.
 - `packages/crypto/src/vault.ts` — the key-slot crypto primitive (web/desktop) the Android
   runtime must mirror (fixed-size image, `SLOT_COUNT`, `tryPassphrase` timing parity,
   blind-overwrite placement).

@@ -500,7 +500,14 @@ Two VeraCrypt-analogous caveats apply, and are accepted deliberately:
   after which a *different* vault — including a second (decoy) vault — may become bound by being the
   next to enable. At any moment **only one vault is biometric-openable; the other(s) are
   passphrase-only.** The enrollment UI is slot-agnostic — it renders and behaves identically
-  whichever vault is open — so the restriction is not itself a distinguisher.
+  whichever vault is open — so the restriction is not itself a distinguisher. *Known robustness gap
+  (tracked, Android):* the enable flow is not yet serialized, so two overlapping first-enables
+  (a double-tap, or the offer racing the Settings toggle) can race the shared Keystore alias and
+  leave the single wrap **orphaned** (its key mismatched) until the next biometric unlock is retried
+  and the user re-enrolls. This never **repoints an already-established wrap** to a different slot
+  (the write-path guard refuses that), never destroys a pre-existing valid binding, and exposes no
+  which-vault or second-vault information — it is a self-inflicted availability glitch, not a
+  deniability break, and its atomicity fix is a scheduled follow-up.
 - **Vault creation silently fails while an account deletion is pending (0.9.2, Android).** Account
   deletion is a durable two-phase state machine (a `delete-intent` marker, then a `delete-confirmed`
   marker). While either marker is present, attempting to create a new vault does nothing and is
