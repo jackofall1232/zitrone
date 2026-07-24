@@ -85,6 +85,30 @@ PR-1's own first round was **rejected**, and later fix rounds still surfaced Low
 **Re-review every fix delta with the same paired-blind process; reaching clean convergence on an
 earlier delta does NOT carry forward to a later one.** Do not treat "I fixed it" as verification.
 
+### Activity-scoped exclusion can't guard a process-shared resource (0.9.2 PR-3 Unit 1, round-3 single-flight — REVERTED)
+Round-3 review found a concurrent biometric-**enable** race (two overlapping enables thrash the
+single Keystore alias + prefs wrap, orphaning a wrap). The fix attempt was an **Activity-instance**
+`AtomicBoolean` single-flight. Two things went wrong: (1) **it did not work** — an Activity-scoped
+flag cannot provide GLOBAL exclusion over a PROCESS-shared resource; a rotation makes a fresh flag,
+so it never serialized across Activity recreation. (2) **it introduced a new defect** — a synchronous
+throw from the prompt launch after the CAS claim left the flag stuck true (same-instance enable
+lockout until recreation). **Reverted** (Option 2, maintainer). Lessons: **match the guard's scope
+to the resource's scope** — a process-wide resource needs process-correct serialization (or make the
+op atomic/idempotent), never Activity/instance-scoped. And **three rounds of a fix spawning new edge
+cases is the signal the APPROACH is wrong** (the D2c/PR-C lesson) — step back and involve the human
+on scope instead of a fourth patch. The pre-existing enable-flow concurrency is now a dedicated
+follow-up PR (atomic/idempotent enable), NOT bundled into the A-only-guard PR.
+
+### Higher-severity reviewer can be wrong on the FACTS — resolve to source, don't defer to the label (0.9.2 PR-3 Unit 1, round 4)
+Across 4 rounds the two reviewers split on SEVERITY of the same pre-existing enable concurrency
+(Codex HIGH, Grok INFO/LOW) every round. Round-4 Codex HIGH asserted "destroys an existing binding" —
+but that REQUIRES a pre-existing binding, and enable only ever STARTS when `isEnabled()==false` (no
+wrap), so there is never a valid binding to destroy; the worst case is a **self-healing orphan wrap**.
+Grok's lower-severity scoping was **correct against source**. **Adjudicate to source; the more
+alarming label does not win by default, and you do not split the difference.** Verify the load-bearing
+premise of a severity claim (here: "a binding exists to destroy") against the actual control flow.
+
 ## Blockers
-- None blocking right now. **0.9.2 PR-2 spec awaits human review before implementation**; PR-1 is
-  merged. Not blockers — gates.
+- None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
+  round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked
+  follow-up (todos.md), not a blocker on Unit 1. Not blockers — gates.
