@@ -548,20 +548,6 @@ class AppContainer(private val app: Application) {
      * onboarding enable offer (post-publish) and the Settings toggle, so no live [VaultOpen] is ever
      * held across a recomposition.
      */
-    /**
-     * The A-bound single-wrap guard ([VaultUnlockRouter.biometricEnableAllowed]) evaluated for the
-     * CURRENT live session. The enable ENTRYPOINT must call this BEFORE `newEncryptCipher()` — that
-     * call deletes+regenerates the sole auth-gated Keystore key, so gating here keeps a disallowed
-     * (different-slot) enable truly SIDE-EFFECT-FREE: the destructive key-delete never runs and the
-     * existing binding's crypto root survives. Returns false when there is no live session. This is
-     * the write path, not the render path — the enroll AFFORDANCE stays slot-agnostic; only the ACTION
-     * on tap differs. [enableBiometricFromSession] re-checks (belt) in case the session changed since.
-     */
-    fun biometricEnableAllowedNow(): Boolean {
-        val slot = session.value?.slotIndex ?: return false
-        return unlockRouter.biometricEnableAllowed(biometricStore.boundSlotIndex(), slot)
-    }
-
     fun enableBiometricFromSession(
         encryptCipher: javax.crypto.Cipher,
         session: SessionContainer,
@@ -570,11 +556,12 @@ class AppContainer(private val app: Application) {
         // and it must NEVER be repointed to a different slot. Allow the write ONLY when no wrap exists
         // (first-enable-wins, OQ-A(i) — binds this slot) OR the existing wrap already names THIS
         // session's slot (a same-vault re-enable/refresh). A session on any OTHER slot is refused
-        // FAIL-CLOSED: return false, seal nothing, write nothing. This is the sole slot-dependent
-        // behaviour — every enroll UI surface stays slot-agnostic so an A-session and a B-session
-        // render identically; the restriction lives here, on the write path, never in what the UI
-        // shows. Defense-in-depth: the current UI only offers enable when no wrap exists, so this
-        // refusal is unreachable via normal flow, but the invariant is enforced, not assumed.
+        // FAIL-CLOSED: return false, seal nothing, write nothing, no repoint. The PRIMARY gate is the
+        // slot-agnostic isEnabled() check at the enable entrypoint (which also runs before the
+        // destructive newEncryptCipher, so a disallowed enable is side-effect-free); this per-slot check
+        // is the mid-flight BELT — it catches a session that changed between that entrypoint gate and
+        // this seal. The A-only restriction is therefore purely a write-path property; every enroll UI
+        // surface stays slot-agnostic so an A-session and a B-session render identically.
         if (!unlockRouter.biometricEnableAllowed(biometricStore.boundSlotIndex(), session.slotIndex)) {
             return false
         }

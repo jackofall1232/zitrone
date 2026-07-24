@@ -143,16 +143,23 @@ class VaultUnlockRouter {
         enabled && canAuthenticateStrong
 
     /**
-     * Whether to render the biometric ENROLL offer over a live session. Deliberately SLOT-FREE: it
-     * takes only global/transient state ([offerPending], [sessionPresent]) and NO vault slot, so the
-     * enroll surface renders IDENTICALLY in every vault session (A or B). The A-only restriction on
-     * biometric (OQ4) lives ONLY on the write path (`AppContainer.enableBiometricFromSession` refuses
-     * to repoint the single wrap), never in what the UI shows — so the enroll affordance can never be
-     * a real-vs-decoy distinguisher. Keeping this a named, slot-parameterless predicate makes that
-     * invariant structural: adding a slot term here would change the signature and break its test.
+     * Whether to render the biometric ENROLL offer over a live session. Deliberately SLOT-FREE: every
+     * input is global/transient — [offerPending], [sessionPresent], and [alreadyEnabled] (the GLOBAL
+     * `biometricStore.isEnabled()`, identical in an A- and a B-session) — and NONE is a vault slot, so
+     * the enroll surface renders IDENTICALLY in every vault session. The A-only restriction on biometric
+     * (OQ4) lives ONLY on the write path (`AppContainer.enableBiometricFromSession` refuses to repoint
+     * the single wrap), never in what the UI shows, so the enroll affordance can never be a real-vs-decoy
+     * distinguisher. [alreadyEnabled] makes the "enable only when no wrap exists" gate STRUCTURAL (round-2
+     * F2): with a wrap present the offer is hidden — in BOTH sessions — so a cross-slot enable can never
+     * be tapped, which is what removes the enable-action timing tell and the destructive re-enable
+     * (round-2 HIGH/MEDIUM). Keeping this slot-parameterless makes the render-identity invariant
+     * structural: a slot term would change the signature and break its test.
      */
-    fun biometricEnrollOffered(offerPending: Boolean, sessionPresent: Boolean): Boolean =
-        offerPending && sessionPresent
+    fun biometricEnrollOffered(
+        offerPending: Boolean,
+        sessionPresent: Boolean,
+        alreadyEnabled: Boolean,
+    ): Boolean = offerPending && sessionPresent && !alreadyEnabled
 
     /**
      * Whether a session on [sessionSlot] may WRITE the single biometric wrap, given the slot the
