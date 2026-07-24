@@ -36,6 +36,14 @@ usage; the TypeScript pack alone is ~244 findings, mostly low-precision). Adding
 requires curating a high-precision subset that is clean against the tree, one language at a time —
 each is its own vetted change, not a bulk import.
 
+## Provenance & license
+The rule files under `github-actions/` and `go/` are vendored verbatim from the official
+[`semgrep/semgrep-rules`](https://github.com/semgrep/semgrep-rules) repository, pinned at upstream
+commit `81634cfc9e68dc5f238a8062909a60ba34500648`. They are licensed under the **Semgrep Rules
+License v1.0** (<https://semgrep.dev/legal/rules-license>), NOT this project's AGPL-3.0 — they are
+third-party content used here to scan our own code, and retain their upstream license. Do not
+relicense them; when refreshing, re-copy from a pinned upstream commit and record it here.
+
 ## Updating
 - Bump the pinned Semgrep version in `ci.yml` deliberately (never a floating tag).
 - After adding/updating rules, run locally against a clean tree and confirm 0 findings before
