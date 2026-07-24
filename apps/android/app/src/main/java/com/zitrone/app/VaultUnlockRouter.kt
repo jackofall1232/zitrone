@@ -84,25 +84,29 @@ class VaultUnlockRouter {
      * Uses a constant-time digest compare ([MessageDigest.isEqual] over two 32-byte digests) and
      * wipes the transient UTF-8 bytes it hashes.
      */
-    @Synchronized
     fun decideCreate(passphrase: String): Boolean {
+        // Hash OUTSIDE the monitor: SHA-256 of an arbitrary-length passphrase must not hold the lock that
+        // the main-thread resetCandidate / backoff reads also take (avoids any contention/ANR under a
+        // huge passphrase). The compare + counter update below are nanosecond-scale and take the lock.
         val hash = sha256(passphrase)
-        val pending = candidateHash
-        // ALWAYS run the constant-time compare — against a fixed all-zero digest when there is no
-        // pending candidate — so the work is byte-identical on every attempt (no short-circuit that
-        // would make a fresh/reset attempt observably cheaper than a continuing one).
-        val same = MessageDigest.isEqual(hash, pending ?: NO_CANDIDATE)
-        if (pending != null && same) {
-            // Cap at the threshold: create stays requested for further identical entries (the
-            // marker-present fail-closed case) without ever overflowing candidateCount.
-            if (candidateCount < CREATE_THRESHOLD) candidateCount++
-            hash.fill(0) // identical to the existing candidate — drop the fresh copy
-        } else {
-            candidateHash?.fill(0)
-            candidateHash = hash
-            candidateCount = 1
+        return synchronized(this) {
+            val pending = candidateHash
+            // ALWAYS run the constant-time compare — against a fixed all-zero digest when there is no
+            // pending candidate — so the work is byte-identical on every attempt (no short-circuit that
+            // would make a fresh/reset attempt observably cheaper than a continuing one).
+            val same = MessageDigest.isEqual(hash, pending ?: NO_CANDIDATE)
+            if (pending != null && same) {
+                // Cap at the threshold: create stays requested for further identical entries (the
+                // marker-present fail-closed case) without ever overflowing candidateCount.
+                if (candidateCount < CREATE_THRESHOLD) candidateCount++
+                hash.fill(0) // identical to the existing candidate — drop the fresh copy
+            } else {
+                candidateHash?.fill(0)
+                candidateHash = hash
+                candidateCount = 1
+            }
+            candidateCount >= CREATE_THRESHOLD
         }
-        return candidateCount >= CREATE_THRESHOLD
     }
 
     /**

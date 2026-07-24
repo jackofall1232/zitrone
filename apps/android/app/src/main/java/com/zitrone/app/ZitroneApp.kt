@@ -572,24 +572,27 @@ class AppContainer(private val app: Application) {
      */
     fun publishSession(vaultOpen: VaultOpen): Boolean {
         var published = false
-        unlockController.unlock(
-            prepared = { sessionScope ->
-                buildVaultSession(sessionScope, vaultOpen).also { published = true }
-            },
-            onRefused = {
-                wipe(vaultOpen.vaultKey)
-                wipe(vaultOpen.payloadPlaintext)
-            },
-        )
-        if (published) {
-            settingsRepository.setOnboardingDone(true)
+        try {
+            unlockController.unlock(
+                prepared = { sessionScope ->
+                    buildVaultSession(sessionScope, vaultOpen).also { published = true }
+                },
+                onRefused = {
+                    wipe(vaultOpen.vaultKey)
+                    wipe(vaultOpen.payloadPlaintext)
+                },
+            )
+        } finally {
             // Any live session ENDS/interrupts an in-progress triple-entry ritual — reset here so the
             // guard covers EVERY unlock path uniformly (passphrase, BIOMETRIC, onboarding create), not
-            // just the passphrase path. This closes the gap where a biometric unlock (which never goes
-            // through the passphrase router's reset) could leave a mid-ritual candidate to be completed
-            // by a single lock-screen entry after a later non-background re-lock.
-            unlockRouter.resetCandidate()
+            // just the passphrase path. In a `finally` keyed on `published` so it runs EVEN IF a
+            // post-publish step (afterPublish / the settings write below) throws AFTER the session went
+            // live: without this, a soft exception on the biometric path could leave a mid-ritual
+            // candidate alive over a published session, to be completed by one lock-screen entry after a
+            // later non-background re-lock. A refused (non-published) build must NOT reset — no session.
+            if (published) unlockRouter.resetCandidate()
         }
+        if (published) settingsRepository.setOnboardingDone(true)
         return published
     }
 
