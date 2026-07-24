@@ -79,14 +79,16 @@ built on it.
   UI copy, code, string resources, comments, or logs. There is no canonical "which is real": it
   is defined only by which one the user treats as theirs.
 - Every vault derives its unlock key with **identical Argon2id parameters**, and the unlock
-  *attempt* runs the same no-early-exit sweep over **every** slot regardless of outcome (mirroring
-  `vault.ts`'s `tryPassphrase`). So the **cryptographic work** — its timing, memory-access pattern,
-  and per-slot storage access — is identical whether the entered passphrase matches slot A, slot B,
-  or nothing: the *computation* leaks neither which vault opened nor whether a second vault exists.
-  What is of course visible is the **outcome** — a correct passphrase opens the app, a wrong one
-  stays denied — but that reveals nothing about a hidden vault (a wrong guess looks the same whether
-  or not a vault B exists), and the two *success* cases (A and B) are mutually indistinguishable.
-  One deliberate exception: *creating* a vault additionally persists to disk (see §3.3 /
+  *attempt* runs the same fixed **no-early-exit sweep** — derive and attempt-unwrap **every** slot,
+  regardless of outcome (mirroring `vault.ts`'s `tryPassphrase`). So the sweep's **cryptographic-work
+  budget** (its wall-clock time and per-slot access) is fixed whether the entered passphrase matches
+  slot A, slot B, or nothing: the sweep leaks neither *which* slot matched nor *whether* any did.
+  What the sweep does **not** hide — because it is inherent to unlocking, not a second-vault tell — is
+  the **success branch**: a match then retains its key and opens its vault, a miss stays denied. That
+  visible outcome (opened vs still-denied) reveals nothing about a hidden vault — a wrong guess looks
+  the same whether or not a vault B exists — and two *matches* (A vs B) are symmetric and mutually
+  indistinguishable **at the unlock**; once open, each vault of course shows its own contents, as any
+  unlock does. One deliberate exception: *creating* a vault additionally persists to disk (see §3.3 /
   `SECURITY_MODEL.md`), an accepted timing residual an ordinary unlock does not incur.
 - A hidden vault's contents must not be constrained to "sensitive" material only. If vault B
   only ever held high-stakes conversations, its *contents* become the tell the moment anyone
@@ -117,8 +119,9 @@ The lock screen is **visually and structurally unchanged** — no new screen, bu
   denied) — that is inherent to any unlock and reveals nothing about a hidden vault. What the design
   guarantees is narrower and is the part that matters: an observer watching or forcing an unlock
   **cannot tell which vault opened, nor whether more than one vault exists** — the two success cases
-  are identical (same screen, same flow), and a miss looks the same whether or not a second vault is
-  present. (A *creating* third entry additionally persists to disk; see §3.3.)
+  run the identical unlock flow to the same chat-list screen (no per-vault banner; the opened vault's
+  own contents then appear, as with any unlock), and a miss looks the same whether or not a second
+  vault is present. (A *creating* third entry additionally persists to disk; see §3.3.)
 
 ### 3.3 Setup
 
@@ -229,8 +232,8 @@ introduce server involvement in vault unlock without recognizing it breaks this 
 ## 6. Threat model & accepted limits
 
 - **Single disk snapshot / compelled disclosure (the target scenario):** unprovable. Fixed-size
-  storage image, identical timing, no stored vault count, blind-overwrite on creation — nothing
-  distinguishes one identity from two.
+  storage image, a fixed no-early-exit unlock-attempt work budget, no stored vault count,
+  blind-overwrite on creation — nothing in the image distinguishes one identity from two.
 - **Multi-snapshot diffing** (adversary images the disk at two times): can see which slot's
   payload region changed, revealing *that* slot is live. Same bound VeraCrypt hidden volumes
   accept; documented, not solved.

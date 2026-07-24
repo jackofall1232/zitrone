@@ -426,9 +426,11 @@ cryptographic evidence that a second vault exists.
   byte-for-byte indistinguishable from a real wrapped key. The integer number of vaults is never
   stored anywhere; a slot that fails to decrypt is indistinguishable from a wrong passphrase.
 - **Timing parity.** `tryPassphrase` derives a key for, and attempts to unwrap, **every** slot with
-  no early exit. The wall-clock time is identical whether a passphrase matches slot 0, slot 1, or
-  nothing — a stopwatch cannot distinguish a decoy unlock from a real one. (See the timing-parity
-  test in `packages/crypto`.)
+  no early exit. The wall-clock time of that KDF-and-unwrap **sweep** is identical whether a passphrase
+  matches slot 0, slot 1, or nothing — a stopwatch cannot distinguish a decoy unlock from a real one,
+  nor tell a match from a miss by the sweep. (See the timing-parity test in `packages/crypto`.) Two
+  residuals sit *outside* the sweep and are disclosed separately: the winning vault's post-decrypt
+  parse (the "one residue" below), and — on Android — a vault **creation** persisting to disk.
 - **Independence.** Each vault has its own random vault key and its own server account, identity key,
   and prekey bundle. The server cannot link them. Decrypted vault contents live in memory only and
   are zeroed on background.
@@ -501,7 +503,7 @@ Two VeraCrypt-analogous caveats apply, and are accepted deliberately:
   **same heavy cryptographic-work budget** (the full per-slot Argon2id sweep, the candidate seal, and
   the one 256-KiB payload GCM every outcome performs). It is **not** claimed to be wall-clock
   identical to a wrong-passphrase attempt: the pending-delete create path additionally performs two
-  `Files.notExists` marker checks that a plain wrong attempt does not, and their timing is not claimed
+  `Files.notExists` marker checks (up to two — the `&&` short-circuits) that a plain wrong attempt does not, and their timing is not claimed
   identical or negligible — the parity guarantee here is over the heavy cryptographic budget, not
   those filesystem stats. This is a deliberate fail-closed choice: with a live image on disk, nothing
   observable can tell a *stale* marker (cleanup that did not finish) from a *live* one (a deletion
