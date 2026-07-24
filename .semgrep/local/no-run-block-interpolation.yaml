@@ -31,6 +31,13 @@ rules:
       confidence: HIGH
       references:
         - https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#understanding-the-risk-of-script-injections
+    # Semgrep's generic `...` ellipsis matches at most `generic_ellipsis_max_span` newlines (default 10),
+    # so a `${{ … }}` expression split across many blank lines inside a `run: |` block (GitHub ignores the
+    # whitespace) could evade the `${{ ... }}` pattern below. Raise the span to a bound no reviewable
+    # workflow could plausibly exceed — a single interpolation spanning 10 000 lines of one run scalar is
+    # absurd and would be obvious in review — so line-split obfuscation cannot hide the injection.
+    options:
+      generic_ellipsis_max_span: 10000
     patterns:
       - pattern-inside: "steps: [...]"
       - pattern-inside: |
