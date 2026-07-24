@@ -1,0 +1,44 @@
+# Zitrone — Copyright (C) 2026 Zitrone contributors
+# Licensed under the GNU Affero General Public License v3.0 or later.
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# LOCAL rule (our own — NOT vendored from semgrep-rules). Closes a coverage gap in the upstream
+# `run-shell-injection` rule, which matches only an ENUMERATED set of direct `github.event.*` fields
+# and does NOT flag `${{ steps.*.outputs.* }}` (a step output derived from an attacker-influenceable
+# input) or other contexts interpolated into a `run:` script — the exact variant that produced the
+# release-apk.yml injection (the release TAG flowed through steps.meta.outputs.tag / steps.stage.outputs.apk).
+#
+# Policy: NEVER interpolate `${{ … }}` into a `run:` script. GitHub substitutes it as text BEFORE the
+# shell parses, so ANY interpolated value (github.*, inputs.*, or a derived step output) is arbitrary
+# command execution. Always pass the value via `env:` and use a quoted "$VAR". This rule is intentionally
+# stricter than the upstream one (it flags every interpolation in a run block, safe-looking ones
+# included) — that is the point: the gate should catch a re-introduction regardless of which context is used.
+rules:
+  - id: zitrone-no-interpolation-in-run
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      Do not interpolate `${{ ... }}` into a `run:` script — it is substituted as text before the shell
+      parses, so any attacker-influenceable value (github.*, inputs.*, or a step output derived from them)
+      becomes shell injection in the runner. Pass the value via `env:` and reference a quoted "$VAR".
+    metadata:
+      category: security
+      technology: [github-actions]
+      cwe:
+        - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+      owasp:
+        - "A03:2021 - Injection"
+      confidence: HIGH
+      references:
+        - https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#understanding-the-risk-of-script-injections
+    patterns:
+      - pattern-inside: "steps: [...]"
+      - pattern-inside: |
+          - run: ...
+            ...
+      - pattern: "run: $SHELL"
+      - metavariable-pattern:
+          language: generic
+          metavariable: $SHELL
+          patterns:
+            - pattern: ${{ ... }}

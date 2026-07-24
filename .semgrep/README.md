@@ -28,6 +28,13 @@ CI runs a **pinned** Semgrep container (`semgrep/semgrep:<version>` in `ci.yml`)
   means pinning every action to a 40-char SHA + SHA-pin maintenance; tracked as its own follow-up so
   the gate stays focused and green.)
 - **`go/`** — Semgrep's official Go **language security** rules; clean against `server/`.
+- **`local/`** — OUR OWN rules (not vendored; AGPL like the rest of the repo). `no-run-block-interpolation`
+  flags **any** `${{ … }}` interpolated into a `run:` script, not just the enumerated `github.event.*`
+  fields the upstream `run-shell-injection` rule matches. This closes a real gate gap: the upstream rule
+  does NOT flag `${{ steps.*.outputs.* }}` (a step output derived from an attacker-influenceable input) —
+  the exact variant that produced the release-apk.yml injection (the tag flowed via
+  `steps.meta.outputs.tag` / `steps.stage.outputs.apk`). It is intentionally strict (safe-looking
+  interpolations included) — the enforced policy is "never interpolate into `run:`; pass via `env:`".
 
 ## Extending coverage (follow-up)
 The full Kotlin / TypeScript / JavaScript packs are NOT gate-clean — they include informational /
