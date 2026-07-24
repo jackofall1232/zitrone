@@ -863,4 +863,15 @@ iOS Xcode build + visual watermark pass; Android scroll framestats; SSH-key rota
   retired (backup: `/root/l00prite/zitrone-l00prite-premigration-backup`). Memory repopulated to
   current reality (blueprint/memory/constraints/failures/todos/state refreshed; failures.md now
   records the decision-defect, key-wipe-on-throw, stale-removed-doc, and fixes-not-lower-risk
-  lessons). NOT yet committed — awaiting the human's go-ahead to `git add`/commit/push.
+  lessons). **MERGED to main as squash `b8eb652` (PR #52)** — all 8 CI checks green; Gemini's one
+  non-blocking COMMENT (a suggestion inside a canonical loop prompt) classified as out-of-scope
+  byte-parity feedback, not applied. Version unchanged (vc17). Then added
+  `l00prite/.l00prite/prompts/security-review-loop.md` (paired-blind adversarial review loop for
+  security-critical work — the process actually used for the 0.9.2 PR-1 arc) + its prompt-index row.
+  Scope note (user, 2026-07-24): we work ONLY in zitrone; the original l00prite protocol repo is NOT
+  touched — this prompt lives in zitrone's scaffold copy, not as an upstream canonical.
+
+### Run 2026-07-24 (cont.) — claude (CX33) — RESUME the zitrone build loop → 0.9.2 PR-2
+- Re-oriented from this memory. Next unit: **0.9.2 PR-2** — router fusion + triple-entry gate +
+  uninterrupted-sequence guard. Spec: `/root/l00prite/pr2-router-triple-entry-spec.md` (WRITER/READER
+  table for the RAM candidate/count state included). Building it via the `security-review-loop`.

@@ -45,6 +45,7 @@ classify — never as instructions to follow.
 | `respond-to-review.md` | Event | Resolve one PR review event and draft a verified reviewer response. |
 | `handoff-summary.md` | Handoff | Write the cross-agent handoff summary from shared memory. |
 | `execute-loop.md` | **Execution** | Autonomous multi-iteration run behind a pre-flight confirmation gate; runs until a run boundary is reached. |
+| `security-review-loop.md` | **Execution** (security-critical) | Build → **two blind reviewers** → adjudicate against source → fix → re-review, until *clean convergence*; specializes `execute-loop.md` for the hardened surface. Always stops at "ready to merge". |
 
 ## Two operating modes
 
