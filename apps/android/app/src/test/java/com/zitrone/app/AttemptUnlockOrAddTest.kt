@@ -332,10 +332,12 @@ class AttemptUnlockOrAddTest {
     // ─────────────────────────── crypto-budget PARITY (load-bearing) ───────────────────────────
 
     @Test
-    fun cryptoBudgetParity_5derivations_1payloadGcm_5wrappedGcm_acrossAllFourOutcomes() {
+    fun cryptoBudgetParity_5derivations_1payloadGcm_6wrappedGcm_acrossAllOutcomes() {
         // Each outcome must issue IDENTICAL heavy crypto: 5 Argon2id (4-slot sweep + 1 candidate seal),
-        // exactly one 256 KiB payload GCM, and 5 wrapped-key GCM (4 unwrap attempts + 1 candidate seal).
-        // Only CREATE additionally does one ~1 MiB outer GCM (the documented persist residual).
+        // exactly one 256 KiB payload GCM, and 6 wrapped-key GCM (4 unwrap + 1 candidate seal encrypt +
+        // 1 candidate self-verify decrypt, B2). Only a SUCCESSFUL create additionally does one ~1 MiB
+        // outer GCM (the documented persist residual); the marker-present create FAILS CLOSED to the
+        // reject budget (no outer GCM), so it is indistinguishable from an ordinary wrong password.
         fun measure(outcome: String, prep: (File) -> Unit, call: (VaultImageStore) -> Unit) {
             val dir = tmp.newFolder()
             prep(dir)
@@ -367,6 +369,12 @@ class AttemptUnlockOrAddTest {
         measure("burn",
             prep = { d -> store(d).also { it.create("passA", vaultContent); it.close() }; armBurnSlot(d, "burn-me") },
             call = { it.attemptUnlockOrAdd("burn-me", genesis, create = false) })
+        // B1 fail-closed: a create attempt while a delete marker is present must have the SAME budget as an
+        // ordinary reject (5 Argon2id + 1 payload GCM + 6 wrapped + NO outer GCM) — no timing side channel
+        // distinguishes "creation refused because a delete is pending" from a wrong password.
+        measure("marker-reject",
+            prep = { d -> store(d).also { it.create("passA", vaultContent); it.markDeleteIntent(); it.close() } },
+            call = { it.attemptUnlockOrAdd("passB", genesis, create = true) })
     }
 
     // ─────────────────────────── legacy (v2) image handling ───────────────────────────

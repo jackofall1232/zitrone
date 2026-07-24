@@ -604,8 +604,9 @@ class VaultImageStore internal constructor(
      * cases apart (the plausible-deniability + duress-credential timing contract):
      *
      *   - [tryPassphrase] over ALL SLOT_COUNT slots (incl. slot 0), no early exit — SLOT_COUNT Argon2id;
-     *   - ONE unconditional candidate-slot seal ([sealSlot]) — 1 more Argon2id + 1 tiny wrapped-key GCM
-     *     (real vault-B material on create, pure timing filler otherwise);
+     *   - ONE unconditional candidate-slot seal ([sealSlotSelfVerifying]) — 1 more Argon2id + TWO
+     *     wrapped-key GCM (the seal encrypt + a same-master-key verify decrypt, 0 extra Argon2id); real
+     *     vault-B material on create, pure timing filler otherwise. Total: 5 Argon2id + 6 wrapped-key GCM;
      *   - EXACTLY ONE 256 KiB payload GCM (open on a match, seal on create/reject).
      *
      * A SLOT MATCH (0..SLOT_COUNT-1) ALWAYS wins over [create]. A match on slot 0
@@ -613,8 +614,9 @@ class VaultImageStore internal constructor(
      * and never treats slot 0 as a vault). A match on 1..SLOT_COUNT-1 returns [UnlockOrAdd.Unlocked].
      * No match with [create] true seals a NEW vault into a random VAULT-POOL slot
      * ([randomVaultSlotIndex], never slot 0) sealing [genesisPayload], writes it durably (reusing the
-     * EXISTING DEK — no dek write), and returns [UnlockOrAdd.Created]; with [create] false it returns
-     * [UnlockOrAdd.Rejected] having written nothing.
+     * EXISTING DEK — no dek write), and returns [UnlockOrAdd.Created] — UNLESS a delete marker is present
+     * (see DELETE MARKERS below), in which case it FAILS CLOSED to [UnlockOrAdd.Rejected]. With [create]
+     * false it returns [UnlockOrAdd.Rejected] having written nothing.
      *
      * TIMING RESIDUAL (documented, accepted): only the create path additionally PERSISTS (the ~1 MiB
      * outer GCM + atomic write + dir-fsync that gate a durable [UnlockOrAdd.Created]). That work is
@@ -626,9 +628,15 @@ class VaultImageStore internal constructor(
      * slots 1..SLOT_COUNT-1 — the documented VeraCrypt-outer-volume tradeoff. Slot 0 (burn) is never a
      * target, so duress protection survives even a full pool.
      *
-     * DELETE MARKERS: a create clears BOTH delete markers durably FIRST (mirrors [create]'s F2/round-14
-     * discipline) — safety-critical so a stale confirmed marker cannot auto-destroy the new vault and a
-     * stale intent cannot resurrect a reconcile against it. A non-durable clear throws before any write.
+     * DELETE MARKERS — FAIL-CLOSED, this method is a pure READER (never writes/clears a marker). Unlike
+     * [create], whose `require(!binFile.exists())` PROVES its markers orphaned, the add-path has a LIVE
+     * image and cannot tell a stale marker from a live one (intent = reconcile owed; confirmed = destroy
+     * owed). So if it cannot prove BOTH markers absent (`Files.notExists`), it does NOT create and does NOT
+     * touch any marker — it returns [UnlockOrAdd.Rejected] (NOT a throw — a throw would be an observable
+     * side channel while the device is mid-delete) after the SAME throwaway payload GCM every other outcome
+     * performs. A's delete-state machine is left untouched. The marker check is in the SAME [imageLock]
+     * critical section as the sweep and the write, and the marker writers take [imageLock] too, so no
+     * marker can appear between the check and the write (no TOCTOU). Disclosed in docs/SECURITY_MODEL.md.
      *
      * The [create] flag is the CALLER's decision (the router's triple-entry gate); this method holds no
      * cross-call state. [genesisPayload] is the plaintext to seal into a new vault (caller owns+wipes it,
@@ -636,8 +644,8 @@ class VaultImageStore internal constructor(
      *
      * CPU-heavy (SLOT_COUNT+1 Argon2id): caller MUST be off-main. Throws [VaultImageException.MissingImage]
      * / [VaultImageException.CorruptImage] / [VaultImageException.LegacyImage] from [open]; [CorruptImage]
-     * if a MATCHED VAULT slot's payload is unreadable; [NotDurable] if the pre-create marker clear or the
-     * create write is not confirmed durable.
+     * if a MATCHED VAULT slot's payload is unreadable; [NotDurable] if the create write is not confirmed
+     * durable; [IllegalStateException] if the candidate self-verify fails (a miscomputing AEAD provider).
      */
     fun attemptUnlockOrAdd(passphrase: String, genesisPayload: ByteArray, create: Boolean): UnlockOrAdd {
         imageLock.withLock {
