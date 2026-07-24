@@ -10,6 +10,7 @@ package com.zitrone.app.data
 
 import android.content.SharedPreferences
 import com.zitrone.app.crypto.KeyStoreManager
+import com.zitrone.app.crypto.vault.BiometricVaultKeyCipher
 import com.zitrone.app.crypto.vault.BiometricWrappedKey
 import com.zitrone.app.crypto.vault.VAULT_SLOT_RANGE
 import java.util.Base64
@@ -34,8 +35,17 @@ class BiometricUnlockStore(private val prefs: SharedPreferences) {
     constructor(keyStoreManager: KeyStoreManager) :
         this(keyStoreManager.prefs(KeyStoreManager.PREFS_SETTINGS))
 
-    /** The stored wrap, or null when biometric unlock is not enabled (or the blob is off-shape). */
-    fun load(): BiometricWrappedKey? {
+    /** The stored wrap, or null when biometric unlock is not enabled (or any field is off-shape). */
+    fun load(): BiometricWrappedKey? = try {
+        loadUnsafe()
+    } catch (e: Exception) {
+        // Hostile / corrupt prefs — a field stored with the WRONG TYPE makes the typed getters throw
+        // ClassCastException (e.g. a forensic edit turning the aliasId string into an int) — must read as
+        // NOT enabled, never crash isEnabled()/boundAliasId()/the unlock coroutine. Errors still propagate.
+        null
+    }
+
+    private fun loadUnsafe(): BiometricWrappedKey? {
         val encoded = prefs.getString(KEY_BLOB, null) ?: return null
         val slot = prefs.getInt(KEY_SLOT, -1)
         // Validate against the VAULT POOL (1..SLOT_COUNT-1), not just >= 0: a corrupted/tampered prefs int
@@ -43,13 +53,19 @@ class BiometricUnlockStore(private val prefs: SharedPreferences) {
         // read as "not enabled" here, never reach unlockWithKey's require(slotIndex in VAULT_SLOT_RANGE)
         // and crash the unlock coroutine. Biometric is A-only, and A always lives in the pool.
         if (slot !in VAULT_SLOT_RANGE) return null
+        // aliasId (0.9.2): names the per-enable Keystore key that sealed this wrap. A MISSING aliasId is a
+        // pre-0.9.2 (single-alias) or tampered wrap → read as NOT enabled so the user simply re-enrolls
+        // (no migration; consistent with the fresh-install / storage-format stance). A malformed aliasId
+        // must never reach a Keystore alias, so validate its shape here too.
+        val aliasId = prefs.getString(KEY_ALIAS_ID, null) ?: return null
+        if (!BiometricVaultKeyCipher.isValidAliasId(aliasId)) return null
         val blob = try {
             Base64.getDecoder().decode(encoded)
         } catch (e: IllegalArgumentException) {
             return null
         }
         if (blob.size != BiometricWrappedKey.BLOB_BYTES) return null
-        return BiometricWrappedKey(slot, blob)
+        return BiometricWrappedKey(slot, aliasId, blob)
     }
 
     /**
@@ -70,6 +86,13 @@ class BiometricUnlockStore(private val prefs: SharedPreferences) {
     fun boundSlotIndex(): Int? = load()?.slotIndex
 
     /**
+     * The aliasId of the CURRENT valid wrap, or null when none — the alias GC
+     * ([BiometricVaultKeyCipher.deleteAllAliasesExcept]) must KEEP at cold start / after enable, so it
+     * reaps only superseded/abandoned aliases and never the one the live wrap references (INV-1).
+     */
+    fun boundAliasId(): String? = load()?.aliasId
+
+    /**
      * Persist a fresh wrap (enable / re-enable). Constant-size; never logged. Low-level primitive:
      * it does NOT itself enforce the A-bound never-repoint invariant (OQ4). That invariant is enforced
      * by the SOLE production caller, `AppContainer.enableBiometricFromSession`, which fail-closes via
@@ -80,17 +103,19 @@ class BiometricUnlockStore(private val prefs: SharedPreferences) {
     fun save(wrap: BiometricWrappedKey) {
         prefs.edit()
             .putInt(KEY_SLOT, wrap.slotIndex)
+            .putString(KEY_ALIAS_ID, wrap.aliasId)
             .putString(KEY_BLOB, Base64.getEncoder().encodeToString(wrap.blob))
             .apply()
     }
 
     /** Drop the wrap (disable / invalidation). Idempotent. */
     fun clear() {
-        prefs.edit().remove(KEY_SLOT).remove(KEY_BLOB).apply()
+        prefs.edit().remove(KEY_SLOT).remove(KEY_ALIAS_ID).remove(KEY_BLOB).apply()
     }
 
     private companion object {
         const val KEY_SLOT = "biometric_vault_slot"
+        const val KEY_ALIAS_ID = "biometric_vault_alias_id"
         const val KEY_BLOB = "biometric_vault_blob"
     }
 }

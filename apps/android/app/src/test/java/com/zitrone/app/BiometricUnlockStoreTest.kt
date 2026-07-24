@@ -5,6 +5,7 @@
 
 package com.zitrone.app
 
+import com.zitrone.app.crypto.vault.BiometricVaultKeyCipher
 import com.zitrone.app.crypto.vault.BiometricWrappedKey
 import com.zitrone.app.crypto.vault.SLOT_COUNT
 import com.zitrone.app.data.BiometricUnlockStore
@@ -22,7 +23,8 @@ import org.junit.Test
 class BiometricUnlockStoreTest {
 
     private fun store() = BiometricUnlockStore(FakeSharedPreferences())
-    private fun wrap(slot: Int) = BiometricWrappedKey(slot, ByteArray(BiometricWrappedKey.BLOB_BYTES) { it.toByte() })
+    private fun wrap(slot: Int, aliasId: String = BiometricVaultKeyCipher.newAliasId()) =
+        BiometricWrappedKey(slot, aliasId, ByteArray(BiometricWrappedKey.BLOB_BYTES) { it.toByte() })
 
     @Test
     fun `a valid wrap round-trips and reads enabled`() {
@@ -120,6 +122,34 @@ class BiometricUnlockStoreTest {
         s.save(wrap(3))
         s.clear()
         assertNull("cleared wrap → no binding", s.boundSlotIndex())
+    }
+
+    @Test
+    fun `aliasId round-trips, boundAliasId reports it, and a missing or malformed aliasId reads as not-enabled`() {
+        // 0.9.2 enable-atomicity: the wrap names its own per-enable Keystore alias. The stored aliasId must
+        // round-trip; a MISSING aliasId (a pre-0.9.2 single-alias wrap, or tampering) must read as NOT
+        // enabled so the user simply re-enrolls (no migration); a malformed aliasId must likewise be rejected
+        // (it must never reach a Keystore alias).
+        val prefs = FakeSharedPreferences()
+        val s = BiometricUnlockStore(prefs)
+        assertNull("no wrap → no alias binding", s.boundAliasId())
+
+        val w = wrap(2, aliasId = "0123456789abcdef0123456789abcdef") // 32 hex = 16 bytes
+        s.save(w)
+        assertEquals("0123456789abcdef0123456789abcdef", s.load()!!.aliasId)
+        assertEquals("0123456789abcdef0123456789abcdef", s.boundAliasId())
+
+        // Old-format wrap: slot + blob present, but NO aliasId → not enabled.
+        prefs.edit().remove("biometric_vault_alias_id").apply()
+        assertFalse("wrap without aliasId (pre-0.9.2) is not enabled", s.isEnabled())
+        assertNull(s.load())
+        assertNull(s.boundAliasId())
+
+        // Malformed aliasId (wrong length / non-hex) → not enabled.
+        s.save(w)
+        prefs.edit().putString("biometric_vault_alias_id", "not-hex!!").apply()
+        assertFalse("malformed aliasId is not enabled", s.isEnabled())
+        assertNull(s.load())
     }
 
     @Test
