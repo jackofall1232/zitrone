@@ -76,6 +76,49 @@ fun sealSlot(
 }
 
 /**
+ * Like [sealSlot] but SELF-VERIFYING: immediately after wrapping, it decrypts the wrapped key back under
+ * the SAME derived master key and constant-time-compares it to [vaultKey], then wipes the master key. This
+ * costs ZERO extra Argon2id (one 60-byte GCM decrypt) and the master key never outlives the verify — its
+ * lifetime is identical to [sealSlot]'s.
+ *
+ * It proves the produced slot is actually openable with [vaultKey] BEFORE the caller persists it and hands
+ * a live session the in-memory key. The live [VaultImageStore.attemptUnlockOrAdd] add-path CANNOT verify by
+ * re-opening the persisted image the way [VaultImageStore.create] does (that would add SLOT_COUNT Argon2id
+ * and break the plausible-deniability timing parity), so this is the parity-preserving substitute: it
+ * catches a miscomputing [VaultSodiumOps] that returned a size-correct but wrong-content / wrong-key wrapped
+ * blob (which would otherwise be written durably and leave the new vault permanently unopenable after
+ * process death). Throws [IllegalStateException] on a self-verify failure — a broken AEAD provider, which
+ * would equally break every other slot operation; failing closed here is correct.
+ */
+fun sealSlotSelfVerifying(
+    passphrase: String,
+    vaultKey: ByteArray,
+    ops: VaultSodiumOps,
+    deriver: KeyDeriver = argon2idDeriver(ops),
+): KeySlot {
+    require(vaultKey.size == VAULT_KEY_BYTES) { "vault key must be $VAULT_KEY_BYTES bytes" }
+    val salt = ops.randomBytes(SALT_BYTES)
+    val masterKey = deriver(passphrase, salt)
+    try {
+        val wrapped = ops.aeadEncrypt(masterKey, vaultKey, SLOT_AD)
+        val recovered = ops.aeadDecrypt(masterKey, wrapped, SLOT_AD)
+            ?: throw IllegalStateException("sealed slot failed self-verify (wrapped key did not unwrap)")
+        try {
+            // Constant-time equality (both are VAULT_KEY_BYTES) — MessageDigest.isEqual is the platform
+            // constant-time compare. A mismatch means the AEAD provider does not round-trip: fail closed.
+            check(java.security.MessageDigest.isEqual(recovered, vaultKey)) {
+                "sealed slot failed self-verify (recovered key mismatch)"
+            }
+        } finally {
+            wipe(recovered)
+        }
+        return KeySlot(salt = salt, wrapped = wrapped)
+    } finally {
+        wipe(masterKey)
+    }
+}
+
+/**
  * Initialize a fresh set of slots: SLOT_COUNT slots, exactly one of which is the
  * real vault sealed under [passphrase]. The rest are random filler. The returned
  * vaultKey is the random key the caller should use to encrypt the vault's data.

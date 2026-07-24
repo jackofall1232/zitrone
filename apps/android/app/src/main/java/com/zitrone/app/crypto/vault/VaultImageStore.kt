@@ -572,7 +572,12 @@ class VaultImageStore internal constructor(
      */
     fun unlockWithKey(vaultKey: ByteArray, slotIndex: Int): VaultOpen? {
         imageLock.withLock {
-            require(slotIndex in 0 until SLOT_COUNT) { "slot index out of range" }
+            // Only VAULT-POOL slots (1..SLOT_COUNT-1) are openable this way (F9 / Grok): slot 0 is the burn
+            // credential and must NEVER be opened as a vault — a future biometric dual-wrap that named slot
+            // 0 would otherwise surface the burn payload as an ordinary unlock instead of triggering a wipe.
+            // BiometricUnlockStore is tightened to the same range, so a tampered slot-0 wrap reads
+            // not-enabled and never reaches here; this require is the store-level backstop.
+            require(slotIndex in VAULT_SLOT_RANGE) { "slot index out of range" }
             val image = canonical ?: run { open(); canonical!! }
             val payload = decodeImage(image).payloads[slotIndex]
             // Own COPY: on success the VaultOpen keeps it; on any failure wipe it. The
@@ -643,14 +648,22 @@ class VaultImageStore internal constructor(
             // (1) SWEEP — ALWAYS. SLOT_COUNT Argon2id over slots 0..SLOT_COUNT-1, no early exit.
             val unlock: VaultUnlock? = tryPassphrase(passphrase, decoded.slots, ops, deriver)
 
-            // (2) CANDIDATE SEAL — ALWAYS. 1 Argon2id + 1 tiny wrapped-key GCM. Real vault-B material on
-            //     the create branch; pure timing filler (wiped) otherwise. Placement is over the VAULT
-            //     POOL (never slot 0) so a create can never clobber the burn credential.
-            val candKey = ops.randomBytes(VAULT_KEY_BYTES)
-            val candSlotIndex = randomVaultSlotIndex(ops)
-            val candSlot = sealSlot(passphrase, candKey, ops, deriver)
-
+            // A cleanup mirror of the live candidate key (F4 / Codex): the candidate is generated INSIDE
+            // the try below so a throw during its generation (native crypto failure, OOM,
+            // sealSlotSelfVerifying self-verify failure) cannot strand it. The catch wipes both this and a
+            // live matched vault key — neither is covered if candidate generation sits before the try.
+            var candKeyForCleanup: ByteArray? = null
             try {
+                // (2) CANDIDATE SEAL — ALWAYS. 1 Argon2id + a SELF-VERIFYING wrap (2 wrapped-key GCM:
+                //     encrypt + verify-decrypt, 0 extra Argon2id — B2 / both reviewers). Real vault-B
+                //     material on the create branch; pure timing filler (wiped) otherwise. Placement is
+                //     over the VAULT POOL (never slot 0). sealSlotSelfVerifying proves the wrap is openable
+                //     with candKey BEFORE a create persists it (the add-path substitute for create()'s
+                //     re-open, which we cannot afford at +SLOT_COUNT Argon2id).
+                val candKey = ops.randomBytes(VAULT_KEY_BYTES).also { candKeyForCleanup = it }
+                val candSlotIndex = randomVaultSlotIndex(ops)
+                val candSlot = sealSlotSelfVerifying(passphrase, candKey, ops, deriver)
+
                 return when {
                     // ── BURN (slot 0 match) — wins over everything. Store writes nothing. ──
                     unlock != null && unlock.slotIndex == BURN_SLOT_INDEX -> {
@@ -680,42 +693,57 @@ class VaultImageStore internal constructor(
                         UnlockOrAdd.Unlocked(VaultOpen(unlock.vaultKey, unlock.slotIndex, pt))
                     }
 
-                    // ── CREATE a new vault into a vault-pool slot. ──
+                    // ── CREATE a new vault into a vault-pool slot — B1 FAIL-CLOSED. ──
                     create -> {
-                        // Clear stale delete markers durably BEFORE any write (OQ3; mirrors create()).
-                        // Conservative tristate: run the clear unless BOTH are CONFIRMED absent.
-                        val markersConfirmedAbsent =
+                        // B1 (fail-closed; reverses OQ3): if we cannot PROVE both delete markers absent, an
+                        // account delete may be in flight — intent = reconcile owed, confirmed = destroy
+                        // owed — and NOTHING observable distinguishes a stale marker from a live one. So we
+                        // NEVER create over that state and NEVER clear a marker (unlike create(), whose
+                        // require(!binFile.exists()) has PROVEN its markers orphaned; we have no such proof).
+                        // Instead behave EXACTLY like an ordinary wrong password: return Rejected (NOT throw —
+                        // a throw is an observable side channel precisely when the device is mid-delete) after
+                        // the SAME throwaway payload GCM every other outcome performs. A's delete-state
+                        // machine is left completely untouched. This marker check is in the SAME imageLock
+                        // critical section as the sweep and the write, and markDeleteIntent /
+                        // markServerDeleteConfirmed also take imageLock, so no marker can appear between the
+                        // check and the write (no TOCTOU). See docs/SECURITY_MODEL.md for the disclosed cost.
+                        val markersAbsent =
                             Files.notExists(deleteIntentFile.toPath()) &&
                                 Files.notExists(serverDeletedFile.toPath())
-                        if (!markersConfirmedAbsent && !clearBothMarkersDurably()) {
-                            throw VaultImageException.NotDurable()
-                        }
-                        // The 1×256 KiB payload GCM for this branch.
-                        val sealedGenesis = sealPayload(candKey, genesisPayload, ops)
-                        val newSlots = decoded.slots.toMutableList().also { it[candSlotIndex] = candSlot }
-                        val newPayloads =
-                            decoded.payloads.toMutableList().also { it[candSlotIndex] = sealedGenesis }
-                        val newInner = encodeImage(VaultImage(newSlots, newPayloads))
-                        // Reuse the EXISTING DEK (no dek write) → the {bin-present, dek-absent} brick is
-                        // unreachable by construction; the dek is already durable on disk from create().
-                        val outer = ops.aeadEncrypt(activeDek, newInner, VAULT_IMAGE_OUTER_AD)
-                        // atomicWrite throws ONLY pre-rename (canonical untouched); a RETURN means the
-                        // rename landed, the result reporting the rename's durability.
-                        val sync = atomicWrite(binFile, outer)
-                        // Rename committed → advance canonical BEFORE the durability check so a later
-                        // splice/attempt never works from stale state even on the NotDurable throw.
-                        canonical = newInner
-                        if (sync != DirSyncResult.DURABLE) {
-                            // On disk but durability unconfirmed: fail CLOSED so the caller does NOT ack a
-                            // create. candKey is wiped (the caller gets no VaultOpen); the new vault IS in
-                            // canonical, so a later single entry of its passphrase unlocks it via the
-                            // match path (no write needed) — or, if the rename did not survive a crash, it
-                            // is simply absent and re-creatable.
+                        if (!markersAbsent) {
+                            // The 1×256 KiB payload GCM, identical to Reject — no path skips it (folds in F6).
+                            val throwaway = sealPayload(candKey, ByteArray(0), ops)
                             wipe(candKey)
-                            throw VaultImageException.NotDurable()
+                            wipe(throwaway)
+                            UnlockOrAdd.Rejected
+                        } else {
+                            // The 1×256 KiB payload GCM for the create branch.
+                            val sealedGenesis = sealPayload(candKey, genesisPayload, ops)
+                            val newSlots = decoded.slots.toMutableList().also { it[candSlotIndex] = candSlot }
+                            val newPayloads =
+                                decoded.payloads.toMutableList().also { it[candSlotIndex] = sealedGenesis }
+                            val newInner = encodeImage(VaultImage(newSlots, newPayloads))
+                            // Reuse the EXISTING DEK (no dek write) → the {bin-present, dek-absent} brick is
+                            // unreachable by construction; the dek is already durable on disk from create().
+                            val outer = ops.aeadEncrypt(activeDek, newInner, VAULT_IMAGE_OUTER_AD)
+                            // atomicWrite throws ONLY pre-rename (canonical untouched); a RETURN means the
+                            // rename landed, the result reporting the rename's durability.
+                            val sync = atomicWrite(binFile, outer)
+                            // Rename committed → advance canonical BEFORE the durability check so a later
+                            // splice/attempt never works from stale state even on the NotDurable throw.
+                            canonical = newInner
+                            if (sync != DirSyncResult.DURABLE) {
+                                // On disk but durability unconfirmed: fail CLOSED so the caller does NOT ack a
+                                // create. candKey is wiped (the caller gets no VaultOpen); the new vault IS in
+                                // canonical, so a later single entry of its passphrase unlocks it via the
+                                // match path — or, if the rename did not survive a crash, it is simply absent
+                                // and re-creatable.
+                                wipe(candKey)
+                                throw VaultImageException.NotDurable()
+                            }
+                            // candKey is now the new vault's live key — HANDED to the session, NOT wiped here.
+                            UnlockOrAdd.Created(VaultOpen(candKey, candSlotIndex, genesisPayload.copyOf()))
                         }
-                        // candKey is now the new vault's live key — HANDED to the session, NOT wiped here.
-                        UnlockOrAdd.Created(VaultOpen(candKey, candSlotIndex, genesisPayload.copyOf()))
                     }
 
                     // ── REJECT — no match, no create. Nothing written. ──
@@ -729,10 +757,11 @@ class VaultImageStore internal constructor(
                     }
                 }
             } catch (t: Throwable) {
-                // Defensive: ensure no live candidate key is abandoned on any throw. On the Created
-                // (return) path this is not reached; on every other path candKey was already wiped, and a
-                // re-wipe of zeroed bytes is a no-op.
-                wipe(candKey)
+                // Ensure no live key is abandoned on ANY throw (F4): the candidate (if generated) AND a
+                // matched vault key that had not yet been handed to a VaultOpen. On a normal return this is
+                // not reached; on paths that already wiped, a re-wipe of zeroed bytes is a no-op.
+                candKeyForCleanup?.let { wipe(it) }
+                unlock?.let { wipe(it.vaultKey) }
                 throw t
             }
         }

@@ -16,6 +16,7 @@ import com.zitrone.app.crypto.vault.LEGACY_IMAGE_VERSION
 import com.zitrone.app.crypto.vault.LibsodiumVaultOps
 import com.zitrone.app.crypto.vault.OUTER_IMAGE_BYTES
 import com.zitrone.app.crypto.vault.PAYLOAD_PLAINTEXT_BYTES
+import com.zitrone.app.crypto.vault.SLOT_AD
 import com.zitrone.app.crypto.vault.SLOT_COUNT
 import com.zitrone.app.crypto.vault.SLOT_PAYLOAD_BYTES
 import com.zitrone.app.crypto.vault.UnlockOrAdd
@@ -266,14 +267,51 @@ class AttemptUnlockOrAddTest {
     // ─────────────────────────── delete-marker interaction (OQ3) ───────────────────────────
 
     @Test
-    fun create_clearsAStaleDeleteIntentMarker() {
+    fun create_failsClosed_whenDeleteIntentPresent_markerUntouched_nothingWritten() {
+        // B1 (reversal of OQ3): a create over an image carrying a delete marker must NOT create and must
+        // NOT clear the marker — it returns Rejected (like a wrong password), leaving A's delete-state
+        // machine intact. The old behavior (clearing the marker) cancelled A's account-delete reconcile.
         val dir = tmp.newFolder()
         val s = store(dir)
         s.create("passA", "A".toByteArray(Charsets.UTF_8))
         s.markDeleteIntent()
-        assertTrue(File(dir, "vault.delete-intent").exists())
-        assertTrue(s.attemptUnlockOrAdd("passB", genesis, create = true) is UnlockOrAdd.Created)
-        assertFalse("create clears the stale intent marker", File(dir, "vault.delete-intent").exists())
+        val before = bin(dir).readBytes()
+        assertEquals(UnlockOrAdd.Rejected, s.attemptUnlockOrAdd("passB", genesis, create = true))
+        assertTrue("intent marker is NOT cleared", File(dir, "vault.delete-intent").exists())
+        assertArrayEquals("nothing written on the fail-closed reject", before, bin(dir).readBytes())
+        // And passB did not create a vault: after retiring the marker, the pool is unchanged.
+        assertEquals(UnlockOrAdd.Rejected, s.attemptUnlockOrAdd("passB", genesis, create = false))
+    }
+
+    @Test
+    fun create_failsClosed_whenServerDeleteConfirmedPresent() {
+        // The confirmed marker is the sole authorization for boot-time auto-destroy; a create must never
+        // clear it (that would strand a server-deleted account's forensic image).
+        val dir = tmp.newFolder()
+        val s = store(dir)
+        s.create("passA", "A".toByteArray(Charsets.UTF_8))
+        s.markServerDeleteConfirmed()
+        val before = bin(dir).readBytes()
+        assertEquals(UnlockOrAdd.Rejected, s.attemptUnlockOrAdd("passB", genesis, create = true))
+        assertTrue("confirmed marker is NOT cleared", File(dir, "vault.delete-confirmed").exists())
+        assertArrayEquals(before, bin(dir).readBytes())
+    }
+
+    @Test
+    fun create_selfVerifiesTheSealedSlot_throwsAndPersistsNothing_onAMisSealingProvider() {
+        // B2: a miscomputing aeadEncrypt (size-correct, wrong-content wrapped key) must be caught by the
+        // candidate self-verify BEFORE anything is persisted — otherwise the new vault would be written
+        // durably yet be permanently unopenable after process death.
+        val dir = tmp.newFolder()
+        store(dir).also { it.create("passA", "A".toByteArray(Charsets.UTF_8)); it.close() }
+        val misSealing = MisSealingWrappedKeyOps(realOps)
+        val s = store(dir, ops = misSealing)
+        s.open()
+        val before = bin(dir).readBytes()
+        assertThrows(IllegalStateException::class.java) {
+            s.attemptUnlockOrAdd("passB", genesis, create = true)
+        }
+        assertArrayEquals("a failed self-verify persists nothing", before, bin(dir).readBytes())
     }
 
     // ─────────────────────────── durability ───────────────────────────
@@ -309,7 +347,8 @@ class AttemptUnlockOrAddTest {
             call(s)
             assertEquals("$outcome: 5 Argon2id (4 sweep + 1 candidate)", 5, counter.calls)
             assertEquals("$outcome: exactly one 256 KiB payload GCM", 1, counting.payloadOps)
-            assertEquals("$outcome: 5 wrapped-key GCM (4 unwrap + 1 seal)", 5, counting.wrappedOps)
+            // 4 sweep unwraps + 1 candidate seal encrypt + 1 candidate self-verify decrypt = 6 (B2).
+            assertEquals("$outcome: 6 wrapped-key GCM (4 unwrap + 1 seal + 1 self-verify)", 6, counting.wrappedOps)
             val expectedOuter = if (outcome == "create") 1 else 0
             assertEquals("$outcome: outer GCM only on create", expectedOuter, counting.outerOps)
         }
@@ -434,5 +473,23 @@ class AttemptUnlockOrAddTest {
         override fun aeadDecrypt(key: ByteArray, box: ByteArray, associatedData: ByteArray) =
             inner.aeadDecrypt(key, box, associatedData)
         override fun randomBytes(length: Int) = if (length == 4) forced.copyOf() else inner.randomBytes(length)
+    }
+
+    /**
+     * Miscomputes ONLY the wrapped-key layer (`SLOT_AD`): returns a size-correct but bit-flipped wrapped
+     * blob so it no longer decrypts back to the vault key. Every other AEAD op (payload, outer image) is
+     * the real byte path, so the store opens/reads normally — the defect surfaces only at the candidate
+     * self-verify (B2).
+     */
+    private class MisSealingWrappedKeyOps(private val inner: VaultSodiumOps) : VaultSodiumOps {
+        override fun argon2idDeriveKey(password: ByteArray, salt: ByteArray) = inner.argon2idDeriveKey(password, salt)
+        override fun randomBytes(length: Int) = inner.randomBytes(length)
+        override fun aeadDecrypt(key: ByteArray, box: ByteArray, associatedData: ByteArray) =
+            inner.aeadDecrypt(key, box, associatedData)
+        override fun aeadEncrypt(key: ByteArray, plaintext: ByteArray, associatedData: ByteArray): ByteArray {
+            val out = inner.aeadEncrypt(key, plaintext, associatedData)
+            if (associatedData.contentEquals(SLOT_AD)) out[out.size - 1] = (out[out.size - 1].toInt() xor 0x01).toByte()
+            return out
+        }
     }
 }
