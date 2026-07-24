@@ -113,9 +113,11 @@ The lock screen is **visually and structurally unchanged** — no new screen, bu
   intentional, accepted asymmetry: only one vault is reachable by biometric convenience; the rest
   are passphrase-only. **Enable is atomic** (0.9.2): each enable seals under its own unique Keystore
   alias, the wrap records which alias sealed it, an enable never destroys another's key, and all wrap
-  mutations (enable/disable/account-delete/GC) are serialized — so a concurrent, interrupted, or
-  disable-racing enable can never orphan the wrap or break an existing binding. A missing/invalidated
-  key auto-clears and re-offers; other decrypt/open failures (a corrupted or tampered blob, an
+  mutations (enable/disable/account-delete/GC) are serialized under one lock with an alias-exists check
+  at commit — so a concurrent, interrupted, or disable-racing enable can never leave a **wrong-key**
+  orphan or break an existing binding. (The prefs wrap and the Keystore key are separate stores, so a
+  process kill between them — as before this change — can leave a self-clearing *missing-key* wrap.) A
+  missing/invalidated key auto-clears and re-offers; other decrypt/open failures (a corrupted or tampered blob, an
   invalidation racing the unwrap, or a biometric-bound slot blind-overwritten by a later create) drop
   safely to the passphrase without auto-clearing (cleared by disabling biometric) — see
   `SECURITY_MODEL.md`.

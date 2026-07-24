@@ -749,7 +749,8 @@ class AppContainer(private val app: Application) {
             transportResolver.state.collect(::applyTransport)
         }
         // Cold-start GC of superseded/abandoned per-enable biometric aliases (0.9.2 enable-atomicity),
-        // off-main and at a quiescent point (no enable UI yet), keeping the live wrap's alias.
+        // off-main. Safe even if an enable races it: reapStaleBiometricAliases holds biometricWriteLock
+        // and keeps the live wrap's alias, and the enable-commit re-checks keyExists under the same lock.
         scope.launch(Dispatchers.IO) { runCatching { reapStaleBiometricAliases() } }
     }
 

@@ -505,10 +505,12 @@ Two VeraCrypt-analogous caveats apply, and are accepted deliberately:
   records which alias sealed it, and an enable never deletes another's key; every wrap mutation
   (enable-commit, disable, account-delete, and the stale-alias GC) is serialized under one lock, and
   the commit verifies its own alias still exists before persisting. So no concurrent, interrupted, or
-  disable-racing enable can leave a wrap that references a wrong or deleted key — the persisted wrap
-  always references its own existing sealing key. A **missing** key (superseded alias reaped, Keystore
-  eviction) or an **invalidated** key (new fingerprint enrolled) auto-clears the wrap and re-offers
-  enrollment. Not every failure auto-clears, and that is deliberate: a biometric unlock can also end in
+  disable-racing enable can ever leave a wrap that references a **wrong** key. (The prefs wrap and the
+  Keystore key are two separate stores, so — as before this change, and unavoidably — a process kill in
+  the tiny window between the asynchronous preferences write and the synchronous key delete can leave a
+  wrap whose key is simply **absent**; that is not a wrong-key orphan and the next unlock auto-clears
+  it.) A **missing** key (that crash window, a superseded alias reaped, or Keystore eviction) or an
+  **invalidated** key (new fingerprint enrolled) auto-clears the wrap and re-offers enrollment. Not every failure auto-clears, and that is deliberate: a biometric unlock can also end in
   a plain **failure that drops to the passphrase and grants no access** — if the stored blob is
   corrupted or forensically tampered, if the key is invalidated *between* cipher init and use, or if
   the biometric-bound vault's slot was **blind-overwritten by a later vault creation** (the unwrap

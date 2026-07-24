@@ -125,12 +125,13 @@ class BiometricVaultKeyCipher {
     fun deleteKey(aliasId: String) = deleteAlias(aliasFor(aliasId))
 
     /**
-     * Reap stale biometric aliases (GC): delete every `PREFIX*` Keystore entry EXCEPT the one the
-     * current persisted wrap references ([keepAliasId], or null to delete ALL — used by disable /
-     * account-delete). Best-effort and idempotent. MUST be called only at quiescent points (cold-start
-     * init; disable) — never concurrently with an in-flight enable — so it can never delete the alias
-     * the current wrap references (INV-1). Leftover aliases it fails to reap are harmless: unlock uses
-     * the wrap's own alias, not an enumeration.
+     * Reap stale biometric aliases (GC): delete every `PREFIX*` Keystore entry (and the pre-0.9.2
+     * fixed alias) EXCEPT the one the current persisted wrap references ([keepAliasId], or null to
+     * delete ALL — used by disable / account-delete). Best-effort and idempotent. Callers hold
+     * `AppContainer.biometricWriteLock` (the enable-commit takes the same lock and re-checks
+     * `keyExists`), so this is SAFE to run concurrently with an enable: it either reads a `keepAliasId`
+     * that already reflects the enable's saved wrap, or the enable aborts because its alias was reaped.
+     * Leftover aliases it fails to reap are harmless: unlock uses the wrap's own alias, not an enumeration.
      */
     fun deleteAllAliasesExcept(keepAliasId: String?) {
         val keep = keepAliasId?.let { aliasFor(it) }
