@@ -112,10 +112,13 @@ The lock screen is **visually and structurally unchanged** — no new screen, bu
   slot. Disabling biometric frees the binding for a different vault to claim later. This is the
   intentional, accepted asymmetry: only one vault is reachable by biometric convenience; the rest
   are passphrase-only. **Enable is atomic** (0.9.2): each enable seals under its own unique Keystore
-  alias and the wrap records which alias sealed it, so an enable never destroys another's key — a
-  concurrent or interrupted enable cannot orphan the wrap or break an existing binding, and the only
-  unlock failures (a reaped/evicted key, or a new-enrollment invalidation) both auto-clear and
-  re-offer enrollment, needing no manual recovery.
+  alias, the wrap records which alias sealed it, an enable never destroys another's key, and all wrap
+  mutations (enable/disable/account-delete/GC) are serialized — so a concurrent, interrupted, or
+  disable-racing enable can never orphan the wrap or break an existing binding. A missing/invalidated
+  key auto-clears and re-offers; other decrypt/open failures (a corrupted or tampered blob, an
+  invalidation racing the unwrap, or a biometric-bound slot blind-overwritten by a later create) drop
+  safely to the passphrase without auto-clearing (cleared by disabling biometric) — see
+  `SECURITY_MODEL.md`.
 - **"Use PIN" (the existing fallback) → is the vault router.** The entered passphrase is checked
   **locally** against the derived key for **every** vault slot (the no-early-exit sweep), not just
   two:

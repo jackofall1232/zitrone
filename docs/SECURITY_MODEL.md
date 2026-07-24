@@ -501,15 +501,23 @@ Two VeraCrypt-analogous caveats apply, and are accepted deliberately:
   next to enable. At any moment **only one vault is biometric-openable; the other(s) are
   passphrase-only.** The enrollment UI is slot-agnostic — it renders and behaves identically
   whichever vault is open — so the restriction is not itself a distinguisher. *Enable is atomic
-  (0.9.2, Android):* each enable generates its key under its **own unique Keystore alias**, and the
-  persisted wrap records which alias sealed it, so an enable never deletes or overwrites another's key.
-  Two overlapping enables (a double-tap, or the offer racing the Settings toggle) therefore cannot
-  orphan the wrap or destroy an existing binding — the persisted wrap always references its own,
-  existing key. The only ways a biometric unlock can fail are a **missing** key (e.g. a superseded
-  alias reaped, or Keystore eviction) or an **invalidated** key (a new fingerprint enrolled) — and
-  BOTH auto-clear the wrap and re-offer enrollment, so there is no stuck state and no manual recovery
-  step. Enrollment stays never-repointed (an established wrap is never moved to a different slot) and
-  slot-agnostic in the UI.
+  (0.9.2, Android):* each enable generates its key under its **own unique Keystore alias**, the wrap
+  records which alias sealed it, and an enable never deletes another's key; every wrap mutation
+  (enable-commit, disable, account-delete, and the stale-alias GC) is serialized under one lock, and
+  the commit verifies its own alias still exists before persisting. So no concurrent, interrupted, or
+  disable-racing enable can leave a wrap that references a wrong or deleted key — the persisted wrap
+  always references its own existing sealing key. A **missing** key (superseded alias reaped, Keystore
+  eviction) or an **invalidated** key (new fingerprint enrolled) auto-clears the wrap and re-offers
+  enrollment. Not every failure auto-clears, and that is deliberate: a biometric unlock can also end in
+  a plain **failure that drops to the passphrase and grants no access** — if the stored blob is
+  corrupted or forensically tampered, if the key is invalidated *between* cipher init and use, or if
+  the biometric-bound vault's slot was **blind-overwritten by a later vault creation** (the unwrap
+  succeeds but the recovered key no longer opens that slot). Such a wrap is left in place, not
+  auto-cleared, because a decrypt/open failure is not reliably distinguishable from a transient glitch
+  and clearing a *good* wrap on a transient would be worse than the stuck state; the user clears it by
+  disabling biometric (the passphrase always works meanwhile). None of these grant access or leak
+  which-vault / second-vault information. Enrollment stays never-repointed (an established wrap is never
+  moved to a different slot) and slot-agnostic in the UI.
 - **Vault creation silently fails while an account deletion is pending (0.9.2, Android).** Account
   deletion is a durable two-phase state machine (a `delete-intent` marker, then a `delete-confirmed`
   marker). While either marker is present, attempting to create a new vault does nothing and is

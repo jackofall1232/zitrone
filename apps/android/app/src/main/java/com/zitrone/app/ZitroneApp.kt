@@ -160,8 +160,18 @@ class AppContainer(private val app: Application) {
     /** The auth-gated biometric key that wraps the slot-A vault key (dual-wrap, posture B). */
     val biometricCipher = BiometricVaultKeyCipher()
 
-    /** Persisted `{ slotIndex, wrappedVaultKey }` — present ONLY for a biometric-enabled install. */
+    /** Persisted `{ slotIndex, aliasId, wrappedVaultKey }` — present ONLY for a biometric-enabled install. */
     val biometricStore = BiometricUnlockStore(keyStoreManager)
+
+    /**
+     * Serializes EVERY biometric-wrap-state mutation — enable-commit (belt re-check + alias-exists check
+     * + save), disable, account-delete cleanup, and the cold-start alias GC — so INV-1 holds under
+     * arbitrary interleaving. Without it, a disable/GC could reap the alias an in-flight enable is about
+     * to reference (orphan), and two cross-slot first-enables could both commit (silent rebind). The
+     * enable-commit runs the never-repoint belt AND `keyExists(aliasId)` under this lock, so a concurrent
+     * delete makes it ABORT instead of persisting a wrap that references a gone key.
+     */
+    private val biometricWriteLock = Any()
 
     /** Composable-free unlock decisions (backoff, uniform failure, biometric gating). */
     val unlockRouter = VaultUnlockRouter()
@@ -553,27 +563,31 @@ class AppContainer(private val app: Application) {
         session: SessionContainer,
         aliasId: String,
     ): Boolean {
-        // A-BOUND SINGLE WRAP (OQ4, "one wrap, never repointed"): there is exactly one biometric wrap
-        // and it must NEVER be repointed to a different slot. Allow the write ONLY when no wrap exists
-        // (first-enable-wins, OQ-A(i) — binds this slot) OR the existing wrap already names THIS
-        // session's slot (a same-vault re-enable/refresh). A session on any OTHER slot is refused
-        // FAIL-CLOSED: return false, seal nothing, write nothing, no repoint. The PRIMARY gate is the
-        // slot-agnostic isEnabled() check at the enable entrypoint (which also runs before the
-        // destructive newEncryptCipher, so a disallowed enable is side-effect-free); this per-slot check
-        // is the mid-flight BELT — it catches a session that changed between that entrypoint gate and
-        // this seal. The A-only restriction is therefore purely a write-path property; every enroll UI
-        // surface stays slot-agnostic so an A-session and a B-session render identically.
-        if (!unlockRouter.biometricEnableAllowed(biometricStore.boundSlotIndex(), session.slotIndex)) {
-            return false
-        }
+        // A-BOUND SINGLE WRAP (OQ4, "one wrap, never repointed"): allow the write ONLY when no wrap
+        // exists (first-enable-wins, OQ-A(i)) OR the existing wrap already names THIS session's slot
+        // (same-vault re-enable). Any OTHER slot is refused fail-closed (write nothing, no repoint). The
+        // slot-agnostic isEnabled() check at the entrypoint is the primary UX gate; the per-slot belt
+        // below is enforced UNDER [biometricWriteLock] atomically with the save, so it also catches a
+        // concurrent cross-slot enable (TOCTOU) — the later commit sees the earlier wrap and refuses.
+        // The A-only restriction stays purely a write-path property; every enroll UI surface is
+        // slot-agnostic so an A-session and a B-session render identically.
         return session.withVaultKey { key ->
+            // Seal OUTSIDE the lock (crypto over the live key); commit UNDER it. The commit re-checks the
+            // never-repoint belt AND that this enable's own alias still exists (a concurrent
+            // disable/account-delete/GC may have reaped it), atomically with the save — so the persisted
+            // wrap always references an existing sealing alias (INV-1) and two cross-slot first-enables
+            // cannot both commit (the later one's belt now sees the earlier wrap and refuses).
             val blob = biometricCipher.sealVaultKey(encryptCipher, key)
-            // [aliasId] names the key `newEncryptCipher(aliasId)` just created for THIS enable; the wrap
-            // therefore references its own alias (INV-1). Superseded aliases are reaped by cold-start GC.
-            biometricStore.save(
-                com.zitrone.app.crypto.vault.BiometricWrappedKey(session.slotIndex, aliasId, blob),
-            )
-            true
+            synchronized(biometricWriteLock) {
+                if (!unlockRouter.biometricEnableAllowed(biometricStore.boundSlotIndex(), session.slotIndex)) {
+                    return@synchronized false
+                }
+                if (!biometricCipher.keyExists(aliasId)) return@synchronized false // reaped mid-flight → abort
+                biometricStore.save(
+                    com.zitrone.app.crypto.vault.BiometricWrappedKey(session.slotIndex, aliasId, blob),
+                )
+                true
+            }
         }
     }
 
@@ -582,8 +596,10 @@ class AppContainer(private val app: Application) {
      * key (`deleteAllAliasesExcept(null)`), so no stale alias survives a disable. Idempotent.
      */
     fun disableBiometric() {
-        biometricStore.clear()
-        biometricCipher.deleteAllAliasesExcept(null)
+        synchronized(biometricWriteLock) {
+            biometricStore.clear()
+            biometricCipher.deleteAllAliasesExcept(null)
+        }
     }
 
     /**
@@ -594,7 +610,13 @@ class AppContainer(private val app: Application) {
      * enable, so it can never delete the live wrap's alias (INV-1).
      */
     fun reapStaleBiometricAliases() {
-        biometricCipher.deleteAllAliasesExcept(biometricStore.boundAliasId())
+        // Under the lock, read the live wrap's alias and delete every other biometric alias atomically —
+        // so a concurrent enable can neither have its just-saved wrap's alias reaped (it is `keep`) nor
+        // save between the read and the deletes (the enable-commit takes the same lock and re-checks
+        // keyExists). GC never deletes the alias the current wrap references (INV-1).
+        synchronized(biometricWriteLock) {
+            biometricCipher.deleteAllAliasesExcept(biometricStore.boundAliasId())
+        }
     }
 
     /**
@@ -618,8 +640,14 @@ class AppContainer(private val app: Application) {
      * there cannot mask — or pre-empt — the image destroy's success/failure signal.
      */
     fun destroyVaultForAccountDeletion() {
-        tolerateCleanup { biometricStore.clear() }
-        tolerateCleanup { biometricCipher.deleteAllAliasesExcept(null) }
+        // Under the same lock as enable-commit, so a racing in-flight enable cannot re-persist a wrap
+        // after this cleanup (it would abort on the keyExists check once these aliases are gone).
+        tolerateCleanup {
+            synchronized(biometricWriteLock) {
+                biometricStore.clear()
+                biometricCipher.deleteAllAliasesExcept(null)
+            }
+        }
         // NOT tolerated: a DestroyFailed (a surviving file) MUST reach the caller as a NOT-deleted signal.
         imageStore.destroy()
     }

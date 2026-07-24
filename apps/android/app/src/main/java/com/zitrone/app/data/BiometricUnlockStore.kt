@@ -36,7 +36,16 @@ class BiometricUnlockStore(private val prefs: SharedPreferences) {
         this(keyStoreManager.prefs(KeyStoreManager.PREFS_SETTINGS))
 
     /** The stored wrap, or null when biometric unlock is not enabled (or any field is off-shape). */
-    fun load(): BiometricWrappedKey? {
+    fun load(): BiometricWrappedKey? = try {
+        loadUnsafe()
+    } catch (e: Exception) {
+        // Hostile / corrupt prefs — a field stored with the WRONG TYPE makes the typed getters throw
+        // ClassCastException (e.g. a forensic edit turning the aliasId string into an int) — must read as
+        // NOT enabled, never crash isEnabled()/boundAliasId()/the unlock coroutine. Errors still propagate.
+        null
+    }
+
+    private fun loadUnsafe(): BiometricWrappedKey? {
         val encoded = prefs.getString(KEY_BLOB, null) ?: return null
         val slot = prefs.getInt(KEY_SLOT, -1)
         // Validate against the VAULT POOL (1..SLOT_COUNT-1), not just >= 0: a corrupted/tampered prefs int

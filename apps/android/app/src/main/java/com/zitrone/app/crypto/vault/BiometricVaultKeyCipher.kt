@@ -135,7 +135,10 @@ class BiometricVaultKeyCipher {
     fun deleteAllAliasesExcept(keepAliasId: String?) {
         val keep = keepAliasId?.let { aliasFor(it) }
         val toDelete = try {
-            keyStore.aliases().toList().filter { it.startsWith(PREFIX) && it != keep }
+            // Per-enable aliases (PREFIX + id) AND the pre-0.9.2 single fixed alias (no id suffix), which
+            // otherwise never matches PREFIX and would linger as forensic/hygiene residue after upgrade.
+            keyStore.aliases().toList()
+                .filter { (it.startsWith(PREFIX) || it == LEGACY_ALIAS) && it != keep }
         } catch (e: Exception) {
             return // enumeration hiccup → best-effort; leftover aliases are harmless
         }
@@ -215,6 +218,9 @@ class BiometricVaultKeyCipher {
          * [ALIAS_ID_BYTES]-byte hex id (0.9.2 enable-atomicity — was a single fixed alias pre-0.9.2).
          */
         const val PREFIX = "zitrone_vault_biometric_key_"
+
+        /** The pre-0.9.2 single fixed alias (no id suffix) — reaped by GC so an upgrade leaves no residue. */
+        private const val LEGACY_ALIAS = "zitrone_vault_biometric_key"
 
         private const val AES_GCM_TRANSFORM = "AES/GCM/NoPadding"
 
