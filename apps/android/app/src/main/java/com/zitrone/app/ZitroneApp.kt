@@ -410,6 +410,10 @@ class AppContainer(private val app: Application) {
             val result = try {
                 imageStore.attemptUnlockOrAdd(passphrase, genesis, create)
             } catch (c: CancellationException) {
+                // A cancelled attempt (e.g. Activity recreation) must NOT count toward the streak — an
+                // interrupted entry is not one of the 3 uninterrupted identical entries. Reset like every
+                // other exception path (the store's Argon2id is uninterruptible, so this runs after it).
+                unlockRouter.resetCandidate()
                 throw c
             } catch (e: VaultImageException.LegacyImage) {
                 unlockRouter.resetCandidate()
@@ -577,7 +581,15 @@ class AppContainer(private val app: Application) {
                 wipe(vaultOpen.payloadPlaintext)
             },
         )
-        if (published) settingsRepository.setOnboardingDone(true)
+        if (published) {
+            settingsRepository.setOnboardingDone(true)
+            // Any live session ENDS/interrupts an in-progress triple-entry ritual — reset here so the
+            // guard covers EVERY unlock path uniformly (passphrase, BIOMETRIC, onboarding create), not
+            // just the passphrase path. This closes the gap where a biometric unlock (which never goes
+            // through the passphrase router's reset) could leave a mid-ritual candidate to be completed
+            // by a single lock-screen entry after a later non-background re-lock.
+            unlockRouter.resetCandidate()
+        }
         return published
     }
 

@@ -34,14 +34,17 @@ class VaultUnlockRouter {
      * prior failures: 500 ms × attempts, capped at [MAX_BACKOFF_MS]. Zero on a fresh counter,
      * so the first attempt is never delayed.
      */
+    @Synchronized
     fun backoffDelayMs(): Long = (BACKOFF_STEP_MS * failedAttempts).coerceAtMost(MAX_BACKOFF_MS)
 
     /** Record a failed passphrase attempt (advances the backoff). */
+    @Synchronized
     fun recordFailure() {
         failedAttempts++
     }
 
     /** Clear the backoff after any successful unlock. */
+    @Synchronized
     fun recordSuccess() {
         failedAttempts = 0
     }
@@ -81,13 +84,19 @@ class VaultUnlockRouter {
      * Uses a constant-time digest compare ([MessageDigest.isEqual] over two 32-byte digests) and
      * wipes the transient UTF-8 bytes it hashes.
      */
+    @Synchronized
     fun decideCreate(passphrase: String): Boolean {
         val hash = sha256(passphrase)
         val pending = candidateHash
-        if (pending != null && MessageDigest.isEqual(hash, pending)) {
-            candidateCount++
-            // Keep the existing candidate digest (identical); drop the fresh copy.
-            hash.fill(0)
+        // ALWAYS run the constant-time compare — against a fixed all-zero digest when there is no
+        // pending candidate — so the work is byte-identical on every attempt (no short-circuit that
+        // would make a fresh/reset attempt observably cheaper than a continuing one).
+        val same = MessageDigest.isEqual(hash, pending ?: NO_CANDIDATE)
+        if (pending != null && same) {
+            // Cap at the threshold: create stays requested for further identical entries (the
+            // marker-present fail-closed case) without ever overflowing candidateCount.
+            if (candidateCount < CREATE_THRESHOLD) candidateCount++
+            hash.fill(0) // identical to the existing candidate — drop the fresh copy
         } else {
             candidateHash?.fill(0)
             candidateHash = hash
@@ -97,10 +106,13 @@ class VaultUnlockRouter {
     }
 
     /**
-     * Discard the triple-entry candidate + streak. Called on any Unlocked / Burn / Created
-     * outcome, on a NotDurable create failure, AND — the uninterrupted-sequence guard — on app
-     * backgrounding, a lock cycle, and (implicitly) process death. Leaves the backoff untouched.
+     * Discard the triple-entry candidate + streak. Called on any match/create outcome, on ANY session
+     * publish (so a biometric unlock or onboarding also interrupts a ritual — [AppContainer.publishSession]),
+     * on a create-attempt cancellation, on a NotDurable create failure, AND — the uninterrupted-sequence
+     * guard — on app backgrounding ([VaultLockManager.onStop]) and (implicitly) process death. Leaves the
+     * backoff untouched. Thread-safe.
      */
+    @Synchronized
     fun resetCandidate() {
         candidateHash?.fill(0)
         candidateHash = null
@@ -148,5 +160,9 @@ class VaultUnlockRouter {
 
         /** Consecutive identical non-matching entries required to create a vault (triple-entry). */
         const val CREATE_THRESHOLD = 3
+
+        /** Fixed all-zero 32-byte digest compared against when there is no pending candidate, so the
+         *  constant-time compare in [decideCreate] runs identically on every attempt. */
+        private val NO_CANDIDATE = ByteArray(32)
     }
 }

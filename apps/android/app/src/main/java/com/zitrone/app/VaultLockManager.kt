@@ -85,7 +85,8 @@ fun shouldAutoLockAtFireTime(sessionLive: Boolean, terminalWipe: Boolean): Boole
  *   ([VaultUnlockRouter.resetCandidate]): invoked UNCONDITIONALLY on every [onStop] — independent of
  *   whether a session is live — because the ritual runs at the lock screen (no session), so a session
  *   gate would miss it. Backgrounding the app breaks any in-progress ritual; process death clears the
- *   RAM candidate on its own. Defaults to a no-op so existing tests need not supply it.
+ *   RAM candidate on its own. REQUIRED (no default): a silent no-op would disable the
+ *   uninterrupted-sequence guard while auto-lock still runs, so every construction must wire it.
  */
 class VaultLockManager(
     private val scope: CoroutineScope,
@@ -93,7 +94,7 @@ class VaultLockManager(
     private val sessionLive: () -> Boolean,
     private val terminalWipe: () -> Boolean,
     private val lock: () -> Unit,
-    private val resetRitual: () -> Unit = {},
+    private val resetRitual: () -> Unit,
 ) : DefaultLifecycleObserver {
 
     private var pending: Job? = null

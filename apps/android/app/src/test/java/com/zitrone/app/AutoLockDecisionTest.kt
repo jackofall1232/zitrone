@@ -5,10 +5,15 @@
 
 package com.zitrone.app
 
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import kotlinx.coroutines.CoroutineScope
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.coroutines.EmptyCoroutineContext
 
 /**
  * D3 idle auto-lock decision — the pure branch matrix, factored out of the ProcessLifecycleOwner
@@ -16,6 +21,30 @@ import org.junit.Test
  * [VaultLockManager] are the only non-host-testable surface).
  */
 class AutoLockDecisionTest {
+
+    /** Minimal host LifecycleOwner — [VaultLockManager.onStop] ignores the owner arg. */
+    private val stubOwner = object : LifecycleOwner {
+        override val lifecycle: Lifecycle = LifecycleRegistry.createUnsafe(this)
+    }
+
+    @Test
+    fun `onStop resets the triple-entry ritual UNCONDITIONALLY, even with no live session`() {
+        // The uninterrupted-sequence guard (0.9.2): backgrounding must break a ritual regardless of
+        // session state (the ritual runs at the lock screen, where there is no session to auto-lock).
+        var resets = 0
+        val mgr = VaultLockManager(
+            scope = CoroutineScope(EmptyCoroutineContext),
+            timeoutSeconds = { 300 },
+            sessionLive = { false }, // lock screen: no session → auto-lock is a no-op, reset still fires
+            terminalWipe = { false },
+            lock = { },
+            resetRitual = { resets++ },
+        )
+        mgr.onStop(stubOwner)
+        assertEquals("onStop resets the ritual even with nothing to auto-lock", 1, resets)
+        mgr.onStop(stubOwner)
+        assertEquals("every onStop resets", 2, resets)
+    }
 
     @Test
     fun `no live session does nothing — nothing is unlocked to lock`() {

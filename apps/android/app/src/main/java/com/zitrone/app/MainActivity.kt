@@ -815,7 +815,10 @@ private fun ZitroneRoot(
                 onFailure = { e ->
                     if (e is kotlinx.coroutines.CancellationException) throw e
                     // attemptPassphrase maps every expected image/durability case to an outcome; an
-                    // unexpected throw is a bug/transient — uniform failure, never leak the cause.
+                    // unexpected throw (e.g. a publishSession build-refuse) is a failure — bump the
+                    // backoff (parity with the pre-fusion path) and surface a uniform failure, never
+                    // leaking the cause.
+                    container.unlockRouter.recordFailure()
                     lockError = VaultUnlockRouter.UNIFORM_FAILURE
                     unlocking = false
                 },
