@@ -132,6 +132,33 @@ fun SettingsScreen(
             onToggle = onToggleBiometric,
             enabled = biometricEnabled || biometricAvailable,
         )
+        // Idle auto-lock (D3). The tradeoff copy is shown HERE, at the picker, not in a help doc —
+        // a user choosing "Immediate" should understand the delivery-latency cost in the moment.
+        ClickableRow(
+            title = "Auto-lock when backgrounded",
+            subtitle = "Locks the vault after ${autoLockLabel(settings.autoLockTimeoutSeconds)} in " +
+                "the background. Zitrone has no push notifications; messages only arrive while the " +
+                "app is open and unlocked. A shorter auto-lock is more private but means messages " +
+                "may not arrive until you next open the app." +
+                if (settings.autoLockTimeoutSeconds <= 0) {
+                    " “Immediate” trades delivery latency for security."
+                } else {
+                    ""
+                },
+            trailing = {
+                Text(
+                    text = autoLockLabel(settings.autoLockTimeoutSeconds),
+                    fontFamily = MonoFamily,
+                    fontSize = TypeScale.Sm,
+                    color = Lemon,
+                )
+            },
+            onClick = {
+                val options = settingsRepository.autoLockOptionsSeconds
+                val cur = options.indexOf(settings.autoLockTimeoutSeconds).coerceAtLeast(0)
+                settingsRepository.setAutoLockTimeoutSeconds(options[(cur + 1) % options.size])
+            },
+        )
         Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
             Text(
                 text = "Your identity key fingerprint",
@@ -393,6 +420,15 @@ fun SettingsScreen(
             onClick = {},
         )
     }
+}
+
+/** Human label for an idle auto-lock timeout (seconds). 0 = immediate. */
+// Any value <= 0 is "Immediate" — mirrors autoLockOnBackground's `timeoutSeconds <= 0 -> LockNow`,
+// so a negative value ever loaded from settings never renders as "-1 minutes".
+private fun autoLockLabel(seconds: Int): String = when {
+    seconds <= 0 -> "Immediate"
+    seconds == 60 -> "1 minute"
+    else -> "${seconds / 60} minutes"
 }
 
 @Composable

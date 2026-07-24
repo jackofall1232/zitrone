@@ -274,6 +274,20 @@ class AppContainer(private val app: Application) {
         afterPublish = ::onSessionPublished,
     )
 
+    /**
+     * D3 idle auto-lock. Locks the vault through the SAME [unlockController] teardown after the
+     * user's device-level timeout once the app is backgrounded — it only LOCKS (reseal + teardown),
+     * never DELETES, so it adds no writer to the vault-delete / auth state. Registered on the
+     * process lifecycle at construction (on the main thread, in Application.onCreate).
+     */
+    val vaultLockManager = VaultLockManager(
+        scope = scope,
+        timeoutSeconds = { deviceSettings.autoLockTimeoutSeconds },
+        sessionLive = { _session.value != null },
+        terminalWipe = { unlockController.isTerminalWipe() },
+        lock = { unlockController.lock() },
+    ).also { it.register(androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle) }
+
     // ── Vault unlock / create orchestration (all off-main; caller drives the UI) ──
 
     /**

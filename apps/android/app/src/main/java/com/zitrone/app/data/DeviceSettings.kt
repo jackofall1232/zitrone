@@ -26,12 +26,12 @@ import kotlinx.coroutines.flow.map
  * lemon-drop-compose / unread-reminder) are deliberately NOT surfaced here and
  * stay on [SettingsRepository]; D2/D5 move those into the vault.
  *
- * The idle auto-lock timeout is NOT here yet: it is a genuinely new,
- * device-level, writable setting with no legacy value, and its correct model
- * (async-loaded, reactive, with a live-updating setter — NOT a blocking
- * main-thread read at startup) is inseparable from its D3 consumer. D3 adds it
- * to a device-level reactive settings source, separate from the vault-scoped
- * [SettingsRepository].
+ * The idle auto-lock timeout ([autoLockTimeoutSeconds]) is device-level and lives on
+ * [SettingsRepository] alongside the other device fields (D3). It rides that repository's
+ * existing batch load — so it adds NO new startup decrypt (the concern that kept it out of D1
+ * was a SEPARATE per-field decrypt, not a field in the already-loaded [SettingsRepository.Settings])
+ * — and its setter re-emits the same reactive `settings` StateFlow. Kept device-level, not
+ * per-vault, so it reveals nothing about vault count or which slot is active.
  */
 class DeviceSettings(
     private val source: SettingsRepository,
@@ -51,6 +51,13 @@ class DeviceSettings(
 
     /** I2P-via-router toggle. Backed by `i2p_enabled`. */
     val i2pEnabled: Boolean get() = source.settings.value.i2pEnabled
+
+    /**
+     * Idle auto-lock timeout (seconds) while backgrounded; 0 = immediate. Read as a snapshot at the
+     * moment the app backgrounds (the vault is unlocked then, so the value is current). Backed by
+     * `auto_lock_timeout_seconds`; default 300.
+     */
+    val autoLockTimeoutSeconds: Int get() = source.settings.value.autoLockTimeoutSeconds
 
     /**
      * Reactive transport inputs (the I2P/Tor toggles) for the resolver. This is

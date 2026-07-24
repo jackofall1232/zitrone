@@ -49,6 +49,13 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
          * otherwise goes silent after the first arrival. Global on/off.
          */
         val unreadReminderEnabled: Boolean = true,
+        /**
+         * Idle auto-lock timeout in SECONDS while the app is backgrounded (D3). Default 300 (5 min).
+         * 0 = lock immediately on background. DEVICE-level, not per-vault: it describes the device
+         * and reveals nothing about vault count or which slot is active (see [DeviceSettings]).
+         * Rides this batch [load]; no separate startup decrypt. See [autoLockOptionsSeconds].
+         */
+        val autoLockTimeoutSeconds: Int = 300,
     )
 
     private val _settings = MutableStateFlow(load())
@@ -56,6 +63,9 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
 
     /** TTL choices from features.messaging.disappearing_messages. */
     val ttlOptionsSeconds: List<Int?> = listOf(null, 30, 60, 300, 3600, 86400, 604800)
+
+    /** Idle auto-lock choices (seconds): immediate / 1 min / 5 min / 15 min. Default is 5 min. */
+    val autoLockOptionsSeconds: List<Int> = listOf(0, 60, 300, 900)
 
     fun setOnboardingDone(done: Boolean) = put { putBoolean(KEY_ONBOARDING, done) }
 
@@ -77,6 +87,8 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
     fun setUnreadReminderEnabled(enabled: Boolean) =
         put { putBoolean(KEY_UNREAD_REMINDER, enabled) }
 
+    fun setAutoLockTimeoutSeconds(seconds: Int) = put { putInt(KEY_AUTOLOCK, seconds) }
+
     private fun put(edit: android.content.SharedPreferences.Editor.() -> Unit) {
         prefs.edit().apply(edit).apply()
         _settings.value = load()
@@ -92,6 +104,7 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
         i2pEnabled = prefs.getBoolean(KEY_I2P, true),
         lemonDropComposeEnabled = prefs.getBoolean(KEY_LEMON_DROP_COMPOSE, false),
         unreadReminderEnabled = prefs.getBoolean(KEY_UNREAD_REMINDER, true),
+        autoLockTimeoutSeconds = prefs.getInt(KEY_AUTOLOCK, DEFAULT_AUTOLOCK_SECONDS),
     )
 
     companion object {
@@ -105,5 +118,7 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
         private const val KEY_I2P = "i2p_enabled"
         private const val KEY_LEMON_DROP_COMPOSE = "lemon_drop_compose_enabled"
         private const val KEY_UNREAD_REMINDER = "unread_reminder_enabled"
+        private const val KEY_AUTOLOCK = "auto_lock_timeout_seconds"
+        private const val DEFAULT_AUTOLOCK_SECONDS = 300
     }
 }
