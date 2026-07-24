@@ -19,16 +19,20 @@ disagrees with this document, that is a bug (same convention as `SECURITY_MODEL.
 | Crypto primitive — **Android** (Argon2id + no-early-exit `tryPassphrase` + fixed-size blind payload/image) | **Built + wired** — `apps/android/.../crypto/vault/` (`VaultSodiumOps`, `VaultSlots`, `VaultPayload`, `VaultImage`), byte-mirrored from the web reference, unit-tested (no-early-exit, wipe discipline, NIST AES-GCM KAT). As of **0.9.1-beta** it backs the live storage — no longer isolated. |
 | Notification-parity structure (single-id, content-free, extra-free intent, teardown hook) | **Built** on Android as of the notification re-fire work (0.9.0-beta) — see §7 |
 | Android vault RUNTIME — **everyday (single) vault**: session-over-vault unlock (biometric + PIN/passphrase fallback via `VaultUnlockRouter`), per-slot stores/coordinator, flush-before-ack durability, atomic contact delete, two-marker no-remanence account delete, idle auto-lock (`VaultLockManager`) | **Built as of 0.9.1-beta** (the P1b-2 / PR-D arc). The app runs over the vault image; onboarding sets a passphrase and the ordinary lock screen opens it. |
-| Android vault RUNTIME — **second (decoy) vault**: user path to CREATE a second slot, setup wizard, teardown-on-switch, destruction | **NOT built yet.** The unlock router is slot-agnostic and *would* open a second vault if one existed, but 0.9.1 ships **no way to create one** — so plausible deniability is not yet a usable guarantee on Android. This is P2 (second slot + teardown-on-switch) and P3 (setup wizard + destruction). |
+| Android vault RUNTIME — **second (decoy) vault**: user path to CREATE a second slot | **Built as of 0.9.2-beta.** A second vault is created through the PIN/passphrase router itself (no setup wizard) — the **triple-entry** ceremony (§3.3): three consecutive identical entries of a never-before-used passphrase create and open it, **blind-placed in a random slot** of the vault pool (slots 1..`SLOT_COUNT`-1; slot 0 reserved for the Pucker Burn credential). Biometric binds to one vault at a time on a **first-enable-wins** basis and its wrap is never repointed while it exists (0.9.2 A-only guard). So plausible deniability is now a usable guarantee on Android, subject to the documented limits (blind-overwrite, triple-entry coercion consequence, create-persistence timing residual, first-enable-wins biometric) — see `SECURITY_MODEL.md`. |
+| Android vault RUNTIME — second-vault **per-vault destruction**, and Pucker Burn **setup + wipe** | **NOT built yet.** Whole-image account delete exists, but there is no primitive to destroy one vault's slot alone (§3.4). The Pucker Burn duress credential's slot (slot 0) is reserved and the store is burn-*aware*, but the burn setup UX and wipe execution are separate future PRs. |
 | Migration from a pre-vault Android install into the vault format | **Dropped — not built.** 0.9.1 is a **fresh-install-only** cut; there is no in-place migration and no commitment to storage-format stability yet (wipe-on-breaking-change is disclosed in the release notes). |
 | Decoy traffic (§8) | Deferred to a later release (0.10.0-beta) — specced adjacent, not built |
 
-> **Documentation-accuracy note (updated 0.9.1-beta).** The Android **everyday-vault** runtime
-> is now built and live (see the table above). The part that delivers deniability — a **second
-> (decoy) vault** — is **not** creatable yet, so any statement that Android has "two vaults" or
-> real duress resistance today is still an overclaim. `SECURITY_MODEL.md` and `README.md` are
-> reconciled to this per-platform status (Android: one vault reachable, second not yet
-> creatable) — see §9.
+> **Documentation-accuracy note (updated 0.9.2-beta).** The Android everyday-vault runtime
+> (0.9.1-beta) and now the **second-vault creation path** (0.9.2-beta, the silent triple-entry
+> router of §3.3) are both built and live. Android can therefore create and reveal a second
+> (decoy) vault, so plausible deniability is a **usable** guarantee here — bounded by the
+> limitations documented in `SECURITY_MODEL.md` (single-snapshot only, blind-overwrite on creation,
+> the triple-entry gate's coercion consequence, a create-persistence timing residual, biometric
+> bound to one vault at a time on first-enable-wins). What is **not** yet built: per-vault
+> destruction (whole-image delete only) and the Pucker Burn setup/wipe UX (§3.4). Do not describe
+> those as shipped. `SECURITY_MODEL.md` and `README.md` are reconciled to this status.
 
 ---
 
@@ -63,18 +67,32 @@ built on it.
 
 ### 3.1 Structural symmetry
 
-- Every install **always** has structural capacity for two vaults, in every build, for every
-  user. There is **no** "enable vault" setting, toggle, or feature flag anywhere in UI, Settings,
-  or code paths that a decompiler could correlate to "vault feature on/off".
+- Every install **always** has structural capacity for **up to three** vaults, in every build, for
+  every user (the vault pool is slots `1..SLOT_COUNT-1` — three at `SLOT_COUNT = 4`; slot 0 is
+  reserved for the Pucker Burn duress credential and is never a vault). The deniability model below
+  is written around two vaults (A and B) because that is the decoy scenario that matters, but the
+  pool holds three. There is **no** "enable vault" setting, toggle, or feature flag anywhere in UI,
+  Settings, or code paths that a decompiler could correlate to "vault feature on/off".
 - Both vaults are **fully independent identities** — each its own identity keypair, contacts,
   message store, relay account, and (once decoy traffic ships) its own dummy pinned account.
   Internally they are **vault slot A** and **vault slot B** — never labeled "real" / "decoy" in
   UI copy, code, string resources, comments, or logs. There is no canonical "which is real": it
   is defined only by which one the user treats as theirs.
-- Both vaults derive their unlock keys with **identical Argon2id parameters and timing**, so no
-  local side-channel — timing, memory-access pattern, storage layout, UI latency — can
-  distinguish "correct password for A" from "for B" from "wrong entirely". This mirrors
-  `vault.ts`'s `tryPassphrase`, which derives-and-attempts **every** slot with no early exit.
+- Every vault derives its unlock key with **identical Argon2id parameters**, and the unlock
+  *attempt* runs the same fixed **no-early-exit sweep** — derive and attempt-unwrap **every** slot,
+  regardless of outcome (mirroring `vault.ts`'s `tryPassphrase`). The guarantee the tests pin is that
+  the sweep does the **same number of per-slot Argon2id derivations and unwrap attempts** whether the
+  entered passphrase matches slot A, slot B, or nothing — no early exit on a match. Because that KDF
+  cost dominates the unlock, the sweep's wall-clock does not meaningfully vary with the outcome (the
+  practical consequence of the fixed derivation count, not a separately-measured guarantee), so the
+  sweep leaks neither *which* slot matched nor *whether* any did.
+  What the sweep does **not** hide — because it is inherent to unlocking, not a second-vault tell — is
+  the **success branch**: a match then retains its key and opens its vault, a miss stays denied. That
+  visible outcome (opened vs still-denied) reveals nothing about a hidden vault — a wrong guess looks
+  the same whether or not a vault B exists — and two *matches* (A vs B) are symmetric and mutually
+  indistinguishable **at the unlock**; once open, each vault of course shows its own contents, as any
+  unlock does. One deliberate exception: *creating* a vault additionally persists to disk (see §3.3 /
+  `SECURITY_MODEL.md`), an accepted timing residual an ordinary unlock does not incur.
 - A hidden vault's contents must not be constrained to "sensitive" material only. If vault B
   only ever held high-stakes conversations, its *contents* become the tell the moment anyone
   gains access. Both vaults hold an ordinary mix; deniability comes from the vault's *existence*
@@ -84,18 +102,30 @@ built on it.
 
 The lock screen is **visually and structurally unchanged** — no new screen, button, or copy.
 
-- **Biometric (fingerprint/face) → always routes to vault slot A, unconditionally.** Biometrics
-  cannot encode a distinct secret the way a typed passphrase can, so no attempt is made to make
-  biometric unlock ambiguous. This is an intentional, accepted asymmetry: slot A is the only
-  vault reachable by biometric convenience, serving the majority who never touch vault B.
+- **Biometric (fingerprint/face) → routes to the single biometric-bound vault.** Biometrics cannot
+  encode a distinct secret the way a typed passphrase can, so no attempt is made to make biometric
+  unlock ambiguous: there is exactly one biometric wrap at a time and it opens exactly one vault.
+  *Which* vault is **first-enable-wins** (0.9.2, §3.3 / `SECURITY_MODEL.md`) — whichever vault first
+  enables biometric while no wrap exists becomes bound, and the wrap can never be repointed to
+  another slot while it exists (the A-only guard). In practice that vault is the everyday one (the
+  majority enable biometric there and never touch a second vault); "A" names that role, not a fixed
+  slot. Disabling biometric frees the binding for a different vault to claim later. This is the
+  intentional, accepted asymmetry: only one vault is reachable by biometric convenience; the rest
+  are passphrase-only.
 - **"Use PIN" (the existing fallback) → is the vault router.** The entered passphrase is checked
-  **locally** against the derived key for *both* slots:
-  - matches slot A's derivation → unlock into A;
-  - matches slot B's derivation → unlock into B;
-  - matches neither → access denied, with **identical failure behavior and timing** regardless
-    of which vaults exist or which was "closer".
-- To any external observer — watching an unlock, or forcing one under duress — nothing
-  distinguishes these three outcomes: same screen, same flow, same apparent behavior every time.
+  **locally** against the derived key for **every** vault slot (the no-early-exit sweep), not just
+  two:
+  - matches a live slot's derivation → unlock into that vault (A, B, or a third pool vault);
+  - matches none → access denied, with the **same unlock-attempt behaviour and the same fixed
+    no-early-exit work budget** (equal per-slot derivation count) regardless of which vaults exist or
+    which was "closer".
+- The observable *outcome* of course differs between a match (the app opens) and a miss (still
+  denied) — that is inherent to any unlock and reveals nothing about a hidden vault. What the design
+  guarantees is narrower and is the part that matters: an observer watching or forcing an unlock
+  **cannot tell which vault opened, nor whether more than one vault exists** — the two success cases
+  run the identical unlock flow to the same chat-list screen (no per-vault banner; the opened vault's
+  own contents then appear, as with any unlock), and a miss looks the same whether or not a second
+  vault is present. (A *creating* third entry additionally persists to disk; see §3.3.)
 
 ### 3.3 Setup
 
@@ -103,17 +133,44 @@ The lock screen is **visually and structurally unchanged** — no new screen, bu
   memorability, but the app derives and stores its **own independent key** — it does not defer
   to or depend on the OS credential store. This keeps A and B symmetric in implementation (same
   mechanism, same code path, same guarantees) rather than A being OS-backed and B app-backed.
-- Vault B's passphrase is set in a dedicated, explicit **setup wizard** that must clearly warn:
-  - the passphrase is **not recoverable** — no reset, no account recovery, no support path;
-  - this is a **separate vault** — separate contacts, messages, identity.
-- The wizard copy needs careful review before ship: it must convey real stakes without the
-  onboarding flow *itself* becoming the tell for users who never touch vault B again.
+- Vault B is created through the **PIN/passphrase router itself — there is no setup wizard, and
+  there must not be one** (a dedicated "create second vault" flow would be exactly the
+  discoverable tell §2 forbids). The entire ceremony (0.9.2-beta, Android) is: at the ordinary
+  lock screen, enter the **same never-before-used passphrase three times, consecutively and
+  uninterrupted**. The third consecutive identical entry of a passphrase that matches no existing
+  slot creates vault B (blind-placed in a random pool slot) and unlocks straight into it, following
+  the same lock-screen success path as an ordinary unlock — like a user who mistyped twice and got in
+  on the third try. (Caveat, see `SECURITY_MODEL.md`: a successful create also *persists* to disk, an
+  accepted observable timing residual that a plain unlock does not incur — so it is not claimed to be
+  wall-clock identical to an unlock, only to share the UI path and KDF budget.)
+  - **Uninterrupted** is enforced: backgrounding the app (which includes auto-lock), any session
+    publish, or process death resets the streak (`VaultLockManager.onStop` and the RAM-only candidate
+    in `VaultUnlockRouter`, cleared on publish/cancellation too), so a stray sequence cannot
+    accumulate across sessions.
+  - There is **intentionally no confirmation dialog and no warning copy** — a "you are creating a
+    hidden vault, its passphrase is unrecoverable" prompt would itself be the tell. The
+    non-recoverability is inherent (no reset, no account recovery, no support path) and is
+    disclosed here and in `SECURITY_MODEL.md`, not in an in-flow dialog that would out the feature.
+  - Consequence to accept (see `SECURITY_MODEL.md`): because the gate triggers on three *identical
+    consecutive* entries of a never-matching passphrase, a coercer who forces you to type one
+    chosen wrong passphrase three times in a row will create an (empty) vault; conversely,
+    systematic enumeration of *different* wrong guesses never creates one (any differing entry
+    resets the streak). Slot 0 is reserved for the Pucker Burn duress credential and is never a
+    creation target; blind placement is over the vault pool (slots 1..`SLOT_COUNT`-1) only.
 
 ### 3.4 Destruction
 
+**Status (0.9.2-beta): per-vault destruction is NOT built.** This subsection is a locked design
+for a future phase, not shipped behavior. What ships today is whole-image destruction only
+(account delete removes the entire device image — all vaults, all identities — via the two-marker
+no-remanence delete state machine); there is no primitive that overwrites *one* vault's slot while
+leaving the others intact, so a user cannot yet destroy vault B alone. `destroy()` stays
+whole-image and is documented as such. The per-vault design below stands until that primitive and
+its adversarial review land.
+
 - There is no "disable vault" toggle — the capability is structural and always present (§3.1),
   so there is nothing to disable.
-- The real, supportable action is **destroying a specific vault's contents and identity
+- The real, supportable action (future) is **destroying a specific vault's contents and identity
   entirely** — held to the same rigor already established for contact deletion (0.8.4–0.8.6):
   - explicit confirmation (irreversible, destructive);
   - full cryptographic teardown — identity key, all sessions, all message keys, roster, and (once
@@ -179,15 +236,17 @@ introduce server involvement in vault unlock without recognizing it breaks this 
 ## 6. Threat model & accepted limits
 
 - **Single disk snapshot / compelled disclosure (the target scenario):** unprovable. Fixed-size
-  storage image, identical timing, no stored vault count, blind-overwrite on creation — nothing
-  distinguishes one identity from two.
+  storage image, a fixed no-early-exit unlock-attempt work budget, no stored vault count,
+  blind-overwrite on creation — nothing in the image distinguishes one identity from two.
 - **Multi-snapshot diffing** (adversary images the disk at two times): can see which slot's
   payload region changed, revealing *that* slot is live. Same bound VeraCrypt hidden volumes
   accept; documented, not solved.
 - **Blind overwrite on vault creation:** creating a vault into an existing image picks a random
   slot and can destroy a vault whose passphrase is not currently entered (as with a VeraCrypt
   outer volume). Deliberate, documented risk.
-- **Biometric → A asymmetry (§3.2):** accepted. A compelled biometric unlock only ever opens A.
+- **Biometric → single-bound-vault asymmetry (§3.2):** accepted. A compelled biometric unlock only
+  ever opens the one biometric-bound vault ("A" — the first-enable-wins role, never repointed while
+  the wrap exists), never a second vault; a second vault is reachable only by its passphrase.
 - **Compromised device / OS keylogger / second camera:** outside any app's power. Not claimed.
 
 ## 7. Notification parity (permanent security requirement)
@@ -245,11 +304,12 @@ parity-ready from day one:
 - **Invariant comments** at the scheduler and at `showNewMessage` state requirement 6 explicitly,
   so a future edit that would break parity is caught in review.
 
-**What remains gated on the Android vault runtime (not yet built):** the *verification* of
+**Cross-vault parity verification (now unblocked by 0.9.2's second vault):** the *verification* of
 cross-vault parity — firing a notification from vault A, then vault B, and confirming an automated
-diff cannot distinguish them (requirement 5) — cannot be executed until a second vault/coordinator
-exists. When the vault runtime lands, that test becomes: instantiate both, fire from each, assert
-byte-identical notification construction and behavior. The structure above makes that assertion
+diff cannot distinguish them (requirement 5) — previously could not be executed with only one vault.
+Now that a second vault is creatable (0.9.2-beta), it can: instantiate both, fire from each, assert
+byte-identical notification construction and behavior (this dedicated cross-vault parity test should
+be added if not already present). The structure above makes that assertion
 hold by construction; the test is the proof.
 
 ## 8. Decoy traffic (adjacent; separate release — 0.10.0-beta)
@@ -281,9 +341,11 @@ design (full spec is out of scope for this document):
 - `SECURITY_MODEL.md` — the "Plausible deniability (key-slot vaults)" section is the security
   promise; this document is the implementation architecture behind it. The §5 zero-knowledge
   invariant and the §7 notification-parity requirement must be re-stated in `SECURITY_MODEL.md`.
-  The present/near-tense "being built for the current Android release" language should be
-  reconciled to the honest state in this document's status table (design locked; crypto primitive
-  built on web; Android runtime pending) rather than implying a shipped Android vault.
+  All vault language should be reconciled to the honest state in this document's status table:
+  the Android everyday-vault runtime shipped in 0.9.1-beta and second-vault **creation** shipped in
+  0.9.2-beta (crypto primitive built on web + Android; second vault creatable via the silent
+  triple-entry router), while per-vault destruction and the Pucker Burn setup/wipe remain unbuilt —
+  rather than implying either that no Android vault ships or that the unshipped pieces do.
 - `packages/crypto/src/vault.ts` — the key-slot crypto primitive (web/desktop) the Android
   runtime must mirror (fixed-size image, `SLOT_COUNT`, `tryPassphrase` timing parity,
   blind-overwrite placement).

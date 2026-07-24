@@ -64,14 +64,17 @@ Full details in [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md).
 
 Five layered defenses, each built as if the one beneath it has already failed:
 
-- 🤷‍♂️ **Plausible deniability** — the *design* is two separate vaults behind two passphrases, with
-  no cryptographic evidence the second exists and identical unlock timing for both (a **per-device**
-  feature, safe because there is no cross-device account access). Status: the crypto primitive is
-  built (web/desktop + Android), and on **Android the everyday (single) vault runtime ships as of
-  0.9.1-beta** (the app runs over the vault, with dual-wrap unlock, the PIN/passphrase unlock
-  router, and the no-remanence delete state machine). **Creating a second (decoy) vault is not
-  available yet** — that is planned work (second-slot creation + setup wizard), so plausible
-  deniability is **not yet a usable guarantee on Android**. See
+- 🤷‍♂️ **Plausible deniability** — two (up to three) separate vaults behind different passphrases,
+  with no cryptographic evidence a second exists and a fixed no-early-exit unlock-attempt work budget (a **per-device** feature, safe
+  because there is no cross-device account access). Status: the crypto primitive is built
+  (web/desktop + Android); the **Android everyday vault runtime shipped in 0.9.1-beta**; and as of
+  **0.9.2-beta, creating a second (decoy) vault is live** — there is no setup wizard (that would be
+  the tell), just the **triple-entry** ceremony at the ordinary lock screen (enter the same
+  never-before-used passphrase three times in a row). Plausible deniability is now a **usable**
+  guarantee on Android, within documented limits (creation blind-overwrites a random pool slot;
+  biometric binds to one vault at a time, first-enable-wins; a chosen wrong passphrase entered three
+  times creates an empty vault). Not yet shipped: per-vault destruction (whole-image account delete only) and the
+  Pucker Burn duress credential's setup/wipe. See
   [docs/VAULT_ARCHITECTURE.md](docs/VAULT_ARCHITECTURE.md) and
   [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md)
 - 🕵‍♂️💼 **Dead-drop mode** — anonymous, account-free message deposit; no metadata links the two parties
