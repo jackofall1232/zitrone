@@ -203,3 +203,29 @@ User intent recorded 2026-07-24: "at some point we need to cut 0.9.1 apk and fli
 ## Done recently (see ledger for detail)
 - 0.8.1-beta released (PR #8 + #9 merged @ `c78a606`, GH release live, website flipped PR #10).
 - 0.9.x vault track P1a/P1b-1/PR-A/B/C/D1/D2a/D2b then D2c all merged to `3c598ad`.
+
+## W-A FOLLOW-UP DELTA (one round covers all of it — do not split)
+Held out of the convergence commit `acb5904` deliberately: adding them would have made the converged
+commit a new delta needing its own round. "It's only tests" is NOT a safety argument in this unit —
+three test-only edits here silently destroyed coverage (dropped `@Test`, deleted row 7, defanged the
+retry test). Batch these into ONE delta and give it ONE paired-blind round:
+
+- [ ] Apply `/root/l00prite/unit-wa-r4-info-tests.patch` — 4 tests closing the two uncovered
+      post-mutation branches (Kimi: post-unlink re-stat; Gemini: `catch (Throwable)`) + the two
+      afterPublish cancellation characterisation tests. Verified: applies cleanly to `acb5904`,
+      suite 487 → 491, 0 failures, 3 of 4 mutation-verified (the 4th is labelled as catching none).
+- [ ] `BootReconcileOwnerTest.kt:314` — stale docstring claiming production wraps `afterPublish` in a
+      local `runCatching`; `acb5904` removed that (the wrapper contains now). Raised independently by
+      Grok (INFO-1) and Kimi (LOW) — the only finding two lenses converged on.
+- [ ] `MainActivity.kt` ~697-704 `onRetryDestroy` — still `!hasVault() && !serverDeleteConfirmed()`,
+      the weaker sibling of the predicate `acb5904` unified everywhere else. Kimi independently
+      derived it SAFE (reachable only via `Route.DeleteIncomplete`, which requires the confirmed
+      marker; a held boot admits no session). Structural-family residual, not a live bug.
+- [ ] `MainActivity.kt` ~1129-1130 — comment overstates: destroy's survival verify is `exists()`-based
+      (proven-present only), so the required `dirSync` is the real second barrier, not the verify.
+- [ ] `runBootReconcile` kdoc — says "production passes `Dispatchers.IO`"; production relies on the
+      parameter default.
+- [ ] TRACKED, NOT IN THIS BATCH: `VaultImageStore.serverDeleteConfirmed()` uses `File.exists()`, not
+      the `Files.notExists` tristate discipline — an indeterminate marker stat reads "not confirmed".
+      Pre-existing on main and uniform across all routing inputs, so NOT a W-A regression; it is a
+      discipline gap in a routing input and wants its own scoped unit.

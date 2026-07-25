@@ -929,3 +929,43 @@ coverage they lacked.
 HIGH. Pinning to 3.1 Pro did not change the pattern — real findings, unreliable verdicts.
 
 Nothing pushed, no version bump, slot 0 unarmed. semgrep + Moonshot rule audit HELD.
+
+### Unit W-A — round 4 (acb5904): CLEAN CONVERGENCE
+
+Four blind lenses, disposable worktrees, full source: **codex `gpt-5.6-sol`**, **`gemini-3.1-pro`**,
+**`grok-4.5`**, **`kimi-k3`**. All four independently ran the suite (487/484/0/3, matching).
+
+**No CRITICAL / HIGH / MEDIUM from any lens.** Codex: zero findings. Kimi: one LOW. Gemini + Grok:
+INFO only. Convergence criterion met — all four on the SAME delta, every finding re-derived against
+source.
+
+Per HoboJoe's rule ("write the test, don't decide from the label"), every testable INFO got a test:
+
+| INFO | lens | test | mutation-verified |
+|---|---|---|---|
+| post-unlink re-stat branch uncovered | kimi | residue that survives its unlink | YES |
+| `catch (Throwable)` uncovered | gemini | a throwing step after the unlinks | YES |
+| `runCatching` swallows CancellationException | grok | synthetic + real cancellation | partly — see below |
+
+All pass. **No INFO was a defect.** Suite 487 → 491 (0 failures). Grok's INFO-3 is LATENT, and the
+test says why: `afterPublish` is `() -> Unit`, not `suspend`, so no real cancellation can be
+delivered into it; and `runCatching` sits INSIDE `withContext`, which rechecks its job on exit, so a
+genuine cancellation still propagates.
+
+NOT testable, verified by reading instead: the stale docstring (grok INFO-1 == kimi LOW, converged
+independently — real, and introduced by acb5904 itself), `onRetryDestroy`'s weaker predicate (grok
+INFO-2; kimi independently derived it safe — reachable only via DeleteIncomplete, which requires the
+confirmed marker), and three imprecise comments (kimi).
+
+**FAILURE RECORDED — I wrote a false `MUTATION UNIQUELY CAUGHT` header.** The cancellation test
+claimed it caught hoisting `runCatching` outside `withContext`. I ran that mutation: the test stays
+green. Cancellation is Job state, so once the parent is cancelled the child is cancelled regardless
+of what any enclosing `runCatching` swallows — no assertion on `isCancelled` can separate the forms.
+Header corrected in place to say it catches NOTHING and is characterisation only. This is the unit's
+signature failure (a header asserting coverage it lacks) reproduced by me, in the round that closed
+it, three rounds after Moonshot caught the same shape at lines 90-98. The lesson is not "check
+headers" — it is that a mutation claim is a claim, and an unrun mutation is an unverified claim.
+
+**The four tests are NOT committed.** Committing them makes the convergence commit a new delta, which
+would need its own round. HEAD stays `acb5904`; the tests are held at
+`/root/l00prite/unit-wa-r4-info-tests.patch` for HoboJoe's call.

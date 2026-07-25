@@ -115,6 +115,37 @@ self-heals. **Don't over-claim "self-healing" — trace the exact failure result
 vs INVALIDATED) and which of them actually clears the wrap.** The reviewer with the less convenient
 fact was right both times; source, not severity or self-interest, decides.
 
+### PROCESS FIX (BINDING) — run the mutation BEFORE writing the header, not after (0.9.2 Unit W-A, round 4)
+**The rule: a `MUTATION UNIQUELY CAUGHT:` line may not be WRITTEN until the named mutation has been
+applied to production, the test run, and the failure observed. It is a precondition of writing the
+claim, not a verification performed afterwards.** If the mutation survives, the header must say the
+test catches nothing and is characterisation — or the test must be strengthened until it does.
+
+Why this is mechanical and not a reminder: I wrote a header claiming a cancellation test uniquely
+caught hoisting `runCatching` outside `withContext`. I ran the mutation. The test stayed green —
+cancellation is Job state, so once the parent is cancelled the child is cancelled regardless of what
+any enclosing `runCatching` swallows, and no assertion on `isCancelled` can separate the two forms.
+
+**Knowledge did not prevent this.** I knew the pattern, it was recorded here, and Moonshot had caught
+the identical shape three rounds earlier in *the same file* (`BootReconcileOwnerTest.kt:88-97`, whose
+header still carries its own correction). I produced it anyway, in the round that closed the unit.
+What caught it was running the mutation and observing green — a mechanism, not care. So the remedy is
+the same shape as every structural fix that worked in this unit (remove the default param so omission
+is a compile error; move the dispatcher inside the function; contain the fault in the wrapper): **make
+the wrong thing impossible rather than remembered.** An unrun mutation claim is an unverified claim,
+and a false coverage claim is worse than no claim — it retires scrutiny from a path nothing guards.
+
+### GOOD HANDLING — demonstrate why a concern is latent; never assert a property the test cannot prove
+Grok's round-4 INFO-3 said `runCatching { afterPublish() }` swallows `CancellationException` while the
+sweep path deliberately rethrows. Rather than "fix" the asymmetry or wave the label away, the test
+was written to answer whether it was live: `afterPublish` is `() -> Unit`, not `suspend`, so it has no
+suspension point at which a real cancellation could ever reach it — the only CE it can raise is one it
+constructs itself; and the `runCatching` sits INSIDE `withContext`, which rechecks its job on exit, so
+a genuine cancellation still propagates. Latent, not live, and the reasoning is executable and will
+fail loudly if `afterPublish` ever becomes suspending. **Characterisation, honestly labelled, beats a
+false coverage claim.** Pairs with the rule above: the same test carries `MUTATION UNIQUELY CAUGHT:
+NONE` because the mutation was run and survived.
+
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
   round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked
