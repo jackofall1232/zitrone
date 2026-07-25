@@ -305,4 +305,39 @@ class BootReconcileOwnerTest {
         assertTrue(h.done.value)
         assertFalse("nothing was mutated, so nothing to withhold", h.hold.value)
     }
+
+    /**
+     * `afterPublish` runs AFTER the verdict is published, so a fault in it must not be able to affect
+     * the verdict or the release of waiters (round-3 review, Gemini: no test passed an `afterPublish`
+     * lambda at all, so the wrapper's behaviour around it was entirely uncovered).
+     *
+     * Production passes `{ runCatching { retryPlaintextCacheClearIfNoVault() } }`, so it cannot throw
+     * today — this pins the ordering guarantee for any future caller that is less careful.
+     *
+     * MUTATION UNIQUELY CAUGHT: moving `afterPublish()` ahead of the `finally` that publishes.
+     */
+    @Test
+    fun `a throwing afterPublish cannot unpublish the verdict`() = runTest {
+        val io = StandardTestDispatcher(testScheduler)
+        val h = Harness()
+        var released = false
+        launch {
+            h.done.first { it }
+            released = true
+        }
+
+        runBootReconcile(
+            scope = this,
+            claim = h::claim,
+            sweep = { ResidueSweepResult.SWEPT_DURABLE },
+            publish = h::publish,
+            afterPublish = { error("post-publication hygiene failed") },
+            ioDispatcher = io,
+        )
+        advanceUntilIdle()
+
+        assertTrue("the verdict must already be published before afterPublish runs", h.done.value)
+        assertTrue("and its waiters released", released)
+        assertFalse("a durable verdict must survive a later failure", h.hold.value)
+    }
 }

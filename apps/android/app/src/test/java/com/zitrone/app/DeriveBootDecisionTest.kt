@@ -155,3 +155,56 @@ class DeriveBootDecisionTest {
         assertEquals(BootRoute.DELETE_INCOMPLETE, d.route)
     }
 }
+
+/**
+ * DOES A COMPLETED DESTROY SUPERSEDE A RESIDUE-SWEEP HOLD? (0.9.2 Unit W-A, round 3.)
+ *
+ * The account-delete completion path and the session collector decide the SAME routing moment. Before
+ * this, the collector consumed the carried `residueSweepHold` and the delete path did not, so a hold
+ * raised earlier in the process made them disagree — collector LOCKED, delete path Onboarding, last
+ * writer wins, pinning a successfully deleted account to a lock screen for the rest of the process.
+ *
+ * Unifying them is only safe if a completed destroy genuinely supersedes the hold. It does: destroy
+ * proves image-bearing absence with its own required `dirSync` and retires both markers only after
+ * that proof — strictly stronger evidence than the sweep's unproven unlink. This pins that reasoning.
+ */
+class DestroySupersedesResidueHoldTest {
+
+    /** The whole point: a completed destroy clears a stale hold. */
+    @Test
+    fun `a completed destroy supersedes the hold`() {
+        assertTrue(
+            destroySupersedesResidueHold(vaultProvenAbsent = true, serverDeleteConfirmed = false),
+        )
+    }
+
+    /**
+     * A destroy that threw before retiring its markers has NOT proven anything — the confirmed marker
+     * is still present, and the hold must stand.
+     *
+     * MUTATION UNIQUELY CAUGHT: dropping the `!serverDeleteConfirmed` conjunct.
+     */
+    @Test
+    fun `a destroy that did not reach its marker retire does not supersede`() {
+        assertFalse(
+            "a surviving confirmed marker means the destroy never completed — the hold stands",
+            destroySupersedesResidueHold(vaultProvenAbsent = true, serverDeleteConfirmed = true),
+        )
+    }
+
+    /**
+     * Absence that is not proven is not absence. Without proven image-bearing absence there is no
+     * stronger evidence to supersede the hold with.
+     *
+     * MUTATION UNIQUELY CAUGHT: dropping the `vaultProvenAbsent` conjunct.
+     */
+    @Test
+    fun `an unproven directory never supersedes the hold`() {
+        assertFalse(
+            destroySupersedesResidueHold(vaultProvenAbsent = false, serverDeleteConfirmed = false),
+        )
+        assertFalse(
+            destroySupersedesResidueHold(vaultProvenAbsent = false, serverDeleteConfirmed = true),
+        )
+    }
+}

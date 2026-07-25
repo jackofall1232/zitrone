@@ -284,7 +284,8 @@ class AppContainer(private val app: Application) {
             },
             afterPublish = {
                 // Non-routing hygiene AFTER the gate opens — a slow cache clear must not hold splash.
-                runCatching { retryPlaintextCacheClearIfNoVault() }
+                // No local runCatching: runBootReconcile contains faults here by contract.
+                retryPlaintextCacheClearIfNoVault()
             },
         )
     }
@@ -1163,7 +1164,12 @@ internal fun runBootReconcile(
             // the coroutine is being cancelled.
             publish(result == ResidueSweepResult.SWEPT_NOT_DURABLE)
         }
-        withContext(ioDispatcher) { afterPublish() }
+        // CONTAINED (round-3 review, Gemini). This runs AFTER the verdict is published, so it can
+        // never affect routing — but an uncaught throw here propagates out of the launch and, on
+        // Android, reaches the default handler and takes the process down. Production's lambda wraps
+        // itself, which protects today's caller and no future one; the guarantee belongs in the
+        // wrapper. A fault in post-publication hygiene must not be able to kill the app.
+        withContext(ioDispatcher) { runCatching { afterPublish() } }
     }
 }
 
@@ -1206,6 +1212,28 @@ internal fun deriveBootDecision(
         ),
     )
 }
+
+/**
+ * Does a completed account destroy SUPERSEDE an earlier residue-sweep hold?
+ *
+ * The hold exists because a cold-start orphan sweep unlinked residue without being able to prove the
+ * unlink crash-durable. A destroy that completed proves image-bearing absence with its OWN required
+ * `dirSync`, and retires both delete markers only after that proof — so once it has completed, the
+ * earlier uncertainty is resolved by strictly stronger evidence. Leaving the hold raised would
+ * withhold onboarding over a directory this delete has just proven durably clean, for the rest of the
+ * process.
+ *
+ * Both conditions are required. [vaultProvenAbsent] alone is not enough — a fresh stat reports absence
+ * the instant a file is unlinked — and `!`[serverDeleteConfirmed] is what says the destroy actually
+ * reached its marker retire rather than throwing part-way.
+ *
+ * Extracted as a pure predicate so the decision is testable: it is the one behavioural change in an
+ * otherwise-documentation delta, and it sits in the account-delete surface.
+ */
+internal fun destroySupersedesResidueHold(
+    vaultProvenAbsent: Boolean,
+    serverDeleteConfirmed: Boolean,
+): Boolean = vaultProvenAbsent && !serverDeleteConfirmed
 
 /** Where a composition must route out of Splash on a cold start — see [bootRoute]. */
 internal enum class BootRoute { DELETE_INCOMPLETE, LOCKED, ONBOARDING }

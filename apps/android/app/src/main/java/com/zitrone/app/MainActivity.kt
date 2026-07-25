@@ -1090,25 +1090,48 @@ private fun ZitroneRoot(
                 // completeTerminalWipe's outermost finally, so the unlock gate is not stranded.
             } finally {
                 // This callback runs on the coordinator's background (confined) dispatcher, so the
-                // Compose-state reconcile is marshaled to Main (round 12d, Gemini). Main.immediate
-                // + container.scope so a rotation mid-wipe cannot cancel it. The disk-truth reads
-                // (hasVault / vaultDestroyPending — fast stats under imageLock) run on Main here,
-                // as they already do from Splash routing. The session→route reconciler is the
-                // parallel main-thread backstop: lockIf published session=null above, so it also
-                // derives the same route from the same disk truth — the two cannot disagree.
+                // Compose-state reconcile is marshaled to Main. Main.immediate + container.scope so a
+                // rotation mid-wipe cannot cancel it.
+                //
+                // ONE ROUTING AUTHORITY (round-3 review, Grok; Kimi concurring). `lockIf` publishes
+                // session=null above, which also wakes the session collector — so this callback and
+                // that collector decide the SAME routing moment. They used to read the same two
+                // stats, and a comment here asserted "the two cannot disagree". W-A made that comment
+                // FALSE: the collector was given the carried `residueSweepHold` and this path was
+                // left on `hasVault()` + `serverDeleteConfirmed()`. With a hold raised earlier in the
+                // process, the collector computes LOCKED while this computes Onboarding, both write
+                // `route`, and the last writer wins — pinning a successfully deleted account to a
+                // lock screen for the rest of the process. That is this unit's signature failure
+                // class, reintroduced by strengthening one consumer and not its twin.
+                //
+                // Both now go through the same derivation with the same inputs.
                 container.scope.launch(Dispatchers.Main.immediate) {
                     identityFingerprint = null
                     unlocked = false
                     lockError = null
-                    vaultExists = container.hasVault()
-                    route = if (!vaultExists && !container.serverDeleteConfirmed()) {
-                        // Destroy CONFIRMED (files gone, both markers retired) → fresh-install state.
-                        Route.Onboarding
-                    } else {
-                        // The image (or the server-delete-confirmed marker) survives: the server
-                        // account IS gone, so the only honest route is "finish deleting" with a
-                        // direct retry — NEVER the lock gate (see Route.DeleteIncomplete).
-                        Route.DeleteIncomplete
+                    // A COMPLETED destroy supersedes an earlier non-durable orphan sweep: it proved
+                    // image-bearing absence with its OWN required dirSync and retired both markers
+                    // only after that proof. Leaving a stale boot-time hold raised would withhold
+                    // onboarding over a directory this delete has just proven durably clean.
+                    if (destroySupersedesResidueHold(
+                            vaultProvenAbsent = container.vaultProvenAbsent(),
+                            serverDeleteConfirmed = container.serverDeleteConfirmed(),
+                        )
+                    ) {
+                        container.residueSweepHold.value = false
+                    }
+                    val snap = container.deriveBootDecisionFromDisk()
+                    vaultExists = snap.present && !snap.legacy
+                    // The mapping matches the previous explicit semantics in every REACHABLE
+                    // post-destroy state: a surviving image implies the markers were NOT retired
+                    // (destroy retires them only after proving absence), so `serverDeleteConfirmed`
+                    // is still set and bootRoute yields DELETE_INCOMPLETE — never the lock gate.
+                    // {image survives, confirmed absent} cannot occur: destroy throws before the
+                    // retire when absence is unproven.
+                    route = when (snap.route) {
+                        BootRoute.DELETE_INCOMPLETE -> Route.DeleteIncomplete
+                        BootRoute.ONBOARDING -> Route.Onboarding
+                        BootRoute.LOCKED -> Route.Locked
                     }
                 }
             }

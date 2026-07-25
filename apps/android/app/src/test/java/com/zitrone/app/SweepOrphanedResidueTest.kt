@@ -162,13 +162,20 @@ class SweepOrphanedResidueTest {
      *
      * There is deliberately no gate on `vault.delete-intent`. `destroy()` writes the CONFIRMED marker
      * durably BEFORE it unlinks anything, so every real account-delete unlink already carries the
-     * confirmed marker and is caught by the other gate — while an intent alone never accompanies an
-     * absent image in a legitimate delete state (an intent is written while the image is still
-     * present, and `create()` clears both markers durably before writing the DEK).
+     * confirmed marker and is caught by the other gate. An intent gate would therefore protect
+     * nothing against a deletion in flight, while it could only STRAND residue.
      *
-     * An intent gate would therefore protect nothing and could only STRAND a recoverable outer image
-     * that no other path reaches. A gate can be wrong by being too narrow, and here that would be
-     * worse than the over-deletion such a gate is written to prevent.
+     * PROOF CORRECTED (round 3, Codex). An earlier version of this docstring claimed "an intent alone
+     * never accompanies an absent image in a legitimate state" — and that is FALSE.
+     * `createVaultAndPublish` calls `retireLegacyImage()`, which unlinks the image, BEFORE `create()`
+     * clears the markers, so a crash between them leaves exactly an intent standing over an absent
+     * image. The same false claim was corrected in the store's own table as row 6c; it survived HERE,
+     * in the sibling docstring, which is this unit's recurring shape: fix one site, miss its twin.
+     *
+     * What makes sweeping safe is NOT that the state is unreachable — it is that whatever produced it
+     * has already destroyed the only openable image, so the residue opens nothing and keeping it would
+     * strand dead data. A gate can be wrong by being too narrow, and here that would be worse than the
+     * over-deletion such a gate is written to prevent.
      */
     @Test
     fun `row 6b - an intent marker does not strand recoverable residue`() {
