@@ -103,6 +103,30 @@ class KeystoreDeviceKeyCipher(
     // existingKey / wrap / unwrap. Lazily loaded on first use (mirrors lazy key generation).
     private val keyStore: KeyStore by lazy { KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) } }
 
+    /**
+     * Delete this install's device-key alias. Returns true iff the alias is PROVEN gone afterwards.
+     *
+     * **Why a burn must call this (0.9.2 Unit W-B, found by the byte-for-byte gate's first run).**
+     * The alias is created LAZILY — [getOrCreateKey] generates it on the first `wrapDek`, i.e. when a
+     * vault is first created. A device that never created a vault does not have it. So its mere
+     * EXISTENCE after a burn is an on-device oracle that a vault once lived here: post-burn state
+     * differs from post-fresh-install state by exactly this artifact, which is the property the
+     * duress wipe exists to provide.
+     *
+     * Safe to delete: [getOrCreateKey] regenerates on demand, and after an obliterate there is no
+     * wrapped DEK left for it to unwrap.
+     *
+     * Deliberately NOT called by the account-delete path: there the user is TOLD the account was
+     * deleted, so an alias proving a vault existed discloses nothing they do not already know.
+     * Deniability is the burn path's property, not that one's.
+     */
+    fun deleteKeyMaterial(): Boolean = try {
+        keyStore.deleteEntry(alias)
+        !keyStore.containsAlias(alias)
+    } catch (e: Exception) {
+        false
+    }
+
     private fun existingKey(): SecretKey? = try {
         (keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.secretKey
     } catch (e: Exception) {

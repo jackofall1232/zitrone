@@ -213,6 +213,16 @@ class BurnByteForByteGateTest {
             fresh.keystoreAliases,
             burnedWithResidue.keystoreAliases,
         )
+        // AND IT MUST FAIL FOR THE RIGHT REASON. `!=` alone passed on the gate's first execution
+        // while the real discriminator was an UNRELATED defect (the device-key alias surviving every
+        // burn). Once that defect is fixed the inequality would still have held on the narrower true
+        // condition, and nobody would have noticed the guard had stopped guarding — the anti-vacuity
+        // guard going vacuous as a SIDE EFFECT of an unrelated fix. Name the artifact.
+        assertTrue(
+            "the difference must be THIS deliberately orphaned alias, not some other residue",
+            (burnedWithResidue.keystoreAliases - fresh.keystoreAliases)
+                .contains(BiometricVaultKeyCipher.PREFIX + "gatenegative"),
+        )
 
         // Restore the device to a clean state so a later test in this class is not polluted.
         container.wipeBiometricMaterial()

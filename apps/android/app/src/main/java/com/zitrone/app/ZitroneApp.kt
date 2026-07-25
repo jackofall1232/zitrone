@@ -156,7 +156,14 @@ class AppContainer(private val app: Application) {
      * device-key layer is not a slot secret, so keeping it open is fine, and a fresh
      * unlock reuses this instance rather than re-registering the directory.
      */
-    val imageStore = VaultImageStore(app.filesDir, vaultOps, KeystoreDeviceKeyCipher())
+    /**
+     * The device-key cipher, held as a field rather than constructed inline so the BURN path can
+     * reach it — its alias is lazily created and therefore an oracle (see [wipeBiometricMaterial]
+     * and `KeystoreDeviceKeyCipher.deleteKeyMaterial`).
+     */
+    private val deviceKeyCipher = KeystoreDeviceKeyCipher()
+
+    val imageStore = VaultImageStore(app.filesDir, vaultOps, deviceKeyCipher)
 
     /** The auth-gated biometric key that wraps the slot-A vault key (dual-wrap, posture B). */
     val biometricCipher = BiometricVaultKeyCipher()
@@ -375,6 +382,14 @@ class AppContainer(private val app: Application) {
             // AFTER the image so a failure here cannot strand a recoverable vault — the image is
             // already proven gone by the time this can fail.
             if (!wipeBiometricMaterial()) throw VaultImageException.DestroyFailed()
+            // THE DEVICE KEY IS AN ORACLE (gate finding, first execution). It is created LAZILY by
+            // the first `wrapDek`, so a device that never made a vault does not have the alias —
+            // leaving it behind proves one existed. Enumerated rather than fixed one-off: the app
+            // creates three alias families, and this is the only other one that is
+            // "exists only if the feature was used". `_androidx_security_master_key_` is created at
+            // STARTUP by EncryptedSharedPreferences, so a fresh install has it too and wiping it
+            // would break prefs — deliberately NOT touched.
+            if (!deviceKeyCipher.deleteKeyMaterial()) throw VaultImageException.DestroyFailed()
         },
         lowerHold = { durabilityHold.value = false },
     )
