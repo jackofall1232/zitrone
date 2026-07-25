@@ -234,10 +234,18 @@ class BootReconcileOwnerTest {
         val io = StandardTestDispatcher(testScheduler)
         val h = Harness()
 
+        // The first run IS cancelled (round-2 review, Kimi). This test previously performed no
+        // cancellation at all — a `rest = { throw CancellationException(...) }` argument was removed
+        // during the extraction when the `rest` hook was dropped, silently reducing it to a duplicate
+        // of `a second start does not re-run the destructive sweep`. The point is that a CANCELLED
+        // claimant still holds the claim, so destructive work must not run again.
         runBootReconcile(
             scope = this,
             claim = h::claim,
-            sweep = { h.sweepRuns.incrementAndGet(); ResidueSweepResult.SWEPT_DURABLE },
+            sweep = {
+                h.sweepRuns.incrementAndGet()
+                throw CancellationException("recreation mid-reconcile")
+            },
             publish = h::publish,
             ioDispatcher = io,
         )
@@ -252,7 +260,12 @@ class BootReconcileOwnerTest {
         )
         advanceUntilIdle()
 
-        assertEquals("destructive boot work must never run twice", 1, h.sweepRuns.get())
+        assertEquals(
+            "the claim survives cancellation, so destructive boot work must never run twice",
+            1,
+            h.sweepRuns.get(),
+        )
+        assertTrue("and the cancelled run still released its waiters fail-closed", h.hold.value)
     }
 
     /** A healthy, durable boot must NOT hold — the hold has to be earned, not the default outcome. */

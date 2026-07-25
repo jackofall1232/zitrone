@@ -120,7 +120,7 @@ class SweepOrphanedResidueTest {
 
         assertEquals(ResidueSweepResult.SWEPT_DURABLE, newStore(dir).sweepOrphanedResidue())
         assertFalse("a complete outer image must not survive as a temp", binTmp(dir).exists())
-        assertTrue("the directory must now be provably clean", newStore(dir).obliterationComplete())
+        assertTrue("the directory must now be provably clean", newStore(dir).imageBearingProvenAbsent())
     }
 
     // ──────────────────── rows 4-8: states another owner holds — REFUSE ────────────────────
@@ -187,7 +187,7 @@ class SweepOrphanedResidueTest {
         )
         assertFalse("the stranded complete image must be gone", binTmp(dir).exists())
         assertFalse("and the stray dek", dek(dir).exists())
-        assertTrue("the directory is now provably clean", newStore(dir).obliterationComplete())
+        assertTrue("the directory is now provably clean", newStore(dir).imageBearingProvenAbsent())
     }
 
     /**
@@ -212,6 +212,39 @@ class SweepOrphanedResidueTest {
             newStore(dir).sweepOrphanedResidue(),
         )
         assertTrue("and the residue it owns must survive", dek(dir).exists())
+    }
+
+    /**
+     * Row 8, THE LOAD-BEARING VERSION — gate 2's tristate, by CONSEQUENCE (round-2 review, Grok).
+     *
+     * Gate 1 had an ELOOP test proving an indeterminate IMAGE stat refuses; gate 2 had only a
+     * present-marker case and the admittedly-weak ENOTDIR one. Verified by mutation: downgrading gate
+     * 2 from `!Files.notExists(...)` to `File.exists()` broke NOTHING — so the confirmed marker's
+     * fail-closed reading was uncovered while the image's was covered. Symmetry gap, closed here.
+     *
+     * A self-referential symlink at `vault.delete-confirmed` yields ELOOP: `File.exists()` reads false
+     * (indistinguishable from absent — the fail-open) while `Files.notExists()` is ALSO false
+     * (correctly: not proven absent). The assertion is on the DAMAGE — the DEK of a directory whose
+     * deletion status cannot be determined must survive.
+     *
+     * MUTATION UNIQUELY CAUGHT: `!Files.notExists(serverDeletedFile)` → `serverDeletedFile.exists()`.
+     */
+    @Test
+    fun `row 8 - an unstattable confirmed marker must not cost the residue`() {
+        val dir = tmp.newFolder()
+        val marker = confirmed(dir).toPath()
+        java.nio.file.Files.createSymbolicLink(marker, marker.fileName)
+        dek(dir).writeBytes(ByteArray(WRAPPED_KEY_BYTES) { 7 })
+
+        assertEquals(
+            "an indeterminate confirmed-marker stat must refuse — a pending deletion may own this",
+            ResidueSweepResult.NO_MUTATION,
+            newStore(dir).sweepOrphanedResidue(),
+        )
+        assertTrue(
+            "and MUST NOT have deleted the residue on the way to refusing",
+            dek(dir).exists(),
+        )
     }
 
     /**
@@ -331,12 +364,12 @@ class SweepOrphanedResidueTest {
 
         assertFalse(
             "precondition: residue means onboarding is NOT authorised",
-            newStore(dir).obliterationComplete(),
+            newStore(dir).imageBearingProvenAbsent(),
         )
         assertEquals(ResidueSweepResult.SWEPT_DURABLE, newStore(dir).sweepOrphanedResidue())
         assertTrue(
             "after the sweep, and only then, onboarding is authorised",
-            newStore(dir).obliterationComplete(),
+            newStore(dir).imageBearingProvenAbsent(),
         )
     }
 

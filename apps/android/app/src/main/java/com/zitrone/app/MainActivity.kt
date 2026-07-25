@@ -643,7 +643,7 @@ private fun ZitroneRoot(
     LaunchedEffect(splashFinished, bootDone) {
         if (!splashFinished || !bootDone) return@LaunchedEffect
         if (route != Route.Splash) return@LaunchedEffect
-        val decided = withContext(Dispatchers.IO) { container.deriveBootDecisionFromDisk() }
+        val decided = container.deriveBootDecisionFromDisk()
         // RE-CHECK AFTER THE SUSPEND: the guard above ran before `withContext`, and a decision taken
         // for a tree that has since left Splash must not be applied to it.
         if (route != Route.Splash) return@LaunchedEffect
@@ -664,7 +664,7 @@ private fun ZitroneRoot(
         // process-scoped result is available.
         container.bootReconciled.first { it }
         if (container.session.value == null) {
-            val snap = withContext(Dispatchers.IO) { container.deriveBootDecisionFromDisk() }
+            val snap = container.deriveBootDecisionFromDisk()
             // RE-CHECK AFTER THE SUSPEND (round-1 review, Kimi). The session was checked before
             // `withContext`; a session published while we were off-main must not then be pulled to
             // DeleteIncomplete by a decision taken for a tree that no longer has none. The Splash

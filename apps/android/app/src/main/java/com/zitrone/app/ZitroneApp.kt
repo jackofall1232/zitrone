@@ -232,22 +232,28 @@ class AppContainer(private val app: Application) {
      * `vault.dek` or `vault.bin.tmp` (which stages a COMPLETE outer image) reads as "no vault" and
      * would route ONBOARDING over recoverable ciphertext.
      */
-    fun vaultProvenAbsent(): Boolean = imageStore.obliterationComplete()
+    fun vaultProvenAbsent(): Boolean = imageStore.imageBearingProvenAbsent()
 
     /**
      * Read the four disk facts and produce ONE boot decision — the single derivation every routing
-     * consumer uses. Call OFF the main thread: the legacy probe reads and decrypts the outer layer.
+     * consumer uses.
+     *
+     * SUSPEND, and it moves itself to IO (round-2 review, Gemini). This was a plain function with a
+     * kdoc saying "call off the main thread", and one of its three callers — the session collector —
+     * called it bare on the composition dispatcher, running a ~1 MiB decrypt on the main thread. A
+     * requirement stated in a comment is a requirement that will eventually be violated by one call
+     * site; the dispatcher move belongs INSIDE, where no caller can get it wrong. Callers now simply
+     * `deriveBootDecisionFromDisk()`.
      */
-    internal fun deriveBootDecisionFromDisk(): BootDecision = deriveBootDecision(
-        serverDeleteConfirmed = serverDeleteConfirmed(),
-        imagePresent = hasVault(),
-        residueSweepHold = residueSweepHold.value,
-        vaultProvenAbsent = vaultProvenAbsent(),
-        isLegacyImage = { isLegacyImage() },
-    )
-
-    /** Cold-start orphan sweep — see [VaultImageStore.sweepOrphanedResidue]. */
-    fun sweepOrphanedVaultResidue(): ResidueSweepResult = imageStore.sweepOrphanedResidue()
+    internal suspend fun deriveBootDecisionFromDisk(): BootDecision = withContext(Dispatchers.IO) {
+        deriveBootDecision(
+            serverDeleteConfirmed = serverDeleteConfirmed(),
+            imagePresent = hasVault(),
+            residueSweepHold = residueSweepHold.value,
+            vaultProvenAbsent = vaultProvenAbsent(),
+            isLegacyImage = { isLegacyImage() },
+        )
+    }
 
     /**
      * PROCESS-scoped boot-reconciliation state.

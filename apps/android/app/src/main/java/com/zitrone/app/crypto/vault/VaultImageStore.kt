@@ -1292,7 +1292,6 @@ class VaultImageStore internal constructor(
         return dirSync(target.parentFile)
     }
 
-    /** Delete an incomplete-write temp for [target], if any. Best-effort. */
     /**
      * True ONLY when every image-bearing file is PROVEN absent — image, DEK envelope, and BOTH
      * interrupted-write temps. Fail-closed: present OR indeterminate yields false.
@@ -1309,12 +1308,14 @@ class VaultImageStore internal constructor(
             Files.notExists(leftoverTmp(dekFile).toPath())
 
     /**
-     * Public fail-closed proof that the vault directory holds nothing image-bearing. This is the ONLY
-     * predicate that may authorise a fresh-install presentation; `hasVault()` keys on `vault.bin`
-     * alone and would call a directory empty while a surviving DEK or temp still held a recoverable
-     * vault.
+     * Public fail-closed proof that the vault directory holds nothing image-bearing.
+     *
+     * Named for what it asserts, not for a wipe (round-2 review, Grok): this unit has no destructive
+     * wipe, and a name carrying that vocabulary invites a reader to assume a mechanism that is not
+     * here. `hasVault()` keys on `vault.bin` alone and would call a directory empty while a surviving
+     * DEK or temp still held a recoverable vault, which is why routing must not use it.
      */
-    fun obliterationComplete(): Boolean = imageLock.withLock { imageBearingFilesProvenAbsent() }
+    fun imageBearingProvenAbsent(): Boolean = imageLock.withLock { imageBearingFilesProvenAbsent() }
 
     /**
      * COLD-START ORPHAN SWEEP. Deletes an orphaned `vault.dek` / `vault.bin.tmp` / `vault.dek.tmp`
@@ -1377,12 +1378,31 @@ class VaultImageStore internal constructor(
      *  9  {nothing present}                      fresh install                 NO-OP (already proven
      *                                                                          clean).
      *
-     * There is deliberately NO gate on `vault.delete-intent`: [destroy] writes the CONFIRMED marker
+     *  6c {delete-intent, no bin, residue}         a crash between            SWEEP. MISSING ROW,
+     *                                               retireLegacyImage() and     found in round 2
+     *                                               create() — the retire       (Codex). Retirement
+     *                                               unlinks the image, only     has ALREADY destroyed
+     *                                               create() clears markers     the only usable image,
+     *                                                                           so the residue opens
+     *                                                                           nothing and retaining
+     *                                                                           it would strand dead
+     *                                                                           data. Swept because
+     *                                                                           the image is gone —
+     *                                                                           NOT because the state
+     *                                                                           is unreachable.
+     *
+     * There is deliberately NO gate on `vault.delete-intent`. [destroy] writes the CONFIRMED marker
      * durably BEFORE it unlinks anything, so every real D2c unlink already carries the confirmed
-     * marker and is caught by gate 2 — while an intent alone never accompanies an absent image in a
-     * legitimate D2c state (an intent is written while the image is still present, and [create]
-     * clears both markers durably before writing the DEK). An intent gate would protect nothing and
-     * could only strand residue.
+     * marker and is caught by gate 2. An intent gate would therefore protect nothing against a
+     * deletion in flight — and it could only STRAND residue.
+     *
+     * A PREVIOUS VERSION OF THIS PROOF WAS WRONG (round 2, Codex) and is corrected here rather than
+     * quietly reworded: it claimed an intent "never accompanies an absent image in a legitimate
+     * state". Row 6c is exactly that state, and it is reachable — `createVaultAndPublish` calls
+     * [retireLegacyImage] (which unlinks the image) BEFORE [create] (which clears the markers), so a
+     * crash between them leaves an intent standing over an absent image. The sweep's ACTION was
+     * always right; the JUSTIFICATION was not. What makes 6c safe is that retirement has already
+     * destroyed the only openable image, not that nothing can produce the state.
      *
      * ── OTHER PROPERTIES ────────────────────────────────────────────────────────────────────────
      * Touches NO in-memory state (no [dek] wipe, no [canonical] drop, no [unregister]): gate 1 proves
@@ -1427,6 +1447,7 @@ class VaultImageStore internal constructor(
     private fun leftoverTmp(target: File): File =
         File(target.parentFile, "${target.name}$TMP_SUFFIX")
 
+    /** Delete an incomplete-write temp for [target], if any. Best-effort. */
     private fun deleteLeftoverTmp(target: File) {
         leftoverTmp(target).delete()
     }
