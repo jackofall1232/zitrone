@@ -926,10 +926,14 @@ image is *proven* absent (`Files.notExists`, so an unstattable image refuses) **
 `vault.delete-confirmed` marker is present or indeterminate — so it can never touch a live vault's key
 or state that an in-flight account deletion owns. It is idempotent and silent.
 
-**Onboarding requires proven absence.** Every path that can present the first-run screen now requires
-the whole directory to be provably clean — not merely "no `vault.bin`". If the sweep cannot complete
-(an I/O fault, a refused gate), or completed without a durable sync, the lock screen is held for the
-rest of that boot instead of claiming a clean device. Absence that is not durable is not absence.
+**Onboarding over an empty directory requires proven absence.** Where the first-run screen is shown
+because the device appears to have no vault, it now requires the whole directory to be provably clean —
+not merely "no `vault.bin`". (Re-onboarding a prior-format image is the one first-run presentation that
+does not rest on that test: there the image is present and is retired by the create.) If a sweep
+unlinked residue but could not confirm the deletion durable, the lock screen is held for the rest of
+that boot instead of claiming a clean device — absence that is not durable is not absence. A sweep that
+simply refuses (a live image, a pending deletion, an unstattable path) changes nothing and reports
+nothing; the routing outcome then follows from the other disk facts.
 
 **Honest limits.** The sweep is cryptographic hygiene, not media sanitization: unlinking does not erase
 data from wear-levelled flash, and the guarantee remains that the DEK is destroyed so surviving blocks

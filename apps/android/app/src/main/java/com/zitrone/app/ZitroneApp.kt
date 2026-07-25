@@ -234,6 +234,18 @@ class AppContainer(private val app: Application) {
      */
     fun vaultProvenAbsent(): Boolean = imageStore.obliterationComplete()
 
+    /**
+     * Read the four disk facts and produce ONE boot decision — the single derivation every routing
+     * consumer uses. Call OFF the main thread: the legacy probe reads and decrypts the outer layer.
+     */
+    internal fun deriveBootDecisionFromDisk(): BootDecision = deriveBootDecision(
+        serverDeleteConfirmed = serverDeleteConfirmed(),
+        imagePresent = hasVault(),
+        residueSweepHold = residueSweepHold.value,
+        vaultProvenAbsent = vaultProvenAbsent(),
+        isLegacyImage = { isLegacyImage() },
+    )
+
     /** Cold-start orphan sweep — see [VaultImageStore.sweepOrphanedResidue]. */
     fun sweepOrphanedVaultResidue(): ResidueSweepResult = imageStore.sweepOrphanedResidue()
 
@@ -1147,6 +1159,46 @@ internal fun runBootReconcile(
         }
         withContext(ioDispatcher) { afterPublish() }
     }
+}
+
+/**
+ * Derive a boot decision from disk in ONE place. All three consumers (the Splash decision, the
+ * post-boot re-derive, and the session collector) call this rather than each assembling the five
+ * `bootRoute` inputs themselves.
+ *
+ * Round-1 review (Gemini): the derivation — including the ~1 MiB `isLegacyImage()` decrypt and its
+ * skip conditions — was copy-pasted across all three call sites. Three copies of a safety derivation
+ * drift silently: change one and the others keep the old rule, with no test able to catch the
+ * divergence. One owner, one derivation. This is also why the legacy probe's cost and its
+ * "only when it can matter" guard live here rather than being restated three times.
+ *
+ * MUST be called off the main thread — `isLegacyImage()` reads and decrypts the outer layer.
+ */
+internal fun deriveBootDecision(
+    serverDeleteConfirmed: Boolean,
+    imagePresent: Boolean,
+    residueSweepHold: Boolean,
+    vaultProvenAbsent: Boolean,
+    isLegacyImage: () -> Boolean,
+): BootDecision {
+    // Computed only when it can matter: never over a confirmed delete (that state is owned elsewhere)
+    // and never with no image to inspect.
+    val legacy = if (imagePresent && !serverDeleteConfirmed) {
+        runCatching { isLegacyImage() }.getOrDefault(false)
+    } else {
+        false
+    }
+    return BootDecision(
+        present = imagePresent,
+        legacy = legacy,
+        route = bootRoute(
+            serverDeleteConfirmed = serverDeleteConfirmed,
+            vaultImagePresent = imagePresent,
+            residueSweepHold = residueSweepHold,
+            vaultProvenAbsent = vaultProvenAbsent,
+            legacyImage = legacy,
+        ),
+    )
 }
 
 /** Where a composition must route out of Splash on a cold start — see [bootRoute]. */

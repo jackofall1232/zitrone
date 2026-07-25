@@ -191,6 +191,30 @@ class SweepOrphanedResidueTest {
     }
 
     /**
+     * Row 7: a CONFIRMED server delete owns this state — `Route.DeleteIncomplete` must finish it.
+     *
+     * THIS TEST WAS DELETED BY AN EARLIER REWRITE and restored in round 1 (Grok, Gemini). Gate 2 is
+     * the ownership bar for an in-flight account deletion, and while it was missing, REMOVING gate 2
+     * entirely would not have failed this suite — a destructive gate with no coverage, under a header
+     * still claiming the table was walked row by row.
+     *
+     * MUTATION UNIQUELY CAUGHT: deleting the `serverDeletedFile` gate.
+     */
+    @Test
+    fun `row 7 - refuses while a delete-confirmed marker is present`() {
+        val dir = tmp.newFolder()
+        dek(dir).writeBytes(ByteArray(WRAPPED_KEY_BYTES) { 7 })
+        confirmed(dir).writeBytes(ByteArray(1))
+
+        assertEquals(
+            "a confirmed account delete owns this directory — the sweep must not touch it",
+            ResidueSweepResult.NO_MUTATION,
+            newStore(dir).sweepOrphanedResidue(),
+        )
+        assertTrue("and the residue it owns must survive", dek(dir).exists())
+    }
+
+    /**
      * Row 5/8: an INDETERMINATE stat, constructed for real (ENOTDIR — the store's baseDir is a regular
      * file). Every gate uses `Files.notExists`, true ONLY on a proven absence, so a failing filesystem
      * refuses rather than sweeping blind.

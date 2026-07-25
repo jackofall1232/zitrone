@@ -643,28 +643,7 @@ private fun ZitroneRoot(
     LaunchedEffect(splashFinished, bootDone) {
         if (!splashFinished || !bootDone) return@LaunchedEffect
         if (route != Route.Splash) return@LaunchedEffect
-        val decided = withContext(Dispatchers.IO) {
-            val confirmed = container.serverDeleteConfirmed()
-            val present = container.hasVault()
-            // Computed only when it can matter — a ~1 MiB outer decrypt, so never on a
-            // confirmed-delete or an absent image, and never on the main thread.
-            val legacy = if (present && !confirmed) {
-                runCatching { container.isLegacyImage() }.getOrDefault(false)
-            } else {
-                false
-            }
-            BootDecision(
-                present = present,
-                legacy = legacy,
-                route = bootRoute(
-                    serverDeleteConfirmed = confirmed,
-                    vaultImagePresent = present,
-                    residueSweepHold = container.residueSweepHold.value,
-                    vaultProvenAbsent = container.vaultProvenAbsent(),
-                    legacyImage = legacy,
-                ),
-            )
-        }
+        val decided = withContext(Dispatchers.IO) { container.deriveBootDecisionFromDisk() }
         // RE-CHECK AFTER THE SUSPEND: the guard above ran before `withContext`, and a decision taken
         // for a tree that has since left Splash must not be applied to it.
         if (route != Route.Splash) return@LaunchedEffect
@@ -685,26 +664,12 @@ private fun ZitroneRoot(
         // process-scoped result is available.
         container.bootReconciled.first { it }
         if (container.session.value == null) {
-            val snap = withContext(Dispatchers.IO) {
-                val c = container.serverDeleteConfirmed()
-                val p = container.hasVault()
-                val l = if (p && !c) {
-                    runCatching { container.isLegacyImage() }.getOrDefault(false)
-                } else {
-                    false
-                }
-                BootDecision(
-                    present = p,
-                    legacy = l,
-                    route = bootRoute(
-                        serverDeleteConfirmed = c,
-                        vaultImagePresent = p,
-                        residueSweepHold = container.residueSweepHold.value,
-                        vaultProvenAbsent = container.vaultProvenAbsent(),
-                        legacyImage = l,
-                    ),
-                )
-            }
+            val snap = withContext(Dispatchers.IO) { container.deriveBootDecisionFromDisk() }
+            // RE-CHECK AFTER THE SUSPEND (round-1 review, Kimi). The session was checked before
+            // `withContext`; a session published while we were off-main must not then be pulled to
+            // DeleteIncomplete by a decision taken for a tree that no longer has none. The Splash
+            // consumer already re-checks; this one did not — the asymmetry was the finding.
+            if (container.session.value != null) return@LaunchedEffect
             vaultExists = snap.present && !snap.legacy
             when (snap.route) {
                 BootRoute.DELETE_INCOMPLETE ->
@@ -758,24 +723,15 @@ private fun ZitroneRoot(
         BiometricManager.from(context).canAuthenticate(BIOMETRIC_STRONG) ==
             BiometricManager.BIOMETRIC_SUCCESS
 
-    // 0.9.2 upgrade safety: a PRIOR-format (v2 / 0.9.1) image is unsafe to unlock under the burn-slot
-    // reservation, so route it to fresh onboarding instead of the lock screen. Computed ONCE, off-main
-    // (a ~1 MiB outer decrypt, no Argon2id), only at a cold start with no live session. Safety does not
-    // depend on this — open() throws LegacyImage before any slot interpretation, and onUnlockPassphrase
-    // below also routes LegacyImage to onboarding as a backstop — this just avoids showing a dead lock
-    // screen. Treat a legacy image as "no usable vault" (vaultExists=false) so onboarding proceeds; the
-    // create there retires the old image.
-    LaunchedEffect(Unit) {
-        if (vaultExists && container.session.value == null) {
-            val legacy = withContext(Dispatchers.IO) {
-                runCatching { container.isLegacyImage() }.getOrDefault(false)
-            }
-            if (legacy && (route == Route.Splash || route == Route.Locked)) {
-                vaultExists = false
-                route = Route.Onboarding
-            }
-        }
-    }
+    // (The standalone legacy-image routing effect that used to live here is REMOVED. It was a SECOND
+    // routing authority: it set Route.Onboarding on its own, without awaiting `bootReconciled`,
+    // without the carried `residueSweepHold`, and without consulting `serverDeleteConfirmed()` — so
+    // with a v2 image over a durable `vault.delete-confirmed` it could preempt Route.DeleteIncomplete,
+    // and the create() on that onboarding screen CLEARS both markers, erasing the SOLE authorisation
+    // for the account-delete auto-destroy. Legacy detection is now an INPUT to the single boot
+    // decision; see bootRoute's `legacyImage` arm, which orders it AFTER the confirmed marker and
+    // BEFORE image-present. `onUnlockPassphrase` still routes PassphraseOutcome.LegacyImage to
+    // onboarding as an unlock-time backstop.)
 
     var identityFingerprint by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(session) {
@@ -823,23 +779,11 @@ private fun ZitroneRoot(
                 // Only a CONFIRMED server delete routes to the auto-destroy path. A session going
                 // null never carries a mere delete-intent (onNotConfirmed keeps the session live),
                 // so intent-only handling lives in the boot decision, not here.
-                val imagePresent = container.hasVault()
-                val legacyNow = if (imagePresent && !container.serverDeleteConfirmed()) {
-                    runCatching { container.isLegacyImage() }.getOrDefault(false)
-                } else {
-                    false
-                }
-                // A legacy image is present but NOT usable — same derivation the boot consumers use.
-                vaultExists = imagePresent && !legacyNow
-                route = when (
-                    bootRoute(
-                        serverDeleteConfirmed = container.serverDeleteConfirmed(),
-                        vaultImagePresent = imagePresent,
-                        residueSweepHold = container.residueSweepHold.value,
-                        vaultProvenAbsent = container.vaultProvenAbsent(),
-                        legacyImage = legacyNow,
-                    )
-                ) {
+                // Same single derivation the two boot consumers use — see deriveBootDecision.
+                val snap = container.deriveBootDecisionFromDisk()
+                // A legacy image is present but NOT usable.
+                vaultExists = snap.present && !snap.legacy
+                route = when (snap.route) {
                     BootRoute.DELETE_INCOMPLETE -> Route.DeleteIncomplete
                     BootRoute.ONBOARDING -> Route.Onboarding
                     BootRoute.LOCKED -> Route.Locked

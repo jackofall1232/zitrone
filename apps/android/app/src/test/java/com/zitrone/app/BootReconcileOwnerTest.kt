@@ -22,10 +22,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * PUCKER BURN Unit W — the BOOT-OWNER LIFECYCLE CONTRACT (0.9.2, sweep-delta round 3).
+ * BOOT-OWNER LIFECYCLE CONTRACT (0.9.2 Unit W-A).
  *
  * ── WHY THIS SUITE EXISTS, AND A CORRECTION ──────────────────────────────────────────────────────
- * Round 2's two HIGHs both lived in this layer, and I reported them as "inspection-verified only —
+ * Two HIGHs in the parent unit lived in this layer, and I reported them as "inspection-verified only —
  * this project has no test infrastructure for lifecycle". **That was wrong, and a five-second check
  * of the build file refutes it:** `kotlinx-coroutines-test` and `robolectric` are both already
  * declared (`app/build.gradle.kts:222,224`). The contract was always testable on the host JVM; it
@@ -190,12 +190,20 @@ class BootReconcileOwnerTest {
     }
 
     /**
-     * The other half, so "always hold on cancellation" cannot pass as a fix: cancellation AFTER a
-     * proven-durable sweep must NOT invent a hold. The verdict was earned before the interruption,
-     * and a spurious hold would strand a healthy device on the lock screen for the whole process.
+     * The other side of the fail-closed default, so "always hold" cannot pass as a fix: a sweep that
+     * DID produce a durable verdict must not have that verdict overwritten by the initial
+     * SWEPT_NOT_DURABLE. A spurious hold would strand a healthy device on the lock screen for the
+     * whole process.
+     *
+     * NAME CORRECTED in round 1 (Codex). This was called "cancellation after a durable sweep…" and
+     * performed no cancellation. Worse, that window does not exist in this shape: `publish` runs in a
+     * `finally` with NO suspension point between the verdict and the publication, so a run cannot be
+     * cancelled after producing a verdict and before publishing it. The test now claims only what it
+     * proves — and the cancellation-before-verdict case, which IS reachable, is covered by the
+     * stranding test above.
      */
     @Test
-    fun `cancellation after a durable sweep does not invent a hold`() = runTest {
+    fun `a durable verdict is never overwritten by the fail-closed default`() = runTest {
         val io = StandardTestDispatcher(testScheduler)
         val h = Harness()
         var released = false

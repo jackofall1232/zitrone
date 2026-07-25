@@ -9,7 +9,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * PUCKER BURN Unit W — the COLD-START route decision (0.9.2, sweep-delta round 1, Codex).
+ * COLD-START ROUTE DECISION (0.9.2 Unit W-A).
  *
  * WHY THIS SUITE EXISTS, stated plainly: the previous round had a test proving
  * `sweepOrphanedResidue()` RETURNED the right value on a non-durable sync, and nothing anywhere
@@ -228,13 +228,27 @@ class BootRouteTest {
         val onboarding = all.filter { (c, i, h, p, l) -> bootRoute(c, i, h, p, l) == BootRoute.ONBOARDING }
         // Onboarding is reachable two ways, and ONLY two: a proven-clean directory, or a legacy
         // image — each requiring no confirmed delete. Both are enumerated explicitly.
-        val expected = all.filter { (c, i, h, p, l) ->
-            !c && (l || (!i && !h && p))
-        }
+        // ENUMERATED, not re-derived (round-1 review, Gemini). Computing the expectation with a
+        // formula that mirrors the implementation means a developer who mutates `bootRoute` can make
+        // the suite pass by copying the same mutation here. The expected set is written out instead:
+        // onboarding is reachable ONLY with no confirmed delete, and then only via a legacy image or a
+        // provably clean directory.
+        val expected = setOf(
+            //     confirmed, present, hold, provenAbsent, legacy
+            listOf(false, true, true, true, true),
+            listOf(false, true, true, false, true),
+            listOf(false, true, false, true, true),
+            listOf(false, true, false, false, true),
+            listOf(false, false, true, true, true),
+            listOf(false, false, true, false, true),
+            listOf(false, false, false, true, true),
+            listOf(false, false, false, false, true),
+            listOf(false, false, false, true, false),
+        )
         assertEquals(
             "onboarding — the fresh-install presentation — must be reachable ONLY from a legacy " +
                 "image or a provably clean directory, and never over a confirmed delete",
-            expected.toSet(),
+            expected,
             onboarding.toSet(),
         )
         assertEquals("the sweep must cover all five inputs", 32, all.size)
