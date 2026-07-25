@@ -1176,3 +1176,30 @@ cross-device volume move), symlinked the old path, added a cache-cleanup init sc
 guard that aborts below 5G with a real message. The init script's first version broke EVERY build
 (`buildCache.setRemoveUnusedEntriesAfterDays` is absent from Gradle 8.7's API) — caught because it
 was staged and validated before the re-gate rather than after.
+
+### Unit W-B — SCOPED PUSH EXCEPTION (2026-07-25), and why it was justified
+
+**The standing rule is "nothing pushed until the loop converges".** A scoped exception was authorised
+to push `feat/0.9.2-unit-wb-burn-wipe` and open PR #62 **as DRAFT**, solely to obtain the burn gate's
+FIRST EXECUTION. No review requested, no merge, no version bump. A PR was mechanically required: the
+gate workflow fires on `pull_request`, and a feature-branch push does not trigger it.
+
+**The distinction that justified it — third time it has mattered in this unit.** Structural or
+documentary confirmation is NOT execution:
+1. The emulator route was confirmed *documentary* (GitHub shipped hardware-accelerated Android
+   virtualization on Linux runners, free for public repos) and then confirmed *executable* by spike
+   (run 30170046383: emulator booted, 1 instrumented test green, ~8 min). Both were needed.
+2. The byte-for-byte gate *compiled* (`assembleDebugAndroidTest` exit 0) but had never RUN.
+3. Reviewing it unexecuted would mean adjudicating DoD-8 on a structural argument — and the unproven
+   part is precisely the NEGATIVE test, whose entire job is proving the gate CAN fail. **A negative
+   test that does not fail when it should is the anti-vacuity guard being itself vacuous**, which is
+   the exact class this unit has spent rounds eliminating.
+
+**The rule's purpose is keeping unreviewed work off the remote, not preventing determination of
+whether something works.** The exception serves the rule's purpose rather than defeating it: the
+branch is on the remote as a draft that explicitly says "not for review, not for merge", and the loop
+has not started.
+
+**Precondition set before the run, so the result could not be rationalised afterwards:** if the gate
+is red, or the negative test does NOT discriminate, that is a BLOCKING finding to fix BEFORE the loop
+— reviewers must never be handed a known-broken gate.
