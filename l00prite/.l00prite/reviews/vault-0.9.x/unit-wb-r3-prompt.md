@@ -109,6 +109,15 @@ I. **INDEPENDENTLY RUN THE UNIT SUITE** (`cd apps/android && ANDROID_HOME=/opt/a
    The instrumented gate needs an emulator and is NOT runnable here. If you cannot run the suite in
    your sandbox, say so plainly and report NO numbers rather than adopting the claim.
 
+   **GATE EXECUTION STATUS, so you are not guessing at it.** The rebuilt gate HAS been executed:
+   - run 30178703899 on 2bd7af0 — **RED**, two failures, both in assertions the rebuild added
+     (the seeded-artifact check and the prefs negative control). Cause: the snapshot raced
+     production's async `apply()` writer.
+   - run 30179007260 on 62bb0fd — **GREEN**, 4 tests started, 4 finished, BUILD SUCCESSFUL in 5m13s,
+     after the flush barrier.
+   Treat both as claims about a CI run, not as evidence you gathered, and note that a green gate is
+   evidence about the scenario it runs — not about coverage completeness (see C and D).
+
 J. **ANY OTHER DEFECT**, including whether any commit message overstates what the code does. The
    round-2 commits make strong process claims (a complete enumeration of preference stores; a complete
    enumeration of gated cleanups; six negative controls over five domains). **Check each enumeration
