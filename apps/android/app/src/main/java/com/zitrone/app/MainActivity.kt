@@ -912,34 +912,60 @@ private fun ZitroneRoot(
      * auto-lock timer and shuts the unlock gate, so no successor session can be built over stores
      * that are being torn out from under it, and no background timer races the wipe.
      *
-     * NonCancellable: a duress wipe that a rotation could interrupt is a duress wipe that a coercer
-     * can interrupt. Once the first unlink is attempted this runs to completion or to a recorded
-     * failure — never to a silent abandonment.
+     * **WB-2 — NonCancellable IS A SECURITY PROPERTY, NOT A ROBUSTNESS ONE. DO NOT MAKE THIS
+     * CANCELLABLE.** A duress wipe a rotation can interrupt is a duress wipe a COERCER can interrupt:
+     * hand the phone back, rotate the screen, and the wipe stops half-done. This is an
+     * attacker-controlled abort, not a responsiveness trade-off. Past the first unlink this runs to
+     * completion or to a recorded failure, never to silent abandonment.
      *
-     * PRESENTATION IS DELIBERATELY UNIFORM ON FAILURE. Success routes to ordinary onboarding (P2:
-     * VISIBLE RESET, no special screen — the fresh-install presentation IS the outcome). Failure
-     * shows the SAME uniform failure a wrong passphrase shows: an observer who watches the screen
-     * must not learn that a burn was attempted, let alone that it failed. The durability hold raised
-     * inside [AppContainer.burnVault] is what keeps that safe — a failed burn leaves the doubt
-     * recorded, so the next boot cannot present a fresh install over an unproven wipe.
+     * **WB-1 — THE UNIFORM FAILURE AND THE DURABILITY HOLD ARE ONE INVARIANT, NOT TWO PROPERTIES.**
+     * Success routes to ordinary onboarding (P2: VISIBLE RESET — the fresh-install presentation IS
+     * the outcome). Failure shows the SAME uniform failure a wrong passphrase shows. The two halves
+     * are mutually load-bearing and may not be changed independently:
+     *  - the uniform message is only SAFE because the hold stops the next boot presenting a fresh
+     *    install over an unproven wipe — without it, "say nothing" degrades to "say nothing and lose
+     *    the wipe";
+     *  - the hold's value HERE is only realized because the message reveals nothing — without
+     *    uniformity the hold protects durability while the screen tells a coercer a burn was tried.
+     *
+     * **Making this message more informative is an ordinary-looking UX change that breaks the
+     * deniability half while every durability test still passes.** Nothing mechanical objects; this
+     * comment and invariant WB-1 are the objection.
      */
     val onBurn: () -> Unit = {
         container.unlockController.beginTerminalWipe()
+        // The PROCESS scope, not the composition's: the wipe must survive an Activity recreation
+        // (WB-2). Its outcome is SIGNALLED rather than applied here, because the composition that
+        // started it may not be the one alive when it finishes.
         container.scope.launch {
             val wiped = withContext(NonCancellable + Dispatchers.IO) {
                 runCatching { container.burnVault() }.isSuccess
             }
-            withContext(Dispatchers.Main.immediate) {
-                container.unlockController.endTerminalWipe()
-                unlocking = false
-                if (wiped) {
-                    vaultExists = false
-                    route = Route.Onboarding
-                } else {
-                    // Indistinguishable from a wrong passphrase. See the presentation note above.
-                    lockError = VaultUnlockRouter.UNIFORM_FAILURE
-                }
+            container.unlockController.endTerminalWipe()
+            container.burnCompletion.signal(
+                if (wiped) BurnCompletion.Wiped else BurnCompletion.Failed,
+            )
+        }
+    }
+
+    /**
+     * APPLY-ONCE (0.9.2 Unit W-B): snapshot → claim → apply. Whichever composition is alive when the
+     * wipe finishes renders the outcome exactly once; a recreation mid-wipe picks up an outcome
+     * signalled while it did not exist, and two concurrent compositions cannot both render it because
+     * only one wins [BurnCompletionCoordinator.claim].
+     */
+    val pendingBurn by container.burnCompletion.pending.collectAsState()
+    LaunchedEffect(pendingBurn) {
+        val outcome = pendingBurn ?: return@LaunchedEffect
+        if (!container.burnCompletion.claim(outcome)) return@LaunchedEffect
+        unlocking = false
+        when (outcome) {
+            BurnCompletion.Wiped -> {
+                vaultExists = false
+                route = Route.Onboarding
             }
+            // WB-1: uniform with a wrong passphrase. Read the invariant before changing this.
+            BurnCompletion.Failed -> lockError = VaultUnlockRouter.UNIFORM_FAILURE
         }
     }
 

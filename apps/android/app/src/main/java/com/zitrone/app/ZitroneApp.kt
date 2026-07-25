@@ -337,6 +337,13 @@ class AppContainer(private val app: Application) {
     val durabilityHold = MutableStateFlow(false)
 
     /**
+     * Apply-once carrier for the duress wipe's outcome. PROCESS-scoped for the same reason the hold
+     * is: the wipe outlives the composition that started it, so an Activity recreation mid-wipe must
+     * neither lose the outcome nor apply it twice.
+     */
+    internal val burnCompletion = BurnCompletionCoordinator()
+
+    /**
      * Raise the [durabilityHold] — the single entry point for every producer.
      *
      * Monotonic within a process: a raised hold is never lowered by another producer's success, only
@@ -1396,6 +1403,58 @@ internal fun destroySupersedesDurabilityHold(
     vaultProvenAbsent: Boolean,
     serverDeleteConfirmed: Boolean,
 ): Boolean = vaultProvenAbsent && !serverDeleteConfirmed
+
+/** The outcome of a duress wipe, awaiting exactly one application to the UI. */
+internal sealed interface BurnCompletion {
+    /** The wipe proved itself durable. Present the fresh install (P2: visible reset). */
+    data object Wiped : BurnCompletion
+
+    /** The wipe failed. Present the UNIFORM failure — see invariant WB-1 before changing it. */
+    data object Failed : BurnCompletion
+}
+
+/**
+ * APPLY-ONCE for the burn's completion (0.9.2 Unit W-B, "snapshot → claim → apply/ack").
+ *
+ * The burn runs on the PROCESS scope under `NonCancellable` (WB-2), so it outlives the composition
+ * that started it. An Activity recreation mid-wipe — a rotation, a configuration change, the system
+ * rebuilding the window — must therefore not lose the outcome, and must not apply it twice.
+ *
+ * Extracted as a class so **apply-once is exercised against production code rather than a test
+ * stand-in**: the same reason `runBootReconcile` owns its CAS claim instead of the composition owning
+ * it. The shape is the one this codebase has converged on:
+ *  - **snapshot** — read the pending completion without consuming it, so a composition that is about
+ *    to be destroyed cannot swallow an outcome it will never render;
+ *  - **claim** — CAS the exact snapshot away, so exactly one caller may apply it even if two
+ *    compositions observe it concurrently;
+ *  - **apply/ack** — the winner renders it; losers see `false` and do nothing.
+ *
+ * [pending] is observable so a freshly-created composition picks up an outcome signalled while it did
+ * not exist.
+ */
+internal class BurnCompletionCoordinator {
+    private val state = MutableStateFlow<BurnCompletion?>(null)
+
+    /** Observable pending completion — collect this to learn an outcome landed. */
+    val pending: StateFlow<BurnCompletion?> = state.asStateFlow()
+
+    /** Publish an outcome. Overwrites any unclaimed one: the LATEST wipe outcome is the true one. */
+    fun signal(outcome: BurnCompletion) {
+        state.value = outcome
+    }
+
+    /** Read without consuming. */
+    fun snapshot(): BurnCompletion? = state.value
+
+    /**
+     * Consume [snapshot] if it is still the pending one. Returns true to EXACTLY ONE caller per
+     * signalled outcome; a caller that loses the race must not render.
+     *
+     * `compareAndSet` on the flow's value is the whole guarantee — a `value == snapshot` check
+     * followed by a separate `value = null` would let two claimants both pass the check.
+     */
+    fun claim(snapshot: BurnCompletion): Boolean = state.compareAndSet(snapshot, null)
+}
 
 /**
  * THE DURESS WIPE ORCHESTRATION (0.9.2 Unit W-B) — extracted so the ORDER is testable against

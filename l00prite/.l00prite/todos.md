@@ -159,7 +159,11 @@ credential in reserved slot 0** (replaces rejected "N wrong passwords wipes"); *
          against W-B's design — never restored from W-A-era comments, whose exclusion argument
          explicitly cited the absence of the duress wipe and therefore voids by its own premise.
       8. Byte-for-byte Robolectric gate green — and **ruling E: it compares the DERIVED VERDICT, not
-         only files/prefs/Keystore.** "Fresh install" now has a derived-verdict precondition (no hold
+         only files/prefs/Keystore.** SPECIFIC ASSERTIONS OWED (a gap described precisely gets closed;
+         a gap described generally gets closed approximately): (a) **the burn path CONSUMES
+         `wipeBiometricMaterial()`'s boolean and FAILS the wipe on false** — currently untested because
+         it lives on `AppContainer`, which needs an `Application`; (b) post-burn `BootDecision` equals
+         post-fresh-install `BootDecision`, hold included. "Fresh install" now has a derived-verdict precondition (no hold
          raised), so a file-only comparison would prove the wrong thing. Shadow gaps are in-test
          exclusions WITH reasons + `SECURITY_MODEL.md` lines.
       9. `SECURITY_MODEL.md` honesty pass: local-only scope, crypto-erase not NAND sanitisation,
