@@ -8,13 +8,16 @@ package com.zitrone.app
 import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.zitrone.app.crypto.KeyStoreManager
 import com.zitrone.app.crypto.vault.BiometricVaultKeyCipher
+import com.zitrone.app.crypto.vault.KeystoreDeviceKeyCipher
 import java.io.File
 import java.security.KeyStore
 import javax.crypto.KeyGenerator
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import kotlinx.coroutines.runBlocking
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -34,16 +37,46 @@ import org.junit.runner.RunWith
  * the half a duress wipe must not leave behind. Verified by spike: an emulator boots on
  * `ubuntu-latest` and runs instrumented tests green in ~8 minutes.
  *
- * **What "fresh install" means now.** Not only files, prefs and Keystore aliases: W-A made the
+ * **What "fresh install" means here.** Not only files, prefs and Keystore aliases: W-A made the
  * ROUTING VERDICT part of the definition. A fresh install has no durability hold raised, so a
  * post-burn state that matches on every byte but differs on the derived [BootDecision] is NOT
  * fresh-install-equivalent (maintainer ruling E). Both halves are asserted.
  *
- * **The negative test is what makes the positive one mean anything.** A byte-for-byte comparison
- * that passes is only evidence if it would have failed; a comparison over an empty coverage set
- * passes trivially. [the gate catches a deliberately orphaned Keystore alias] leaves one artifact
- * behind on purpose — a Keystore alias, chosen because it is the half that was previously
- * unreachable — and asserts the gate FAILS. Same discipline as the boot-mutator non-vacuity guard.
+ * ─── WHAT ROUND 2 FOUND, AND WHAT THIS REBUILD CHANGES ──────────────────────────────────────────
+ *
+ * Both lenses found the same thing independently: the gate was **materially non-discriminating**.
+ * It provisioned by calling `imageStore.create()` directly, which writes a vault image and NOTHING
+ * ELSE — no `onboarding_done`, no device setting, no lazily-created prefs files, no diagnostics log,
+ * no cache. `cacheDir` was not even in the snapshot. So the burn was compared over a state that
+ * contained almost none of the residue it exists to remove, and these wrong implementations all
+ * passed it: never wiping preferences, never clearing the cache, never clearing diagnostics, and
+ * making `wipeBiometricMaterial()` a successful no-op. Round 1's content hashing fixed
+ * REPRESENTATION; it could not fix COVERAGE, and a gate cannot detect residue its scenario never
+ * creates. It certified whatever it happened to create.
+ *
+ * Four structural changes, in the order they matter:
+ *
+ *  1. **Provisioning runs the PRODUCTION path** — `createVaultAndPublish`, the same call onboarding
+ *     makes. It writes `onboarding_done`, runs `wipeLegacyPrefs()` (which CREATES the three lazy
+ *     prefs files), and publishes a real session. Residue now arrives the way it arrives in the
+ *     field instead of being imagined by the test.
+ *  2. **Every domain gets a NAMED seeded artifact, asserted PRESENT before the burn**
+ *     ([assertProvisioned]). A domain whose seed is missing means the gate is not covering it —
+ *     which the assertions now say out loud, rather than the comparison silently passing over an
+ *     empty set.
+ *  3. **Per-domain NEGATIVE CONTROLS** ([the_snapshot_discriminates_in_every_domain_it_claims]).
+ *     Each domain is proven able to report a difference, by planting one and checking the comparison
+ *     names it. Previously ONE domain (Keystore) had a control and the other four were trusted.
+ *  4. **`cacheDir` is in the snapshot**, so the fail-closed cache clear is actually compared.
+ *
+ * ─── THE LIMIT OF THIS GATE, STATED RATHER THAN DISCOVERED ──────────────────────────────────────
+ *
+ * It cannot see an artifact that is created and then correctly wiped — that state is identical to
+ * one never created. So a green run does NOT prove the coverage set is complete; it proves the burn
+ * removes what this scenario produces. Completeness of the set is a SOURCE-ENUMERATION obligation
+ * (`AppContainer.wipeVaultUsePreferences` carries the preference-store table), and a reviewer should
+ * enumerate lazily-created artifacts in source rather than trusting a green run here. The seeded,
+ * asserted-present artifacts in (2) exist to shrink that blind spot to the artifacts nobody named.
  */
 @RunWith(AndroidJUnit4::class)
 class BurnByteForByteGateTest {
@@ -51,20 +84,25 @@ class BurnByteForByteGateTest {
     private lateinit var ctx: Context
     private lateinit var container: AppContainer
 
-    /** The app-local state this gate compares. Anything not in here is silently unverified. */
+    /**
+     * The app-local state this gate compares. **Anything not in here is silently unverified**, which
+     * is why `caches` was added: the burn clears `cacheDir` fail-closed, and a wipe step whose result
+     * no snapshot observes is a wipe step no test can defend.
+     */
     private data class StateSnapshot(
         val files: Map<String, String>,
         val prefs: Map<String, String>,
-        val keystoreAliases: Set<String>,
+        val keystoreAliases: Map<String, String>,
         val databases: Map<String, String>,
+        val caches: Map<String, String>,
     )
 
     /**
      * CONTENT HASHES, NOT LENGTHS (round-1 review — the gate compared neither bytes nor prefs and
      * database state, while `SECURITY_MODEL.md` claimed all three). A length-only comparison passes
      * over a surviving artifact of identical size, and a filename-only comparison passes over residue
-     * written INSIDE an existing prefs file or database — which is where session state actually goes.
-     * "Byte-for-byte" has to mean bytes or the name is the second overclaim.
+     * written INSIDE an existing prefs file — which is where session state actually goes, and where
+     * round 2's `onboarding_done` defect lived.
      */
     private fun digest(f: File): String =
         java.security.MessageDigest.getInstance("SHA-256").digest(f.readBytes())
@@ -77,13 +115,22 @@ class BurnByteForByteGateTest {
 
     private fun snapshot(): StateSnapshot {
         val dataDir = ctx.filesDir.parentFile!!
-        val files = treeHashes(ctx.filesDir)
-        val prefs = treeHashes(File(dataDir, "shared_prefs"))
-        val databases = treeHashes(File(dataDir, "databases"))
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        val aliases = ks.aliases().toList().toSet()
-        return StateSnapshot(files, prefs, aliases, databases)
+        return StateSnapshot(
+            files = treeHashes(ctx.filesDir),
+            prefs = treeHashes(File(dataDir, "shared_prefs")),
+            // Aliases carry no comparable content; the map shape exists so every domain runs through
+            // the SAME diff, and so a domain can never be compared by a weaker rule than its
+            // neighbours without that being visible here.
+            keystoreAliases = ks.aliases().toList().associateWith { "" },
+            databases = treeHashes(File(dataDir, "databases")),
+            caches = treeHashes(ctx.cacheDir),
+        )
     }
+
+    /** Names whose content changed, appeared, or vanished between two views of one domain. */
+    private fun changed(before: Map<String, String>, after: Map<String, String>): Set<String> =
+        (before.keys + after.keys).filter { before[it] != after[it] }.toSet()
 
     /**
      * EXPLICIT EXCLUSIONS, each with its reason IN the test (an exclusion list that grows without
@@ -103,28 +150,146 @@ class BurnByteForByteGateTest {
     }
 
     /**
-     * THE GATE. Fresh → provisioned → burned → compared, in one run so "fresh" is this device's
-     * actual fresh state rather than an assumption about it.
+     * These tests share ONE device and ONE process, and each takes its "fresh" baseline at its own
+     * start — so a test that leaks a live session or a vault image does not fail itself, it
+     * corrupts the baseline of whichever test runs next. Teardown is therefore part of the harness's
+     * correctness, not tidiness.
+     *
+     * `lock()` first: production's own burn leaves the session published (the composition routes to
+     * onboarding rather than locking), and `createVaultAndPublish` REFUSES to build over a live one.
+     * A post-burn reseal cannot resurrect the image — `obliterateLocked` nulls `canonical` and `dek`,
+     * so the reseal throws and `lockCurrent` swallows it — but the session must still go for the
+     * next unlock to succeed.
+     */
+    @After
+    fun tearDown() {
+        runCatching { container.unlockController.lock() }
+        if (container.hasVault()) runCatching { container.burnVault() }
+    }
+
+    /** Plant a REAL alias carrying production's biometric prefix — residue of exactly the reaped class. */
+    private fun plantBiometricAlias(alias: String) {
+        // Deliberately NOT auth-gated: `newEncryptCipher` requires an enrolled biometric, which a
+        // headless CI emulator has none of — the gate would then fail for an environmental reason
+        // and prove nothing about residue.
+        KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
+            init(
+                KeyGenParameterSpec.Builder(
+                    alias,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+                )
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .build(),
+            )
+            generateKey()
+        }
+    }
+
+    /**
+     * Drive the PRODUCTION create/publish path and then seed the domains production alone does not
+     * reach on a headless emulator, each with a NAMED artifact.
+     *
+     * Which is which, so no reader has to guess how faithful this is:
+     *  - PRODUCTION-GENERATED: the vault image + DEK, the device-key Keystore alias (lazily created
+     *    by the first `wrapDek`), `onboarding_done`, and the three lazily-created prefs FILES
+     *    (`wipeLegacyPrefs()` opens them during create).
+     *  - SEEDED BY THIS TEST, with cause: a non-default device SETTING (a user action, not a boot
+     *    side effect); the diagnostics log (production writes it during boot reconciliation, which
+     *    has already happened for this process); a cache file (production fills `cacheDir` only from
+     *    a live attachment/QR download, which needs a relay); and a biometric-prefixed alias
+     *    (enabling biometrics needs an ENROLLED biometric, which CI emulators lack).
+     */
+    private fun provisionThroughProduction() {
+        assertTrue(
+            "precondition: the production create/publish path must succeed, or nothing below is " +
+                "testing production",
+            runBlocking { container.createVaultAndPublish(PASSPHRASE) },
+        )
+        container.settingsRepository.setTorEnabled(true)
+        container.bootDiagnostics.record(DIAGNOSTIC_LINE)
+        File(ctx.cacheDir, CACHE_ARTIFACT).writeText("plaintext attachment stand-in")
+        plantBiometricAlias(BIOMETRIC_ALIAS)
+    }
+
+    /**
+     * Every domain's seed, asserted PRESENT before the burn and BY NAME.
+     *
+     * This is the assertion the old gate lacked, and its absence is why it certified whatever it
+     * happened to create: a comparison over a domain the scenario never populated passes trivially,
+     * and reads in review as proof. If a seed is missing here the gate FAILS LOUDLY as
+     * mis-provisioned, instead of passing quietly with that domain empty.
+     */
+    private fun assertProvisioned(fresh: StateSnapshot, provisioned: StateSnapshot) {
+        assertTrue(
+            "files: the vault image must exist before a burn can be said to remove it",
+            provisioned.files.containsKey(VAULT_IMAGE),
+        )
+        assertTrue(
+            "files: the diagnostics log — the artifact whose ungated clear was a round-2 HIGH",
+            provisioned.files.containsKey(DIAGNOSTICS_LOG),
+        )
+        assertNotEquals(
+            "prefs: the settings store must now differ from fresh — `onboarding_done` and a " +
+                "non-default setting are KEYS INSIDE an innocent-looking file, which is exactly " +
+                "the residue class round 2 found and round 1's file-level reasoning missed",
+            fresh.prefs[SETTINGS_PREFS],
+            provisioned.prefs[SETTINGS_PREFS],
+        )
+        LAZY_PREFS.forEach {
+            assertTrue(
+                "prefs: $it must exist after production create — a never-used device has no such " +
+                    "file, so its presence is the oracle the burn must remove",
+                provisioned.prefs.containsKey(it),
+            )
+        }
+        assertTrue(
+            "keystore: the device-key alias is created LAZILY by the first wrapDek",
+            provisioned.keystoreAliases.containsKey(KeystoreDeviceKeyCipher.DEFAULT_ALIAS),
+        )
+        assertTrue(
+            "keystore: the biometric-prefixed alias must exist, or the burn's biometric wipe is " +
+                "asserted against nothing",
+            provisioned.keystoreAliases.containsKey(BIOMETRIC_ALIAS),
+        )
+        assertTrue(
+            "cache: the plaintext cache artifact",
+            provisioned.caches.containsKey(CACHE_ARTIFACT),
+        )
+    }
+
+    /**
+     * THE GATE. Fresh → provisioned through production → burned → compared, in one run so "fresh" is
+     * this device's actual fresh state rather than an assumption about it.
      */
     @Test
     fun post_burn_state_matches_post_fresh_install_state() {
         val fresh = snapshot()
-
-        container.imageStore.create(PASSPHRASE, GENESIS)
-        assertTrue("precondition: a vault exists to burn", container.hasVault())
-        val provisioned = snapshot()
-        assertNotEquals(
-            "precondition: provisioning must be OBSERVABLE, or the comparison proves nothing",
-            fresh.files,
-            provisioned.files,
+        assertTrue(
+            "the app creates no databases, so this domain is asserted EMPTY rather than compared " +
+                "over content. If this fires, the app has gained a database and the gate has been " +
+                "silently comparing an empty set — re-derive the coverage claim before deleting it.",
+            fresh.databases.isEmpty(),
         )
 
-        container.burnVault()
+        provisionThroughProduction()
+        val provisioned = snapshot()
+        assertProvisioned(fresh, provisioned)
+
+        // Through production's own terminal exclusion, as MainActivity's `onBurn` does — a live
+        // session must not be writing while the image is obliterated underneath it.
+        container.unlockController.beginTerminalWipe()
+        try {
+            container.burnVault()
+        } finally {
+            container.unlockController.endTerminalWipe()
+        }
 
         val burned = snapshot()
         assertEquals("files must match a fresh install", fresh.files, burned.files)
         assertEquals("shared_prefs must match a fresh install", fresh.prefs, burned.prefs)
         assertEquals("databases must match a fresh install", fresh.databases, burned.databases)
+        assertEquals("the plaintext cache must match a fresh install", fresh.caches, burned.caches)
         assertEquals(
             "NO Keystore alias may survive a burn — an orphaned alias is 'something was here'",
             fresh.keystoreAliases,
@@ -142,7 +307,7 @@ class BurnByteForByteGateTest {
         val freshHold = container.durabilityHold.value
         val freshDecision = container.deriveBootDecisionFromDisk()
 
-        container.imageStore.create(PASSPHRASE, GENESIS)
+        provisionThroughProduction()
         container.burnVault()
 
         assertEquals(
@@ -160,90 +325,153 @@ class BurnByteForByteGateTest {
 
     /**
      * DoD-8(a) — the burn path CONSUMES [AppContainer.wipeBiometricMaterial]'s boolean and FAILS the
-     * wipe on false. This was unclosable under Robolectric (no AndroidKeyStore to fail against) and
-     * is the specific gap this harness change exists to close.
+     * wipe on false. This was unclosable under Robolectric (no AndroidKeyStore to fail against).
      *
-     * Asserted through its observable consequence: after a burn, no alias remains AND the hold is
-     * lowered — which can only both hold if the biometric wipe was required to succeed.
+     * **Round 2 rejected the previous version of this test, correctly.** It asserted "no biometric
+     * alias remains" after a scenario that never ENABLED biometrics — so no alias existed to remove,
+     * and a burn that ignored the wipe's boolean entirely (or whose wipe was a successful no-op)
+     * passed it. The assertion was satisfied by both the correct and the incorrect implementation:
+     * it named the defect it was written to catch and then failed to discriminate against it.
+     *
+     * The fix is a real alias, planted with production's own prefix, asserted PRESENT first. A no-op
+     * wipe now leaves it behind and fails this test at the second assertion.
      */
     @Test
     fun burn_requires_the_biometric_wipe_to_succeed() {
-        container.imageStore.create(PASSPHRASE, GENESIS)
+        provisionThroughProduction()
+        assertTrue(
+            "precondition: there must BE biometric material, or 'none survived' is vacuous",
+            KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+                .aliases().toList().any { it.startsWith(BiometricVaultKeyCipher.PREFIX) },
+        )
+
         container.burnVault()
 
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         assertTrue(
-            "no biometric alias may survive; if the wipe could fail silently the burn would still " +
-                "report success and the hold would still be lowered",
+            "the planted alias must be GONE: if the wipe could fail (or no-op) silently, the burn " +
+                "would still report success and the hold would still be lowered",
             ks.aliases().toList().none { it.startsWith(BiometricVaultKeyCipher.PREFIX) },
         )
         assertFalse(container.durabilityHold.value)
     }
 
     /**
-     * THE NEGATIVE TEST — the gate must be able to FAIL.
+     * THE NEGATIVE CONTROLS — one per domain, because the gate must be able to FAIL in each of them.
      *
-     * A byte-for-byte comparison that passes is evidence only if it would have caught a survivor. A
-     * comparison over an empty or wrongly-scoped coverage set passes trivially and reads as proof in
-     * every future review — the vacuous-test failure applied to the gate itself.
+     * A byte-for-byte comparison that passes is evidence only if it would have caught a survivor,
+     * and that has to be shown per DOMAIN: a comparison can be sound for files and structurally
+     * blind for caches, and the aggregate green run looks identical either way. Round 2's finding was
+     * exactly this shape — Keystore had a control, and the other four domains were trusted rather
+     * than proven.
      *
-     * One artifact is left behind DELIBERATELY: a Keystore alias, chosen because it is the half that
-     * was unreachable under the previous harness and therefore the half most likely to be silently
-     * uncovered. The assertion is that the comparison REPORTS THE DIFFERENCE.
+     * Each control plants ONE named artifact, asserts the domain's comparison NAMES it, then removes
+     * it and asserts the domain returned to its prior state — so a control cannot leave residue that
+     * corrupts the next test's baseline.
      */
     @Test
-    fun the_gate_catches_a_deliberately_orphaned_keystore_alias() {
-        val fresh = snapshot()
+    fun the_snapshot_discriminates_in_every_domain_it_claims() {
+        val dataDir = ctx.filesDir.parentFile!!
 
-        container.imageStore.create(PASSPHRASE, GENESIS)
-        container.imageStore.burnObliterate() // image only — biometric material deliberately NOT wiped
-        // A REAL Keystore alias carrying production's own prefix, so it is residue of exactly the
-        // class a burn must remove and is reapable by production's `deleteAllAliasesExcept`.
-        // Deliberately NOT auth-gated: `newEncryptCipher` requires an enrolled biometric, which a
-        // headless CI emulator has none of — the gate would then fail for an environmental reason
-        // and prove nothing about residue.
-        KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
-            init(
-                KeyGenParameterSpec.Builder(
-                    BiometricVaultKeyCipher.PREFIX + "gatenegative",
-                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
-                )
-                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                    .build(),
+        assertDiscriminates(
+            domain = "files",
+            artifact = "gate-negative-file",
+            view = { it.files },
+            plant = { File(ctx.filesDir, "gate-negative-file").writeText("residue") },
+            cleanup = { File(ctx.filesDir, "gate-negative-file").delete() },
+        )
+
+        // Two controls for prefs, because prefs residue comes in two shapes and round 2's defect was
+        // the SECOND one — a key written inside a file a fresh install also has.
+        assertDiscriminates(
+            domain = "prefs (a whole lazily-created store file)",
+            artifact = "zitrone_auth.xml",
+            view = { it.prefs },
+            plant = {
+                container.keyStoreManager.prefs(KeyStoreManager.PREFS_AUTH)
+                    .edit().putString("gate_negative", "residue").commit()
+            },
+            cleanup = {
+                container.keyStoreManager.forget(KeyStoreManager.PREFS_AUTH)
+                File(dataDir, "shared_prefs/zitrone_auth.xml").delete()
+                File(dataDir, "shared_prefs/zitrone_auth.xml.bak").delete()
+            },
+        )
+        assertDiscriminates(
+            domain = "prefs (a KEY inside the store a fresh install also has)",
+            artifact = SETTINGS_PREFS,
+            view = { it.prefs },
+            plant = { container.settingsRepository.setOnboardingDone(true) },
+            cleanup = { container.settingsRepository.resetToFreshInstallDefaults() },
+        )
+
+        assertDiscriminates(
+            domain = "keystore",
+            artifact = BiometricVaultKeyCipher.PREFIX + "gatenegative",
+            view = { it.keystoreAliases },
+            plant = { plantBiometricAlias(BiometricVaultKeyCipher.PREFIX + "gatenegative") },
+            cleanup = { container.wipeBiometricMaterial() },
+        )
+
+        assertDiscriminates(
+            domain = "databases",
+            artifact = "gate-negative.db",
+            view = { it.databases },
+            plant = {
+                File(dataDir, "databases").mkdirs()
+                File(dataDir, "databases/gate-negative.db").writeText("residue")
+            },
+            cleanup = { File(dataDir, "databases/gate-negative.db").delete() },
+        )
+
+        assertDiscriminates(
+            domain = "caches",
+            artifact = "gate-negative-cache.bin",
+            view = { it.caches },
+            plant = { File(ctx.cacheDir, "gate-negative-cache.bin").writeText("residue") },
+            cleanup = { File(ctx.cacheDir, "gate-negative-cache.bin").delete() },
+        )
+    }
+
+    private fun assertDiscriminates(
+        domain: String,
+        artifact: String,
+        view: (StateSnapshot) -> Map<String, String>,
+        plant: () -> Unit,
+        cleanup: () -> Unit,
+    ) {
+        val before = view(snapshot())
+        plant()
+        val after = view(snapshot())
+        try {
+            assertTrue(
+                "$domain: planting `$artifact` produced NO observable difference. This domain is " +
+                    "not actually being compared, and every green run of this gate has been " +
+                    "vacuous for it.",
+                changed(before, after).contains(artifact),
             )
-            generateKey()
+        } finally {
+            cleanup()
         }
-
-        val burnedWithResidue = snapshot()
         assertEquals(
-            "control: the FILE half is clean, so the difference below is the alias and nothing else",
-            fresh.files,
-            burnedWithResidue.files,
+            "$domain: the control must leave no residue, or it corrupts the next test's baseline",
+            before,
+            view(snapshot()),
         )
-        assertNotEquals(
-            "THE GATE MUST FAIL HERE. If these compare equal, the Keystore half of the coverage set " +
-                "is not actually being compared, and every green run of this suite has been vacuous.",
-            fresh.keystoreAliases,
-            burnedWithResidue.keystoreAliases,
-        )
-        // AND IT MUST FAIL FOR THE RIGHT REASON. `!=` alone passed on the gate's first execution
-        // while the real discriminator was an UNRELATED defect (the device-key alias surviving every
-        // burn). Once that defect is fixed the inequality would still have held on the narrower true
-        // condition, and nobody would have noticed the guard had stopped guarding — the anti-vacuity
-        // guard going vacuous as a SIDE EFFECT of an unrelated fix. Name the artifact.
-        assertTrue(
-            "the difference must be THIS deliberately orphaned alias, not some other residue",
-            (burnedWithResidue.keystoreAliases - fresh.keystoreAliases)
-                .contains(BiometricVaultKeyCipher.PREFIX + "gatenegative"),
-        )
-
-        // Restore the device to a clean state so a later test in this class is not polluted.
-        container.wipeBiometricMaterial()
     }
 
     private companion object {
         const val PASSPHRASE = "correct horse battery staple"
-        val GENESIS: ByteArray = "genesis".toByteArray(Charsets.UTF_8)
+        const val VAULT_IMAGE = "vault.bin"
+        const val DIAGNOSTICS_LOG = "boot-diagnostics.log"
+        const val SETTINGS_PREFS = "zitrone_settings.xml"
+        const val CACHE_ARTIFACT = "gate-seeded-attachment.bin"
+        const val DIAGNOSTIC_LINE = "gate-seeded diagnostics entry"
+        val BIOMETRIC_ALIAS = BiometricVaultKeyCipher.PREFIX + "gateseeded"
+        val LAZY_PREFS = listOf(
+            "zitrone_signal_store.xml",
+            "zitrone_auth.xml",
+            "zitrone_contacts.xml",
+        )
     }
 }

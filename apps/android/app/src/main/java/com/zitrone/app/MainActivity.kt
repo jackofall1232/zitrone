@@ -894,10 +894,11 @@ private fun ZitroneRoot(
     // Passphrase unlock (§2): ALWAYS available. Enforce the RAM backoff BEFORE the off-main
     // attempt, then surface only a uniform generic failure (no per-slot / per-factor branch) —
     // EXCEPT a damaged image, which escalates distinctly (it is not a passphrase guess).
-    // Pucker Burn (slot 0) match handler. FAIL-CLOSED STUB (0.9.2 PR-2): the duress WIPE is a sibling
-    // Pucker Burn PR and slot 0 is unarmed until burn-setup ships, so Burn is currently UNREACHABLE — and
-    // until the wipe lands, a burn match is surfaced exactly like a wrong passphrase (uniform failure), a
-    // deniable no-op. When the burn-wipe PR lands, this becomes the wipe trigger.
+    // Pucker Burn (slot 0) match handler. The WIPE HAS LANDED (0.9.2 Unit W-B) — the stub text that
+    // stood here described `onBurn` below as an inert no-op while it was already calling burnVault(),
+    // which is the "confident prose outliving the code it describes" failure this unit keeps
+    // producing. What remains true: slot 0 is UNARMED until burn-setup ships, so no real user can
+    // reach this path yet — the credential is not settable. Unreachable-by-credential, not inert.
     /**
      * THE DURESS WIPE (0.9.2 Unit W-B) — replaces the inert stub that showed a uniform failure and
      * destroyed nothing.

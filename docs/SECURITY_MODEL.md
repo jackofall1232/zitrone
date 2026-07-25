@@ -561,9 +561,9 @@ while a delete is pending, self-verifying seal), the silent **triple-entry** rou
 (the single wrap is never repointed). An Android user can therefore create and reveal a second
 vault, and plausible deniability is a **usable** guarantee here, within the limits above. **What
 is NOT built yet:** per-vault destruction (whole-image account delete only — there is no
-single-slot destroy primitive) and the **Pucker Burn** setup/wipe UX (slot 0 is reserved and the
-store is burn-*aware*, but the credential is not yet user-settable and the wipe is a fail-closed
-stub). Those, plus the full dual-slot destruction design, remain a **locked design** in
+single-slot destroy primitive) and the **Pucker Burn** setup UX (slot 0 is reserved and the store is
+burn-*aware*, but the credential is **not yet user-settable**, so the burn cannot be triggered by a
+real user even though the wipe behind it is wired and gated — see the section below). Those, plus the full dual-slot destruction design, remain a **locked design** in
 [`docs/VAULT_ARCHITECTURE.md`](VAULT_ARCHITECTURE.md) §3.4, landing as their own adversarially-
 reviewed PRs. **Do not describe per-vault destruction or a working Pucker Burn as shipped.**
 
@@ -571,11 +571,22 @@ reviewed PRs. **Do not describe per-vault destruction or a working Pucker Burn a
 
 The duress wipe's guarantee is **post-burn indistinguishability**: after a completed burn, app-local
 state matches a fresh install. That is now mechanically gated in CI on every Android change — files,
-`shared_prefs`, databases and **Android Keystore aliases** compared against a fresh baseline, plus the
-derived boot verdict (a fresh install has no durability hold raised, so a state matching on every byte
-but differing in what the app will DO with it is not fresh-install-equivalent). The gate carries a
-negative test that deliberately orphans an artifact and asserts the comparison catches it, so a green
-run means the comparison is live rather than empty.
+`shared_prefs`, databases, the plaintext **cache**, and **Android Keystore aliases** compared by
+CONTENT HASH against a fresh baseline, plus the derived boot verdict (a fresh install has no
+durability hold raised, so a state matching on every byte but differing in what the app will DO with
+it is not fresh-install-equivalent).
+
+Two properties make a green run mean something, and both were added after a review found the gate
+green over residue it structurally could not see:
+
+- **It provisions through the PRODUCTION create/publish path**, not by writing a vault image
+  directly, so the residue it compares is the residue the field produces — `onboarding_done`, device
+  settings, the lazily-created preference files, a live session. A gate that provisions its own
+  simplified state certifies whatever it happens to create.
+- **Every domain carries a named seeded artifact asserted PRESENT before the burn, and a per-domain
+  NEGATIVE CONTROL** that plants residue and asserts the comparison names it. A comparison can be
+  sound for files and structurally blind for caches; the aggregate green run looks identical either
+  way, so each domain is proven able to fail rather than trusted to be.
 
 **THE LIMIT, STATED PLAINLY: the gate proves post-burn indistinguishability, NOT that the app is
 indistinguishable from never-used at ALL TIMES.** These are different claims and only the first is
@@ -590,7 +601,14 @@ that fix.
 Artifacts audited for that signature: Keystore aliases (three families — the device key and biometric
 wraps are lazily created and wiped by burn; `_androidx_security_master_key_` is created at app startup
 and present on a fresh install, so it is not an oracle and is deliberately left alone), vault files
-and interrupted-write temps, delete markers, `shared_prefs`, and databases.
+and interrupted-write temps, delete markers, the boot diagnostics log, plaintext caches, databases
+(the app creates none, which the gate asserts rather than assumes), and **preferences — in both
+shapes**. The second shape is the one a file-level audit misses and a review had to find: three of the
+four preference stores are opened lazily and a never-used device has no such FILE, while the fourth is
+opened at startup by every install and its residue is the KEYS INSIDE it (`onboarding_done`, every
+device setting the user touched). "A fresh install has this file too" is true of the fourth store and
+settles nothing about its contents. The burn's per-store table — reset in place, unlinked, or
+deliberately left — lives in `AppContainer.wipeVaultUsePreferences`.
 
 **Explicitly NOT verified, and outside app control** — the app cannot claim fresh-install
 indistinguishability for these, and they are excluded from the gate with reasons recorded in the test

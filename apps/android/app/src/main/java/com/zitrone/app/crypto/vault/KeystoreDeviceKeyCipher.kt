@@ -182,7 +182,12 @@ class KeystoreDeviceKeyCipher(
         return generator.generateKey()
     }
 
-    private companion object {
+    // `internal`, not `private` (0.9.2 Unit W-B): the byte-for-byte gate asserts the device-key
+    // alias is PRESENT before the burn and gone after, and it has to NAME it to do that. The
+    // alternative — a string literal in the test — is the same constant maintained in two places,
+    // and the one that drifts is the test, which then asserts the presence of an alias nothing
+    // creates and passes for the wrong reason.
+    internal companion object {
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
 
         /** The single device key that wraps this install's vault DEK. */
