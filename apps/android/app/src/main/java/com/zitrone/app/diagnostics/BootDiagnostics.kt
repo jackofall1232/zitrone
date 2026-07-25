@@ -89,6 +89,19 @@ class BootDiagnostics(context: Context) {
     }
 
     /** Wipe the log — a user action from the Diagnostics screen (call off-main). */
+    /**
+     * Clear the diagnostics log and PROVE it (0.9.2 W-B round-2 review, BLOCKING).
+     *
+     * The previous `clear()` swallowed both truncation and deletion failures and returned nothing, so
+     * `burnVault()` lowered the durability hold even when `boot-diagnostics.log` survived — a burn
+     * reporting success over an artifact a never-used device does not have. Returns true ONLY on a
+     * PROVEN absence; present or indeterminate both fail closed.
+     */
+    fun clearProven(): Boolean = synchronized(lock) {
+        runCatching { file.delete() }
+        java.nio.file.Files.notExists(file.toPath())
+    }
+
     fun clear() {
         synchronized(lock) {
             // Truncate FIRST so a delete that fails or throws can't leave stale

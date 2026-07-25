@@ -402,7 +402,9 @@ class AppContainer(private val app: Application) {
             // NOT wiped and deliberately so: `_androidx_security_master_key_` and the prefs file
             // EncryptedSharedPreferences creates at STARTUP — a fresh install has both, so removing
             // them would CREATE a difference rather than erase one.
-            bootDiagnostics.clear()
+            // PROVEN, not best-effort (round-2 review, BLOCKING): `clear()` swallowed its own
+            // failures and returned nothing, so the hold was lowered over a surviving log.
+            if (!bootDiagnostics.clearProven()) throw VaultImageException.DestroyFailed()
             if (!runCatching { clearCacheDir(app.cacheDir) }.getOrDefault(false)) {
                 throw VaultImageException.DestroyFailed()
             }
