@@ -1114,3 +1114,65 @@ duplicate existing coverage while reading as coverage of this site: the false-co
 
 **GATE UNCHANGED:** none of this substitutes for Codex's GitHub PR gate on W-A itself. Nothing merges
 until that is satisfied.
+
+### PR #60 GATE + combined-delta round — Codex SOL CLI standing in for the out-of-credit GitHub bot
+
+**Gate (Codex SOL, `--cd` a worktree at the PR head `aa380c1`): DO NOT MERGE.**
+- **HIGH — `MainActivity.kt:699`.** `onRetryDestroy` is a second, weaker routing authority
+  (`!hasVault() && !serverDeleteConfirmed()`): discards `residueSweepHold`, uses `File.exists()`
+  predicates, omits legacy and proven image-bearing absence, bypasses `bootRoute`. An indeterminate
+  post-destroy stat can read as successful absence and route to ONBOARDING over unproven surviving
+  vault material.
+- Plus three LOW: the stale `BootReconcileOwnerTest:314` header, the `Dispatchers.IO` kdoc, and the
+  uncovered survive-unlink / throw-after-mutation sweep branches.
+- **All four were already fixed in `bdde066`**, which the gate was explicitly forbidden to credit.
+  A blind lens re-derived the follow-up delta's exact contents from the PR head alone. That validates
+  the DIAGNOSIS, not the implementation — the gate never saw `bdde066`'s code (maintainer's point).
+- **Therefore pushed** (maintainer directive): `bdde066` + `157c1f6` onto
+  `feat/0.9.2-unit-wa-residue-sweep`, kept as distinct commits. Rationale recorded because it
+  reverses an earlier call of mine: green CI on a head with a known HIGH is not an asset to protect,
+  it is a hazard — an open PR showing green is what gets merged by someone moving fast. A push
+  SUPERSEDES that verification rather than invalidating it, and re-running CI is cheap.
+  Distinctness within the PR preserves the vuln→fix narrative; remoteness was never what provided it.
+
+**Combined-delta round on `aa380c1..157c1f6`:** Grok READY TO MERGE (independently observed
+491/488/0/3); Codex NOT READY on three LOW documentation/coverage findings. Adjudicated:
+1. **Codex right, Grok passed it** — the `failures.md` enumeration named the `runBootReconcile` kdoc
+   as the third instance of the containment fact. It was corrected in the same commit for a
+   DIFFERENT fact (`Dispatchers.IO`). Count right by accident, over the wrong set. Corrected, and the
+   rule gained its second half: verify each grep hit actually asserts the fact.
+2. **Grok right, Codex missed it** — "the stale hold routes it to LOCKED" overstates: `snap.route` is
+   LOCKED, so the success check fails; the UI `route` stays `DeleteIncomplete`. Corrected.
+3. **Both right, argument conceded** — the "a direct test would duplicate `bootRoute` coverage"
+   defence was wrong. Grok even named the test: the diverging row (old predicate says success, new
+   says failure). Extraction + tests landed rather than tracked (maintainer directive).
+
+**`Residence` tri-state landed** (`Residence.kt`), with the rule as a value: only `ProvenAbsent` may
+route to ONBOARDING. `deriveBootDecisionFromDisk` now takes ONE classification instead of two
+independently-timed reads, so "present AND proven absent" is unrepresentable. `onRetryDestroy`'s
+orchestration is extracted into `runDeleteRetry` and tested for wiring.
+
+**A REAL LATENT DEFECT, FOUND BY WRITING THE TEST THE ARGUMENT SAID WAS REDUNDANT.** The first
+version of the invariant test asserted that an indeterminate reading plus `legacyImage = true` falls
+through to LOCKED. It FAILED: `bootRoute`'s legacy arm did not consult `vaultImagePresent`, so the
+flag returned ONBOARDING irrespective of any absence proof. The invariant was real but lived one
+layer out, in `deriveBootDecision`'s probe guard — the router would have onboarded over an unstattable
+image for any future caller that set the flag. Arm narrowed to `legacyImage && vaultImagePresent`;
+three combinations left the exhaustive onboarding-reachability set, none reachable in production.
+**The rule belongs where it cannot be bypassed** — the same shape as "the containment guarantee
+belongs in the wrapper, not the call site".
+
+**Item E reclassified** (`todos.md`): `serverDeleteConfirmed()`'s `File.exists()` fail-open is
+SAME CLASS, TRACKED, NEXT — not "not W-A's fault, therefore out of scope". Honest changelog line:
+"closes the fail-open at the retry-destroy call site", not "closes the fail-open class".
+
+**Infrastructure (root cause of two apparent product failures).** Grok's "164 failures" and the
+gate's inability to run the suite were ONE cause in two costumes: a Gradle home the runner could not
+own. Abandoned per-reviewer homes (one 7.3G, a week old) filled the 38G disk to 100%; ENOSPC surfaces
+as unwritable result XML and failed transform extraction, i.e. as phantom test failures. Reclaimed
+~11.3G, migrated `/root/.gradle` → `/var/lib/ci/gradle` (same-device rename; rsync is for the
+cross-device volume move), symlinked the old path, added a cache-cleanup init script (which trimmed
+7.3G→6.7G on first run), a 2d `/tmp` reaper excluding live agent scratchpads, and a pre-build disk
+guard that aborts below 5G with a real message. The init script's first version broke EVERY build
+(`buildCache.setRemoveUnusedEntriesAfterDays` is absent from Gradle 8.7's API) — caught because it
+was staged and validated before the re-gate rather than after.

@@ -694,7 +694,6 @@ private fun ZitroneRoot(
         deleteRetrying = true
         deleteRetryFailed = false
         scope.launch {
-            withContext(Dispatchers.IO) { runCatching { container.destroyVaultForAccountDeletion() } }
             // ONE ROUTING AUTHORITY — the LAST sibling (round-4 review, Grok INFO-2). This judged
             // success with `!hasVault() && !serverDeleteConfirmed()` while the other four consumers
             // went through the single derivation, making it a second authority on the same question.
@@ -735,11 +734,25 @@ private fun ZitroneRoot(
             // only through the fail-closed default (a cancelled boot, or a throw escaping the sweep
             // before gate 1) — remote, since the sweep's own gates return NO_MUTATION over a present
             // image — and the consequence is bounded and restart-recoverable: a successful retry over
-            // a clean disk is reported as FAILURE for the rest of the process, because the stale hold
-            // routes it to LOCKED. Tracked with the 0.9.3 fold, not fixed here.
-            val snap = container.deriveBootDecisionFromDisk()
+            // a clean disk is reported as FAILURE for the rest of the process. Precisely (follow-up
+            // review, Grok): the stale hold makes the DERIVED route LOCKED, so the success check
+            // below fails and the UI stays on `Route.DeleteIncomplete` — `route` is never rewritten
+            // to Locked. Tracked with the 0.9.3 fold, not fixed here.
+            //
+            // The orchestration lives in `runDeleteRetry` so the WIRING is testable — destroy before
+            // derive, derived route only, ONBOARDING-only success, no hold supersede. The truth-table
+            // tests over `bootRoute` cannot catch this call site reverting to the weaker predicate;
+            // `DeleteRetryOwnerTest` can, and does.
+            val succeeded = runDeleteRetry(
+                destroy = {
+                    withContext(Dispatchers.IO) {
+                        runCatching { container.destroyVaultForAccountDeletion() }
+                    }
+                },
+                derive = { container.deriveBootDecisionFromDisk() },
+            )
             deleteRetrying = false
-            if (snap.route == BootRoute.ONBOARDING) {
+            if (succeeded) {
                 vaultExists = false
                 route = Route.Onboarding
             } else {

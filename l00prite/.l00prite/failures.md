@@ -169,11 +169,21 @@ failure mode. Applies to PROSE, not just code: sibling-call-site hunting is alre
 
 **Why it is mechanical and not care — the delta whose stated purpose was closing the sibling pattern
 reproduced the sibling pattern INSIDE itself.** `bdde066` corrected three stale claims. One of them —
-"production wraps `afterPublish` in a local `runCatching`" — had THREE statements, not one: the
-`BootReconcileOwnerTest` header (fixed), the `runBootReconcile` kdoc (fixed), and the implementation
-comment at `ZitroneApp.kt:1172` (MISSED), four lines above the wrapper that actually supplies the
-containment and one screen from the production call site at ~285 that says the opposite. Both
-follow-up lenses raised it independently. Had the grep been run, the third hit was one command away.
+"production wraps `afterPublish` in a local `runCatching`" — was stated in THREE places, not one: the
+production call site at `ZitroneApp.kt:287` (correct, and stated in the negative), the
+`BootReconcileOwnerTest` header (stale, fixed), and the implementation comment at
+`ZitroneApp.kt:1172` (stale, MISSED) — four lines above the wrapper that actually supplies the
+containment and one screen from the call site that says the opposite. Both follow-up lenses raised
+it independently. Had the grep been run, the third hit was one command away.
+
+**AND THE FIRST WRITING OF THIS RULE GOT ITS OWN ENUMERATION WRONG** (follow-up round, Codex; Grok
+checked the count and passed it). It listed the third instance as the `runBootReconcile` kdoc. That
+kdoc was corrected in the same commit, but for a DIFFERENT fact — "production passes
+`Dispatchers.IO`" — and it never carried the containment claim at all. `git show bdde066 --
+ZitroneApp.kt` is a single hunk touching only the dispatcher sentence; source settles it. The count
+of three was right by accident, over the wrong set. **So the rule needs its second half: enumerate by
+GREPPING FOR THE FACT, then verify each hit actually asserts that fact — a correction landing in the
+same commit is not evidence it is the same claim.** Adjacent-and-also-fixed is the trap.
 
 **LINEAGE — same shape as the mutation-header incident above: knowing the pattern did not prevent
 producing it.** Both times the person writing the correction had just articulated the rule. That is

@@ -246,14 +246,33 @@ class AppContainer(private val app: Application) {
      * `deriveBootDecisionFromDisk()`.
      */
     internal suspend fun deriveBootDecisionFromDisk(): BootDecision = withContext(Dispatchers.IO) {
+        // ONE classification, not two independently-timed reads. [hasVault] and [vaultProvenAbsent]
+        // each take the image lock separately, so calling them as a pair could pair up readings taken
+        // at different instants — including the contradiction "present AND proven absent", which
+        // [Residence] cannot represent. The mapping below is DELIBERATELY the identity of today's
+        // semantics: Present ⇔ `hasVault()`, ProvenAbsent ⇔ `vaultProvenAbsent()`.
+        //
+        // DO NOT "simplify" this to `imagePresent = residence.treatAsPresent`. It looks equivalent
+        // and is not: `bootRoute` orders the LEGACY arm AHEAD of the present arm, and legacy routes
+        // to ONBOARDING. Mapping Indeterminate onto imagePresent would send an image that cannot be
+        // stat'd into the ~1 MiB legacy probe, and a `true` there would present a fresh install over
+        // exactly the unprovable material this type exists to withhold. Indeterminate must fall
+        // through to the LOCKED arm, which is what leaving BOTH booleans false does.
+        val residence = vaultResidence()
         deriveBootDecision(
             serverDeleteConfirmed = serverDeleteConfirmed(),
-            imagePresent = hasVault(),
+            imagePresent = residence is Residence.Present,
             residueSweepHold = residueSweepHold.value,
-            vaultProvenAbsent = vaultProvenAbsent(),
+            vaultProvenAbsent = residence.mayRouteToOnboarding,
             isLegacyImage = { isLegacyImage() },
         )
     }
+
+    /**
+     * The image's [Residence] — the tri-state read that [hasVault] and [vaultProvenAbsent] encode
+     * as two booleans a caller has to pair correctly.
+     */
+    internal fun vaultResidence(): Residence = Residence.classify(::hasVault, ::vaultProvenAbsent)
 
     /**
      * PROCESS-scoped boot-reconciliation state.
@@ -1243,6 +1262,31 @@ internal fun destroySupersedesResidueHold(
     serverDeleteConfirmed: Boolean,
 ): Boolean = vaultProvenAbsent && !serverDeleteConfirmed
 
+/**
+ * The account-delete RETRY orchestration, extracted from the Compose lambda so the WIRING is
+ * testable (follow-up review, Codex: the sole behavioural change of the W-A follow-up had no direct
+ * test, and the truth-table tests over [bootRoute] cannot catch this CALL SITE reverting to the
+ * weaker `!hasVault() && !serverDeleteConfirmed()` predicate it used to carry).
+ *
+ * Four properties, and they are the whole contract:
+ *  1. [destroy] runs BEFORE [derive] — a decision taken over pre-destroy disk is meaningless.
+ *  2. The verdict is the DERIVED one. This function does not re-decide, does not consult
+ *     `hasVault()`, and does not assemble [bootRoute] inputs of its own. One authority.
+ *  3. ONLY [BootRoute.ONBOARDING] is success. Every other route — including LOCKED over a residue
+ *     sweep hold — leaves the caller on `Route.DeleteIncomplete` reporting failure.
+ *  4. NO hold supersede. The completion callback owns that; doing it here too would be a second
+ *     writer of the same state. See the call site for why the omission is accepted and tracked.
+ *
+ * [destroy] is expected to contain its own faults (the caller wraps it): a throw here propagates.
+ */
+internal suspend fun runDeleteRetry(
+    destroy: suspend () -> Unit,
+    derive: suspend () -> BootDecision,
+): Boolean {
+    destroy()
+    return derive().route == BootRoute.ONBOARDING
+}
+
 /** Where a composition must route out of Splash on a cold start — see [bootRoute]. */
 internal enum class BootRoute { DELETE_INCOMPLETE, LOCKED, ONBOARDING }
 
@@ -1286,7 +1330,15 @@ internal fun bootRoute(
     legacyImage: Boolean,
 ): BootRoute = when {
     serverDeleteConfirmed -> BootRoute.DELETE_INCOMPLETE
-    legacyImage -> BootRoute.ONBOARDING
+    // `&& vaultImagePresent` is DEFENCE, not behaviour: [deriveBootDecision] computes `legacy` only
+    // when the image is present, so on every reachable input this conjunct is a no-op and every
+    // existing row of the table is unchanged. Without it, the rule "only a PROVEN absence may present
+    // a fresh install" lives in the derivation's probe guard and NOT in this router — a future caller
+    // passing `legacyImage = true` over an image it could not stat would onboard over unprovable
+    // material, because this arm outranks both the present arm and the proven-absence arm. The rule
+    // belongs where it cannot be bypassed. (Found by a test written to pin the invariant, which
+    // failed against this function: the router did not enforce what its caller was enforcing for it.)
+    legacyImage && vaultImagePresent -> BootRoute.ONBOARDING
     vaultImagePresent -> BootRoute.LOCKED
     residueSweepHold -> BootRoute.LOCKED
     vaultProvenAbsent -> BootRoute.ONBOARDING

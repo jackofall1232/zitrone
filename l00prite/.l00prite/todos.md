@@ -256,7 +256,16 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       (proven-present only), so the required `dirSync` is the real second barrier, not the verify.
 - [x] `runBootReconcile` kdoc — said "production passes `Dispatchers.IO`"; production relies on the
       parameter default.
-- [ ] TRACKED, NOT IN THIS BATCH: `VaultImageStore.serverDeleteConfirmed()` uses `File.exists()`, not
-      the `Files.notExists` tristate discipline — an indeterminate marker stat reads "not confirmed".
-      Pre-existing on main and uniform across all routing inputs, so NOT a W-A regression; it is a
-      discipline gap in a routing input and wants its own scoped unit.
+- [ ] **SAME CLASS, TRACKED, NEXT** (reclassified 2026-07-25 — was "not a W-A regression, therefore
+      out of scope", which was true on provenance and wrong on framing):
+      `VaultImageStore.serverDeleteConfirmed()` uses `File.exists()`, not the `Files.notExists`
+      tristate discipline — an indeterminate marker stat reads "not confirmed" and fails **OPEN**
+      with respect to delete ownership (PR #60 gate, Codex, item E: it can admit legacy onboarding).
+      Pre-existing on main and uniform across routing inputs, so not a defect this unit introduced —
+      **but W-A exists to close a CLASS, and fixing the retry call site while leaving the identical
+      fail-open in the marker read closes an instance, not the class.** The honest changelog line is
+      "closes the fail-open at the retry-destroy call site", NOT "closes the fail-open class".
+      Does not block #60. The type and the rule now exist (`Residence`, and "only ProvenAbsent may
+      route to ONBOARDING"), so migrating this call site — and `hasVault()`'s other consumers — is
+      MECHANICAL rather than a second act of judgment. Do it next, as its own scoped unit with its
+      own round; do NOT fold it into a release cut.

@@ -233,21 +233,28 @@ class BootRouteTest {
         // the suite pass by copying the same mutation here. The expected set is written out instead:
         // onboarding is reachable ONLY with no confirmed delete, and then only via a legacy image or a
         // provably clean directory.
+        // NARROWED 2026-07-25 (Unit W-A follow-up): the legacy arm now requires `vaultImagePresent`.
+        // Three combinations left this set — legacy claimed over an image that is NOT present:
+        //     (false, false, true,  true,  true)   hold + proven-absent + legacy  → now LOCKED
+        //     (false, false, true,  false, true)   hold + unprovable   + legacy  → now LOCKED
+        //     (false, false, false, false, true)   unprovable          + legacy  → now LOCKED
+        // The fourth such combination, (false, false, false, true, true), REMAINS onboarding — it
+        // still reaches the proven-absence arm on its own merits, without the legacy flag.
+        // None of the three is reachable in production (`deriveBootDecision` computes `legacy` only
+        // when the image is present), so no behaviour moved; what moved is that the router now
+        // ENFORCES the rule its caller was enforcing for it. See `ResidenceTest`.
         val expected = setOf(
             //     confirmed, present, hold, provenAbsent, legacy
             listOf(false, true, true, true, true),
             listOf(false, true, true, false, true),
             listOf(false, true, false, true, true),
             listOf(false, true, false, false, true),
-            listOf(false, false, true, true, true),
-            listOf(false, false, true, false, true),
             listOf(false, false, false, true, true),
-            listOf(false, false, false, false, true),
             listOf(false, false, false, true, false),
         )
         assertEquals(
-            "onboarding — the fresh-install presentation — must be reachable ONLY from a legacy " +
-                "image or a provably clean directory, and never over a confirmed delete",
+            "onboarding — the fresh-install presentation — must be reachable ONLY from a PRESENT " +
+                "legacy image or a provably clean directory, and never over a confirmed delete",
             expected,
             onboarding.toSet(),
         )
