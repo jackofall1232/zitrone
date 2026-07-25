@@ -969,3 +969,48 @@ headers" — it is that a mutation claim is a claim, and an unrun mutation is an
 **The four tests are NOT committed.** Committing them makes the convergence commit a new delta, which
 would need its own round. HEAD stays `acb5904`; the tests are held at
 `/root/l00prite/unit-wa-r4-info-tests.patch` for HoboJoe's call.
+
+### PR #60 — the two gate blockers, disambiguated
+
+**CI "Security scanning" = Trivy, dependency HIGH. NOT W-A.** Disambiguated the three cases against
+source rather than from the log alone (the log was briefly unreachable):
+- *Real semgrep finding in W-A* — **eliminated structurally.** The vendored ruleset is
+  `github-actions/` + `go/` + `local/` only; Kotlin packs are deliberately excluded as not
+  gate-clean (`.semgrep/README.md`). W-A's file list is Kotlin + markdown, **zero** workflow/Go
+  files. No rule in the gate can match anything W-A changed. Then reproduced locally with the exact
+  digest-pinned container: **0 findings, exit 0.**
+- *Scanner crash* — eliminated; semgrep step passed in CI, Trivy reached a result table.
+- *Dependency HIGH* — **CONFIRMED.** `postcss` 8.5.15, GHSA-r28c-9q8g-f849 (path traversal via
+  `sourceMappingURL`), fixed in 8.5.18. main's last three runs were green (latest 2026-07-24T22:50),
+  so the advisory landed after that; main would fail today too. W-A touches 0 JSON/YAML/lockfile/TS
+  files. Root `pnpm.overrides.postcss` is already `^8.5.12`, which semver-admits 8.5.18 — a stale
+  lockfile, not a manifest change.
+
+**"Didn't we fix Trivy before?" — no.** `git log -S"trivy" -- .github/workflows/ci.yml` → only
+`2f1b1b8 Initial commit`. Trivy has never been modified and has gated with `exit-code: "1"` +
+`ignore-unfixed: true` since day one. The fix in memory was **semgrep** — a different scanner and a
+different failure mode. `ignore-unfixed: true` is also why this is new: it gates only once upstream
+ships a fix. Recorded because conflating the two scanners would have led to "we already fixed this".
+
+### Reviewer-gate finding (Gemini, substituted reviewer) — TRIAGE: confirmed, wrong mechanism, not W-A
+
+Claim: `vaultProvenAbsent()` / `serverDeleteConfirmed()` do blocking disk I/O on Main → ANR.
+
+- **Premise TRUE.** `MainActivity.kt:1108` is `launch(Dispatchers.Main.immediate)`; the calls at
+  1117-1118 are bare and non-suspending.
+- **Stated mechanism REFUTED.** `exists()` / `Files.notExists` are single stats on app-private
+  storage — microseconds. That alone is neither ANR nor jank.
+- **Real mechanism: LOCK CONTENTION.** Both go through `imageLock.withLock`, and the class's own
+  threading contract (`VaultImageStore.kt:222-229`) states `create()` performs SLOT_COUNT+1 Argon2id
+  derivations and `unlock()` performs SLOT_COUNT, all under that same lock, and both "MUST run off a
+  UI thread." A Main-thread `withLock` blocks for the length of an in-flight KDF — deliberately
+  expensive. Right conclusion, route not identified: the PR #59 pattern again.
+- **NOT a W-A regression.** `git show main:` — the identical callback calls `hasVault()` +
+  `serverDeleteConfirmed()` on the same `Dispatchers.Main.immediate`. Same two Main-thread lock
+  acquisitions; W-A swapped WHICH functions, not WHETHER. Systemic across 5 sites (631, 699, 993,
+  1117, 1118); W-A touched one.
+- **Verdict: FOLLOW-UP, not a blocker** (confirmed but outside W-A's scope).
+- The structural fix is not the reviewer's `withContext` at the call site but folding these inputs
+  INTO the suspend derivation, exactly as round 2 did for `deriveBootDecisionFromDisk` — which sits
+  six lines below doing it correctly while 1117-1118 do it wrong. Round-2's fix applied to one of N
+  sites: this unit's signature family, one more time.
