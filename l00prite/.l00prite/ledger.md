@@ -1014,3 +1014,51 @@ Claim: `vaultProvenAbsent()` / `serverDeleteConfirmed()` do blocking disk I/O on
   INTO the suspend derivation, exactly as round 2 did for `deriveBootDecisionFromDisk` — which sits
   six lines below doing it correctly while 1117-1118 do it wrong. Round-2's fix applied to one of N
   sites: this unit's signature family, one more time.
+
+### 0.9.2 release decision + steps 1-2 complete
+
+HoboJoe: merge W-A, cut **0.9.2-beta as second-vault-complete**. Pucker Burn (W-B: mechanism +
+presentation) becomes **0.9.3-beta** with its own budget.
+
+**Step 1 DONE** — postcss lockfile refresh landed on main as `3d086be` (PR #61, squash, branch
+deleted). Lockfile-only; two real version changes (postcss 8.5.15→8.5.23, nanoid 3.3.12→3.3.16),
+five peer-keyed re-pointings with unchanged versions. Verified against a clean `git archive` export
+(no node_modules — matching what CI actually scans): 0 vulns across pnpm/cargo/gomod, exit 0.
+
+**Step 2 DONE** — W-A rebased onto `3d086be`. **Reviewed delta byte-identical**:
+`git diff acb5904 04ebe3c -- apps/android/ docs/` → 0 lines. New head `b31c076`; run 30161574271
+**all six jobs green, Security scanning included** — green because the dependency was fixed on main,
+not because the unit patched around it.
+
+**PROCESS FAILURE (mine, caught):** my first CI poll after the force-push reported the checks
+"settled" — it had read the **pre-rebase run** (30160252207), which was still attached while the new
+run had not yet been created. Same shape as the earlier stale test-results read: a poller that asks
+"are there results?" instead of "are there results FOR THIS COMMIT?" answers with the old ones.
+**Rule: poll CI by head SHA, never by PR number alone.** Corrected by polling
+`gh run list --commit <sha>`.
+
+### Docs honesty audit (pre-flip, BLOCKING) — findings, no edits made
+
+Verified against SHIPPED CODE: `BURN_SLOT_INDEX = 0` is structurally reserved (creation uses
+`randomVaultSlotIndex`, 1..SLOT_COUNT-1); slot 0 is "filler on a fresh onboarding (unarmed burn)";
+`onBurn` (MainActivity.kt:837-840) is a three-line inert stub — uniform-failure message, spinner off,
+destroys nothing. **No duress wipe ships.** Plumbing exists (`PassphraseOutcome.Burn`, burn-aware
+store); arming and wipe do not.
+
+Docs are LARGELY honest already — Unit 2's six rounds held. `VAULT_ARCHITECTURE.md:23` is the model
+phrasing; `SECURITY_MODEL.md:552-568` already says the wipe is "a fail-closed stub" and carries "Do
+not describe per-vault destruction or a working Pucker Burn as shipped."
+
+1. **REAL OVERCLAIM — `SECURITY_MODEL.md:371`.** The v1.5 security-onion diagram lists
+   `panic wipe · duress PIN · plausible-deniability vaults` as Layer 1 with NO status qualifier.
+   Those two terms ARE Pucker Burn and neither exists. Every other mention in the file is hedged;
+   this one is a scannable capability list, so a reader who stops at the diagram has been told the
+   product has a duress PIN.
+2. **SYSTEMATIC UNDERSTATEMENT (3 files).** `README:73`, `SECURITY_MODEL:416`, `CHANGELOG:32` say
+   "setup/wipe" or "setup/wipe UX" — reads as *the interface is missing*. The wipe EXECUTION is the
+   stub. `VAULT_ARCHITECTURE:23` gets it right ("setup UX and wipe **execution**").
+3. **NO AFFIRMATIVE STATEMENT, AND NO 0.9.3 TARGET.** Every mention is a negation inside a "not yet
+   shipped" clause. The required form — slot 0 structurally reserved, the burn credential CANNOT be
+   armed, NO duress wipe in this release, arriving 0.9.3 — appears nowhere.
+4. **RELEASE-NOTES GAP.** `[Unreleased]` omits the residue sweep entirely and still ends "No version
+   bump yet — the 0.9.2 phase is still in progress", which the flip must reconcile.
