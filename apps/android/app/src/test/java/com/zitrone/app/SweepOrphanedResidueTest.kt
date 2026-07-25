@@ -23,6 +23,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.io.IOException
 import java.security.GeneralSecurityException
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -338,6 +339,70 @@ class SweepOrphanedResidueTest {
             ResidueSweepResult.SWEPT_NOT_DURABLE,
             store.sweepOrphanedResidue(),
         )
+    }
+
+    /**
+     * A file that SURVIVES its unlink must fail the sweep. `File.delete()` reports failure by
+     * returning false, not by throwing, so without the post-unlink re-stat the sweep would walk
+     * straight into `dirSync` and report SWEPT_DURABLE over residue that is still on disk — a
+     * fresh-install screen presented over a surviving DEK, which is the exact failure this gate
+     * exists to prevent. That the DEK opens nothing on its own does not make the claim honest.
+     *
+     * Round-4 review (Kimi): the re-stat branch was uncovered — only the `dirSync` branch below it
+     * had a test, so deleting the re-stat left the suite green.
+     *
+     * The vector is a `vault.dek` that is a NON-EMPTY DIRECTORY, so the unlink fails with ENOTEMPTY.
+     * That shape is not itself a reachable production state; it is simply the one way to make
+     * `delete()` fail that does not depend on uid (these tests run as root, where a read-only parent
+     * directory would not refuse the unlink) or on a SecurityManager. What is under test is the
+     * branch, not the shape.
+     *
+     * MUTATION UNIQUELY CAUGHT: dropping the post-unlink `imageBearingFilesProvenAbsent()` re-stat.
+     */
+    @Test
+    fun `residue that survives its unlink fails the sweep instead of claiming durable success`() {
+        val dir = tmp.newFolder()
+        val undeletable = dek(dir)
+        undeletable.mkdirs()
+        File(undeletable, "occupant").writeBytes(byteArrayOf(1))
+
+        val store = newStore(dir) { DirSyncResult.DURABLE }
+        assertEquals(
+            "the unlink failed, so absence was never proven — SWEPT_DURABLE would authorise " +
+                "onboarding over residue that is still there, and NO_MUTATION would deny the sweep " +
+                "even tried",
+            ResidueSweepResult.SWEPT_NOT_DURABLE,
+            store.sweepOrphanedResidue(),
+        )
+        assertTrue("and the survivor is still on disk — the verdict is not cosmetic", undeletable.exists())
+    }
+
+    /**
+     * The total `catch` around the mutation is the sweep's last fail-closed backstop: if any step
+     * between the first unlink and the durability proof throws, the honest answer is "mutated, not
+     * proven durable". An escaping throw would instead unwind into `runBootReconcile`, which reaches
+     * the same verdict only by accident of a second, distant catch — and would take any future caller
+     * that lacks one down with it.
+     *
+     * Round-4 review (Gemini): the block was entirely uncovered — nothing in the suite drove a throw
+     * past the mutation point. `dirSync` is the only injectable step inside the `try`, so it is the
+     * vector; the branch is what matters, not which step raises.
+     *
+     * MUTATION UNIQUELY CAUGHT: removing the `catch` (the throw escapes `sweepOrphanedResidue`).
+     */
+    @Test
+    fun `a throwing step after the unlinks fails the sweep closed instead of escaping`() {
+        val dir = tmp.newFolder()
+        dek(dir).writeBytes(ByteArray(WRAPPED_KEY_BYTES) { 7 })
+
+        val store = newStore(dir) { throw IOException("fsync faulted after the unlinks landed") }
+        assertEquals(
+            "a fault after the mutation point must report SWEPT_NOT_DURABLE — the residue was " +
+                "already touched, so NO_MUTATION would be a lie, and durability was never proven",
+            ResidueSweepResult.SWEPT_NOT_DURABLE,
+            store.sweepOrphanedResidue(),
+        )
+        assertFalse("the unlink that did land is not rolled back", dek(dir).exists())
     }
 
     /** Safe to run on every cold start: a second pass finds nothing and reports nothing. */

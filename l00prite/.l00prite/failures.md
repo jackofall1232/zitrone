@@ -135,6 +135,31 @@ is a compile error; move the dispatcher inside the function; contain the fault i
 the wrong thing impossible rather than remembered.** An unrun mutation claim is an unverified claim,
 and a false coverage claim is worse than no claim — it retires scrutiny from a path nothing guards.
 
+### PROCESS FIX (BINDING) — verify CI by head SHA, and never write to the branch after verifying
+**The rule, both halves — the second is not optional:**
+1. **Poll CI by head SHA, never by PR number alone.** `gh pr checks <n>` answers "are there results?"
+   The question you actually need answered is "are there results **for THIS commit**?" Use
+   `gh run list --commit <sha>`.
+2. **Do not commit or push to a branch between verifying CI and acting on that verification.** A
+   write after verification makes the verification **stale by construction** — the run you cited no
+   longer covers the head you are merging.
+
+**Why it is mechanical and not a reminder — I recorded half of it and then reproduced the failure
+within minutes.** After force-pushing the W-A rebase, my poller reported "settled" while reading the
+**pre-rebase** run, still attached because the new run had not been created yet. I caught it, wrote
+the by-SHA rule, re-verified correctly, reported green — and then immediately committed a ledger
+update to the same branch, moving the head off the SHA I had just certified. Knowing rule 1 did not
+produce rule 2; only doing the thing and watching it break did.
+
+**LINEAGE — this is NOT a new shape.** It is the same producer/consumer family that generated most of
+Unit W: *an authoritative result exists, and a consumer uses something weaker.* Here the authoritative
+signal is "CI result for commit X" and the consumer accepted "CI results exist on this PR" — form (a),
+the weaker proxy, exactly as boot routing consumed proxies for verdicts it did not own. The second
+half is form (b), the lifecycle one: **the verification and the artifact it certifies must share a
+head**, the same shape as "claim and work must share a lifetime" from `runBootReconcile`. Recognizing
+it as the same family matters more than the individual rule — when this family appears, look for the
+stronger signal that already exists and the consumer that settled for less.
+
 ### GOOD HANDLING — demonstrate why a concern is latent; never assert a property the test cannot prove
 Grok's round-4 INFO-3 said `runCatching { afterPublish() }` swallows `CancellationException` while the
 sweep path deliberately rethrows. Rather than "fix" the asymmetry or wave the label away, the test

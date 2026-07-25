@@ -1132,7 +1132,10 @@ internal fun sealDurableOrFalse(seal: () -> Unit): Boolean =
  *     true with no other writer and every later consumer blocks forever.
  *
  * [scope] and [ioDispatcher] are injected precisely so a test can drive cancellation deterministically
- * in virtual time; production passes the process-scoped [AppContainer.scope] and `Dispatchers.IO`.
+ * in virtual time. Production passes the process-scoped [AppContainer.scope] explicitly and does NOT
+ * pass [ioDispatcher] at all — it relies on the `Dispatchers.IO` default in the signature below.
+ * (Round-4 review, Kimi: this line previously said production "passes … `Dispatchers.IO`", which
+ * reads as an explicit argument and would send a reader looking for a call site that does not exist.)
  */
 internal fun runBootReconcile(
     scope: CoroutineScope,

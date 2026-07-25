@@ -7,7 +7,9 @@ package com.zitrone.app
 
 import com.zitrone.app.crypto.vault.ResidueSweepResult
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -311,8 +313,16 @@ class BootReconcileOwnerTest {
      * the verdict or the release of waiters (round-3 review, Gemini: no test passed an `afterPublish`
      * lambda at all, so the wrapper's behaviour around it was entirely uncovered).
      *
-     * Production passes `{ runCatching { retryPlaintextCacheClearIfNoVault() } }`, so it cannot throw
-     * today — this pins the ordering guarantee for any future caller that is less careful.
+     * Production passes the call BARE — `{ retryPlaintextCacheClearIfNoVault() }` — and relies on the
+     * wrapper to contain it. That is deliberate: a local `runCatching` at one call site protects only
+     * that caller, so the guarantee belongs to `runBootReconcile` itself. This test is what makes the
+     * wrapper's half of that contract real.
+     *
+     * CORRECTED (round-4 review, Grok INFO-1 and Kimi LOW — the one finding two lenses raised
+     * independently). This header previously said production passes
+     * `{ runCatching { retryPlaintextCacheClearIfNoVault() } }`. The round-3 fix removed that local
+     * wrap in the same commit that added this test, so the header described the PRE-FIX shape from
+     * the moment it was written — comment/code drift inside the delta that introduced it.
      *
      * MUTATION UNIQUELY CAUGHT: moving `afterPublish()` ahead of the `finally` that publishes.
      */
@@ -339,5 +349,91 @@ class BootReconcileOwnerTest {
         assertTrue("the verdict must already be published before afterPublish runs", h.done.value)
         assertTrue("and its waiters released", released)
         assertFalse("a durable verdict must survive a later failure", h.hold.value)
+    }
+
+    /**
+     * `runCatching { afterPublish() }` catches CancellationException too, which the sweep path
+     * deliberately does NOT (it rethrows, so a cancelled boot cannot be mistaken for a successful
+     * one). Round-4 review (Grok, INFO-3) flagged the asymmetry. These two tests answer whether it
+     * is a live defect or a latent one, because the label alone does not say.
+     *
+     * Here: a SYNTHETIC cancellation — `afterPublish` is `() -> Unit`, not `suspend`, so it has no
+     * suspension point at which a real cancellation could ever be delivered to it. The only
+     * CancellationException it can raise is one it constructs itself: a fault wearing cancellation's
+     * clothes, which is precisely what the containment is for. It runs after the verdict is already
+     * published, so swallowing it strands nobody.
+     *
+     * MUTATION UNIQUELY CAUGHT: removing the `runCatching` — the CE then cancels the boot coroutine.
+     * (Asserted on the child Job, because a CancellationException from a child does not fail its
+     * parent, so nothing observable at the scope level would distinguish the two.)
+     */
+    @Test
+    fun `a synthetic cancellation from afterPublish is contained like any other fault`() = runTest {
+        val io = StandardTestDispatcher(testScheduler)
+        val h = Harness()
+        val parent = Job()
+        val scope = CoroutineScope(parent + io)
+
+        runBootReconcile(
+            scope = scope,
+            claim = h::claim,
+            sweep = { ResidueSweepResult.SWEPT_DURABLE },
+            publish = h::publish,
+            afterPublish = { throw CancellationException("a fault, not a real cancellation") },
+            ioDispatcher = io,
+        )
+        val boot = parent.children.first()
+        advanceUntilIdle()
+
+        assertTrue("the verdict was published before afterPublish ran", h.done.value)
+        assertFalse("and a durable sweep still authorises onboarding", h.hold.value)
+        assertTrue("the boot coroutine ran to completion", boot.isCompleted)
+        assertFalse("post-publication hygiene cannot cancel the boot coroutine", boot.isCancelled)
+    }
+
+    /**
+     * The other half: a REAL cancellation arriving while `afterPublish` runs must still propagate.
+     * It does, and not by luck — `runCatching` is INSIDE `withContext`, and `withContext` rechecks
+     * its job on exit regardless of what the block swallowed. So the containment cannot be used to
+     * outlive a cancelled scope.
+     *
+     * This is the assertion that would fail first if `afterPublish` ever became `suspend`, which is
+     * the condition under which INFO-3 stops being latent. It fails loudly rather than silently.
+     *
+     * MUTATION UNIQUELY CAUGHT: **NONE. This test catches no mutation of the containment, and the
+     * claim that it did was wrong.** The header first written here said it uniquely caught hoisting
+     * `runCatching` outside `withContext`. Running that mutation refutes it: the test stays green.
+     * The reason is structural — cancellation is Job state, so once `parent.cancel()` lands the boot
+     * coroutine is cancelled no matter what any enclosing `runCatching` swallows, and no assertion
+     * on `isCancelled` can separate the two forms. Removing the `runCatching` entirely does not move
+     * it either. The property asserted below is true under every variant considered.
+     *
+     * It is kept anyway, as the executable record of WHY INFO-3 is latent rather than live — but it
+     * is characterisation, not coverage, and is labelled as such so no later reader mistakes it for
+     * a guard. Writing a false MUTATION UNIQUELY CAUGHT line is this unit's signature failure, and
+     * this is the second header in this file to carry its own correction rather than a quiet reword.
+     */
+    @Test
+    fun `a real cancellation during afterPublish still cancels the boot coroutine`() = runTest {
+        val io = StandardTestDispatcher(testScheduler)
+        val h = Harness()
+        val parent = Job()
+        val scope = CoroutineScope(parent + io)
+        var ran = false
+
+        runBootReconcile(
+            scope = scope,
+            claim = h::claim,
+            sweep = { ResidueSweepResult.SWEPT_DURABLE },
+            publish = h::publish,
+            afterPublish = { ran = true; parent.cancel() },
+            ioDispatcher = io,
+        )
+        val boot = parent.children.first()
+        advanceUntilIdle()
+
+        assertTrue("afterPublish must actually have run", ran)
+        assertTrue("the verdict is published regardless", h.done.value)
+        assertTrue("a cancelled scope must cancel the boot coroutine", boot.isCancelled)
     }
 }

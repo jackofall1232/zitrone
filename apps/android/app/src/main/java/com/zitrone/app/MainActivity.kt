@@ -694,12 +694,30 @@ private fun ZitroneRoot(
         deleteRetrying = true
         deleteRetryFailed = false
         scope.launch {
-            val confirmed = withContext(Dispatchers.IO) {
-                runCatching { container.destroyVaultForAccountDeletion() }
-                !container.hasVault() && !container.serverDeleteConfirmed()
-            }
+            withContext(Dispatchers.IO) { runCatching { container.destroyVaultForAccountDeletion() } }
+            // ONE ROUTING AUTHORITY — the LAST sibling (round-4 review, Grok INFO-2). This judged
+            // success with `!hasVault() && !serverDeleteConfirmed()` while the other four consumers
+            // went through the single derivation, making it a second authority on the same question.
+            // Not a reachable dual-writer bug (this path is reachable only via Route.DeleteIncomplete,
+            // which requires the confirmed marker, and a held boot admits no session — so hold and
+            // this path cannot coexist), but it is the structural family this unit exists to close,
+            // and leaving one site on the weaker signal is how the family regrows.
+            //
+            // The criterion is now STRICTLY STRONGER, deliberately: `hasVault()` keys on `vault.bin`
+            // alone, so a retry that left a stray DEK or temp behind reported SUCCESS and routed to
+            // onboarding over recoverable residue — the exact hazard W-A exists to close, still open
+            // on this one path. ONBOARDING now additionally requires `vaultProvenAbsent`
+            // (`Files.notExists` over all four image-bearing files). A destroy that leaves residue
+            // therefore reports FAILURE here; destroy is idempotent, so the retry the user is already
+            // on re-runs it and self-heals.
+            //
+            // No hold supersede here, unlike the delete-completion callback: the hold cannot be
+            // raised on this path (above), and adding one would mean two more BARE `imageLock` calls
+            // on the Main dispatcher — the very shape 0.9.3 is folding INTO the derivation. Do not
+            // add it here; fix it there, once, for every consumer.
+            val snap = container.deriveBootDecisionFromDisk()
             deleteRetrying = false
-            if (confirmed) {
+            if (snap.route == BootRoute.ONBOARDING) {
                 vaultExists = false
                 route = Route.Onboarding
             } else {
@@ -1122,12 +1140,26 @@ private fun ZitroneRoot(
                     }
                     val snap = container.deriveBootDecisionFromDisk()
                     vaultExists = snap.present && !snap.legacy
-                    // The mapping matches the previous explicit semantics in every REACHABLE
-                    // post-destroy state: a surviving image implies the markers were NOT retired
-                    // (destroy retires them only after proving absence), so `serverDeleteConfirmed`
-                    // is still set and bootRoute yields DELETE_INCOMPLETE — never the lock gate.
-                    // {image survives, confirmed absent} cannot occur: destroy throws before the
-                    // retire when absence is unproven.
+                    // The mapping matches the previous explicit semantics in every ORDINARY
+                    // post-destroy state: a surviving image implies the markers were NOT retired, so
+                    // `serverDeleteConfirmed` is still set and bootRoute yields DELETE_INCOMPLETE.
+                    //
+                    // JUSTIFICATION CORRECTED (round-4 review, Kimi), because the previous one was
+                    // WRONG and the distinction is the tristate one this unit exists to enforce.
+                    // This said "{image survives, confirmed absent} cannot occur: destroy throws
+                    // before the retire when absence is unproven". Destroy does NOT throw on unproven
+                    // absence — its verify is `exists()`-based (VaultImageStore ~1126), which is true
+                    // only on a PROVEN PRESENCE, so an INDETERMINATE stat reads as absent and passes.
+                    // A file that survives while its stat faults therefore clears the verify, and if
+                    // the required dirSync then reports DURABLE the markers are retired: the state is
+                    // REACHABLE on a pathological filesystem, not impossible.
+                    //
+                    // What actually makes this safe is the ROUTING, not destroy: at the next
+                    // derivation that same indeterminate stat leaves `vaultProvenAbsent` false
+                    // (`Files.notExists`, proven-absence only) and `imagePresent` false, so bootRoute
+                    // falls through to LOCKED — withholding onboarding over an image it cannot prove
+                    // gone. Fail-closed by construction. The ACTION was always right; the stated
+                    // reason was not, which is exactly the row-6b/6c correction one layer up.
                     route = when (snap.route) {
                         BootRoute.DELETE_INCOMPLETE -> Route.DeleteIncomplete
                         BootRoute.ONBOARDING -> Route.Onboarding
