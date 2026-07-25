@@ -1,21 +1,26 @@
 {
   "schema_version": 2,
-  "max_iterations": 10,
-  "current_iteration": 0,
+  "max_iterations": 6,
+  "current_iteration": 2,
   "stop_conditions": [
     "definition_of_done_met",
     "blocked",
-    "human_review_required",
+    "review_round_cap_reached_6_HARD_CAP_no_self_reset",
+    "merge_confirmation_required",
     "max_iterations_reached"
   ],
   "human_review_gates": [
+    "MERGE \u2014 always, per-action, never lapses (convergence does NOT authorize it)",
+    "version bump / release cut",
+    "push beyond the draft-PR exception already recorded",
+    "round-6 cap reached \u2014 stop and hand to the human regardless of outcome",
     "before executing destructive operations",
     "before changing architecture or security boundaries",
     "before declaring completion"
   ],
-  "last_run_time": "2026-07-24",
+  "last_run_time": "2026-07-25",
   "completion_status": "in_progress",
-  "should_continue": false,
+  "should_continue": true,
   "pause_reason": null,
   "execution": {
     "enabled": false,
@@ -39,5 +44,7 @@
       "lock_lease_conflict",
       "stop_signal"
     ]
-  }
+  },
+  "active_unit": "0.9.2 Unit W-B \u2014 Pucker Burn wipe mechanism (feat/0.9.2-unit-wb-burn-wipe)",
+  "loop": "security-review-loop paired-blind; round 2 of 6 adjudicated NOT READY (3 HIGH); fixing then round 3"
 }
