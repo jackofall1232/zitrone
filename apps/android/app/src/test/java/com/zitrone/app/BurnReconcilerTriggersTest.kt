@@ -11,6 +11,7 @@ import com.zitrone.app.crypto.vault.DeviceKeyCipher
 import com.zitrone.app.crypto.vault.DirSyncResult
 import com.zitrone.app.crypto.vault.KeyDeriver
 import com.zitrone.app.crypto.vault.LibsodiumVaultOps
+import com.zitrone.app.crypto.vault.ReconcileResult
 import com.zitrone.app.crypto.vault.MASTER_KEY_BYTES
 import com.zitrone.app.crypto.vault.NONCE_BYTES
 import com.zitrone.app.crypto.vault.ResidueSweepResult
@@ -125,11 +126,11 @@ class BurnReconcilerTriggersTest {
             // "does it still fire after another mutator already ran?".
             val d1 = tmp.newFolder()
             materialize(d1, s)
-            if (newStore(d1).completeInterruptedBurn()) names += "completeInterruptedBurn"
+            if (newStore(d1).completeInterruptedBurn() != ReconcileResult.NO_MUTATION) names += "completeInterruptedBurn"
 
             val d2 = tmp.newFolder()
             materialize(d2, s)
-            if (newStore(d2).reconcileOrphanedBurnMarkers()) names += "reconcileOrphanedBurnMarkers"
+            if (newStore(d2).reconcileOrphanedBurnMarkers() != ReconcileResult.NO_MUTATION) names += "reconcileOrphanedBurnMarkers"
 
             val d3 = tmp.newFolder()
             materialize(d3, s)
@@ -157,7 +158,11 @@ class BurnReconcilerTriggersTest {
         val dir = tmp.newFolder()
         bin(dir).writeBytes(ByteArray(64) { 9 })
 
-        assertTrue("the signature must be recognised", newStore(dir).completeInterruptedBurn())
+        assertEquals(
+            "the signature must be recognised AND report its durability",
+            ReconcileResult.MUTATED_DURABLE,
+            newStore(dir).completeInterruptedBurn(),
+        )
         assertFalse("the cryptographically dead image must be gone", bin(dir).exists())
     }
 
@@ -172,7 +177,7 @@ class BurnReconcilerTriggersTest {
         val dir = tmp.newFolder()
         dek(dir).writeBytes(ByteArray(WRAPPED_KEY_BYTES) { 4 })
 
-        assertFalse(newStore(dir).completeInterruptedBurn())
+        assertEquals(ReconcileResult.NO_MUTATION, newStore(dir).completeInterruptedBurn())
         assertTrue("a partial create's dek must survive for the sweep to own", dek(dir).exists())
     }
 
@@ -183,7 +188,7 @@ class BurnReconcilerTriggersTest {
         bin(dir).writeBytes(ByteArray(64) { 9 })
         confirmed(dir).writeBytes(ByteArray(1))
 
-        assertFalse(newStore(dir).completeInterruptedBurn())
+        assertEquals(ReconcileResult.NO_MUTATION, newStore(dir).completeInterruptedBurn())
         assertTrue("D2c's self-heal must keep its image", bin(dir).exists())
         assertTrue("and its authorisation", confirmed(dir).exists())
     }
@@ -194,7 +199,7 @@ class BurnReconcilerTriggersTest {
         val dir = tmp.newFolder()
         intent(dir).writeBytes(ByteArray(1))
 
-        assertTrue(newStore(dir).reconcileOrphanedBurnMarkers())
+        assertEquals(ReconcileResult.MUTATED_DURABLE, newStore(dir).reconcileOrphanedBurnMarkers())
         assertFalse("post-burn must carry no marker — fresh-install parity", intent(dir).exists())
     }
 
@@ -210,7 +215,7 @@ class BurnReconcilerTriggersTest {
         bin(dir).writeBytes(ByteArray(64) { 5 })
         intent(dir).writeBytes(ByteArray(1))
 
-        assertFalse(newStore(dir).reconcileOrphanedBurnMarkers())
+        assertEquals(ReconcileResult.NO_MUTATION, newStore(dir).reconcileOrphanedBurnMarkers())
         assertTrue("a genuine pending reconcile must survive", intent(dir).exists())
     }
 
@@ -225,7 +230,7 @@ class BurnReconcilerTriggersTest {
         intent(dir).writeBytes(ByteArray(1))
         confirmed(dir).writeBytes(ByteArray(1))
 
-        assertFalse(newStore(dir).reconcileOrphanedBurnMarkers())
+        assertEquals(ReconcileResult.NO_MUTATION, newStore(dir).reconcileOrphanedBurnMarkers())
         assertTrue(confirmed(dir).exists())
     }
 
@@ -241,7 +246,14 @@ class BurnReconcilerTriggersTest {
         intent(dir).writeBytes(ByteArray(1))
 
         val store = newStore(dir) { DirSyncResult.NOT_DURABLE }
-        assertFalse("a non-durable marker clear is not a success", store.reconcileOrphanedBurnMarkers())
+        // THE ROUND-1 HIGH, AS A TEST: this used to report the same `false` as "did not fire", so the
+        // caller's guard could not tell them apart and published no durability hold over an emptied
+        // directory. It must now be distinguishable from NO_MUTATION.
+        assertEquals(
+            "a mutation that cannot prove itself durable is NOT 'did not fire'",
+            ReconcileResult.MUTATED_NOT_DURABLE,
+            store.reconcileOrphanedBurnMarkers(),
+        )
     }
 
     /** One fixed device key — same shape as the sibling vault suites' per-suite fake. */

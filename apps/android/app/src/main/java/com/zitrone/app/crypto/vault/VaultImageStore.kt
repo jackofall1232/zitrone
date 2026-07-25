@@ -147,6 +147,15 @@ internal enum class DirSyncResult { DURABLE, NOT_DURABLE }
  * instant a file is unlinked, durable or not. A journal replay could then resurrect residue AFTER the
  * app had already presented the fresh-install screen.
  */
+/**
+ * A boot reconciler's outcome (0.9.2 Unit W-B, round-1 review).
+ *
+ * THREE states, not two, because a Boolean cannot say "I mutated the disk and could not prove it
+ * durable" — it collapses that into the same `false` as "my trigger did not fire". That collapse is
+ * how a failed reconciliation published NO durability hold over a directory it had just emptied.
+ */
+enum class ReconcileResult { NO_MUTATION, MUTATED_DURABLE, MUTATED_NOT_DURABLE }
+
 enum class ResidueSweepResult {
     /** Nothing was unlinked: already provably clean, or a gate refused. The disk is UNCHANGED. */
     NO_MUTATION,
@@ -1394,12 +1403,20 @@ class VaultImageStore internal constructor(
      * Returns true iff it completed a wipe. Never throws — a failure leaves the state for the next
      * boot, and the caller publishes the fail-closed durability verdict.
      */
-    fun completeInterruptedBurn(): Boolean =
+    fun completeInterruptedBurn(): ReconcileResult =
         imageLock.withLock {
-            if (!Files.notExists(serverDeletedFile.toPath())) return@withLock false
-            if (!Files.notExists(dekFile.toPath())) return@withLock false
-            if (Files.notExists(binFile.toPath())) return@withLock false
-            runCatching { obliterateLocked() }.isSuccess
+            if (!Files.notExists(serverDeletedFile.toPath())) return@withLock ReconcileResult.NO_MUTATION
+            if (!Files.notExists(dekFile.toPath())) return@withLock ReconcileResult.NO_MUTATION
+            if (Files.notExists(binFile.toPath())) return@withLock ReconcileResult.NO_MUTATION
+            // PAST THIS POINT A MUTATION IS ATTEMPTED, so "it didn't fire" is no longer an available
+            // answer (round-1 review, both lenses). A Boolean here conflated "declined" with "mutated
+            // and could not prove it durable", and the caller's guard only inspected the true case —
+            // so a burn completion whose dirSync failed published NO hold over a stat-clean disk.
+            if (runCatching { obliterateLocked() }.isSuccess) {
+                ReconcileResult.MUTATED_DURABLE
+            } else {
+                ReconcileResult.MUTATED_NOT_DURABLE
+            }
         }
 
     /**
@@ -1422,12 +1439,18 @@ class VaultImageStore internal constructor(
      *
      * Returns true iff it cleared. Never throws — see [completeInterruptedBurn].
      */
-    fun reconcileOrphanedBurnMarkers(): Boolean =
+    fun reconcileOrphanedBurnMarkers(): ReconcileResult =
         imageLock.withLock {
-            if (!imageBearingFilesProvenAbsent()) return@withLock false
-            if (!Files.notExists(serverDeletedFile.toPath())) return@withLock false
-            if (Files.notExists(deleteIntentFile.toPath())) return@withLock false
-            runCatching { clearBothMarkersDurably() }.getOrDefault(false)
+            if (!imageBearingFilesProvenAbsent()) return@withLock ReconcileResult.NO_MUTATION
+            if (!Files.notExists(serverDeletedFile.toPath())) return@withLock ReconcileResult.NO_MUTATION
+            if (Files.notExists(deleteIntentFile.toPath())) return@withLock ReconcileResult.NO_MUTATION
+            // Same tri-state discipline: the marker unlink may land while its dirSync fails, which a
+            // Boolean reported as "did not fire".
+            if (runCatching { clearBothMarkersDurably() }.getOrDefault(false)) {
+                ReconcileResult.MUTATED_DURABLE
+            } else {
+                ReconcileResult.MUTATED_NOT_DURABLE
+            }
         }
 
     /**

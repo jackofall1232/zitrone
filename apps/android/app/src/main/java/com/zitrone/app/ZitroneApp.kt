@@ -16,6 +16,7 @@ import com.zitrone.app.crypto.ZitroneSignalStore
 import com.zitrone.app.crypto.vault.BiometricVaultKeyCipher
 import com.zitrone.app.crypto.vault.KeystoreDeviceKeyCipher
 import com.zitrone.app.crypto.vault.LibsodiumVaultOps
+import com.zitrone.app.crypto.vault.ReconcileResult
 import com.zitrone.app.crypto.vault.ResidueSweepResult
 import com.zitrone.app.crypto.vault.VaultImageStore
 import com.zitrone.app.crypto.vault.UnlockOrAdd
@@ -418,8 +419,15 @@ class AppContainer(private val app: Application) {
                 // fire" or "fired and could not prove itself durable", and those must not be
                 // conflated. Re-derive the distinction from disk: if either reconciler's precondition
                 // still holds after it ran, it mutated (or tried to) without landing — fail closed.
+                // FOLD THE TRI-STATE (round-1 review, both lenses). The previous re-derivation
+                // inspected only reconcilers that returned TRUE, so it structurally could not see the
+                // ambiguous FALSE it claimed to resolve: a reconciler that unlinked and then failed
+                // its dirSync reported `false`, the disk then stat'd clean, and the hold published
+                // FALSE over a wipe that a journal replay can undo. Each reconciler now reports its
+                // own durability, and any MUTATED_NOT_DURABLE raises the hold.
                 val reconcileUnproven =
-                    (burnCompleted || markersCleared) && !imageStore.imageBearingProvenAbsent()
+                    burnCompleted == ReconcileResult.MUTATED_NOT_DURABLE ||
+                        markersCleared == ReconcileResult.MUTATED_NOT_DURABLE
                 if (reconcileUnproven) ResidueSweepResult.SWEPT_NOT_DURABLE else sweepResult
             },
             publish = { hold ->
