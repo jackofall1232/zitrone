@@ -111,6 +111,14 @@ credential in reserved slot 0** (replaces rejected "N wrong passwords wipes"); *
       since the sweep's own gates return `NO_MUTATION` over a present image — and restart-recoverable.
       The fix is the 0.9.3 fold of the hold into the derivation for every consumer at once, NOT two
       more bare `imageLock` calls on the Main dispatcher at this one site. Not release-blocking.
+- [ ] **OPEN GAP (2026-07-25) — only ONE PR-attached reviewer.** GitHub-Codex is out of credits;
+      Gemini alone satisfies the PR gate by maintainer decision (recorded on the process branch,
+      `security-review-loop.md`, as a time-bounded (c) waiver). The paired-blind loop is unaffected —
+      four lenses on the delta. What is single-source is the **whole-repo view**, and Gemini has a
+      documented right-conclusion-wrong-MECHANISM pattern (3 occurrences), so every Gemini finding
+      must be VERIFIED against source and any wrong mechanism called out explicitly. **Restore a
+      second PR-attached lens when Codex credits return, or substitute one.** This is NOT resolved by
+      Gemini performing well — until it closes, every merged unit has had exactly one whole-repo look.
 - [ ] **PR-3 Unit 2 (docs) — SEPARATE PR, must land AFTER Unit 1 merges.** VAULT_ARCHITECTURE §3.3/§3.4
       wizard→silent triple-entry; SECURITY_MODEL flip to "two vaults creatable" + disclosures (triple-entry/
       systematic-entry limit, ~33% blind-overwrite, biometric A-only, burn permanence deferred to burn PR
@@ -120,6 +128,53 @@ credential in reserved slot 0** (replaces rejected "N wrong passwords wipes"); *
       (MainActivity no-match→create) already shipped in PR-2; biometric A-only guard (OQ4) = **Unit 1**
       (in review, above); docs (OQ5) = **Unit 2** (separate, after Unit 1, above). Enable-atomicity =
       the new follow-up above.
+- [ ] **UNIT W-B — burn mechanism + completion presentation. SCOPE APPROVED 2026-07-25; SPEC NEXT,
+      NO IMPL.** Scope statement: `/root/l00prite/unit-wb-scope.md` (approved with rulings A–E).
+      Sources `pucker-burn-spec.md` + `burn-unit-w-invariant-table.md` are PRE-SPLIT and STALE where
+      they conflict with shipped W-A code — **shipped code wins, and each staleness is corrected
+      explicitly, not silently.**
+
+      **DEFINITION OF DONE (binding):**
+      1. `obliterate()` marker-free, fail-closed, keys-first (dek before bin); markers cleared
+         STRICTLY last (after unlinks are proven durable); verify uses `Files.notExists`
+         PROVEN-ABSENCE — **ruling C: the spec's `exists()` verify is SUPERSEDED, not deviated from.**
+         `exists()` is fail-open on the one operation where fail-open is least acceptable.
+      2. `destroy()` behavioural equivalence verified AGAINST SOURCE; the unlink-order change
+         (bin-then-dek → dek-then-bin) named as a review item, never "identical by construction";
+         `keysFirst` param is the landing spot if a reviewer rejects it.
+      3. Burn NEVER writes `vault.delete-confirmed`; no burn-produced state can route to
+         `Route.DeleteIncomplete`.
+      4. **ONE DURABILITY OWNER WITH TWO PRODUCERS** (the boot sweep and burn's `obliterate`) — NOT a
+         second hold alongside the first. A failed-but-clean burn (unlinks landed, durability
+         unproven) MUST NOT present as a fresh install. **BLOCKING invariant, not a robustness
+         residual.**
+      5. Items #1 and #5 land as ONE change with one design: all five Main-thread disk reads
+         (`MainActivity.kt` 631, 1046, 1170, 1171, 1219) folded INTO the derivation — never wrapped
+         at the call sites — and the `destroySupersedesResidueHold` re-derivation + torn pair-read at
+         1170/1171 removed by the same fold. Every boot-routing consumer shown consuming the single
+         verdict.
+      6. Coordinator extracted ("snapshot → claim → apply/ack") so apply-once is tested against
+         PRODUCTION code, not a stand-in.
+      7. Reachability of `completeInterruptedBurn` and `reconcileOrphanedBurnMarkers` RE-DERIVED
+         against W-B's design — never restored from W-A-era comments, whose exclusion argument
+         explicitly cited the absence of the duress wipe and therefore voids by its own premise.
+      8. Byte-for-byte Robolectric gate green — and **ruling E: it compares the DERIVED VERDICT, not
+         only files/prefs/Keystore.** "Fresh install" now has a derived-verdict precondition (no hold
+         raised), so a file-only comparison would prove the wrong thing. Shadow gaps are in-test
+         exclusions WITH reasons + `SECURITY_MODEL.md` lines.
+      9. `SECURITY_MODEL.md` honesty pass: local-only scope, crypto-erase not NAND sanitisation,
+         single-snapshot indistinguishability, burn consumes the credential.
+      10. Item #4 residue: assert the sweep-hold VALUE is PRESERVED across `runDeleteRetry`, not
+          merely that a raised hold yields failure. The rest of #4 shipped in `1b5f5e0`; **W-B must
+          not re-do it.**
+
+      **DIVERGENCE BOUNDARY:** robustness residuals (R2 wall-clock) may defer to a later hardening
+      layer, tracked. **Anything that breaks post-burn ≡ fresh install BLOCKS** — that is the feature
+      failing at its purpose, not a hardening gap.
+
+      **PROCESS:** Rule of 6, HARD CAP, no self-reset, third lens blind at the cap, stop for the
+      maintainer regardless of outcome. Single whole-repo PR lens while Codex credits are out (see
+      the open-gap entry above) — front-loaded review matters MORE, not less.
 - [ ] **PUCKER BURN sibling PRs (0.9.2):** (a) burn SETUP UX — settings "Pucker Burn Password Setup"
       above "Delete Account", disappears once set, actively-acked permanence warning (3 points); (b) burn
       WIPE execution. Scope/sequencing TBD. PR-1 only makes the store burn-AWARE, not setup/wipe.
