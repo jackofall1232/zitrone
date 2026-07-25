@@ -38,7 +38,7 @@ class DeriveBootDecisionTest {
         val d = deriveBootDecision(
             serverDeleteConfirmed = true,
             imagePresent = true,
-            residueSweepHold = false,
+            durabilityHold = false,
             vaultProvenAbsent = false,
             isLegacyImage = { probed = true; true },
         )
@@ -58,7 +58,7 @@ class DeriveBootDecisionTest {
         val d = deriveBootDecision(
             serverDeleteConfirmed = false,
             imagePresent = false,
-            residueSweepHold = false,
+            durabilityHold = false,
             vaultProvenAbsent = true,
             isLegacyImage = { probed = true; true },
         )
@@ -80,7 +80,7 @@ class DeriveBootDecisionTest {
         val d = deriveBootDecision(
             serverDeleteConfirmed = false,
             imagePresent = true,
-            residueSweepHold = false,
+            durabilityHold = false,
             vaultProvenAbsent = false,
             isLegacyImage = { error("simulated decrypt fault") },
         )
@@ -94,7 +94,7 @@ class DeriveBootDecisionTest {
         val d = deriveBootDecision(
             serverDeleteConfirmed = false,
             imagePresent = true,
-            residueSweepHold = false,
+            durabilityHold = false,
             vaultProvenAbsent = false,
             isLegacyImage = { true },
         )
@@ -108,7 +108,7 @@ class DeriveBootDecisionTest {
      * derivation that silently drops one — the round-1 defect, one level up — fails here even though
      * BootRouteTest stays green.
      *
-     * MUTATION UNIQUELY CAUGHT: passing a constant (e.g. `residueSweepHold = false`) instead of the
+     * MUTATION UNIQUELY CAUGHT: passing a constant (e.g. `durabilityHold = false`) instead of the
      * argument.
      */
     @Test
@@ -117,7 +117,7 @@ class DeriveBootDecisionTest {
         val held = deriveBootDecision(
             serverDeleteConfirmed = false,
             imagePresent = false,
-            residueSweepHold = true,
+            durabilityHold = true,
             vaultProvenAbsent = true,
             isLegacyImage = { false },
         )
@@ -130,7 +130,7 @@ class DeriveBootDecisionTest {
         val notHeld = deriveBootDecision(
             serverDeleteConfirmed = false,
             imagePresent = false,
-            residueSweepHold = false,
+            durabilityHold = false,
             vaultProvenAbsent = true,
             isLegacyImage = { false },
         )
@@ -148,7 +148,7 @@ class DeriveBootDecisionTest {
         val d = deriveBootDecision(
             serverDeleteConfirmed = true,
             imagePresent = true,
-            residueSweepHold = false,
+            durabilityHold = false,
             vaultProvenAbsent = false,
             isLegacyImage = { true },
         )
@@ -160,7 +160,7 @@ class DeriveBootDecisionTest {
  * DOES A COMPLETED DESTROY SUPERSEDE A RESIDUE-SWEEP HOLD? (0.9.2 Unit W-A, round 3.)
  *
  * The account-delete completion path and the session collector decide the SAME routing moment. Before
- * this, the collector consumed the carried `residueSweepHold` and the delete path did not, so a hold
+ * this, the collector consumed the carried `durabilityHold` and the delete path did not, so a hold
  * raised earlier in the process made them disagree — collector LOCKED, delete path Onboarding, last
  * writer wins, pinning a successfully deleted account to a lock screen for the rest of the process.
  *
@@ -174,7 +174,7 @@ class DestroySupersedesResidueHoldTest {
     @Test
     fun `a completed destroy supersedes the hold`() {
         assertTrue(
-            destroySupersedesResidueHold(vaultProvenAbsent = true, serverDeleteConfirmed = false),
+            destroySupersedesDurabilityHold(vaultProvenAbsent = true, serverDeleteConfirmed = false),
         )
     }
 
@@ -188,7 +188,7 @@ class DestroySupersedesResidueHoldTest {
     fun `a destroy that did not reach its marker retire does not supersede`() {
         assertFalse(
             "a surviving confirmed marker means the destroy never completed — the hold stands",
-            destroySupersedesResidueHold(vaultProvenAbsent = true, serverDeleteConfirmed = true),
+            destroySupersedesDurabilityHold(vaultProvenAbsent = true, serverDeleteConfirmed = true),
         )
     }
 
@@ -201,10 +201,10 @@ class DestroySupersedesResidueHoldTest {
     @Test
     fun `an unproven directory never supersedes the hold`() {
         assertFalse(
-            destroySupersedesResidueHold(vaultProvenAbsent = false, serverDeleteConfirmed = false),
+            destroySupersedesDurabilityHold(vaultProvenAbsent = false, serverDeleteConfirmed = false),
         )
         assertFalse(
-            destroySupersedesResidueHold(vaultProvenAbsent = false, serverDeleteConfirmed = true),
+            destroySupersedesDurabilityHold(vaultProvenAbsent = false, serverDeleteConfirmed = true),
         )
     }
 }

@@ -113,7 +113,7 @@ class ResidenceTest {
                     val route = bootRoute(
                         serverDeleteConfirmed = confirmed,
                         vaultImagePresent = r is Residence.Present,
-                        residueSweepHold = hold,
+                        durabilityHold = hold,
                         vaultProvenAbsent = r.mayRouteToOnboarding,
                         legacyImage = false,
                     )
@@ -149,7 +149,7 @@ class ResidenceTest {
             bootRoute(
                 serverDeleteConfirmed = false,
                 vaultImagePresent = indeterminate is Residence.Present,
-                residueSweepHold = false,
+                durabilityHold = false,
                 vaultProvenAbsent = indeterminate.mayRouteToOnboarding,
                 legacyImage = true,
             ),
@@ -170,7 +170,7 @@ class ResidenceTest {
         val d = deriveBootDecision(
             serverDeleteConfirmed = false,
             imagePresent = indeterminate is Residence.Present,
-            residueSweepHold = false,
+            durabilityHold = false,
             vaultProvenAbsent = indeterminate.mayRouteToOnboarding,
             isLegacyImage = { probed = true; true },
         )

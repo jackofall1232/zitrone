@@ -262,7 +262,7 @@ class AppContainer(private val app: Application) {
         deriveBootDecision(
             serverDeleteConfirmed = serverDeleteConfirmed(),
             imagePresent = residence is Residence.Present,
-            residueSweepHold = residueSweepHold.value,
+            durabilityHold = durabilityHold.value,
             vaultProvenAbsent = residence.mayRouteToOnboarding,
             isLegacyImage = { isLegacyImage() },
         )
@@ -275,19 +275,69 @@ class AppContainer(private val app: Application) {
     internal fun vaultResidence(): Residence = Residence.classify(::hasVault, ::vaultProvenAbsent)
 
     /**
-     * PROCESS-scoped boot-reconciliation state.
+     * PROCESS-scoped reconciliation state.
      *
      * [bootReconciled] gates the fresh-install presentation: no route may be derived from disk until
-     * boot reconciliation has finished, because the sweep MUTATES what disk says. [residueSweepHold]
-     * carries forward the one fact a later stat cannot recover — that residue was unlinked WITHOUT
-     * proven durability — and withholds onboarding for the rest of this boot.
+     * boot reconciliation has finished, because its mutators CHANGE what disk says.
+     *
+     * ## [durabilityHold] — ONE OWNER, THREE PRODUCERS (0.9.2 Unit W-B)
+     *
+     * **It means exactly one thing: SOME DESTRUCTIVE MUTATION OF LOCAL STATE DID NOT PROVE DURABLE.
+     * Full stop.** It carries forward the one fact a later stat cannot recover — files were unlinked
+     * but a journal replay could bring them back — and withholds the fresh-install presentation for
+     * the rest of this process.
+     *
+     * Three producers publish into this ONE field:
+     *  1. [VaultImageStore.sweepOrphanedResidue] — the cold-start orphan sweep (W-A).
+     *  2. [VaultImageStore.completeInterruptedBurn] / [VaultImageStore.reconcileOrphanedBurnMarkers] —
+     *     the boot reconcilers (W-B).
+     *  3. **[VaultImageStore.burnObliterate] — the duress wipe itself**, which runs at RUNTIME rather
+     *     than at boot. This is the producer whose absence was the round-6 HIGH: the hold covered the
+     *     boot sweep but not the burn's own obliterate, so a burn whose unlinks landed while its
+     *     `dirSync` failed left a directory that STATS CLEAN — and the next boot presented ONBOARDING,
+     *     a fresh install over a wipe that was never proven durable and that a journal replay can
+     *     bring back. Closed STRUCTURALLY: same field, same meaning, one more producer.
+     *
+     * **ROUTING CARES ONLY THAT IT IS RAISED, NEVER WHICH PRODUCER RAISED IT.** There is deliberately
+     * no discriminator, and adding one is not a fix. **If any consumer ever needs to know WHICH
+     * mutation failed, that is the signal this single-field design has broken down — surface it as a
+     * FINDING rather than working around it by widening the field.**
      *
      * PROCESS-scoped, not composition-scoped, and deliberately so: composition state resets on an
      * Activity recreation, and a rotation that cleared this hold would restore exactly the
-     * fresh-install-over-residue presentation it exists to prevent.
+     * fresh-install-over-unproven-absence presentation it exists to prevent.
      */
     val bootReconciled = MutableStateFlow(false)
-    val residueSweepHold = MutableStateFlow(false)
+    val durabilityHold = MutableStateFlow(false)
+
+    /**
+     * Raise the [durabilityHold] — the single entry point for every producer.
+     *
+     * Monotonic within a process: a raised hold is never lowered by another producer's success, only
+     * by evidence STRICTLY STRONGER than the doubt that raised it (a completed destroy's own proven
+     * absence + `dirSync`, via [destroySupersedesDurabilityHold]). A producer that lowered it on its
+     * own success would let a clean sweep erase a failed burn's doubt.
+     */
+    internal fun raiseDurabilityHold() {
+        durabilityHold.value = true
+    }
+
+    /**
+     * The DURESS wipe (0.9.2 Unit W-B) — producer 3 of the [durabilityHold].
+     *
+     * Fail-closed by construction: the hold is raised BEFORE the first destructive mutation is
+     * attempted, and lowered only once the wipe has PROVEN itself durable. Raising it afterwards on
+     * failure would lose the crash window — a process death mid-obliterate would leave no hold at all,
+     * and the next boot would present a fresh install over an unproven wipe.
+     *
+     * Rethrows whatever [VaultImageStore.burnObliterate] throws: the caller decides presentation, but
+     * the hold it leaves behind is what makes a failed burn safe regardless of what the caller does.
+     */
+    fun burnVault() = runBurnWipe(
+        raiseHold = { raiseDurabilityHold() },
+        obliterate = { imageStore.burnObliterate() },
+        lowerHold = { durabilityHold.value = false },
+    )
 
     private val bootReconcileStarted = java.util.concurrent.atomic.AtomicBoolean(false)
 
@@ -296,9 +346,29 @@ class AppContainer(private val app: Application) {
         runBootReconcile(
             scope = scope,
             claim = { bootReconcileStarted.compareAndSet(false, true) },
-            sweep = { imageStore.sweepOrphanedResidue() },
+            // ALL THREE boot mutators, ordered but ORDER-INDEPENDENT BY PROOF: their trigger
+            // predicates are pairwise exclusive over the enumerated state space, asserted in
+            // `BurnReconcilerTriggersTest`. That is a proof rather than the reasoning "they can't
+            // both fire" — if a future change widens a trigger, the test fails loudly instead of the
+            // ordering silently starting to matter.
+            //
+            // Each returns whether IT proved its own mutation durable; the results fold into the ONE
+            // durability verdict below. A reconciler that mutated without proving durability raises
+            // the hold exactly as a non-durable sweep does — one owner, one meaning.
+            sweep = {
+                val burnCompleted = imageStore.completeInterruptedBurn()
+                val markersCleared = imageStore.reconcileOrphanedBurnMarkers()
+                val sweepResult = imageStore.sweepOrphanedResidue()
+                // Both reconcilers are best-effort and never throw: `false` means either "did not
+                // fire" or "fired and could not prove itself durable", and those must not be
+                // conflated. Re-derive the distinction from disk: if either reconciler's precondition
+                // still holds after it ran, it mutated (or tried to) without landing — fail closed.
+                val reconcileUnproven =
+                    (burnCompleted || markersCleared) && !imageStore.imageBearingProvenAbsent()
+                if (reconcileUnproven) ResidueSweepResult.SWEPT_NOT_DURABLE else sweepResult
+            },
             publish = { hold ->
-                residueSweepHold.value = hold
+                durabilityHold.value = hold
                 bootReconciled.value = true
             },
             afterPublish = {
@@ -1216,7 +1286,7 @@ internal fun runBootReconcile(
 internal fun deriveBootDecision(
     serverDeleteConfirmed: Boolean,
     imagePresent: Boolean,
-    residueSweepHold: Boolean,
+    durabilityHold: Boolean,
     vaultProvenAbsent: Boolean,
     isLegacyImage: () -> Boolean,
 ): BootDecision {
@@ -1233,7 +1303,7 @@ internal fun deriveBootDecision(
         route = bootRoute(
             serverDeleteConfirmed = serverDeleteConfirmed,
             vaultImagePresent = imagePresent,
-            residueSweepHold = residueSweepHold,
+            durabilityHold = durabilityHold,
             vaultProvenAbsent = vaultProvenAbsent,
             legacyImage = legacy,
         ),
@@ -1257,10 +1327,39 @@ internal fun deriveBootDecision(
  * Extracted as a pure predicate so the decision is testable: it is the one behavioural change in an
  * otherwise-documentation delta, and it sits in the account-delete surface.
  */
-internal fun destroySupersedesResidueHold(
+internal fun destroySupersedesDurabilityHold(
     vaultProvenAbsent: Boolean,
     serverDeleteConfirmed: Boolean,
 ): Boolean = vaultProvenAbsent && !serverDeleteConfirmed
+
+/**
+ * THE DURESS WIPE ORCHESTRATION (0.9.2 Unit W-B) — extracted so the ORDER is testable against
+ * production code rather than asserted in a comment.
+ *
+ * Three properties, and they are the whole contract:
+ *  1. [raiseHold] runs STRICTLY BEFORE [obliterate] — never after, and never "on failure". A hold
+ *     raised only in a catch block loses the crash window: a process death mid-obliterate would leave
+ *     NO hold, and the next boot would present a fresh install over a wipe that was never proven
+ *     durable. Raising first is what makes the failed-but-clean state safe.
+ *  2. [lowerHold] runs ONLY after [obliterate] returns normally — i.e. only when the wipe proved
+ *     every image-bearing path absent, fsynced the directory, and retired both markers. That is
+ *     evidence strictly stronger than the doubt raised in (1), and it is the ONLY thing that may
+ *     lower the hold.
+ *  3. A throw from [obliterate] propagates with the hold STILL RAISED. The caller owns presentation;
+ *     the hold is what makes a failed burn safe regardless of what the caller decides to show.
+ *
+ * This closes the round-6 HIGH structurally: the durability hold gains a third producer rather than a
+ * second field. See [AppContainer.durabilityHold].
+ */
+internal fun runBurnWipe(
+    raiseHold: () -> Unit,
+    obliterate: () -> Unit,
+    lowerHold: () -> Unit,
+) {
+    raiseHold()
+    obliterate()
+    lowerHold()
+}
 
 /**
  * The account-delete RETRY orchestration, extracted from the Compose lambda so the WIRING is
@@ -1325,7 +1424,7 @@ internal data class BootDecision(
 internal fun bootRoute(
     serverDeleteConfirmed: Boolean,
     vaultImagePresent: Boolean,
-    residueSweepHold: Boolean,
+    durabilityHold: Boolean,
     vaultProvenAbsent: Boolean,
     legacyImage: Boolean,
 ): BootRoute = when {
@@ -1340,7 +1439,7 @@ internal fun bootRoute(
     // failed against this function: the router did not enforce what its caller was enforcing for it.)
     legacyImage && vaultImagePresent -> BootRoute.ONBOARDING
     vaultImagePresent -> BootRoute.LOCKED
-    residueSweepHold -> BootRoute.LOCKED
+    durabilityHold -> BootRoute.LOCKED
     vaultProvenAbsent -> BootRoute.ONBOARDING
     else -> BootRoute.LOCKED
 }

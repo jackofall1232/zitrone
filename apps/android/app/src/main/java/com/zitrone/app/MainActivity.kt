@@ -778,7 +778,7 @@ private fun ZitroneRoot(
 
     // (The standalone legacy-image routing effect that used to live here is REMOVED. It was a SECOND
     // routing authority: it set Route.Onboarding on its own, without awaiting `bootReconciled`,
-    // without the carried `residueSweepHold`, and without consulting `serverDeleteConfirmed()` — so
+    // without the carried `durabilityHold`, and without consulting `serverDeleteConfirmed()` — so
     // with a v2 image over a durable `vault.delete-confirmed` it could preempt Route.DeleteIncomplete,
     // and the create() on that onboarding screen CLEARS both markers, erasing the SOLE authorisation
     // for the account-delete auto-destroy. Legacy detection is now an INPUT to the single boot
@@ -1150,7 +1150,7 @@ private fun ZitroneRoot(
                 // session=null above, which also wakes the session collector — so this callback and
                 // that collector decide the SAME routing moment. They used to read the same two
                 // stats, and a comment here asserted "the two cannot disagree". W-A made that comment
-                // FALSE: the collector was given the carried `residueSweepHold` and this path was
+                // FALSE: the collector was given the carried `durabilityHold` and this path was
                 // left on `hasVault()` + `serverDeleteConfirmed()`. With a hold raised earlier in the
                 // process, the collector computes LOCKED while this computes Onboarding, both write
                 // `route`, and the last writer wins — pinning a successfully deleted account to a
@@ -1166,12 +1166,12 @@ private fun ZitroneRoot(
                     // image-bearing absence with its OWN required dirSync and retired both markers
                     // only after that proof. Leaving a stale boot-time hold raised would withhold
                     // onboarding over a directory this delete has just proven durably clean.
-                    if (destroySupersedesResidueHold(
+                    if (destroySupersedesDurabilityHold(
                             vaultProvenAbsent = container.vaultProvenAbsent(),
                             serverDeleteConfirmed = container.serverDeleteConfirmed(),
                         )
                     ) {
-                        container.residueSweepHold.value = false
+                        container.durabilityHold.value = false
                     }
                     val snap = container.deriveBootDecisionFromDisk()
                     vaultExists = snap.present && !snap.legacy
@@ -1179,22 +1179,37 @@ private fun ZitroneRoot(
                     // post-destroy state: a surviving image implies the markers were NOT retired, so
                     // `serverDeleteConfirmed` is still set and bootRoute yields DELETE_INCOMPLETE.
                     //
-                    // JUSTIFICATION CORRECTED (round-4 review, Kimi), because the previous one was
-                    // WRONG and the distinction is the tristate one this unit exists to enforce.
-                    // This said "{image survives, confirmed absent} cannot occur: destroy throws
-                    // before the retire when absence is unproven". Destroy does NOT throw on unproven
-                    // absence — its verify is `exists()`-based (VaultImageStore ~1126), which is true
-                    // only on a PROVEN PRESENCE, so an INDETERMINATE stat reads as absent and passes.
-                    // A file that survives while its stat faults therefore clears the verify, and if
-                    // the required dirSync then reports DURABLE the markers are retired: the state is
-                    // REACHABLE on a pathological filesystem, not impossible.
+                    // DEFENCE IN DEPTH — DO NOT DELETE THIS AS UNREACHABLE. Read the dependency below
+                    // before concluding anything about whether this can fire.
                     //
-                    // What actually makes this safe is the ROUTING, not destroy: at the next
-                    // derivation that same indeterminate stat leaves `vaultProvenAbsent` false
-                    // (`Files.notExists`, proven-absence only) and `imagePresent` false, so bootRoute
-                    // falls through to LOCKED — withholding onboarding over an image it cannot prove
-                    // gone. Fail-closed by construction. The ACTION was always right; the stated
-                    // reason was not, which is exactly the row-6b/6c correction one layer up.
+                    // History, because the reasoning matters more than the outcome. Round 4 (Kimi)
+                    // corrected a claim here that "{image survives, confirmed absent} cannot occur:
+                    // destroy throws before the retire when absence is unproven". At that time destroy
+                    // did NOT throw on unproven absence — its verify was `exists()`-based, true only
+                    // on a PROVEN PRESENCE, so an INDETERMINATE stat read as absent and passed; if the
+                    // required dirSync then reported DURABLE the markers were retired, making the
+                    // state REACHABLE on a pathological filesystem. What made it safe was the ROUTING
+                    // below, not destroy.
+                    //
+                    // CURRENT FACT AND ITS DEPENDENCY (0.9.2 Unit W-B): `obliterateLocked()`'s S4
+                    // verify is now PROVEN-ABSENCE (`imageBearingFilesProvenAbsent`, Files.notExists),
+                    // so an indeterminate stat is a SURVIVOR and throws `DestroyFailed` before the
+                    // marker retire. Through the destroy/burn path that state is therefore currently
+                    // UNREACHABLE.
+                    //
+                    // **THAT IS NOT A REASON TO REMOVE THIS.** The whole value of this check is that
+                    // it does NOT depend on S4 being right. Deleting it because "S4 makes it
+                    // impossible" would couple correctness HERE to a check three layers up in another
+                    // file, in a different unit, that a future change can loosen without ever looking
+                    // at this line — which is dead-code-removal reasoning applied to a defence-in-depth
+                    // layer, and is exactly backwards.
+                    //
+                    // The routing property stands on its own: an indeterminate stat leaves
+                    // `vaultProvenAbsent` false (`Files.notExists`, proven-absence only) and
+                    // `imagePresent` false, so bootRoute falls through to LOCKED — withholding
+                    // onboarding over an image it cannot prove gone. Fail-closed by construction,
+                    // whatever S4 does. If S4 ever reverts to `exists()`, this comment becomes
+                    // VISIBLY wrong (the stated dependency is checkable) rather than silently stale.
                     route = when (snap.route) {
                         BootRoute.DELETE_INCOMPLETE -> Route.DeleteIncomplete
                         BootRoute.ONBOARDING -> Route.Onboarding

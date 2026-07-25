@@ -30,7 +30,7 @@ class BootRouteTest {
             bootRoute(
                 serverDeleteConfirmed = false,
                 vaultImagePresent = false,
-                residueSweepHold = false,
+                durabilityHold = false,
                 vaultProvenAbsent = true,
                 legacyImage = false,
             ),
@@ -50,7 +50,7 @@ class BootRouteTest {
             bootRoute(
                 serverDeleteConfirmed = false,
                 vaultImagePresent = false,
-                residueSweepHold = true,
+                durabilityHold = true,
                 // TRUE — this is the whole point. A stat cannot tell durable from not.
                 vaultProvenAbsent = true,
                 legacyImage = false,
@@ -66,7 +66,7 @@ class BootRouteTest {
             bootRoute(
                 serverDeleteConfirmed = false,
                 vaultImagePresent = false,
-                residueSweepHold = false,
+                durabilityHold = false,
                 vaultProvenAbsent = false,
                 legacyImage = false,
             ),
@@ -83,7 +83,7 @@ class BootRouteTest {
                 bootRoute(
                     serverDeleteConfirmed = false,
                     vaultImagePresent = true,
-                    residueSweepHold = hold,
+                    durabilityHold = hold,
                     vaultProvenAbsent = false,
                 legacyImage = false,
                 ),
@@ -127,7 +127,7 @@ class BootRouteTest {
             bootRoute(
                 serverDeleteConfirmed = true,
                 vaultImagePresent = true,
-                residueSweepHold = false,
+                durabilityHold = false,
                 vaultProvenAbsent = false,
                 legacyImage = true,
             ),
@@ -142,7 +142,7 @@ class BootRouteTest {
             bootRoute(
                 serverDeleteConfirmed = false,
                 vaultImagePresent = true,
-                residueSweepHold = false,
+                durabilityHold = false,
                 vaultProvenAbsent = false,
                 legacyImage = true,
             ),
@@ -159,11 +159,11 @@ class BootRouteTest {
     fun `legacy outranks image-present but not a confirmed delete`() {
         assertEquals(
             BootRoute.ONBOARDING,
-            bootRoute(false, vaultImagePresent = true, residueSweepHold = true, vaultProvenAbsent = false, legacyImage = true),
+            bootRoute(false, vaultImagePresent = true, durabilityHold = true, vaultProvenAbsent = false, legacyImage = true),
         )
         assertEquals(
             BootRoute.DELETE_INCOMPLETE,
-            bootRoute(true, vaultImagePresent = true, residueSweepHold = true, vaultProvenAbsent = false, legacyImage = true),
+            bootRoute(true, vaultImagePresent = true, durabilityHold = true, vaultProvenAbsent = false, legacyImage = true),
         )
     }
 

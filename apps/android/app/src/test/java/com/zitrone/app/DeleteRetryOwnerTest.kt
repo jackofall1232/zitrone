@@ -90,7 +90,7 @@ class DeleteRetryOwnerTest {
                 deriveBootDecision(
                     serverDeleteConfirmed = confirmedMarker,
                     imagePresent = residence is Residence.Present,
-                    residueSweepHold = false,
+                    durabilityHold = false,
                     vaultProvenAbsent = residence.mayRouteToOnboarding,
                     isLegacyImage = { false },
                 )
@@ -111,7 +111,7 @@ class DeleteRetryOwnerTest {
                 deriveBootDecision(
                     serverDeleteConfirmed = false,
                     imagePresent = false,
-                    residueSweepHold = false,
+                    durabilityHold = false,
                     vaultProvenAbsent = Residence.ProvenAbsent.mayRouteToOnboarding,
                     isLegacyImage = { false },
                 )
