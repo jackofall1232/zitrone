@@ -50,6 +50,21 @@ class KeyStoreManager(private val context: Context) {
         )
     }
 
+    /**
+     * Drop a cached handle so the next [prefs] call opens the file again (0.9.2 Unit W-B).
+     *
+     * The burn DELETES the lazily-created prefs files. A handle cached here would outlive its file
+     * and still hold the store's keyset in memory, so a later write through it would resurrect the
+     * file — residue a never-used device does not have, re-created after the burn proved it gone.
+     * Forgetting the handle does not by itself guarantee that (the platform caches its own
+     * `SharedPreferencesImpl` per file name); the burn also empties each store's contents before
+     * unlinking it, so nothing app-written remains in memory to be written back.
+     */
+    @Synchronized
+    fun forget(name: String) {
+        cache.remove(name)
+    }
+
     companion object {
         const val PREFS_SIGNAL_STORE = "zitrone_signal_store"
         const val PREFS_SETTINGS = "zitrone_settings"

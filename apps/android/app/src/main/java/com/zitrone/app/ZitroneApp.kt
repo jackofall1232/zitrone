@@ -27,7 +27,10 @@ import com.zitrone.app.crypto.vault.VaultSession
 import com.zitrone.app.crypto.vault.VaultSodiumOps
 import com.zitrone.app.crypto.vault.VaultState
 import com.zitrone.app.crypto.vault.VaultStateCodec
+import com.zitrone.app.crypto.vault.DirSyncResult
+import com.zitrone.app.crypto.vault.defaultFsyncDir
 import com.zitrone.app.crypto.vault.wipe
+import com.zitrone.app.data.wipeLazyPrefsFilesProven
 import com.zitrone.app.data.BiometricUnlockStore
 import com.zitrone.app.data.ConversationRepository
 import com.zitrone.app.data.DeviceSettings
@@ -406,6 +409,18 @@ class AppContainer(private val app: Application) {
             // failures and returned nothing, so the hold was lowered over a surviving log.
             if (!bootDiagnostics.clearProven()) throw VaultImageException.DestroyFailed()
             if (!runCatching { clearCacheDir(app.cacheDir) }.getOrDefault(false)) {
+                throw VaultImageException.DestroyFailed()
+            }
+            //   - PREFERENCES: the round-2 HIGH, both lenses. The reasoning above was right that a
+            //     fresh install has the settings FILE, and wrong that this made the store fresh —
+            //     `onboarding_done` and every device setting are keys INSIDE it that only a used
+            //     vault writes, and the signal/auth/contacts stores are three further FILES a
+            //     never-used device does not have at all. All four are enumerated in
+            //     `wipeVaultUsePreferences`, which states per store whether it is reset or
+            //     deliberately left. LAST, and after `wipeBiometricMaterial()` specifically: the
+            //     biometric wrap lives in the settings store, so clearing it earlier would empty the
+            //     store out from under that wipe's proof.
+            if (!runCatching { wipeVaultUsePreferences() }.getOrDefault(false)) {
                 throw VaultImageException.DestroyFailed()
             }
         },
@@ -931,6 +946,59 @@ class AppContainer(private val app: Application) {
     }
 
     /**
+     * Return EVERY preference store to its fresh-install baseline (0.9.2 Unit W-B round-2 review,
+     * BLOCKING, both lenses). The burn CONSUMES this boolean.
+     *
+     * **The enumeration is the fix.** Round 1 fixed the artifact a reviewer named and stopped; the
+     * class here is "preference state a never-used device does not have", and the class has exactly
+     * four members. Every store the app creates, and what the burn does with it:
+     *
+     * | Store | Created by | A never-used device has | Burn |
+     * |---|---|---|---|
+     * | `zitrone_settings` | [SettingsRepository]'s ctor, at STARTUP, every launch | the file, keysets only, no app key | RESET IN PLACE — keys cleared, file and keysets kept |
+     * | `zitrone_signal_store` | session store / `wipeLegacyPrefs()` | nothing | FILE DELETED, proven absent |
+     * | `zitrone_auth` | session store / `wipeLegacyPrefs()` | nothing | FILE DELETED, proven absent |
+     * | `zitrone_contacts` | session store / `wipeLegacyPrefs()` | nothing | FILE DELETED, proven absent |
+     *
+     * DELIBERATELY NOT TOUCHED: the `_androidx_security_master_key_` Keystore alias (created at
+     * startup by `EncryptedSharedPreferences` on every install — removing it would CREATE a
+     * difference AND break the settings store this function has to leave readable). No other
+     * `getSharedPreferences` / `EncryptedSharedPreferences.create` call site exists in the app: the
+     * only factory is [KeyStoreManager.prefs], and its four names are the four rows above. The app
+     * creates no databases and instantiates no WebView, so those stores have no rows to enumerate.
+     *
+     * The three deletes come with a caveat stated rather than hidden: production wipes what it
+     * ENUMERATES, so a future store added without a row here would be missed. That is precisely why
+     * the gate compares the whole `shared_prefs` tree instead of these four names — the gate can see
+     * a store this function has never heard of.
+     *
+     * ORDERED AFTER [wipeBiometricMaterial] at the call site, and that order is load-bearing: the
+     * biometric wrap lives in `zitrone_settings`, so clearing the store first would make
+     * `biometricStore.clear()` a no-op on an already-empty store and its boolean would stop meaning
+     * "the wrap is gone".
+     */
+    internal fun wipeVaultUsePreferences(): Boolean {
+        val sharedPrefsDir = java.io.File(app.filesDir.parentFile, "shared_prefs")
+        // Row 1 — reset in place, synchronously proven.
+        if (!settingsRepository.resetToFreshInstallDefaults()) return false
+        // Rows 2-4 — empty the contents FIRST (so no handle, ours or the platform's, holds app data
+        // that a later write could put back), then unlink the files. Only stores that ALREADY have a
+        // file are opened: opening one that a fresh install lacks would CREATE it, and a delete that
+        // then failed would have manufactured the very residue this is removing.
+        LAZY_PREFS_STORES.forEach { name ->
+            if (java.io.File(sharedPrefsDir, "$name.xml").exists()) {
+                runCatching { keyStoreManager.prefs(name).edit().clear().commit() }
+            }
+            keyStoreManager.forget(name)
+        }
+        return wipeLazyPrefsFilesProven(
+            sharedPrefsDir = sharedPrefsDir,
+            names = LAZY_PREFS_STORES,
+            dirSync = { defaultFsyncDir(it) == DirSyncResult.DURABLE },
+        )
+    }
+
+    /**
      * Run one account-deletion cleanup step, tolerating its own non-cancellation throw so a single
      * failure (e.g. a Keystore already unhealthy) can't strand the remaining steps. A
      * [CancellationException] is rethrown BEFORE the broad catch so cooperative cancellation still
@@ -1052,6 +1120,19 @@ class AppContainer(private val app: Application) {
     }
 
     companion object {
+        /**
+         * The preference stores opened LAZILY — a never-used device has no such file, so the burn's
+         * fresh-install baseline for these is ABSENCE (see [wipeVaultUsePreferences], whose table
+         * enumerates all four stores and states which of them this list deliberately excludes).
+         * [KeyStoreManager.PREFS_SETTINGS] is NOT here: it is opened at startup on every install and
+         * is reset in place instead.
+         */
+        internal val LAZY_PREFS_STORES = listOf(
+            KeyStoreManager.PREFS_SIGNAL_STORE,
+            KeyStoreManager.PREFS_AUTH,
+            KeyStoreManager.PREFS_CONTACTS,
+        )
+
         // Self-hosters: point these at your deployment AND replace the
         // certificate pin in net/CertificatePinning.kt.
         // TODO(zitrone-cutover): live relay endpoint — repoint only at deploy cutover.

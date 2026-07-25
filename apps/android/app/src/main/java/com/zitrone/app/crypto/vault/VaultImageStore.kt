@@ -1640,7 +1640,11 @@ class VaultImageStore internal constructor(
  *
  * A null [dir] is [DirSyncResult.NOT_DURABLE] (no directory to sync → not confirmed durable).
  */
-private fun defaultFsyncDir(dir: File?): DirSyncResult {
+// `internal`, not `private` (0.9.2 Unit W-B): the burn's preference wipe needs the SAME
+// directory-durability primitive. A second copy of this logic next to the prefs wipe is how two
+// callers drift into two different definitions of "durable" — the defect shape this unit already
+// closed once for `wipeBiometricMaterial`.
+internal fun defaultFsyncDir(dir: File?): DirSyncResult {
     if (dir == null) return DirSyncResult.NOT_DURABLE
     val channel = try {
         // java.nio.file requires API 26; minSdk is 26 (build.gradle.kts), so this is always
