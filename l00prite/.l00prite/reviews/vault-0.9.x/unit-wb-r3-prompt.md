@@ -8,10 +8,10 @@ run tests. Nothing is inlined here and nothing has been trimmed. If a verdict de
 read it; do not caveat a verdict as unverifiable.
 
 SCOPE — the unit as it would merge:
-  git diff main...HEAD          (HEAD = 2bd7af0)
+  git diff main...HEAD          (HEAD = 62bb0fd)
   git log --oneline main..HEAD
 The ROUND-2 FIX DELTA specifically, which is what this round exists to attack:
-  git diff 4cf1db5..HEAD        (three commits: c1d5cb0, 882da6c, 2bd7af0)
+  git diff 4cf1db5..HEAD        (c1d5cb0, 882da6c, 2bd7af0, 62bb0fd)
 
 ## What this unit is
 The DURESS WIPE. A "Pucker Burn" credential in reserved slot 0 triggers an irreversible local wipe.
@@ -155,10 +155,28 @@ newest code is the code most likely to be wrong.** Attack these three specifical
    - Is `wipeLazyPrefsFilesProven`'s dir-sync correct for the DELETE case, and is skipping it when the
      directory is absent sound?
 
-3. **THE REBUILT GATE** (2bd7af0). See focus item D — it is the artifact most likely to be wrong,
-   because it is new, load-bearing, and the thing that would otherwise catch the other two fixes
-   being wrong. Note it has NOT been executed at the time this prompt was written unless the CI run
-   attached to the PR is green; check the run rather than assuming either way.
+3. **THE REBUILT GATE** (2bd7af0) **AND ITS FLUSH BARRIER** (62bb0fd). See focus item D — it is the
+   artifact most likely to be wrong, because it is new, load-bearing, and the thing that would
+   otherwise catch the other two fixes being wrong.
+   Its first execution went RED, in its own new assertions: production writes preferences with
+   `apply()` (async), so the snapshot read stale bytes and the prefs domain reported "no difference"
+   over residue that existed. `snapshot()` now opens every ALREADY-EXISTING prefs store and issues an
+   empty `commit()` as a barrier. **Attack that barrier specifically:**
+   - Is an empty `commit()` actually ordered behind a prior `apply()` to the same store, on every API
+     level this app supports, or is that reasoning about `SharedPreferencesImpl` internals that could
+     be wrong or version-dependent? If it is wrong, the gate silently returns to comparing a racing
+     disk and every green run after this is worthless.
+   - Does the barrier cover every asynchronous writer that can dirty a snapshotted domain, or only
+     preferences? What about the diagnostics log, caches, or anything written from a coroutine that
+     the test does not await?
+   - Does opening only EXISTING stores actually prevent the barrier from creating a file a fresh
+     install lacks — including in the post-burn snapshot, where three stores must be absent?
+   - **The in-tree claim is that this was a GATE defect and not a burn defect**, because the burn
+     writes with `commit()` (ordered FIFO behind in-flight `apply()`s) and clears-then-commits each
+     lazy store before unlinking it, so a queued write cannot resurrect a proven-absent file.
+     **Verify that claim against source and against `SharedPreferencesImpl` semantics — if it is
+     wrong, a queued preference write can restore a file AFTER the burn proved it gone, which is
+     BLOCKING.**
 
 4. **THE NON-DISCRIMINATING ASSERTION** (failures.md, now FIVE occurrences, the last two found inside
    the fix for the class and inside the gate written to enforce it): for every assertion in the delta,
