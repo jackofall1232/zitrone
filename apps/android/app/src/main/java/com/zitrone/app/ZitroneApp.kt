@@ -245,7 +245,9 @@ class AppContainer(private val app: Application) {
      * site; the dispatcher move belongs INSIDE, where no caller can get it wrong. Callers now simply
      * `deriveBootDecisionFromDisk()`.
      */
-    internal suspend fun deriveBootDecisionFromDisk(): BootDecision = withContext(Dispatchers.IO) {
+    internal suspend fun deriveBootDecisionFromDisk(
+        supersedeCompletedDestroy: Boolean = false,
+    ): BootDecision = withContext(Dispatchers.IO) {
         // ONE classification, not two independently-timed reads. [hasVault] and [vaultProvenAbsent]
         // each take the image lock separately, so calling them as a pair could pair up readings taken
         // at different instants — including the contradiction "present AND proven absent", which
@@ -259,10 +261,34 @@ class AppContainer(private val app: Application) {
         // exactly the unprovable material this type exists to withhold. Indeterminate must fall
         // through to the LOCKED arm, which is what leaving BOTH booleans false does.
         val residence = vaultResidence()
+        val confirmed = serverDeleteConfirmed()
+        // THE SUPERSEDE DECISION LIVES HERE, not at the call site (0.9.2 Unit W-B, items #1 + #5).
+        //
+        // The delete-completion callback used to take TWO fresh stats of its own to decide this and
+        // then call this function, which stats the disk AGAIN — three defects in one place: disk I/O
+        // on the Main thread, a SECOND re-derivation of a fact this function owns, and a TORN
+        // PAIR-READ whose two halves could land either side of a disk change.
+        //
+        // Now it is decided from the SAME snapshot the route is derived from. A completed destroy
+        // proved image-bearing absence with its OWN required dirSync and retired both markers only
+        // after that proof — evidence strictly stronger than the doubt any producer raised — so it,
+        // and only it, may lower the hold.
+        val hold =
+            if (supersedeCompletedDestroy &&
+                destroySupersedesDurabilityHold(
+                    vaultProvenAbsent = residence.mayRouteToOnboarding,
+                    serverDeleteConfirmed = confirmed,
+                )
+            ) {
+                durabilityHold.value = false
+                false
+            } else {
+                durabilityHold.value
+            }
         deriveBootDecision(
-            serverDeleteConfirmed = serverDeleteConfirmed(),
+            serverDeleteConfirmed = confirmed,
             imagePresent = residence is Residence.Present,
-            durabilityHold = durabilityHold.value,
+            durabilityHold = hold,
             vaultProvenAbsent = residence.mayRouteToOnboarding,
             isLegacyImage = { isLegacyImage() },
         )
@@ -417,7 +443,15 @@ class AppContainer(private val app: Application) {
      * clears this stale intent — it NEVER authorises destruction. See
      * [VaultImageStore.deleteIntentPending].
      */
-    fun vaultDeleteIntentPending(): Boolean = imageStore.deleteIntentPending()
+    /**
+     * SUSPEND, and it moves itself to IO (0.9.2 Unit W-B, item #5) — the same discipline as
+     * [deriveBootDecisionFromDisk]. This was a plain function taking `imageLock` and stat'ing disk,
+     * and its only caller invoked it bare from a composition `LaunchedEffect` on the Main thread.
+     * The dispatcher move belongs INSIDE, where no caller can get it wrong; a requirement stated in
+     * a comment is a requirement that will eventually be violated by one call site.
+     */
+    suspend fun vaultDeleteIntentPending(): Boolean =
+        withContext(Dispatchers.IO) { imageStore.deleteIntentPending() }
 
     /** Persist the delete INTENT durably (throws if not durable; caller fails closed). */
     fun markVaultDeleteIntent() = imageStore.markDeleteIntent()

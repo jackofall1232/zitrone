@@ -628,7 +628,17 @@ private fun ZitroneRoot(
     var unlocking by remember { mutableStateOf(false) }
     // Routing truth (§0): a vault image present → UNLOCK, absent → SETUP. Flips true the
     // instant a create succeeds; otherwise unchanged for the process lifetime.
-    var vaultExists by remember { mutableStateOf(container.hasVault()) }
+    // NO DISK READ ON THE COMPOSITION THREAD (0.9.2 Unit W-B, item #5). This was
+    // `mutableStateOf(container.hasVault())` — a stat under `imageLock` in a `remember` initializer,
+    // i.e. on the Main thread, every first composition.
+    //
+    // `false` is not a guess about disk: it is the PRE-RECONCILIATION value, and nothing may route
+    // off this until the boot derivation publishes. The Splash gate below is what makes that true —
+    // the route stays `Route.Splash` until BOTH the animation ends and `bootReconciled` is set, and
+    // the derivation assigns this field before leaving Splash. A composition that read this during
+    // Splash would be reading pre-reconciliation state, which the sweep's whole design forbids.
+    // NAMED REVIEW ITEM: verify no consumer observes this before the Splash effect assigns it.
+    var vaultExists by remember { mutableStateOf(false) }
 
     // ── COLD-START BOOT ROUTING (0.9.2 Unit W-A) ────────────────────────────────────────────────
     // The orphan sweep is a DESTRUCTIVE boot operation: it unlinks residue before any authentication.
@@ -1043,7 +1053,11 @@ private fun ZitroneRoot(
                 },
                 onFailure = { e ->
                     if (e is kotlinx.coroutines.CancellationException) throw e
-                    if (container.hasVault()) {
+                    // THROUGH THE SINGLE DERIVATION (0.9.2 Unit W-B, items #1 + #5): this was a bare
+                    // `container.hasVault()` — an `imageLock` stat inside `withContext(Main)`. The
+                    // question it asks ("is there an image on disk?") is a routing input, and routing
+                    // inputs have exactly one owner.
+                    if (container.deriveBootDecisionFromDisk().present) {
                         // Complete-but-unconfirmed vault already on disk — it opens normally with
                         // the passphrase just entered, so route to unlock (no error-loop).
                         vaultExists = true
@@ -1162,18 +1176,18 @@ private fun ZitroneRoot(
                     identityFingerprint = null
                     unlocked = false
                     lockError = null
-                    // A COMPLETED destroy supersedes an earlier non-durable orphan sweep: it proved
+                    // A COMPLETED destroy supersedes an earlier durability hold: it proved
                     // image-bearing absence with its OWN required dirSync and retired both markers
-                    // only after that proof. Leaving a stale boot-time hold raised would withhold
-                    // onboarding over a directory this delete has just proven durably clean.
-                    if (destroySupersedesDurabilityHold(
-                            vaultProvenAbsent = container.vaultProvenAbsent(),
-                            serverDeleteConfirmed = container.serverDeleteConfirmed(),
-                        )
-                    ) {
-                        container.durabilityHold.value = false
-                    }
-                    val snap = container.deriveBootDecisionFromDisk()
+                    // only after that proof. Leaving a stale hold raised would withhold onboarding
+                    // over a directory this delete has just proven durably clean.
+                    //
+                    // FOLDED INTO THE DERIVATION (0.9.2 Unit W-B, items #1 + #5). This site used to
+                    // take two fresh stats HERE, on `Dispatchers.Main.immediate`, to decide the
+                    // supersede — then call the derivation, which stats the disk again. Disk I/O on
+                    // the Main thread, a second re-derivation, and a torn pair-read, in one place.
+                    // The flag asks the single owner to decide it from the SAME snapshot it routes
+                    // from; no caller assembles routing inputs of its own.
+                    val snap = container.deriveBootDecisionFromDisk(supersedeCompletedDestroy = true)
                     vaultExists = snap.present && !snap.legacy
                     // The mapping matches the previous explicit semantics in every ORDINARY
                     // post-destroy state: a surviving image implies the markers were NOT retired, so
