@@ -1106,48 +1106,96 @@ class VaultImageStore internal constructor(
             // can't be written+fsynced, ABORT with the vault files untouched (throw). Idempotent
             // with [markServerDeleteConfirmed], which the delete flow calls first — then a no-op.
             writeDurableMarker(serverDeletedFile)
-            // Remove BOTH persisted files and any interrupted-write temps. delete() is
-            // best-effort and never throws on a missing file (returns false) — idempotent.
-            binFile.delete()
-            dekFile.delete()
-            deleteLeftoverTmp(binFile)
-            deleteLeftoverTmp(dekFile)
-            // Release the single-instance registration so a fresh create() may re-open this
-            // directory in the SAME process (re-onboard after account deletion).
-            unregister()
-            // VERIFY everything image-bearing is actually GONE (see kdoc): delete()'s bool is
-            // false on an I/O error too, so re-stat instead. The TEMPS are part of the check
-            // (round 8, Codex): renameIntoPlace stages the COMPLETE outer image in vault.bin.tmp
-            // (and the wrapped DEK in vault.dek.tmp), so under the same failing filesystem this
-            // verify exists to catch, an encrypted image copy could survive as a temp while the
-            // primaries are gone. A surviving file → destruction FAILED → throw; account-delete
-            // treats this as NOT-deleted. exists()==false (already-absent) does NOT throw,
-            // keeping destroy() idempotent.
-            if (binFile.exists() || dekFile.exists() ||
-                leftoverTmp(binFile).exists() || leftoverTmp(dekFile).exists()
-            ) {
-                throw VaultImageException.DestroyFailed()
-            }
-            // Make the unlinks CRASH-DURABLE before retiring the markers (round 8, Codex): the
-            // exists() re-stat proves only the current namespace, not what a journal replay
-            // restores. Without this fsync, a crash could resurrect vault.bin/vault.dek while the
-            // markers' own (later) unlink survived — restarting into DeleteIncomplete over a
-            // now-present image, the exact state the markers exist to signal. A non-durable sync
-            // keeps the markers (throw → retry re-runs the idempotent destroy), never false success.
-            if (dirSync(baseDir) != DirSyncResult.DURABLE) {
-                throw VaultImageException.DestroyFailed()
-            }
-            // Unlinks confirmed durable — retire BOTH markers, verified by RE-STAT + a required
-            // fsync (round 13 Grok P1-2 / round 14 F4): trusting File.delete()'s bool would let a
-            // silent unlink failure leave a marker that a journal replay resurrects over a later
-            // SUCCESSOR vault → DeleteIncomplete → auto-destroy of a valid re-onboarded vault. A
-            // marker that survives the delete, or a non-durable retire, is a FAILED destroy (throw):
-            // marker-present + files-absent is the safe stuck state (a retry re-stats the files
-            // absent and re-runs the retire). Self-healing over the empty image, now also correct.
-            if (!clearBothMarkersDurably()) {
-                throw VaultImageException.DestroyFailed()
-            }
+            // The physical/cryptographic teardown is SHARED with the duress burn (0.9.2 Unit W-B).
+            // Only the confirmed-marker crash-bridge above is account-delete-specific; everything
+            // below it is identical work, so it lives in ONE primitive rather than two divergent
+            // implementations that drift.
+            obliterateLocked()
         }
+    }
+
+    /**
+     * The marker-free, fail-closed, KEYS-FIRST physical teardown — the shared core of [destroy] and
+     * the duress burn (0.9.2 Unit W-B). Caller MUST hold [imageLock].
+     *
+     * ```
+     * S0  wipe RAM DEK; canonical = null            [no durable effect]
+     * S1  unlink vault.dek + vault.dek.tmp          [KEYS FIRST]
+     * S2  unlink vault.bin + vault.bin.tmp
+     * S3  unregister()                              [no durable effect]
+     * S4  every image-bearing path PROVEN absent    → else DestroyFailed
+     * S5  dirSync(baseDir) DURABLE                  → else DestroyFailed
+     * S6  clearBothMarkersDurably()                 → else DestroyFailed   [STRICTLY LAST]
+     * ```
+     *
+     * **KEYS-FIRST (S1 before S2).** At every instant after S1 the on-disk state is (a) both
+     * present, (b) **image-without-DEK = cryptographically erased**, or (c) both gone. The reverse —
+     * a DEK outliving its image — is never observable. State (b) is unrecoverable by design and is
+     * completed on the next boot by [completeInterruptedBurn].
+     *
+     * **This CHANGES `destroy()`'s unlink order** (was bin-then-dek). Named review item, not a
+     * behaviour-preserving refactor: the confirmed marker is written before this runs, so a crash at
+     * any point re-runs the idempotent destroy regardless of order, and keys-first is strictly safer.
+     * If review rejects the shared ordering the landing spot is a `keysFirst: Boolean` parameter —
+     * one primitive with one branch, never two implementations.
+     *
+     * **S4 IS PROVEN-ABSENCE, NOT `exists()`** (0.9.2 W-B, maintainer ruling C — this SUPERSEDES the
+     * Pucker Burn spec's `exists()`-based verify rather than deviating from it). `File.exists()`
+     * returns true only on a PROVEN PRESENCE, so an indeterminate stat reads as absent and passes —
+     * fail-OPEN on the one operation where fail-open is least acceptable, letting a wipe report
+     * success over a possible survivor. [imageBearingFilesProvenAbsent] is true only when every path
+     * is CONFIRMED gone; present OR indeterminate both fail closed.
+     *
+     * **This also closes a live `destroy()` hole.** Under the old `exists()` verify, an indeterminate
+     * stat over a SURVIVING image passed S4, and if S5 then reported DURABLE the markers were retired
+     * at S6 — reaching `{image survives, confirmed absent}`, which W-A's routing had to catch
+     * downstream by refusing onboarding without proven absence. That state is now unreachable through
+     * this path: the verify itself refuses it.
+     *
+     * **S6 STRICTLY LAST is binding.** Clearing markers while the image still exists reproduces
+     * PR-1's B1 state (markers say "nothing pending" over a live vault). Because S4/S5 prove the image
+     * durably ABSENT first, the markers at S6 are ORPHANED BY DEFINITION — the same precondition that
+     * makes `create()`'s clear safe. A crash between S2/S5 and S6 is completed on the next boot by
+     * [reconcileOrphanedBurnMarkers].
+     */
+    private fun obliterateLocked() {
+        // S0 — no durable effect, but it must precede anything that can throw so no DEK survives a
+        // failed teardown. Idempotent: [destroy] has already done this on its own path.
+        dek?.let { wipe(it) }
+        dek = null
+        canonical = null
+        // S1 — KEYS FIRST. delete() is best-effort and never throws on a missing file (idempotent).
+        dekFile.delete()
+        deleteLeftoverTmp(dekFile)
+        // S2 — the ciphertext image second.
+        binFile.delete()
+        deleteLeftoverTmp(binFile)
+        // S3 — release the single-instance registration so a re-onboard can re-open this directory
+        // in the SAME process.
+        unregister()
+        // S4 — PROVEN absence of all four image-bearing paths. The TEMPS are load-bearing, not
+        // incidental: renameIntoPlace stages a COMPLETE outer image in vault.bin.tmp, so a surviving
+        // temp is a surviving encrypted vault.
+        if (!imageBearingFilesProvenAbsent()) throw VaultImageException.DestroyFailed()
+        // S5 — make the unlinks CRASH-DURABLE. A re-stat proves only the current namespace, not what
+        // a journal replay restores.
+        if (dirSync(baseDir) != DirSyncResult.DURABLE) throw VaultImageException.DestroyFailed()
+        // S6 — retire both markers, verified by re-stat + a required fsync.
+        if (!clearBothMarkersDurably()) throw VaultImageException.DestroyFailed()
+    }
+
+    /**
+     * The DURESS teardown (0.9.2 Unit W-B). Physically identical to [destroy]'s teardown and
+     * deliberately marker-free: burn NEVER writes `vault.delete-confirmed`.
+     *
+     * Writing that marker here would be broken three ways, all source-verified: it asserts the FALSE
+     * fact "the server account is confirmed gone" when no server delete occurred; a crash mid-unlink
+     * would restart into [Route.DeleteIncomplete] and, on the next live session, could fire a REAL
+     * network DELETE — a discoverable, false, network-triggering state; and `writeDurableMarker` can
+     * throw BEFORE anything is destroyed, which is fail-OPEN on a duress wipe.
+     */
+    fun burnObliterate() {
+        imageLock.withLock { obliterateLocked() }
     }
 
     /**
@@ -1316,6 +1364,71 @@ class VaultImageStore internal constructor(
      * DEK or temp still held a recoverable vault, which is why routing must not use it.
      */
     fun imageBearingProvenAbsent(): Boolean = imageLock.withLock { imageBearingFilesProvenAbsent() }
+
+    /**
+     * BOOT RECONCILER 1 of 2 (0.9.2 Unit W-B) — finish a burn interrupted BETWEEN the keys-first
+     * unlinks (`obliterateLocked` S1→S2).
+     *
+     * That crash leaves `{vault.bin PRESENT, vault.dek PROVEN absent}`. The image is already
+     * CRYPTOGRAPHICALLY DEAD — it cannot be opened without its DEK envelope — but [exists] reports
+     * true, so boot routes to the lock screen and every unlock attempt escalates as an unreadable
+     * image. Unlike [destroy], whose confirmed marker self-heals through `Route.DeleteIncomplete`, a
+     * burn writes NO marker and so had no boot completion path: the device was left visibly bricked,
+     * which is both a poor duress outcome and a TELL that something was destroyed.
+     *
+     * **WHY A PARTIAL CREATE CANNOT BE MISTAKEN FOR THIS** (verified against [create]): create
+     * renames the DEK envelope into place FIRST and the image SECOND, so a crash mid-create leaves
+     * `{dek present, bin absent}` — the exact INVERSE signature. No ordering in this codebase produces
+     * `{bin present, dek absent}` except an interrupted keys-first obliteration or genuine media loss
+     * of the DEK, and both are unrecoverable — so completing the wipe destroys nothing that was still
+     * readable, and no credential is required.
+     *
+     * **This RESOLVES what the Pucker Burn design doc recorded as residual R1 and called "unavoidable
+     * without a durable pre-burn intent marker".** It needs no marker at all — and a burn-intent
+     * marker would have been exactly the discoverable armed/in-progress artifact the design forbids.
+     *
+     * **DEFERS TO D2c:** a present `vault.delete-confirmed` means this is the account-delete crash
+     * window, which self-heals through `Route.DeleteIncomplete` → the idempotent [destroy]. Completing
+     * the wipe here would clear that marker out from under the heal.
+     *
+     * Returns true iff it completed a wipe. Never throws — a failure leaves the state for the next
+     * boot, and the caller publishes the fail-closed durability verdict.
+     */
+    fun completeInterruptedBurn(): Boolean =
+        imageLock.withLock {
+            if (!Files.notExists(serverDeletedFile.toPath())) return@withLock false
+            if (!Files.notExists(dekFile.toPath())) return@withLock false
+            if (Files.notExists(binFile.toPath())) return@withLock false
+            runCatching { obliterateLocked() }.isSuccess
+        }
+
+    /**
+     * BOOT RECONCILER 2 of 2 (0.9.2 Unit W-B) — clear markers orphaned by a burn interrupted between
+     * the proven-durable unlinks and the marker retire (`obliterateLocked` S2/S5→S6).
+     *
+     * Without this, a `vault.delete-intent` survives over an ABSENT image: a residual that breaks
+     * post-burn ≡ fresh-install parity and reads forensically as "a delete was initiated here".
+     *
+     * DELIBERATELY SURGICAL — fires ONLY on image-bearing PROVEN absent ∧ `delete-confirmed` PROVEN
+     * absent ∧ `delete-intent` PRESENT:
+     *  - image PRESENT is never touched — a `delete-intent` over a live vault is a GENUINE pending
+     *    reconcile (round-14 F1: Splash must never clear it);
+     *  - `delete-confirmed` PRESENT is never touched — image-absent + confirmed-present is produced
+     *    only by [destroy]'s own crash window, which already self-heals; clearing it here would strip
+     *    the auto-destroy authorisation mid-heal and is unreviewed scope creep into D2c.
+     *
+     * TRISTATE throughout: treating an indeterminate stat as absence would let this clear a GENUINE
+     * delete-intent over a still-live vault — the B1 state it exists to prevent.
+     *
+     * Returns true iff it cleared. Never throws — see [completeInterruptedBurn].
+     */
+    fun reconcileOrphanedBurnMarkers(): Boolean =
+        imageLock.withLock {
+            if (!imageBearingFilesProvenAbsent()) return@withLock false
+            if (!Files.notExists(serverDeletedFile.toPath())) return@withLock false
+            if (Files.notExists(deleteIntentFile.toPath())) return@withLock false
+            runCatching { clearBothMarkersDurably() }.getOrDefault(false)
+        }
 
     /**
      * COLD-START ORPHAN SWEEP. Deletes an orphaned `vault.dek` / `vault.bin.tmp` / `vault.dek.tmp`

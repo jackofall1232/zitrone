@@ -190,6 +190,27 @@ producing it.** Both times the person writing the correction had just articulate
 the signal a rule is not enough — the remedy has to be a step in the close-out (`grep`, count, state
 the count), not an intention to be careful.
 
+### THE AFFIRMATIVE CASE FOR RE-DERIVING — a stale claim hid a real capability (W-B, C4)
+Every other entry here records re-derivation catching an OVERCLAIM. This one records it recovering
+something. The Pucker Burn invariant table listed residual **R1** — a crash between the keys-first
+unlinks leaves an image whose DEK is gone, visibly damaged rather than cleanly reset — and accepted
+it as **"unavoidable without a durable pre-burn intent marker"**, with the marker ruled out because
+it would be exactly the discoverable armed/in-progress artifact the design forbids. Sound reasoning,
+stated confidently, and **false**.
+
+Re-deriving it against source found `completeInterruptedBurn()` already built on the parent branch,
+resolving R1 with **no marker at all**: it keys on `{vault.bin PRESENT, vault.dek PROVEN absent}`, a
+signature `create()` structurally cannot produce, because create renames the DEK envelope into place
+FIRST and the image SECOND — a partial create is the exact INVERSE. No ordering in the codebase
+produces that state except an interrupted keys-first obliteration or genuine DEK media loss, and both
+are unrecoverable, so completing the wipe destroys nothing still readable.
+
+**The lesson: re-derivation is not just an overclaim filter.** A residual accepted as unavoidable is
+a claim like any other, and "we couldn't do better" ages exactly as badly as "this is safe". When a
+doc records something as impossible, the cost of re-checking is one derivation and the payoff can be
+a capability the project already paid for and then forgot it had. Do NOT treat the residuals section
+of a design doc as settled just because the defects section has been reviewed.
+
 ### GOOD HANDLING — demonstrate why a concern is latent; never assert a property the test cannot prove
 Grok's round-4 INFO-3 said `runCatching { afterPublish() }` swallows `CancellationException` while the
 sweep path deliberately rethrows. Rather than "fix" the asymmetry or wave the label away, the test
