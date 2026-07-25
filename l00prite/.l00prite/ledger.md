@@ -875,3 +875,57 @@ iOS Xcode build + visual watermark pass; Android scroll framestats; SSH-key rota
 - Re-oriented from this memory. Next unit: **0.9.2 PR-2** — router fusion + triple-entry gate +
   uninterrupted-sequence guard. Spec: `/root/l00prite/pr2-router-triple-entry-spec.md` (WRITER/READER
   table for the RAM candidate/count state included). Building it via the `security-review-loop`.
+
+### Run 2026-07-25 — claude (CX33) — UNIT W-A extracted; round 1 dispatched (autonomous loop authorized)
+**HoboJoe authorized cycling the loop WITHOUT HIL until convergence or a blocker; standard cap 6.**
+
+**W-A extracted and committed (`a98677f`)** — 7 files, +1376/-25 on top of main. Sweep + boot-reconcile
+owner + `bootRoute` and its three consumers + cache-retry. The ENTIRE duress-wipe mechanism and its
+presentation layer defer to W-B (confirmed by HoboJoe): the coupling line
+`signalBurnCompleted(obliterated = burned)` sits in `onBurn`, the mechanism's terminus, so shipping the
+mechanism without its presentation means a burn that fires and reports into nothing. `onBurn` is
+byte-identical to main. Two boot healers excluded with verified unreachability proofs.
+**Every rationale RE-DERIVED for W-A, not ported** — the reviewed kdoc was 16 KB of burn framing
+referencing both excluded healers; `SweepOrphanedResidueTest` went from 9 burn references to 0.
+Verification before dispatch: 0 burn-mechanism symbols, 0 coupling references, 0 healer references,
+`onBurn` identical to main. **475 tests, 0 failures, 472 passed, 3 skipped** — re-run from a CLEANED
+results directory after I caught myself reading a stale 529 from the previous branch's build output.
+
+**BOTH new process rules exercised on first use, and both needed sharpening (`a44ad07`):**
+- **A CLI VERSION IS NOT A MODEL ID.** I recorded `codex-cli 0.145.0` as the lens check; the model it
+  drove was `gpt-5.6-sol`. That is the same weaker-proxy substitution the loop hunts in code, committed
+  inside the rule written to prevent it. Confirmed ids: codex `gpt-5.6-sol`, grok `grok-4.5`, kimi
+  `moonshotai/kimi-k3`, gemini now PINNED to `gemini-3.1-pro-preview-customtools`.
+  **Material caveat: Gemini's model in rounds 4-6 of Unit W is UNKNOWN** — its latest session log shows
+  a `flash`-class model and headless runs do not log there. Gemini was the lens that returned the false
+  CRITICAL, so a cheaper tier is a plausible explanation. Pinned from here.
+- **PER-VENDOR ISOLATION.** The worktree rule (added to fix Codex's read-only 0-tests problem)
+  immediately BROKE Gemini, which refuses untrusted directories — it emitted an error, not a review,
+  and 613 bytes of error output is not a clean pass. Also my own `pkill -f "gemini -p"` killed the
+  REPLACEMENT run along with its target.
+**The worktree rule WORKED where it mattered: Grok independently ran the suite and observed 475/0/3,
+matching the claim — the first time a lens verified my numbers instead of inheriting them.**
+
+**ROUND 1 — 3 of 4 lenses in, NOT converged. Every finding is mine, and ALL are EXTRACTION defects
+invisible to the prior six rounds:**
+| finding | codex | grok | gemini | adjudicated |
+|---|---|---|---|---|
+| leftover standalone legacy effect = 2nd routing authority | HIGH | HIGH | miss | **HIGH, converged** |
+| row-7 confirmed-refuse test DELETED; gate 2 untested | miss | MEDIUM | HIGH | **MEDIUM, converged** |
+| legacy derivation copy-pasted across all 3 consumers | — | — | MEDIUM | **MEDIUM** |
+| cancellation-after-success test performs no cancellation | LOW | — | — | LOW |
+| `onboarding is reachable…` re-implements the rule | — | — | LOW | LOW (catches mutations; fragile) |
+| stale "PUCKER BURN Unit W" naming in 2 suites | — | INFO | — | INFO |
+
+**The HIGH is the pure extraction defect:** Unit W round 3 deleted the standalone legacy effect ON THE
+FEATURE BRANCH; W-A was cut from MAIN, which predates that fix, so I reintroduced a second legacy
+routing authority. **HoboJoe's instruction to review the extraction rather than carry six rounds of
+clearance forward was correct and paid on round 1.**
+**The MEDIUM is self-inflicted while improving hygiene:** rewriting row 6b for W-A sliced out the
+adjacent row-7 test, so gate 2 (the D2c ownership bar) has ZERO coverage while the header still claims
+"row by row". A header claiming coverage it lacks, created by the act of fixing headers that claimed
+coverage they lacked.
+**Gemini calibration:** returned READY TO MERGE while listing its own HIGH, and missed the converged
+HIGH. Pinning to 3.1 Pro did not change the pattern — real findings, unreliable verdicts.
+
+Nothing pushed, no version bump, slot 0 unarmed. semgrep + Moonshot rule audit HELD.
