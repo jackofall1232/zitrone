@@ -211,6 +211,28 @@ doc records something as impossible, the cost of re-checking is one derivation a
 a capability the project already paid for and then forgot it had. Do NOT treat the residuals section
 of a design doc as settled just because the defects section has been reviewed.
 
+### THE NON-DISCRIMINATING ASSERTION — satisfied by BOTH the correct and the broken behaviour (3 occurrences)
+Distinct from a vacuous test (asserts nothing) and from a stand-in test (asserts against a copy of the
+logic). This one asserts something REAL about something REAL — it just cannot tell the two apart, so
+it passes against the very defect it exists to catch.
+
+**Three occurrences in one unit:**
+1. `assertFalse(store.reconcileOrphanedBurnMarkers())` on a non-durable reconcile. `false` was exactly
+   what the BROKEN code returned — the Boolean conflated "did not fire" with "mutated, not durable".
+   The assertion passed against the bug. Now asserts `MUTATED_NOT_DURABLE` specifically.
+2. The gate's negative test asserted only `fresh != burnedWithResidue`. That held anyway because of an
+   unrelated defect (the device-key alias surviving every burn), so it could not distinguish "caught
+   my planted artifact" from "caught someone else's residue". Now names its artifact.
+3. `bootRoute` composed routing: "held + provably clean → LOCKED" alone would pass if ONBOARDING were
+   unreachable for any unrelated reason. Needed its second half — the same disk WITHOUT the doubt →
+   ONBOARDING — to prove the hold was the discriminator.
+
+**THE DETECTION RULE, mechanical: for every assertion, ask what WRONG implementation would also
+satisfy it. If the answer includes the one this test exists to catch, the assertion is too weak.**
+Applies especially to `assertFalse`/`assertNotEquals`/`!= null`: a negative assertion is satisfied by
+enormous numbers of wrong states, so it must name WHICH wrong state it rejects, or pair with a
+positive assertion that fails when the discriminator is removed.
+
 ### GOOD HANDLING — demonstrate why a concern is latent; never assert a property the test cannot prove
 Grok's round-4 INFO-3 said `runCatching { afterPublish() }` swallows `CancellationException` while the
 sweep path deliberately rethrows. Rather than "fix" the asymmetry or wave the label away, the test

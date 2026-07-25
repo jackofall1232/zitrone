@@ -391,6 +391,21 @@ class AppContainer(private val app: Application) {
             // STARTUP by EncryptedSharedPreferences, so a fresh install has it too and wiping it
             // would break prefs — deliberately NOT touched.
             if (!deviceKeyCipher.deleteKeyMaterial()) throw VaultImageException.DestroyFailed()
+            // THE "EXISTS ONLY IF THE FEATURE WAS USED" CLASS, ENUMERATED (round-1 review, Codex).
+            // Fixing only the artifact a reviewer happened to name is the instance-fix this unit has
+            // produced repeatedly; the class-fix is the default posture now. Every app-local writer
+            // whose output a never-used device does NOT have:
+            //   - BootDiagnostics: writes into filesDir on the FIRST record(), i.e. on first boot
+            //     reconciliation of a real vault. A fresh install has no such file.
+            //   - plaintext caches: populated only by a live session's attachment/QR paths.
+            // The vault image, DEK, temps and markers are already covered by obliterateLocked().
+            // NOT wiped and deliberately so: `_androidx_security_master_key_` and the prefs file
+            // EncryptedSharedPreferences creates at STARTUP — a fresh install has both, so removing
+            // them would CREATE a difference rather than erase one.
+            bootDiagnostics.clear()
+            if (!runCatching { clearCacheDir(app.cacheDir) }.getOrDefault(false)) {
+                throw VaultImageException.DestroyFailed()
+            }
         },
         lowerHold = { durabilityHold.value = false },
     )

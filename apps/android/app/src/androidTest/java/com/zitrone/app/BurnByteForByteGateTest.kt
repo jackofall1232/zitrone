@@ -53,19 +53,33 @@ class BurnByteForByteGateTest {
 
     /** The app-local state this gate compares. Anything not in here is silently unverified. */
     private data class StateSnapshot(
-        val files: Map<String, Long>,
-        val prefs: Set<String>,
+        val files: Map<String, String>,
+        val prefs: Map<String, String>,
         val keystoreAliases: Set<String>,
-        val databases: Set<String>,
+        val databases: Map<String, String>,
     )
+
+    /**
+     * CONTENT HASHES, NOT LENGTHS (round-1 review — the gate compared neither bytes nor prefs and
+     * database state, while `SECURITY_MODEL.md` claimed all three). A length-only comparison passes
+     * over a surviving artifact of identical size, and a filename-only comparison passes over residue
+     * written INSIDE an existing prefs file or database — which is where session state actually goes.
+     * "Byte-for-byte" has to mean bytes or the name is the second overclaim.
+     */
+    private fun digest(f: File): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(f.readBytes())
+            .joinToString("") { "%02x".format(it) }
+
+    private fun treeHashes(root: File): Map<String, String> =
+        if (!root.exists()) emptyMap()
+        else root.walkTopDown().filter { it.isFile }
+            .associate { it.relativeTo(root).path to runCatching { digest(it) }.getOrDefault("<unreadable>") }
 
     private fun snapshot(): StateSnapshot {
         val dataDir = ctx.filesDir.parentFile!!
-        val files = ctx.filesDir.walkTopDown()
-            .filter { it.isFile }
-            .associate { it.relativeTo(ctx.filesDir).path to it.length() }
-        val prefs = File(dataDir, "shared_prefs").listFiles()?.map { it.name }?.toSet() ?: emptySet()
-        val databases = File(dataDir, "databases").listFiles()?.map { it.name }?.toSet() ?: emptySet()
+        val files = treeHashes(ctx.filesDir)
+        val prefs = treeHashes(File(dataDir, "shared_prefs"))
+        val databases = treeHashes(File(dataDir, "databases"))
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         val aliases = ks.aliases().toList().toSet()
         return StateSnapshot(files, prefs, aliases, databases)
