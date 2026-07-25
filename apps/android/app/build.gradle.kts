@@ -213,6 +213,10 @@ dependencies {
 
     // Unit tests (pure JVM logic only)
     testImplementation(libs.junit)
+    // The burn byte-for-byte gate runs as an INSTRUMENTED test: it needs the real AndroidKeyStore
+    // and real EncryptedSharedPreferences, neither of which Robolectric provides (0.9.2 Unit W-B).
+    androidTestImplementation(libs.androidx.test.junit)
+    androidTestImplementation(libs.androidx.test.runner)
     testImplementation(libs.org.json)
     testImplementation(libs.kotlinx.coroutines.test)
     // Same libsodium C functions as lazysodium-android, bound for the host
