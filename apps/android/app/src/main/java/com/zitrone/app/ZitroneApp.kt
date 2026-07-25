@@ -1169,9 +1169,14 @@ internal fun runBootReconcile(
         }
         // CONTAINED (round-3 review, Gemini). This runs AFTER the verdict is published, so it can
         // never affect routing — but an uncaught throw here propagates out of the launch and, on
-        // Android, reaches the default handler and takes the process down. Production's lambda wraps
-        // itself, which protects today's caller and no future one; the guarantee belongs in the
-        // wrapper. A fault in post-publication hygiene must not be able to kill the app.
+        // Android, reaches the default handler and takes the process down. Production deliberately
+        // passes a BARE lambda (`startBootReconcile`, ~line 285) and relies on containment HERE: a
+        // local runCatching at the call site would protect only today's caller, so the guarantee
+        // belongs in the wrapper, where it covers every future one. A fault in post-publication
+        // hygiene must not be able to kill the app.
+        // (Follow-up review, Codex + Grok independently: this line said "Production's lambda wraps
+        // itself" — the SAME stale fact `bdde066` corrected in two other places and missed in this
+        // third one. See failures.md: enumerate every instance before committing a correction.)
         withContext(ioDispatcher) { runCatching { afterPublish() } }
     }
 }

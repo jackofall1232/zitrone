@@ -160,6 +160,26 @@ head**, the same shape as "claim and work must share a lifetime" from `runBootRe
 it as the same family matters more than the individual rule — when this family appears, look for the
 stronger signal that already exists and the consumer that settled for less.
 
+### PROCESS FIX (BINDING) — correcting a stated fact means finding EVERY instance of it, and enumerating the hits
+**The rule:** a correction is not done when the line you were pointed at is fixed. Before committing,
+`grep -rn` the whole file AND the whole delta for every OTHER place that states the same fact, and
+**enumerate the hits in the commit message** — "N instances found, N corrected". Two of three is the
+failure mode. Applies to PROSE, not just code: sibling-call-site hunting is already binding for code
+(item A0 in every review prompt), and this is the same hunt one layer up.
+
+**Why it is mechanical and not care — the delta whose stated purpose was closing the sibling pattern
+reproduced the sibling pattern INSIDE itself.** `bdde066` corrected three stale claims. One of them —
+"production wraps `afterPublish` in a local `runCatching`" — had THREE statements, not one: the
+`BootReconcileOwnerTest` header (fixed), the `runBootReconcile` kdoc (fixed), and the implementation
+comment at `ZitroneApp.kt:1172` (MISSED), four lines above the wrapper that actually supplies the
+containment and one screen from the production call site at ~285 that says the opposite. Both
+follow-up lenses raised it independently. Had the grep been run, the third hit was one command away.
+
+**LINEAGE — same shape as the mutation-header incident above: knowing the pattern did not prevent
+producing it.** Both times the person writing the correction had just articulated the rule. That is
+the signal a rule is not enough — the remedy has to be a step in the close-out (`grep`, count, state
+the count), not an intention to be careful.
+
 ### GOOD HANDLING — demonstrate why a concern is latent; never assert a property the test cannot prove
 Grok's round-4 INFO-3 said `runCatching { afterPublish() }` swallows `CancellationException` while the
 sweep path deliberately rethrows. Rather than "fix" the asymmetry or wave the label away, the test

@@ -698,23 +698,45 @@ private fun ZitroneRoot(
             // ONE ROUTING AUTHORITY — the LAST sibling (round-4 review, Grok INFO-2). This judged
             // success with `!hasVault() && !serverDeleteConfirmed()` while the other four consumers
             // went through the single derivation, making it a second authority on the same question.
-            // Not a reachable dual-writer bug (this path is reachable only via Route.DeleteIncomplete,
-            // which requires the confirmed marker, and a held boot admits no session — so hold and
-            // this path cannot coexist), but it is the structural family this unit exists to close,
-            // and leaving one site on the weaker signal is how the family regrows.
+            // It is the structural family this unit exists to close, and leaving one site on the
+            // weaker signal is how the family regrows.
             //
-            // The criterion is now STRICTLY STRONGER, deliberately: `hasVault()` keys on `vault.bin`
-            // alone, so a retry that left a stray DEK or temp behind reported SUCCESS and routed to
-            // onboarding over recoverable residue — the exact hazard W-A exists to close, still open
-            // on this one path. ONBOARDING now additionally requires `vaultProvenAbsent`
-            // (`Files.notExists` over all four image-bearing files). A destroy that leaves residue
-            // therefore reports FAILURE here; destroy is idempotent, so the retry the user is already
-            // on re-runs it and self-heals.
+            // The criterion is STRONGER ON ABSENCE PROOF, deliberately: `hasVault()` keys on
+            // `vault.bin` alone, so a retry that left a stray DEK or temp behind reported SUCCESS and
+            // routed to onboarding over recoverable residue — the exact hazard W-A exists to close,
+            // still open on this one path. ONBOARDING now additionally requires `vaultProvenAbsent`
+            // (`Files.notExists` over all four image-bearing files) and respects the sweep hold.
+            // NOT a formal strengthening over every input: `bootRoute`'s legacy arm routes a present
+            // LEGACY image to ONBOARDING, where `hasVault()` reported failure. That arm is the
+            // reviewed behaviour (a legacy image is unusable and onboarding's `create()` retires it),
+            // and it is not a post-destroy product — but the old blanket "strictly stronger" was
+            // wrong as stated (follow-up review, Grok).
             //
-            // No hold supersede here, unlike the delete-completion callback: the hold cannot be
-            // raised on this path (above), and adding one would mean two more BARE `imageLock` calls
-            // on the Main dispatcher — the very shape 0.9.3 is folding INTO the derivation. Do not
-            // add it here; fix it there, once, for every consumer.
+            // A destroy that leaves residue therefore reports FAILURE here. Destroy is idempotent, so
+            // retrying is SAFE and a TRANSIENT fault may clear on the next attempt — but idempotence
+            // proves only that the retry is safe, never that it succeeds. A PERSISTENT unlink or stat
+            // fault keeps every retry on `Route.DeleteIncomplete`, with no in-app exit. Tracked
+            // follow-up (todos.md): the remedy is a product/support answer, not a routing one.
+            //
+            // Net effect, stated honestly (follow-up review, Codex): this adds ONE pathological state
+            // to a stuck class that ALREADY exists — a visible confirmed marker, or a surviving
+            // `vault.bin`, already stays on DeleteIncomplete — while removing an UNSAFE onboarding
+            // over recoverable residue. The row that changes is the indeterminate-stat one, and
+            // routing it fail-closed instead of to Onboarding over an image that cannot be PROVEN
+            // absent IS the W-A hazard being fixed, not a regression.
+            //
+            // No hold supersede here, unlike the delete-completion callback: adding one would mean
+            // two more BARE `imageLock` calls on the Main dispatcher — the very shape 0.9.3 is
+            // folding INTO the derivation. Do not add it here; fix it there, once, for every
+            // consumer. This comment used to justify the omission with "a held boot admits no
+            // session — so hold and this path cannot coexist". THAT IS FALSE (follow-up review,
+            // Grok): a hold raised while an image is PRESENT routes to LOCKED via the image arm, and
+            // a lock screen admits an unlock, hence a session, hence an in-session delete. Reachable
+            // only through the fail-closed default (a cancelled boot, or a throw escaping the sweep
+            // before gate 1) — remote, since the sweep's own gates return NO_MUTATION over a present
+            // image — and the consequence is bounded and restart-recoverable: a successful retry over
+            // a clean disk is reported as FAILURE for the rest of the process, because the stale hold
+            // routes it to LOCKED. Tracked with the 0.9.3 fold, not fixed here.
             val snap = container.deriveBootDecisionFromDisk()
             deleteRetrying = false
             if (snap.route == BootRoute.ONBOARDING) {

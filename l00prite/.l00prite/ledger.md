@@ -1062,3 +1062,55 @@ not describe per-vault destruction or a working Pucker Burn as shipped."
    armed, NO duress wipe in this release, arriving 0.9.3 — appears nowhere.
 4. **RELEASE-NOTES GAP.** `[Unreleased]` omits the residue sweep entirely and still ends "No version
    bump yet — the 0.9.2 phase is still in progress", which the flip must reconcile.
+
+### Unit W-A FOLLOW-UP round (`aa380c1..bdde066`) — paired-blind Codex + Grok, adjudicated
+
+Both lenses: **READY TO MERGE**, no Critical/High/Medium. Both independently ran the two claimed
+sweep mutations (each fails as claimed) and the full suite (**491 / 488 passed / 0 failures / 3
+skipped**, matching the commit). Prompt: `/root/l00prite/unit-wa-followup-prompt.md` — a faithful
+RECONSTRUCTION (the original was passed inline and never saved); outputs `unit-wa-followup-codex.md`,
+`unit-wa-followup-grok.md`.
+
+**CONFIRMED — fixed in the follow-up fix commit:**
+1. **Stale "Production's lambda wraps itself" at `ZitroneApp.kt:1172`** — raised INDEPENDENTLY by both
+   lenses. The third instance of a fact `bdde066` corrected in two other places, in the commit whose
+   stated purpose was closing the sibling pattern. Remedy is mechanical, not care — recorded as a
+   BINDING process fix in `failures.md` (grep the delta for every instance, enumerate the hits).
+2. **"self-heals" overclaim at `MainActivity.kt:712`** (Codex) — idempotence proves retrying is SAFE,
+   not that it succeeds; a persistent fault never clears. Reworded, with the honest net effect stated:
+   the change adds ONE pathological state to an existing stuck class while removing an UNSAFE
+   onboarding. Row 4 (indeterminate stat) routing fail-closed instead of to Onboarding over an
+   unprovable image IS the W-A hazard being fixed, not a regression.
+3. **"a held boot admits no session — so hold and this path cannot coexist" is FALSE** (Grok INFO) —
+   and it REFUTES the supporting chain of Codex's section-A conclusion that dropping the hold
+   supersede is "justified, not merely convenient". A hold raised while an image is PRESENT routes to
+   LOCKED via the image arm, and a lock screen admits an unlock, hence a session. Adjudicated against
+   source: reachable only through the fail-closed default (cancelled boot, or a throw escaping
+   `sweepOrphanedResidue` before gate 1 — its own gates return `NO_MUTATION` over a present image), so
+   remote and restart-recoverable. **Conclusion survives, justification does not:** behaviour
+   unchanged, comment corrected, strand tracked to the 0.9.3 derivation fold.
+4. **"STRICTLY STRONGER" overclaim** (Grok INFO) — not a formal strengthening over all five inputs:
+   `bootRoute`'s legacy arm routes a present legacy image to ONBOARDING where `hasVault()` reported
+   failure. Reworded to "stronger on absence proof". `bdde066`'s commit message carries the same
+   overclaim and cannot be amended; corrected in the follow-up commit message.
+
+**RESOLVED AGAINST SOURCE — Codex's supporting example for LOW-1 does not support it.** Codex offered
+the new test's non-empty `vault.dek` DIRECTORY as a concrete case of the new permanent-stuck state.
+Source settles it against the finding: `File.exists()` returns TRUE for a directory, so every
+`destroy()` rewrites the confirmed marker and the OLD predicate (`!hasVault() && !confirmed`) reached
+the SAME stuck state. That is row 1 of Codex's own table — which Codex marks **unchanged**. Its prose
+and its table disagreed; the table is right. The wording defect the example was offered for is real
+and was fixed on its own merits.
+
+**TRACKED, NOT SOLVED HERE** (`todos.md`): (a) no in-app exit from a PERSISTENT delete fault — a
+product/support question, not a routing one; solving it in this delta is scope creep into the release
+cut. (b) the stale-hold strand — folds into 0.9.3.
+
+**RESIDUAL GAP, DELIBERATELY NOT PAPERED OVER** (both lenses, both rated acceptable): the sole
+behavioural change has no DIRECT test — `onRetryDestroy` is a Compose lambda whose routing is the
+shared `bootRoute`/derivation, already covered row by row. A new test asserting those same rows would
+duplicate existing coverage while reading as coverage of this site: the false-coverage anti-pattern
+`failures.md` already records. Left uncovered and stated, not claimed.
+
+**GATE UNCHANGED:** none of this substitutes for Codex's GitHub PR gate on W-A itself. Nothing merges
+until that is satisfied.
