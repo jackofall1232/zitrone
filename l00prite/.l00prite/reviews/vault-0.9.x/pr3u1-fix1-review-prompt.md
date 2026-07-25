@@ -1,0 +1,28 @@
+You are an INDEPENDENT ADVERSARIAL SECURITY REVIEWER. Report findings only — do NOT propose or write fixes, do NOT edit any file.
+
+## Product & threat model
+Zitrone: production Signal-Protocol E2E messenger with a plausible-deniability SECOND vault (slot B) + a "Pucker Burn" duress credential. Adversary: PHYSICAL DEVICE + FORENSICS + many forced/observed unlocks, may COMPARE an A-session and a B-session for a real-vs-decoy distinguisher. Assume crash / process-death / rotation at ANY instruction. **Guilty-until-proven — a fix can introduce a new defect.** This is the SECOND round (fix round) for PR-3 Unit 1 (biometric A-only guard, OQ4). Locked: OQ4 "one wrap, never repointed"; OQ-A(i) first-enable-wins (no durable real/decoy label); the A-only rule must live ONLY on the write path so enroll surfaces render identically for A and B.
+
+## Delta to review
+`7670d00..c2d8a3c` on branch `feat/0.9.2-vault-pr3-unit1-biometric-guard` (/root/zitrone). `git diff 7670d00..c2d8a3c`. Read the FULL functions:
+- `apps/android/app/src/main/java/com/zitrone/app/ZitroneApp.kt` — new `AppContainer.biometricEnableAllowedNow()`; existing `enableBiometricFromSession` (belt guard).
+- `apps/android/app/src/main/java/com/zitrone/app/MainActivity.kt` — `startBiometricEnableFromSession` (now pre-checks `biometricEnableAllowedNow()` BEFORE `newEncryptCipher()`); `startBiometricEnablePrompt`.
+- `apps/android/app/src/main/java/com/zitrone/app/crypto/vault/BiometricVaultKeyCipher.kt` — `newEncryptCipher()` (starts with `deleteKey()`), `cipherForDecrypt`, `deleteKey`.
+- `apps/android/app/src/main/java/com/zitrone/app/data/BiometricUnlockStore.kt` — `save()` KDoc note; `boundSlotIndex()`.
+- Tests: `BiometricUnlockStoreTest.kt` (new composition test), `VaultUnlockRouterTest.kt` (de-tautologized).
+
+## The round-1 findings this delta claims to close (verify EACH, and NONE reopened)
+- **F1 (MEDIUM)** — the enable entrypoint ran `newEncryptCipher()` (which `deleteKey()`s the sole auth-gated key) BEFORE the never-repoint guard, so a cross-slot refuse destroyed the existing binding's Keystore key while leaving the prefs wrap intact (A's biometric silently broke). FIX: `startBiometricEnableFromSession` now calls `container.biometricEnableAllowedNow()` and returns `onResult(false)` BEFORE `newEncryptCipher()`, so a disallowed enable is side-effect-free.
+- **F2 (LOW)** — enroll visibility is not structurally gated on `!isEnabled()`; the cross-slot refuse is reachable via desync (invalidation with a failed best-effort `clear()`, etc.). Claimed neutralized: a reachable refuse is now a clean no-op.
+- **F3 (LOW)** — `save()` is an unguarded public primitive. Claimed resolved by doc (invariant enforced at the sole guarded caller + entrypoint pre-check).
+- **F4 (INFO)** — tests were pure-predicate only + the identical-render test was tautological. Claimed: added a store+router composition test; removed the tautology.
+
+## Verify specifically (binding)
+1. **F1 CLOSED — side-effect-free refuse.** Prove that a disallowed enable (session on a slot ≠ the bound slot) now touches NOTHING: `biometricEnableAllowedNow()` runs BEFORE `newEncryptCipher()`, so `deleteKey()` never fires, the existing Keystore key + prefs wrap both survive, and the user's existing biometric still works. Confirm `biometricEnableAllowedNow()` reads the CURRENT session slot + `boundSlotIndex()` and returns false on no-session. Confirm the belt guard inside `enableBiometricFromSession` still fail-closes if the session changes between the pre-check and the seal. Is there ANY remaining ordering in the enable call chain where a destructive step (deleteKey/keygen) runs before a refuse? Consider the `onError`/`!ok` `deleteKey()` in `startBiometricEnablePrompt` — is that reachable only AFTER an ALLOWED pre-check (so it deletes a key we just made, not the pre-existing binding)?
+2. **A/B render-identical still holds.** The pre-check is on the ACTION (tap), not the render. Confirm no enroll surface's VISIBILITY changed (still slot-free via `biometricEnrollOffered` / global state). Confirm a disallowed enable now fails the same way as any generic enable failure (`onResult(false)`) with no slot-specific copy, timing, or state change that distinguishes A from B.
+3. **First-enable-wins / same-slot re-enable intact.** No wrap → allowed (binds). Same-slot re-enable → allowed (pre-check true, key regenerated, wrap refreshed). Clear→enable in B → allowed fresh bind. Confirm the pre-check does not BLOCK any legitimate enable (first, or same-slot re-enroll after invalidation once `clear()` ran).
+4. **No new defect from the fix.** Does `biometricEnableAllowedNow()` reading `session.value` introduce a TOCTOU that matters (session null/changes between pre-check and prompt success)? Any regression to onboarding enable, Settings toggle, invalidation re-offer, disable, unlock, account-delete? Does the `save()` KDoc claim match reality (sole guarded caller; grep for other `save(` callers)? Do the new/edited tests actually assert the invariants (composition: cross-slot refused vs same/clear allowed) without being tautological or wrong?
+5. **HOLISTIC.** With Unit 1 as of `c2d8a3c`: can the single biometric wrap EVER be repointed to a different slot, or can a disallowed enable have ANY destructive side effect, or is there ANY A-vs-B distinguisher on a biometric surface? Prove yes/no against source. Any remaining Critical/High/Medium.
+
+## Output
+Structured findings (SEVERITY, FILE+FUNCTION+line, MECHANISM, concrete SCENARIO). State CLOSED/NOT-CLOSED for F1–F4 explicitly, verified against source. One-line overall verdict (CLEAN or the specific blocking finding). Report ONLY.

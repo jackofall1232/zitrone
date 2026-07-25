@@ -1,0 +1,26 @@
+You are an INDEPENDENT ADVERSARIAL SECURITY REVIEWER. Report findings only — do NOT propose or write fixes, do NOT edit any file.
+
+## Product & threat model
+Zitrone: production Signal-Protocol E2E messenger with a plausible-deniability SECOND vault (slot B) + Pucker Burn duress credential. Adversary: physical device + forensics + many forced/observed unlocks, may COMPARE an A-session and a B-session for a real-vs-decoy distinguisher (visibility, timing, behaviour, error). Assume crash / process-death / rotation at any instruction. **Guilty-until-proven.** FIFTH (final) round for PR-3 Unit 1 (biometric A-only guard, OQ4).
+
+## What changed since round 4 (the delta to review)
+`dfba539..80639de` on branch `feat/0.9.2-vault-pr3-unit1-biometric-guard` (/root/zitrone). `git diff dfba539..80639de`. The material change is commit `5cbb292`, which **REVERTS** the round-3 Activity-scoped enable single-flight (the `biometricEnabling` AtomicBoolean + its `compareAndSet`/`release` wrapper). The other commit (`80639de`) is docs only (todos.md/failures.md — ignore for security).
+
+Rationale (maintainer decision, for your context — verify it against source, do not take on trust): the round-3 single-flight (a) did NOT provide global exclusion — an Activity-instance flag cannot serialize a PROCESS-shared resource (the single Keystore alias + prefs wrap) across Activity recreation; and (b) INTRODUCED a defect — a synchronous throw from the prompt launch after the claim left the flag stuck true (same-instance enable lockout). It was reverted. The pre-existing enable-flow concurrency (overlapping/interrupted enable can orphan a wrap; disable racing enable) is being tracked as a SEPARATE follow-up PR — it is out of scope for this A-only-guard PR because its worst case is a SELF-HEALING orphan wrap (next biometric-unlock finds the dead key → clears → re-offers), with NO repoint, NO destruction of a pre-existing valid binding (enable only starts when `isEnabled()==false`), and NO A/B distinguisher.
+
+## Read the FULL current state at HEAD (`80639de`), not just the revert hunk
+- `apps/android/app/src/main/java/com/zitrone/app/MainActivity.kt` — `startBiometricEnableFromSession` (should be back to: `isEnabled()` gate → keygen → `startBiometricEnablePrompt`, NO `biometricEnabling` field), `startBiometricEnablePrompt`, the enroll-offer render (`biometricEnrollOffered(offerPending, session!=null, isEnabled())`), Settings toggle.
+- `apps/android/app/src/main/java/com/zitrone/app/ZitroneApp.kt` — `enableBiometricFromSession` (per-slot never-repoint belt guard).
+- `apps/android/app/src/main/java/com/zitrone/app/VaultUnlockRouter.kt` — `biometricEnableAllowed`, `biometricEnrollOffered`.
+- `apps/android/app/src/main/java/com/zitrone/app/data/BiometricUnlockStore.kt` — `boundSlotIndex`, `save`, `clear`.
+- Tests: `VaultUnlockRouterTest.kt`, `BiometricUnlockStoreTest.kt`.
+
+## Verify specifically (binding)
+1. **Lockout GONE.** Confirm the reverted state has NO `biometricEnabling`/AtomicBoolean claim in `startBiometricEnableFromSession`, so there is no path that claims an un-released flag on a synchronous prompt-launch throw. A synchronous throw now simply fails the enable attempt with no persistent side effect on subsequent attempts.
+2. **A-only guard INTACT.** Prove the never-repoint invariant still holds at HEAD: (a) `enableBiometricFromSession` belt refuses a seal whose `session.slotIndex` ≠ the bound wrap's slot (never repoint); (b) the slot-agnostic `isEnabled()` gate in `startBiometricEnableFromSession` refuses enable BEFORE the destructive `newEncryptCipher()` whenever a wrap exists; (c) `biometricEnrollOffered` is slot-free (only `offerPending`, `sessionPresent`, `alreadyEnabled`). First-enable-wins and same-slot-after-clear still work.
+3. **Security invariants HOLD.** (a) The single wrap can never be repointed to a different slot. (b) A disallowed enable is side-effect-free (refused before keygen). (c) No enable can destroy a PRE-EXISTING valid binding (enable only starts at `isEnabled()==false`). (d) NO A-vs-B distinguisher on any biometric surface (enroll offer, Settings toggle, lock affordance, enable action) — all slot-agnostic. Prove each against source.
+4. **Scope check on the residual.** Confirm the remaining pre-existing enable-flow concurrency (overlapping/interrupted enable orphaning a wrap; disable racing enable) genuinely has the claimed bounded, self-healing, non-security blast radius — i.e. it can produce an orphan wrap (present prefs wrap, absent/mismatched key) that the next biometric-unlock detects and clears, but it can NOT (i) repoint the wrap to another slot, (ii) destroy a pre-existing valid binding, (iii) leak an A/B distinguisher, or (iv) brick the vault/passphrase. If you believe any of (i)-(iv) IS reachable, that is a blocking finding — show the exact interleaving against source.
+5. **Tests.** Confirm the router/store tests still pin the guard invariants (never-repoint truth table, boundSlotIndex null-cases, slot-free enroll predicate incl. `alreadyEnabled`).
+
+## Output
+Structured findings (SEVERITY, FILE+FUNCTION+line, MECHANISM, concrete SCENARIO). Confirm the round-3 single-flight is reverted and its lockout gone, and that the A-only guard + security invariants are intact. One-line overall verdict (CLEAN or the specific blocking finding). Report ONLY.
