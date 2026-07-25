@@ -875,3 +875,304 @@ iOS Xcode build + visual watermark pass; Android scroll framestats; SSH-key rota
 - Re-oriented from this memory. Next unit: **0.9.2 PR-2** — router fusion + triple-entry gate +
   uninterrupted-sequence guard. Spec: `/root/l00prite/pr2-router-triple-entry-spec.md` (WRITER/READER
   table for the RAM candidate/count state included). Building it via the `security-review-loop`.
+
+### Run 2026-07-25 — claude (CX33) — UNIT W-A extracted; round 1 dispatched (autonomous loop authorized)
+**HoboJoe authorized cycling the loop WITHOUT HIL until convergence or a blocker; standard cap 6.**
+
+**W-A extracted and committed (`a98677f`)** — 7 files, +1376/-25 on top of main. Sweep + boot-reconcile
+owner + `bootRoute` and its three consumers + cache-retry. The ENTIRE duress-wipe mechanism and its
+presentation layer defer to W-B (confirmed by HoboJoe): the coupling line
+`signalBurnCompleted(obliterated = burned)` sits in `onBurn`, the mechanism's terminus, so shipping the
+mechanism without its presentation means a burn that fires and reports into nothing. `onBurn` is
+byte-identical to main. Two boot healers excluded with verified unreachability proofs.
+**Every rationale RE-DERIVED for W-A, not ported** — the reviewed kdoc was 16 KB of burn framing
+referencing both excluded healers; `SweepOrphanedResidueTest` went from 9 burn references to 0.
+Verification before dispatch: 0 burn-mechanism symbols, 0 coupling references, 0 healer references,
+`onBurn` identical to main. **475 tests, 0 failures, 472 passed, 3 skipped** — re-run from a CLEANED
+results directory after I caught myself reading a stale 529 from the previous branch's build output.
+
+**BOTH new process rules exercised on first use, and both needed sharpening (`a44ad07`):**
+- **A CLI VERSION IS NOT A MODEL ID.** I recorded `codex-cli 0.145.0` as the lens check; the model it
+  drove was `gpt-5.6-sol`. That is the same weaker-proxy substitution the loop hunts in code, committed
+  inside the rule written to prevent it. Confirmed ids: codex `gpt-5.6-sol`, grok `grok-4.5`, kimi
+  `moonshotai/kimi-k3`, gemini now PINNED to `gemini-3.1-pro-preview-customtools`.
+  **Material caveat: Gemini's model in rounds 4-6 of Unit W is UNKNOWN** — its latest session log shows
+  a `flash`-class model and headless runs do not log there. Gemini was the lens that returned the false
+  CRITICAL, so a cheaper tier is a plausible explanation. Pinned from here.
+- **PER-VENDOR ISOLATION.** The worktree rule (added to fix Codex's read-only 0-tests problem)
+  immediately BROKE Gemini, which refuses untrusted directories — it emitted an error, not a review,
+  and 613 bytes of error output is not a clean pass. Also my own `pkill -f "gemini -p"` killed the
+  REPLACEMENT run along with its target.
+**The worktree rule WORKED where it mattered: Grok independently ran the suite and observed 475/0/3,
+matching the claim — the first time a lens verified my numbers instead of inheriting them.**
+
+**ROUND 1 — 3 of 4 lenses in, NOT converged. Every finding is mine, and ALL are EXTRACTION defects
+invisible to the prior six rounds:**
+| finding | codex | grok | gemini | adjudicated |
+|---|---|---|---|---|
+| leftover standalone legacy effect = 2nd routing authority | HIGH | HIGH | miss | **HIGH, converged** |
+| row-7 confirmed-refuse test DELETED; gate 2 untested | miss | MEDIUM | HIGH | **MEDIUM, converged** |
+| legacy derivation copy-pasted across all 3 consumers | — | — | MEDIUM | **MEDIUM** |
+| cancellation-after-success test performs no cancellation | LOW | — | — | LOW |
+| `onboarding is reachable…` re-implements the rule | — | — | LOW | LOW (catches mutations; fragile) |
+| stale "PUCKER BURN Unit W" naming in 2 suites | — | INFO | — | INFO |
+
+**The HIGH is the pure extraction defect:** Unit W round 3 deleted the standalone legacy effect ON THE
+FEATURE BRANCH; W-A was cut from MAIN, which predates that fix, so I reintroduced a second legacy
+routing authority. **HoboJoe's instruction to review the extraction rather than carry six rounds of
+clearance forward was correct and paid on round 1.**
+**The MEDIUM is self-inflicted while improving hygiene:** rewriting row 6b for W-A sliced out the
+adjacent row-7 test, so gate 2 (the D2c ownership bar) has ZERO coverage while the header still claims
+"row by row". A header claiming coverage it lacks, created by the act of fixing headers that claimed
+coverage they lacked.
+**Gemini calibration:** returned READY TO MERGE while listing its own HIGH, and missed the converged
+HIGH. Pinning to 3.1 Pro did not change the pattern — real findings, unreliable verdicts.
+
+Nothing pushed, no version bump, slot 0 unarmed. semgrep + Moonshot rule audit HELD.
+
+### Unit W-A — round 4 (acb5904): CLEAN CONVERGENCE
+
+Four blind lenses, disposable worktrees, full source: **codex `gpt-5.6-sol`**, **`gemini-3.1-pro`**,
+**`grok-4.5`**, **`kimi-k3`**. All four independently ran the suite (487/484/0/3, matching).
+
+**No CRITICAL / HIGH / MEDIUM from any lens.** Codex: zero findings. Kimi: one LOW. Gemini + Grok:
+INFO only. Convergence criterion met — all four on the SAME delta, every finding re-derived against
+source.
+
+Per HoboJoe's rule ("write the test, don't decide from the label"), every testable INFO got a test:
+
+| INFO | lens | test | mutation-verified |
+|---|---|---|---|
+| post-unlink re-stat branch uncovered | kimi | residue that survives its unlink | YES |
+| `catch (Throwable)` uncovered | gemini | a throwing step after the unlinks | YES |
+| `runCatching` swallows CancellationException | grok | synthetic + real cancellation | partly — see below |
+
+All pass. **No INFO was a defect.** Suite 487 → 491 (0 failures). Grok's INFO-3 is LATENT, and the
+test says why: `afterPublish` is `() -> Unit`, not `suspend`, so no real cancellation can be
+delivered into it; and `runCatching` sits INSIDE `withContext`, which rechecks its job on exit, so a
+genuine cancellation still propagates.
+
+NOT testable, verified by reading instead: the stale docstring (grok INFO-1 == kimi LOW, converged
+independently — real, and introduced by acb5904 itself), `onRetryDestroy`'s weaker predicate (grok
+INFO-2; kimi independently derived it safe — reachable only via DeleteIncomplete, which requires the
+confirmed marker), and three imprecise comments (kimi).
+
+**FAILURE RECORDED — I wrote a false `MUTATION UNIQUELY CAUGHT` header.** The cancellation test
+claimed it caught hoisting `runCatching` outside `withContext`. I ran that mutation: the test stays
+green. Cancellation is Job state, so once the parent is cancelled the child is cancelled regardless
+of what any enclosing `runCatching` swallows — no assertion on `isCancelled` can separate the forms.
+Header corrected in place to say it catches NOTHING and is characterisation only. This is the unit's
+signature failure (a header asserting coverage it lacks) reproduced by me, in the round that closed
+it, three rounds after Moonshot caught the same shape at lines 90-98. The lesson is not "check
+headers" — it is that a mutation claim is a claim, and an unrun mutation is an unverified claim.
+
+**The four tests are NOT committed.** Committing them makes the convergence commit a new delta, which
+would need its own round. HEAD stays `acb5904`; the tests are held at
+`/root/l00prite/unit-wa-r4-info-tests.patch` for HoboJoe's call.
+
+### PR #60 — the two gate blockers, disambiguated
+
+**CI "Security scanning" = Trivy, dependency HIGH. NOT W-A.** Disambiguated the three cases against
+source rather than from the log alone (the log was briefly unreachable):
+- *Real semgrep finding in W-A* — **eliminated structurally.** The vendored ruleset is
+  `github-actions/` + `go/` + `local/` only; Kotlin packs are deliberately excluded as not
+  gate-clean (`.semgrep/README.md`). W-A's file list is Kotlin + markdown, **zero** workflow/Go
+  files. No rule in the gate can match anything W-A changed. Then reproduced locally with the exact
+  digest-pinned container: **0 findings, exit 0.**
+- *Scanner crash* — eliminated; semgrep step passed in CI, Trivy reached a result table.
+- *Dependency HIGH* — **CONFIRMED.** `postcss` 8.5.15, GHSA-r28c-9q8g-f849 (path traversal via
+  `sourceMappingURL`), fixed in 8.5.18. main's last three runs were green (latest 2026-07-24T22:50),
+  so the advisory landed after that; main would fail today too. W-A touches 0 JSON/YAML/lockfile/TS
+  files. Root `pnpm.overrides.postcss` is already `^8.5.12`, which semver-admits 8.5.18 — a stale
+  lockfile, not a manifest change.
+
+**"Didn't we fix Trivy before?" — no.** `git log -S"trivy" -- .github/workflows/ci.yml` → only
+`2f1b1b8 Initial commit`. Trivy has never been modified and has gated with `exit-code: "1"` +
+`ignore-unfixed: true` since day one. The fix in memory was **semgrep** — a different scanner and a
+different failure mode. `ignore-unfixed: true` is also why this is new: it gates only once upstream
+ships a fix. Recorded because conflating the two scanners would have led to "we already fixed this".
+
+### Reviewer-gate finding (Gemini, substituted reviewer) — TRIAGE: confirmed, wrong mechanism, not W-A
+
+Claim: `vaultProvenAbsent()` / `serverDeleteConfirmed()` do blocking disk I/O on Main → ANR.
+
+- **Premise TRUE.** `MainActivity.kt:1108` is `launch(Dispatchers.Main.immediate)`; the calls at
+  1117-1118 are bare and non-suspending.
+- **Stated mechanism REFUTED.** `exists()` / `Files.notExists` are single stats on app-private
+  storage — microseconds. That alone is neither ANR nor jank.
+- **Real mechanism: LOCK CONTENTION.** Both go through `imageLock.withLock`, and the class's own
+  threading contract (`VaultImageStore.kt:222-229`) states `create()` performs SLOT_COUNT+1 Argon2id
+  derivations and `unlock()` performs SLOT_COUNT, all under that same lock, and both "MUST run off a
+  UI thread." A Main-thread `withLock` blocks for the length of an in-flight KDF — deliberately
+  expensive. Right conclusion, route not identified: the PR #59 pattern again.
+- **NOT a W-A regression.** `git show main:` — the identical callback calls `hasVault()` +
+  `serverDeleteConfirmed()` on the same `Dispatchers.Main.immediate`. Same two Main-thread lock
+  acquisitions; W-A swapped WHICH functions, not WHETHER. Systemic across 5 sites (631, 699, 993,
+  1117, 1118); W-A touched one.
+- **Verdict: FOLLOW-UP, not a blocker** (confirmed but outside W-A's scope).
+- The structural fix is not the reviewer's `withContext` at the call site but folding these inputs
+  INTO the suspend derivation, exactly as round 2 did for `deriveBootDecisionFromDisk` — which sits
+  six lines below doing it correctly while 1117-1118 do it wrong. Round-2's fix applied to one of N
+  sites: this unit's signature family, one more time.
+
+### 0.9.2 release decision + steps 1-2 complete
+
+HoboJoe: merge W-A, cut **0.9.2-beta as second-vault-complete**. Pucker Burn (W-B: mechanism +
+presentation) becomes **0.9.3-beta** with its own budget.
+
+**Step 1 DONE** — postcss lockfile refresh landed on main as `3d086be` (PR #61, squash, branch
+deleted). Lockfile-only; two real version changes (postcss 8.5.15→8.5.23, nanoid 3.3.12→3.3.16),
+five peer-keyed re-pointings with unchanged versions. Verified against a clean `git archive` export
+(no node_modules — matching what CI actually scans): 0 vulns across pnpm/cargo/gomod, exit 0.
+
+**Step 2 DONE** — W-A rebased onto `3d086be`. **Reviewed delta byte-identical**:
+`git diff acb5904 04ebe3c -- apps/android/ docs/` → 0 lines. New head `b31c076`; run 30161574271
+**all six jobs green, Security scanning included** — green because the dependency was fixed on main,
+not because the unit patched around it.
+
+**PROCESS FAILURE (mine, caught):** my first CI poll after the force-push reported the checks
+"settled" — it had read the **pre-rebase run** (30160252207), which was still attached while the new
+run had not yet been created. Same shape as the earlier stale test-results read: a poller that asks
+"are there results?" instead of "are there results FOR THIS COMMIT?" answers with the old ones.
+**Rule: poll CI by head SHA, never by PR number alone.** Corrected by polling
+`gh run list --commit <sha>`.
+
+### Docs honesty audit (pre-flip, BLOCKING) — findings, no edits made
+
+Verified against SHIPPED CODE: `BURN_SLOT_INDEX = 0` is structurally reserved (creation uses
+`randomVaultSlotIndex`, 1..SLOT_COUNT-1); slot 0 is "filler on a fresh onboarding (unarmed burn)";
+`onBurn` (MainActivity.kt:837-840) is a three-line inert stub — uniform-failure message, spinner off,
+destroys nothing. **No duress wipe ships.** Plumbing exists (`PassphraseOutcome.Burn`, burn-aware
+store); arming and wipe do not.
+
+Docs are LARGELY honest already — Unit 2's six rounds held. `VAULT_ARCHITECTURE.md:23` is the model
+phrasing; `SECURITY_MODEL.md:552-568` already says the wipe is "a fail-closed stub" and carries "Do
+not describe per-vault destruction or a working Pucker Burn as shipped."
+
+1. **REAL OVERCLAIM — `SECURITY_MODEL.md:371`.** The v1.5 security-onion diagram lists
+   `panic wipe · duress PIN · plausible-deniability vaults` as Layer 1 with NO status qualifier.
+   Those two terms ARE Pucker Burn and neither exists. Every other mention in the file is hedged;
+   this one is a scannable capability list, so a reader who stops at the diagram has been told the
+   product has a duress PIN.
+2. **SYSTEMATIC UNDERSTATEMENT (3 files).** `README:73`, `SECURITY_MODEL:416`, `CHANGELOG:32` say
+   "setup/wipe" or "setup/wipe UX" — reads as *the interface is missing*. The wipe EXECUTION is the
+   stub. `VAULT_ARCHITECTURE:23` gets it right ("setup UX and wipe **execution**").
+3. **NO AFFIRMATIVE STATEMENT, AND NO 0.9.3 TARGET.** Every mention is a negation inside a "not yet
+   shipped" clause. The required form — slot 0 structurally reserved, the burn credential CANNOT be
+   armed, NO duress wipe in this release, arriving 0.9.3 — appears nowhere.
+4. **RELEASE-NOTES GAP.** `[Unreleased]` omits the residue sweep entirely and still ends "No version
+   bump yet — the 0.9.2 phase is still in progress", which the flip must reconcile.
+
+### Unit W-A FOLLOW-UP round (`aa380c1..bdde066`) — paired-blind Codex + Grok, adjudicated
+
+Both lenses: **READY TO MERGE**, no Critical/High/Medium. Both independently ran the two claimed
+sweep mutations (each fails as claimed) and the full suite (**491 / 488 passed / 0 failures / 3
+skipped**, matching the commit). Prompt: `/root/l00prite/unit-wa-followup-prompt.md` — a faithful
+RECONSTRUCTION (the original was passed inline and never saved); outputs `unit-wa-followup-codex.md`,
+`unit-wa-followup-grok.md`.
+
+**CONFIRMED — fixed in the follow-up fix commit:**
+1. **Stale "Production's lambda wraps itself" at `ZitroneApp.kt:1172`** — raised INDEPENDENTLY by both
+   lenses. The third instance of a fact `bdde066` corrected in two other places, in the commit whose
+   stated purpose was closing the sibling pattern. Remedy is mechanical, not care — recorded as a
+   BINDING process fix in `failures.md` (grep the delta for every instance, enumerate the hits).
+2. **"self-heals" overclaim at `MainActivity.kt:712`** (Codex) — idempotence proves retrying is SAFE,
+   not that it succeeds; a persistent fault never clears. Reworded, with the honest net effect stated:
+   the change adds ONE pathological state to an existing stuck class while removing an UNSAFE
+   onboarding. Row 4 (indeterminate stat) routing fail-closed instead of to Onboarding over an
+   unprovable image IS the W-A hazard being fixed, not a regression.
+3. **"a held boot admits no session — so hold and this path cannot coexist" is FALSE** (Grok INFO) —
+   and it REFUTES the supporting chain of Codex's section-A conclusion that dropping the hold
+   supersede is "justified, not merely convenient". A hold raised while an image is PRESENT routes to
+   LOCKED via the image arm, and a lock screen admits an unlock, hence a session. Adjudicated against
+   source: reachable only through the fail-closed default (cancelled boot, or a throw escaping
+   `sweepOrphanedResidue` before gate 1 — its own gates return `NO_MUTATION` over a present image), so
+   remote and restart-recoverable. **Conclusion survives, justification does not:** behaviour
+   unchanged, comment corrected, strand tracked to the 0.9.3 derivation fold.
+4. **"STRICTLY STRONGER" overclaim** (Grok INFO) — not a formal strengthening over all five inputs:
+   `bootRoute`'s legacy arm routes a present legacy image to ONBOARDING where `hasVault()` reported
+   failure. Reworded to "stronger on absence proof". `bdde066`'s commit message carries the same
+   overclaim and cannot be amended; corrected in the follow-up commit message.
+
+**RESOLVED AGAINST SOURCE — Codex's supporting example for LOW-1 does not support it.** Codex offered
+the new test's non-empty `vault.dek` DIRECTORY as a concrete case of the new permanent-stuck state.
+Source settles it against the finding: `File.exists()` returns TRUE for a directory, so every
+`destroy()` rewrites the confirmed marker and the OLD predicate (`!hasVault() && !confirmed`) reached
+the SAME stuck state. That is row 1 of Codex's own table — which Codex marks **unchanged**. Its prose
+and its table disagreed; the table is right. The wording defect the example was offered for is real
+and was fixed on its own merits.
+
+**TRACKED, NOT SOLVED HERE** (`todos.md`): (a) no in-app exit from a PERSISTENT delete fault — a
+product/support question, not a routing one; solving it in this delta is scope creep into the release
+cut. (b) the stale-hold strand — folds into 0.9.3.
+
+**RESIDUAL GAP, DELIBERATELY NOT PAPERED OVER** (both lenses, both rated acceptable): the sole
+behavioural change has no DIRECT test — `onRetryDestroy` is a Compose lambda whose routing is the
+shared `bootRoute`/derivation, already covered row by row. A new test asserting those same rows would
+duplicate existing coverage while reading as coverage of this site: the false-coverage anti-pattern
+`failures.md` already records. Left uncovered and stated, not claimed.
+
+**GATE UNCHANGED:** none of this substitutes for Codex's GitHub PR gate on W-A itself. Nothing merges
+until that is satisfied.
+
+### PR #60 GATE + combined-delta round — Codex SOL CLI standing in for the out-of-credit GitHub bot
+
+**Gate (Codex SOL, `--cd` a worktree at the PR head `aa380c1`): DO NOT MERGE.**
+- **HIGH — `MainActivity.kt:699`.** `onRetryDestroy` is a second, weaker routing authority
+  (`!hasVault() && !serverDeleteConfirmed()`): discards `residueSweepHold`, uses `File.exists()`
+  predicates, omits legacy and proven image-bearing absence, bypasses `bootRoute`. An indeterminate
+  post-destroy stat can read as successful absence and route to ONBOARDING over unproven surviving
+  vault material.
+- Plus three LOW: the stale `BootReconcileOwnerTest:314` header, the `Dispatchers.IO` kdoc, and the
+  uncovered survive-unlink / throw-after-mutation sweep branches.
+- **All four were already fixed in `bdde066`**, which the gate was explicitly forbidden to credit.
+  A blind lens re-derived the follow-up delta's exact contents from the PR head alone. That validates
+  the DIAGNOSIS, not the implementation — the gate never saw `bdde066`'s code (maintainer's point).
+- **Therefore pushed** (maintainer directive): `bdde066` + `157c1f6` onto
+  `feat/0.9.2-unit-wa-residue-sweep`, kept as distinct commits. Rationale recorded because it
+  reverses an earlier call of mine: green CI on a head with a known HIGH is not an asset to protect,
+  it is a hazard — an open PR showing green is what gets merged by someone moving fast. A push
+  SUPERSEDES that verification rather than invalidating it, and re-running CI is cheap.
+  Distinctness within the PR preserves the vuln→fix narrative; remoteness was never what provided it.
+
+**Combined-delta round on `aa380c1..157c1f6`:** Grok READY TO MERGE (independently observed
+491/488/0/3); Codex NOT READY on three LOW documentation/coverage findings. Adjudicated:
+1. **Codex right, Grok passed it** — the `failures.md` enumeration named the `runBootReconcile` kdoc
+   as the third instance of the containment fact. It was corrected in the same commit for a
+   DIFFERENT fact (`Dispatchers.IO`). Count right by accident, over the wrong set. Corrected, and the
+   rule gained its second half: verify each grep hit actually asserts the fact.
+2. **Grok right, Codex missed it** — "the stale hold routes it to LOCKED" overstates: `snap.route` is
+   LOCKED, so the success check fails; the UI `route` stays `DeleteIncomplete`. Corrected.
+3. **Both right, argument conceded** — the "a direct test would duplicate `bootRoute` coverage"
+   defence was wrong. Grok even named the test: the diverging row (old predicate says success, new
+   says failure). Extraction + tests landed rather than tracked (maintainer directive).
+
+**`Residence` tri-state landed** (`Residence.kt`), with the rule as a value: only `ProvenAbsent` may
+route to ONBOARDING. `deriveBootDecisionFromDisk` now takes ONE classification instead of two
+independently-timed reads, so "present AND proven absent" is unrepresentable. `onRetryDestroy`'s
+orchestration is extracted into `runDeleteRetry` and tested for wiring.
+
+**A REAL LATENT DEFECT, FOUND BY WRITING THE TEST THE ARGUMENT SAID WAS REDUNDANT.** The first
+version of the invariant test asserted that an indeterminate reading plus `legacyImage = true` falls
+through to LOCKED. It FAILED: `bootRoute`'s legacy arm did not consult `vaultImagePresent`, so the
+flag returned ONBOARDING irrespective of any absence proof. The invariant was real but lived one
+layer out, in `deriveBootDecision`'s probe guard — the router would have onboarded over an unstattable
+image for any future caller that set the flag. Arm narrowed to `legacyImage && vaultImagePresent`;
+three combinations left the exhaustive onboarding-reachability set, none reachable in production.
+**The rule belongs where it cannot be bypassed** — the same shape as "the containment guarantee
+belongs in the wrapper, not the call site".
+
+**Item E reclassified** (`todos.md`): `serverDeleteConfirmed()`'s `File.exists()` fail-open is
+SAME CLASS, TRACKED, NEXT — not "not W-A's fault, therefore out of scope". Honest changelog line:
+"closes the fail-open at the retry-destroy call site", not "closes the fail-open class".
+
+**Infrastructure (root cause of two apparent product failures).** Grok's "164 failures" and the
+gate's inability to run the suite were ONE cause in two costumes: a Gradle home the runner could not
+own. Abandoned per-reviewer homes (one 7.3G, a week old) filled the 38G disk to 100%; ENOSPC surfaces
+as unwritable result XML and failed transform extraction, i.e. as phantom test failures. Reclaimed
+~11.3G, migrated `/root/.gradle` → `/var/lib/ci/gradle` (same-device rename; rsync is for the
+cross-device volume move), symlinked the old path, added a cache-cleanup init script (which trimmed
+7.3G→6.7G on first run), a 2d `/tmp` reaper excluding live agent scratchpads, and a pre-build disk
+guard that aborts below 5G with a real message. The init script's first version broke EVERY build
+(`buildCache.setRemoveUnusedEntriesAfterDays` is absent from Gradle 8.7's API) — caught because it
+was staged and validated before the re-gate rather than after.

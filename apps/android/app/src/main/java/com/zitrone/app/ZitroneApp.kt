@@ -16,6 +16,7 @@ import com.zitrone.app.crypto.ZitroneSignalStore
 import com.zitrone.app.crypto.vault.BiometricVaultKeyCipher
 import com.zitrone.app.crypto.vault.KeystoreDeviceKeyCipher
 import com.zitrone.app.crypto.vault.LibsodiumVaultOps
+import com.zitrone.app.crypto.vault.ResidueSweepResult
 import com.zitrone.app.crypto.vault.VaultImageStore
 import com.zitrone.app.crypto.vault.UnlockOrAdd
 import com.zitrone.app.crypto.vault.VaultImageException
@@ -224,6 +225,103 @@ class AppContainer(private val app: Application) {
 
     /** Routing truth: a vault image is present → UNLOCK, absent → SETUP (onboarding). */
     fun hasVault(): Boolean = imageStore.exists()
+
+    /**
+     * FAIL-CLOSED routing truth: "there is provably nothing here", the only state that may present as
+     * a fresh install. [hasVault] is NOT a substitute — it keys on `vault.bin` alone, so a surviving
+     * `vault.dek` or `vault.bin.tmp` (which stages a COMPLETE outer image) reads as "no vault" and
+     * would route ONBOARDING over recoverable ciphertext.
+     */
+    fun vaultProvenAbsent(): Boolean = imageStore.imageBearingProvenAbsent()
+
+    /**
+     * Read the four disk facts and produce ONE boot decision — the single derivation every routing
+     * consumer uses.
+     *
+     * SUSPEND, and it moves itself to IO (round-2 review, Gemini). This was a plain function with a
+     * kdoc saying "call off the main thread", and one of its three callers — the session collector —
+     * called it bare on the composition dispatcher, running a ~1 MiB decrypt on the main thread. A
+     * requirement stated in a comment is a requirement that will eventually be violated by one call
+     * site; the dispatcher move belongs INSIDE, where no caller can get it wrong. Callers now simply
+     * `deriveBootDecisionFromDisk()`.
+     */
+    internal suspend fun deriveBootDecisionFromDisk(): BootDecision = withContext(Dispatchers.IO) {
+        // ONE classification, not two independently-timed reads. [hasVault] and [vaultProvenAbsent]
+        // each take the image lock separately, so calling them as a pair could pair up readings taken
+        // at different instants — including the contradiction "present AND proven absent", which
+        // [Residence] cannot represent. The mapping below is DELIBERATELY the identity of today's
+        // semantics: Present ⇔ `hasVault()`, ProvenAbsent ⇔ `vaultProvenAbsent()`.
+        //
+        // DO NOT "simplify" this to `imagePresent = residence.treatAsPresent`. It looks equivalent
+        // and is not: `bootRoute` orders the LEGACY arm AHEAD of the present arm, and legacy routes
+        // to ONBOARDING. Mapping Indeterminate onto imagePresent would send an image that cannot be
+        // stat'd into the ~1 MiB legacy probe, and a `true` there would present a fresh install over
+        // exactly the unprovable material this type exists to withhold. Indeterminate must fall
+        // through to the LOCKED arm, which is what leaving BOTH booleans false does.
+        val residence = vaultResidence()
+        deriveBootDecision(
+            serverDeleteConfirmed = serverDeleteConfirmed(),
+            imagePresent = residence is Residence.Present,
+            residueSweepHold = residueSweepHold.value,
+            vaultProvenAbsent = residence.mayRouteToOnboarding,
+            isLegacyImage = { isLegacyImage() },
+        )
+    }
+
+    /**
+     * The image's [Residence] — the tri-state read that [hasVault] and [vaultProvenAbsent] encode
+     * as two booleans a caller has to pair correctly.
+     */
+    internal fun vaultResidence(): Residence = Residence.classify(::hasVault, ::vaultProvenAbsent)
+
+    /**
+     * PROCESS-scoped boot-reconciliation state.
+     *
+     * [bootReconciled] gates the fresh-install presentation: no route may be derived from disk until
+     * boot reconciliation has finished, because the sweep MUTATES what disk says. [residueSweepHold]
+     * carries forward the one fact a later stat cannot recover — that residue was unlinked WITHOUT
+     * proven durability — and withholds onboarding for the rest of this boot.
+     *
+     * PROCESS-scoped, not composition-scoped, and deliberately so: composition state resets on an
+     * Activity recreation, and a rotation that cleared this hold would restore exactly the
+     * fresh-install-over-residue presentation it exists to prevent.
+     */
+    val bootReconciled = MutableStateFlow(false)
+    val residueSweepHold = MutableStateFlow(false)
+
+    private val bootReconcileStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Start boot reconciliation ONCE PER PROCESS; later callers no-op and observe [bootReconciled]. */
+    fun startBootReconcile() {
+        runBootReconcile(
+            scope = scope,
+            claim = { bootReconcileStarted.compareAndSet(false, true) },
+            sweep = { imageStore.sweepOrphanedResidue() },
+            publish = { hold ->
+                residueSweepHold.value = hold
+                bootReconciled.value = true
+            },
+            afterPublish = {
+                // Non-routing hygiene AFTER the gate opens — a slow cache clear must not hold splash.
+                // No local runCatching: runBootReconcile contains faults here by contract.
+                retryPlaintextCacheClearIfNoVault()
+            },
+        )
+    }
+
+    /**
+     * Retry the plaintext-cache clear on a cold start. Cheap (a directory list), silent, self-healing.
+     *
+     * TRISTATE GATE: this DELETES on "no vault", so the gate must be a PROVEN absence
+     * ([VaultImageStore.primaryImageProvenAbsent]) and not the `File.exists()`-backed routing signal —
+     * a stat/I/O fault read as "absent" would clear the cache out from under a LIVE vault. The fail
+     * direction is the safe one (over-clearing an OS-evictable cache at cold start), but the caller of
+     * a destructive operation must not use the looser test.
+     */
+    fun retryPlaintextCacheClearIfNoVault(): Boolean {
+        if (!imageStore.primaryImageProvenAbsent()) return false
+        return runCatching { clearCacheDir(app.cacheDir) }.getOrDefault(false)
+    }
 
     /**
      * Routing signal (0.9.2): a present image is the PRIOR (v2 / 0.9.1) format, which the burn-slot
@@ -1035,3 +1133,229 @@ internal fun sealDurableOrFalse(seal: () -> Unit): Boolean =
     } catch (t: Throwable) {
         false
     }
+
+
+/**
+ * The boot-reconciliation OWNER, extracted so its lifecycle contract is testable on the host JVM.
+ * Four properties, each of which is a real failure mode:
+ *
+ *  1. **Once only.** [claim] is the CAS; a second call does nothing.
+ *  2. **Publication ordering.** [publish] runs before any consumer is released — consumers await the
+ *     published verdict instead of reading a field's default.
+ *  3. **Fail-closed default.** The verdict starts at [ResidueSweepResult.SWEPT_NOT_DURABLE], so a run
+ *     that dies before proving the disk durably clean releases waiters WITHHOLDING the fresh-install
+ *     presentation. A permissive default would make the race invisible and wrong exactly when it
+ *     matters.
+ *  4. **Cancellation cannot strand the claim.** [publish] is in a `finally`, so a claimant cancelled
+ *     after claiming and before publishing still releases every waiter. Without this the CAS stays
+ *     true with no other writer and every later consumer blocks forever.
+ *
+ * [scope] and [ioDispatcher] are injected precisely so a test can drive cancellation deterministically
+ * in virtual time. Production passes the process-scoped [AppContainer.scope] explicitly and does NOT
+ * pass [ioDispatcher] at all — it relies on the `Dispatchers.IO` default in the signature below.
+ * (Round-4 review, Kimi: this line previously said production "passes … `Dispatchers.IO`", which
+ * reads as an explicit argument and would send a reader looking for a call site that does not exist.)
+ */
+internal fun runBootReconcile(
+    scope: CoroutineScope,
+    claim: () -> Boolean,
+    sweep: () -> ResidueSweepResult,
+    publish: (hold: Boolean) -> Unit,
+    afterPublish: () -> Unit = {},
+    ioDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.IO,
+) {
+    if (!claim()) return
+    scope.launch {
+        // FAIL-CLOSED default: only a completed, proven-durable sweep may lower this.
+        var result = ResidueSweepResult.SWEPT_NOT_DURABLE
+        try {
+            withContext(ioDispatcher) {
+                // NOT `runCatching` — that swallows CancellationException too, turning a cancelled
+                // boot into a "successful" one. A cancellation must propagate to the `finally`, which
+                // publishes the fail-closed default; only a genuine fault degrades and continues.
+                result = try {
+                    sweep()
+                } catch (c: CancellationException) {
+                    throw c
+                } catch (t: Throwable) {
+                    ResidueSweepResult.SWEPT_NOT_DURABLE
+                }
+            }
+        } finally {
+            // On EVERY exit — normal, throw, or cancellation. Non-suspending, so it still runs while
+            // the coroutine is being cancelled.
+            publish(result == ResidueSweepResult.SWEPT_NOT_DURABLE)
+        }
+        // CONTAINED (round-3 review, Gemini). This runs AFTER the verdict is published, so it can
+        // never affect routing — but an uncaught throw here propagates out of the launch and, on
+        // Android, reaches the default handler and takes the process down. Production deliberately
+        // passes a BARE lambda (`startBootReconcile`, ~line 285) and relies on containment HERE: a
+        // local runCatching at the call site would protect only today's caller, so the guarantee
+        // belongs in the wrapper, where it covers every future one. A fault in post-publication
+        // hygiene must not be able to kill the app.
+        // (Follow-up review, Codex + Grok independently: this line said "Production's lambda wraps
+        // itself" — the SAME stale fact `bdde066` corrected in two other places and missed in this
+        // third one. See failures.md: enumerate every instance before committing a correction.)
+        withContext(ioDispatcher) { runCatching { afterPublish() } }
+    }
+}
+
+/**
+ * Derive a boot decision from disk in ONE place. All three consumers (the Splash decision, the
+ * post-boot re-derive, and the session collector) call this rather than each assembling the five
+ * `bootRoute` inputs themselves.
+ *
+ * Round-1 review (Gemini): the derivation — including the ~1 MiB `isLegacyImage()` decrypt and its
+ * skip conditions — was copy-pasted across all three call sites. Three copies of a safety derivation
+ * drift silently: change one and the others keep the old rule, with no test able to catch the
+ * divergence. One owner, one derivation. This is also why the legacy probe's cost and its
+ * "only when it can matter" guard live here rather than being restated three times.
+ *
+ * MUST be called off the main thread — `isLegacyImage()` reads and decrypts the outer layer.
+ */
+internal fun deriveBootDecision(
+    serverDeleteConfirmed: Boolean,
+    imagePresent: Boolean,
+    residueSweepHold: Boolean,
+    vaultProvenAbsent: Boolean,
+    isLegacyImage: () -> Boolean,
+): BootDecision {
+    // Computed only when it can matter: never over a confirmed delete (that state is owned elsewhere)
+    // and never with no image to inspect.
+    val legacy = if (imagePresent && !serverDeleteConfirmed) {
+        runCatching { isLegacyImage() }.getOrDefault(false)
+    } else {
+        false
+    }
+    return BootDecision(
+        present = imagePresent,
+        legacy = legacy,
+        route = bootRoute(
+            serverDeleteConfirmed = serverDeleteConfirmed,
+            vaultImagePresent = imagePresent,
+            residueSweepHold = residueSweepHold,
+            vaultProvenAbsent = vaultProvenAbsent,
+            legacyImage = legacy,
+        ),
+    )
+}
+
+/**
+ * Does a completed account destroy SUPERSEDE an earlier residue-sweep hold?
+ *
+ * The hold exists because a cold-start orphan sweep unlinked residue without being able to prove the
+ * unlink crash-durable. A destroy that completed proves image-bearing absence with its OWN required
+ * `dirSync`, and retires both delete markers only after that proof — so once it has completed, the
+ * earlier uncertainty is resolved by strictly stronger evidence. Leaving the hold raised would
+ * withhold onboarding over a directory this delete has just proven durably clean, for the rest of the
+ * process.
+ *
+ * Both conditions are required. [vaultProvenAbsent] alone is not enough — a fresh stat reports absence
+ * the instant a file is unlinked — and `!`[serverDeleteConfirmed] is what says the destroy actually
+ * reached its marker retire rather than throwing part-way.
+ *
+ * Extracted as a pure predicate so the decision is testable: it is the one behavioural change in an
+ * otherwise-documentation delta, and it sits in the account-delete surface.
+ */
+internal fun destroySupersedesResidueHold(
+    vaultProvenAbsent: Boolean,
+    serverDeleteConfirmed: Boolean,
+): Boolean = vaultProvenAbsent && !serverDeleteConfirmed
+
+/**
+ * The account-delete RETRY orchestration, extracted from the Compose lambda so the WIRING is
+ * testable (follow-up review, Codex: the sole behavioural change of the W-A follow-up had no direct
+ * test, and the truth-table tests over [bootRoute] cannot catch this CALL SITE reverting to the
+ * weaker `!hasVault() && !serverDeleteConfirmed()` predicate it used to carry).
+ *
+ * Four properties, and they are the whole contract:
+ *  1. [destroy] runs BEFORE [derive] — a decision taken over pre-destroy disk is meaningless.
+ *  2. The verdict is the DERIVED one. This function does not re-decide, does not consult
+ *     `hasVault()`, and does not assemble [bootRoute] inputs of its own. One authority.
+ *  3. ONLY [BootRoute.ONBOARDING] is success. Every other route — including LOCKED over a residue
+ *     sweep hold — leaves the caller on `Route.DeleteIncomplete` reporting failure.
+ *  4. NO hold supersede. The completion callback owns that; doing it here too would be a second
+ *     writer of the same state. See the call site for why the omission is accepted and tracked.
+ *
+ * [destroy] is expected to contain its own faults (the caller wraps it): a throw here propagates.
+ */
+internal suspend fun runDeleteRetry(
+    destroy: suspend () -> Unit,
+    derive: suspend () -> BootDecision,
+): Boolean {
+    destroy()
+    return derive().route == BootRoute.ONBOARDING
+}
+
+/** Where a composition must route out of Splash on a cold start — see [bootRoute]. */
+internal enum class BootRoute { DELETE_INCOMPLETE, LOCKED, ONBOARDING }
+
+/**
+ * One boot decision plus the disk facts it was taken from, so a caller applies a SINGLE consistent
+ * snapshot instead of re-reading disk after the decision.
+ */
+internal data class BootDecision(
+    val present: Boolean,
+    val legacy: Boolean,
+    val route: BootRoute,
+)
+
+/**
+ * The cold-start route decision, extracted as a PURE function so the fail-closed precedence is
+ * unit-testable without Compose.
+ *
+ * PRECEDENCE:
+ *  1. **A CONFIRMED server delete outbids everything** — `Route.DeleteIncomplete` owns that state.
+ *  2. **A LEGACY (v2) image goes to onboarding** — present but unusable, and its create() retires it.
+ *     Ordered AFTER the confirmed marker (a legacy image must never preempt finishing a confirmed
+ *     delete, whose create() would clear the marker authorising it) and BEFORE "a present image is a
+ *     lock screen" (a legacy image IS present, so it would otherwise fall through to a lock screen the
+ *     user can never pass).
+ *  3. **A present image is a lock screen.**
+ *  4. **A non-durable sweep withholds onboarding for the rest of this boot.** The residue is currently
+ *     unlinked, so [AppContainer.vaultProvenAbsent] says "clean" and would authorise a fresh install —
+ *     but a crash could replay the journal and bring it back. Absence that is not durable is not
+ *     absence.
+ *  5. **Onboarding requires PROVEN absence**, never merely "no `vault.bin`".
+ *  6. Anything else is a lock screen.
+ *
+ * No parameter carries a default: omitting an input must be a COMPILE ERROR, not a silently weaker
+ * call.
+ */
+internal fun bootRoute(
+    serverDeleteConfirmed: Boolean,
+    vaultImagePresent: Boolean,
+    residueSweepHold: Boolean,
+    vaultProvenAbsent: Boolean,
+    legacyImage: Boolean,
+): BootRoute = when {
+    serverDeleteConfirmed -> BootRoute.DELETE_INCOMPLETE
+    // `&& vaultImagePresent` is DEFENCE, not behaviour: [deriveBootDecision] computes `legacy` only
+    // when the image is present, so on every reachable input this conjunct is a no-op and every
+    // existing row of the table is unchanged. Without it, the rule "only a PROVEN absence may present
+    // a fresh install" lives in the derivation's probe guard and NOT in this router — a future caller
+    // passing `legacyImage = true` over an image it could not stat would onboard over unprovable
+    // material, because this arm outranks both the present arm and the proven-absence arm. The rule
+    // belongs where it cannot be bypassed. (Found by a test written to pin the invariant, which
+    // failed against this function: the router did not enforce what its caller was enforcing for it.)
+    legacyImage && vaultImagePresent -> BootRoute.ONBOARDING
+    vaultImagePresent -> BootRoute.LOCKED
+    residueSweepHold -> BootRoute.LOCKED
+    vaultProvenAbsent -> BootRoute.ONBOARDING
+    else -> BootRoute.LOCKED
+}
+
+/**
+ * Clear a cache directory, FAIL-CLOSED. `!exists()` conflates "confirmed absent" with "stat failed",
+ * and `listFiles()` returning null on an I/O or permission fault is exactly when plaintext is most
+ * likely still present — a directory we cannot read is a directory we cannot claim to have emptied.
+ */
+internal fun clearCacheDir(cacheDir: java.io.File?): Boolean {
+    if (cacheDir == null) return true
+    if (java.nio.file.Files.notExists(cacheDir.toPath())) return true
+    val entries = cacheDir.listFiles() ?: return false
+    entries.forEach { runCatching { it.deleteRecursively() } }
+    // Re-list to PROVE the clear rather than trusting deleteRecursively's bool (false on I/O error).
+    val remaining = cacheDir.listFiles() ?: return false
+    return remaining.isEmpty()
+}

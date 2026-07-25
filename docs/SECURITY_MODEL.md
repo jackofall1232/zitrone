@@ -905,6 +905,42 @@ The app treats it exactly like the printed sticker — it does not track, manage
 desktop the file write happens natively behind the OS save dialog; the WebView never supplies a
 filesystem path.
 
+## Cold-start residue sweep (0.9.2 Unit W-A)
+
+The vault directory can legitimately end up holding a `vault.dek`, a `vault.bin.tmp` or a
+`vault.dek.tmp` with **no `vault.bin`**. Two ordinary interruptions produce that state:
+
+- an interrupted **create** — the DEK is written and fsynced *before* the image (the DEK-first
+  durability barrier, which makes a `{bin present, dek absent}` brick unreachable), so a crash between
+  the two leaves a stray DEK and no image;
+- an interrupted **legacy-image retirement** — it unlinks the image and *then* the DEK, so a crash
+  between those unlinks leaves the same shape.
+
+Boot routing keys on `vault.bin` alone, so it read that state as "no vault" and presented ordinary
+first-run onboarding. That matters because `vault.bin.tmp` stages a **complete** outer image: the
+first-run screen could be shown while a recoverable encrypted vault was still on disk.
+
+**What now happens.** Before any routing decision reads disk state, a cold-start sweep deletes that
+orphaned residue, proves it gone by re-stat, and makes the deletion durable. It runs **only** when the
+image is *proven* absent (`Files.notExists`, so an unstattable image refuses) **and** no
+`vault.delete-confirmed` marker is present or indeterminate — so it can never touch a live vault's key
+or state that an in-flight account deletion owns. It is idempotent and silent.
+
+**Onboarding over an empty directory requires proven absence.** Where the first-run screen is shown
+because the device appears to have no vault, it now requires the whole directory to be provably clean —
+not merely "no `vault.bin`". (Re-onboarding a prior-format image is the one first-run presentation that
+does not rest on that test: there the image is present and is retired by the create.) If a sweep
+unlinked residue but could not confirm the deletion durable, the lock screen is held for the rest of
+that boot instead of claiming a clean device — absence that is not durable is not absence. A sweep that
+simply refuses (a live image, a pending deletion, an unstattable path) changes nothing and reports
+nothing; the routing outcome then follows from the other disk facts.
+
+**Honest limits.** The sweep is cryptographic hygiene, not media sanitization: unlinking does not erase
+data from wear-levelled flash, and the guarantee remains that the DEK is destroyed so surviving blocks
+are ciphertext. The routing decision itself is exhaustively unit-tested; its *delivery to the screen*
+(the Compose wiring, and behaviour across an Activity recreation) is verified by inspection, because
+this project has no Compose UI test infrastructure — tracked as follow-up work.
+
 ## Audit history
 
 See [AUDIT.md](../AUDIT.md). No third-party audits have been completed yet — treat the

@@ -87,6 +87,30 @@ credential in reserved slot 0** (replaces rejected "N wrong passwords wipes"); *
       failures.md: the round-3 Activity-scoped single-flight was reverted). Also fold in the disable-∥-enable
       race (disable/account-delete not synchronized with enable's seal/save). Own spec + invariant table +
       paired-blind loop. Pre-existing (predates 0.9.2); not release-blocking.
+- [ ] **FOLLOW-UP (new, from the Unit W-A follow-up review — Codex LOW): no in-app exit from a
+      PERSISTENT delete fault.** After W-A, `onRetryDestroy` routes to ONBOARDING only when
+      `vaultProvenAbsent` (`Files.notExists` over all four image-bearing files). Destroy is idempotent,
+      so retry is SAFE and a TRANSIENT fault clears — but a PERSISTENT unlink or stat fault (corrupt
+      or pathological filesystem; the new test's own non-empty `vault.dek` DIRECTORY is the shape)
+      keeps every retry on `Route.DeleteIncomplete`, and the app offers no other exit. **Not a routing
+      defect and must NOT be "fixed" by weakening the proven-absence criterion** — fail-closed is
+      correct and strictly safer than the pre-W-A onboarding it replaces. It is a PRODUCT/SUPPORT
+      question: what does a user do when the fault never clears (documented app-data reset? an
+      explicit last-resort action, with the deniability implications worked through? support
+      guidance?). Deliberately out of scope for the W-A delta — solving it there would be scope creep
+      into the release cut. Not release-blocking.
+- [ ] **FOLLOW-UP (new, from the Unit W-A follow-up review — Grok INFO): stale-hold strand on the
+      delete-retry path; FOLD INTO the 0.9.3 derivation work.** `onRetryDestroy` deliberately does not
+      supersede `residueSweepHold` (the delete-completion callback does). The omission was justified
+      with "a held boot admits no session — so hold and this path cannot coexist"; that is FALSE, and
+      the comment is now corrected in place. A hold raised while an image is PRESENT routes to LOCKED
+      via the image arm, and a lock screen admits an unlock → session → in-session delete → a failed
+      first destroy → `DeleteIncomplete` with the hold still up. Then a SUCCESSFUL retry over a clean
+      disk is reported as FAILURE for the rest of the process. Reachable only via the fail-closed
+      default (cancelled boot, or a throw escaping `sweepOrphanedResidue` before gate 1) — remote,
+      since the sweep's own gates return `NO_MUTATION` over a present image — and restart-recoverable.
+      The fix is the 0.9.3 fold of the hold into the derivation for every consumer at once, NOT two
+      more bare `imageLock` calls on the Main dispatcher at this one site. Not release-blocking.
 - [ ] **PR-3 Unit 2 (docs) — SEPARATE PR, must land AFTER Unit 1 merges.** VAULT_ARCHITECTURE §3.3/§3.4
       wizard→silent triple-entry; SECURITY_MODEL flip to "two vaults creatable" + disclosures (triple-entry/
       systematic-entry limit, ~33% blind-overwrite, biometric A-only, burn permanence deferred to burn PR
@@ -203,3 +227,45 @@ User intent recorded 2026-07-24: "at some point we need to cut 0.9.1 apk and fli
 ## Done recently (see ledger for detail)
 - 0.8.1-beta released (PR #8 + #9 merged @ `c78a606`, GH release live, website flipped PR #10).
 - 0.9.x vault track P1a/P1b-1/PR-A/B/C/D1/D2a/D2b then D2c all merged to `3c598ad`.
+
+## W-A FOLLOW-UP DELTA — ✅ LANDED as `bdde066`, follow-up round adjudicated (Codex + Grok, both READY TO MERGE)
+Held out of the convergence commit `acb5904` deliberately: adding them would have made the converged
+commit a new delta needing its own round. "It's only tests" is NOT a safety argument in this unit —
+three test-only edits here silently destroyed coverage (dropped `@Test`, deleted row 7, defanged the
+retry test). Batched into ONE delta and given ONE paired-blind round; the round's confirmed items are
+in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
+
+- [x] Apply `/root/l00prite/unit-wa-r4-info-tests.patch` — 4 tests closing the two uncovered
+      post-mutation branches (Kimi: post-unlink re-stat; Gemini: `catch (Throwable)`) + the two
+      afterPublish cancellation characterisation tests. Verified: applies cleanly to `acb5904`,
+      suite 487 → 491, 0 failures, 3 of 4 mutation-verified (the 4th is labelled as catching none).
+      Both follow-up lenses re-ran both mutations independently: each fails as claimed.
+- [x] `BootReconcileOwnerTest.kt:314` — stale docstring claiming production wraps `afterPublish` in a
+      local `runCatching`; `acb5904` removed that (the wrapper contains now). Raised independently by
+      Grok (INFO-1) and Kimi (LOW) — the only finding two lenses converged on. **The fix corrected 2
+      of the 3 instances of this fact; the third (`ZitroneApp.kt:1172`) was caught by BOTH follow-up
+      lenses and is fixed in the follow-up commit — see the binding close-out rule in failures.md.**
+- [x] `MainActivity.kt` ~697-704 `onRetryDestroy` — was still `!hasVault() && !serverDeleteConfirmed()`,
+      the weaker sibling of the predicate `acb5904` unified everywhere else; now routes through
+      `deriveBootDecisionFromDisk()`. **Kimi's safety derivation ("reachable only via
+      `Route.DeleteIncomplete`, which requires the confirmed marker; a held boot admits no session")
+      is REFUTED on its second clause** — follow-up Grok, adjudicated against source: a hold raised
+      while an image is PRESENT routes to LOCKED via the image arm, and a lock screen admits an
+      unlock, hence a session. Remote and restart-recoverable; tracked above with the 0.9.3 fold.
+- [x] `MainActivity.kt` ~1129-1130 — comment overstates: destroy's survival verify is `exists()`-based
+      (proven-present only), so the required `dirSync` is the real second barrier, not the verify.
+- [x] `runBootReconcile` kdoc — said "production passes `Dispatchers.IO`"; production relies on the
+      parameter default.
+- [ ] **SAME CLASS, TRACKED, NEXT** (reclassified 2026-07-25 — was "not a W-A regression, therefore
+      out of scope", which was true on provenance and wrong on framing):
+      `VaultImageStore.serverDeleteConfirmed()` uses `File.exists()`, not the `Files.notExists`
+      tristate discipline — an indeterminate marker stat reads "not confirmed" and fails **OPEN**
+      with respect to delete ownership (PR #60 gate, Codex, item E: it can admit legacy onboarding).
+      Pre-existing on main and uniform across routing inputs, so not a defect this unit introduced —
+      **but W-A exists to close a CLASS, and fixing the retry call site while leaving the identical
+      fail-open in the marker read closes an instance, not the class.** The honest changelog line is
+      "closes the fail-open at the retry-destroy call site", NOT "closes the fail-open class".
+      Does not block #60. The type and the rule now exist (`Residence`, and "only ProvenAbsent may
+      route to ONBOARDING"), so migrating this call site — and `hasVault()`'s other consumers — is
+      MECHANICAL rather than a second act of judgment. Do it next, as its own scoped unit with its
+      own round; do NOT fold it into a release cut.

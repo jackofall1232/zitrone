@@ -115,6 +115,92 @@ self-heals. **Don't over-claim "self-healing" — trace the exact failure result
 vs INVALIDATED) and which of them actually clears the wrap.** The reviewer with the less convenient
 fact was right both times; source, not severity or self-interest, decides.
 
+### PROCESS FIX (BINDING) — run the mutation BEFORE writing the header, not after (0.9.2 Unit W-A, round 4)
+**The rule: a `MUTATION UNIQUELY CAUGHT:` line may not be WRITTEN until the named mutation has been
+applied to production, the test run, and the failure observed. It is a precondition of writing the
+claim, not a verification performed afterwards.** If the mutation survives, the header must say the
+test catches nothing and is characterisation — or the test must be strengthened until it does.
+
+Why this is mechanical and not a reminder: I wrote a header claiming a cancellation test uniquely
+caught hoisting `runCatching` outside `withContext`. I ran the mutation. The test stayed green —
+cancellation is Job state, so once the parent is cancelled the child is cancelled regardless of what
+any enclosing `runCatching` swallows, and no assertion on `isCancelled` can separate the two forms.
+
+**Knowledge did not prevent this.** I knew the pattern, it was recorded here, and Moonshot had caught
+the identical shape three rounds earlier in *the same file* (`BootReconcileOwnerTest.kt:88-97`, whose
+header still carries its own correction). I produced it anyway, in the round that closed the unit.
+What caught it was running the mutation and observing green — a mechanism, not care. So the remedy is
+the same shape as every structural fix that worked in this unit (remove the default param so omission
+is a compile error; move the dispatcher inside the function; contain the fault in the wrapper): **make
+the wrong thing impossible rather than remembered.** An unrun mutation claim is an unverified claim,
+and a false coverage claim is worse than no claim — it retires scrutiny from a path nothing guards.
+
+### PROCESS FIX (BINDING) — verify CI by head SHA, and never write to the branch after verifying
+**The rule, both halves — the second is not optional:**
+1. **Poll CI by head SHA, never by PR number alone.** `gh pr checks <n>` answers "are there results?"
+   The question you actually need answered is "are there results **for THIS commit**?" Use
+   `gh run list --commit <sha>`.
+2. **Do not commit or push to a branch between verifying CI and acting on that verification.** A
+   write after verification makes the verification **stale by construction** — the run you cited no
+   longer covers the head you are merging.
+
+**Why it is mechanical and not a reminder — I recorded half of it and then reproduced the failure
+within minutes.** After force-pushing the W-A rebase, my poller reported "settled" while reading the
+**pre-rebase** run, still attached because the new run had not been created yet. I caught it, wrote
+the by-SHA rule, re-verified correctly, reported green — and then immediately committed a ledger
+update to the same branch, moving the head off the SHA I had just certified. Knowing rule 1 did not
+produce rule 2; only doing the thing and watching it break did.
+
+**LINEAGE — this is NOT a new shape.** It is the same producer/consumer family that generated most of
+Unit W: *an authoritative result exists, and a consumer uses something weaker.* Here the authoritative
+signal is "CI result for commit X" and the consumer accepted "CI results exist on this PR" — form (a),
+the weaker proxy, exactly as boot routing consumed proxies for verdicts it did not own. The second
+half is form (b), the lifecycle one: **the verification and the artifact it certifies must share a
+head**, the same shape as "claim and work must share a lifetime" from `runBootReconcile`. Recognizing
+it as the same family matters more than the individual rule — when this family appears, look for the
+stronger signal that already exists and the consumer that settled for less.
+
+### PROCESS FIX (BINDING) — correcting a stated fact means finding EVERY instance of it, and enumerating the hits
+**The rule:** a correction is not done when the line you were pointed at is fixed. Before committing,
+`grep -rn` the whole file AND the whole delta for every OTHER place that states the same fact, and
+**enumerate the hits in the commit message** — "N instances found, N corrected". Two of three is the
+failure mode. Applies to PROSE, not just code: sibling-call-site hunting is already binding for code
+(item A0 in every review prompt), and this is the same hunt one layer up.
+
+**Why it is mechanical and not care — the delta whose stated purpose was closing the sibling pattern
+reproduced the sibling pattern INSIDE itself.** `bdde066` corrected three stale claims. One of them —
+"production wraps `afterPublish` in a local `runCatching`" — was stated in THREE places, not one: the
+production call site at `ZitroneApp.kt:287` (correct, and stated in the negative), the
+`BootReconcileOwnerTest` header (stale, fixed), and the implementation comment at
+`ZitroneApp.kt:1172` (stale, MISSED) — four lines above the wrapper that actually supplies the
+containment and one screen from the call site that says the opposite. Both follow-up lenses raised
+it independently. Had the grep been run, the third hit was one command away.
+
+**AND THE FIRST WRITING OF THIS RULE GOT ITS OWN ENUMERATION WRONG** (follow-up round, Codex; Grok
+checked the count and passed it). It listed the third instance as the `runBootReconcile` kdoc. That
+kdoc was corrected in the same commit, but for a DIFFERENT fact — "production passes
+`Dispatchers.IO`" — and it never carried the containment claim at all. `git show bdde066 --
+ZitroneApp.kt` is a single hunk touching only the dispatcher sentence; source settles it. The count
+of three was right by accident, over the wrong set. **So the rule needs its second half: enumerate by
+GREPPING FOR THE FACT, then verify each hit actually asserts that fact — a correction landing in the
+same commit is not evidence it is the same claim.** Adjacent-and-also-fixed is the trap.
+
+**LINEAGE — same shape as the mutation-header incident above: knowing the pattern did not prevent
+producing it.** Both times the person writing the correction had just articulated the rule. That is
+the signal a rule is not enough — the remedy has to be a step in the close-out (`grep`, count, state
+the count), not an intention to be careful.
+
+### GOOD HANDLING — demonstrate why a concern is latent; never assert a property the test cannot prove
+Grok's round-4 INFO-3 said `runCatching { afterPublish() }` swallows `CancellationException` while the
+sweep path deliberately rethrows. Rather than "fix" the asymmetry or wave the label away, the test
+was written to answer whether it was live: `afterPublish` is `() -> Unit`, not `suspend`, so it has no
+suspension point at which a real cancellation could ever reach it — the only CE it can raise is one it
+constructs itself; and the `runCatching` sits INSIDE `withContext`, which rechecks its job on exit, so
+a genuine cancellation still propagates. Latent, not live, and the reasoning is executable and will
+fail loudly if `afterPublish` ever becomes suspending. **Characterisation, honestly labelled, beats a
+false coverage claim.** Pairs with the rule above: the same test carries `MUTATION UNIQUELY CAUGHT:
+NONE` because the mutation was run and survived.
+
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
   round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked
