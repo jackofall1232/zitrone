@@ -13,6 +13,14 @@ Hard rules, user preferences, security boundaries, and architecture constraints 
 - Fixes to security-sensitive code get an **independent** review before merge (never a
   self-re-read). Hardest surfaces get two blind reviewers.
 - Deliver-then-claim: report real command/exit-code evidence; never claim an unrun/failed check.
+- **ENUMERATION IS A PRECONDITION OF COMMITTING A CLASS-FIX, not a discipline to remember.** Before
+  committing a fix framed as covering a class, list EVERY call site / member of that class in the
+  COMMIT MESSAGE and mark each `APPLIED` or `DELIBERATELY SKIPPED` with its reason. Binding as of
+  2026-07-25 after the FIFTH instance of stating this rule and violating it in the same commit — the
+  last one gated the cache clear and left the diagnostics clear ungated, four lines apart, in the
+  commit whose message declared class-fixes the default posture. Every one of the five was caught
+  mechanically by a reviewer, never by the intent that wrote the rule; an unwritten enumeration is
+  therefore evidence of nothing, and the written list is the only artifact that has ever worked.
 
 ## User Preferences
 - Use review agents (Codex/Grok on this box) **in moderation** — weekly credit limits. Cap any

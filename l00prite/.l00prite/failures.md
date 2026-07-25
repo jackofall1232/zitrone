@@ -211,12 +211,13 @@ doc records something as impossible, the cost of re-checking is one derivation a
 a capability the project already paid for and then forgot it had. Do NOT treat the residuals section
 of a design doc as settled just because the defects section has been reviewed.
 
-### THE NON-DISCRIMINATING ASSERTION — satisfied by BOTH the correct and the broken behaviour (3 occurrences)
+### THE NON-DISCRIMINATING ASSERTION — satisfied by BOTH the correct and the broken behaviour (5 occurrences)
 Distinct from a vacuous test (asserts nothing) and from a stand-in test (asserts against a copy of the
 logic). This one asserts something REAL about something REAL — it just cannot tell the two apart, so
 it passes against the very defect it exists to catch.
 
-**Three occurrences in one unit:**
+**Five occurrences in one unit** — and note where the last two were found: inside the FIX for this
+class, and inside the gate written to enforce it. Naming a class does not close it.
 1. `assertFalse(store.reconcileOrphanedBurnMarkers())` on a non-durable reconcile. `false` was exactly
    what the BROKEN code returned — the Boolean conflated "did not fire" with "mutated, not durable".
    The assertion passed against the bug. Now asserts `MUTATED_NOT_DURABLE` specifically.
@@ -226,9 +227,29 @@ it passes against the very defect it exists to catch.
 3. `bootRoute` composed routing: "held + provably clean → LOCKED" alone would pass if ONBOARDING were
    unreachable for any unrelated reason. Needed its second half — the same disk WITHOUT the doubt →
    ONBOARDING — to prove the hold was the discriminator.
+4. **The gate's own positive comparison** (round 2, both lenses, found INSIDE the commit that fixed
+   occurrence 2). `assertEquals(fresh.prefs, burned.prefs)` is a real assertion over real state — and
+   it was satisfied by a burn that wipes preferences AND by one that does not, because the scenario
+   provisioned via `imageStore.create()` and never created preference residue at all. Same for
+   databases, caches and diagnostics. **The assertion was strong and the SCENARIO was empty**, which
+   is the form this class takes at the harness level: content hashing fixed how faithfully the gate
+   compared, and changed nothing about whether there was anything to compare. Fixed by provisioning
+   through the production create/publish path and asserting each seeded artifact PRESENT by name
+   before the burn.
+5. `burn_requires_the_biometric_wipe_to_succeed` — "no biometric alias remains" asserted after a
+   scenario that never enabled biometrics. No alias existed, so the assertion held for a burn that
+   consumes `wipeBiometricMaterial()`'s boolean, for one that ignores it, and for a wipe that is a
+   successful no-op. **The test named the defect in its own title and could not discriminate against
+   it.** Fixed by planting a real alias with production's prefix and asserting it present first.
 
 **THE DETECTION RULE, mechanical: for every assertion, ask what WRONG implementation would also
 satisfy it. If the answer includes the one this test exists to catch, the assertion is too weak.**
+Occurrences 4 and 5 add the SCENARIO-level form of the same question, which the assertion-level one
+misses entirely: **ask what the test actually CREATED before it compared.** An assertion cannot
+discriminate over state the scenario never produced, so a strong assertion over an empty scenario
+reads in review exactly like proof. For any gate, list the domains it claims and name the artifact it
+seeded in each; a domain with no named seed is not being tested, however rigorous the comparison
+looks.
 Applies especially to `assertFalse`/`assertNotEquals`/`!= null`: a negative assertion is satisfied by
 enormous numbers of wrong states, so it must name WHICH wrong state it rejects, or pair with a
 positive assertion that fails when the discriminator is removed.
