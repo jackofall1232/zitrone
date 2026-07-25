@@ -179,6 +179,15 @@ credential in reserved slot 0** (replaces rejected "N wrong passwords wipes"); *
       **PROCESS:** Rule of 6, HARD CAP, no self-reset, third lens blind at the cap, stop for the
       maintainer regardless of outcome. Single whole-repo PR lens while Codex credits are out (see
       the open-gap entry above) — front-loaded review matters MORE, not less.
+- [ ] **FOLLOW-UP (W-B, demonstrated defect class): sweep for "exists only if the feature was used"
+      artifacts BEYOND the burn window.** The byte-for-byte gate proves POST-BURN
+      indistinguishability, not indistinguishability from never-used at ALL TIMES. An artifact created
+      lazily and then correctly wiped passes the gate while still being an oracle **between creation
+      and burn** — a device seized in that window discloses the feature was used. Not a hypothesis:
+      the gate's first execution found the vault device-key Keystore alias surviving every burn.
+      Enumerate deliberately rather than trusting the diff (the diff only catches what a burn LEAVES
+      BEHIND): files, prefs KEYS, database tables, WorkManager job names, notification channels, cache
+      dirs. Disclosed in SECURITY_MODEL.md as a stated limit in the meantime.
 - [ ] **PUCKER BURN sibling PRs (0.9.2):** (a) burn SETUP UX — settings "Pucker Burn Password Setup"
       above "Delete Account", disappears once set, actively-acked permanence warning (3 points); (b) burn
       WIPE execution. Scope/sequencing TBD. PR-1 only makes the store burn-AWARE, not setup/wipe.

@@ -14,6 +14,17 @@
 # behind. If this job is ever considered for removal on cost grounds, the thing being removed is
 # Keystore-residue coverage, not "a slow job".
 #
+# ─── KNOWN-BENIGN NOISE IN THE LOG, INCLUDING ON GREEN RUNS ──────────────────────────────────────
+# These lines appear during emulator boot in PASSING runs and mean nothing about the product:
+#   The process '/usr/local/lib/android/sdk/platform-tools/adb' failed with exit code 1
+#   [EmulatorConsole]: Failed to start Emulator console for 5554
+#   WARNING | Failed to process .ini file .../emu-update-last-check.ini
+# They are the action's boot-wait retry loop. Observed in both the RED first run and the GREEN run
+# that followed it. Recorded here because a benign line that appears in passing runs is exactly what
+# gets grabbed as the cause when a real failure happens — misdiagnosing a genuine burn-residue
+# failure as "emulator flake" is the specific mistake this note exists to prevent. The signal is the
+# test result, never the boot chatter.
+#
 # ─── WHY THERE IS NO TEST RETRY, AND WHY ADDING ONE WOULD BE WRONG ───────────────────────────────
 # The emulator BOOT may be retried — that is infrastructure, and a failed boot proves nothing about
 # the product. The instrumented TEST is never retried. A retried burn-residue test converts a REAL

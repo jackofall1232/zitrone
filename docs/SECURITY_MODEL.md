@@ -567,6 +567,43 @@ stub). Those, plus the full dual-slot destruction design, remain a **locked desi
 [`docs/VAULT_ARCHITECTURE.md`](VAULT_ARCHITECTURE.md) §3.4, landing as their own adversarially-
 reviewed PRs. **Do not describe per-vault destruction or a working Pucker Burn as shipped.**
 
+### Pucker Burn — what the byte-for-byte gate proves, and what it does NOT (0.9.2 Unit W-B)
+
+The duress wipe's guarantee is **post-burn indistinguishability**: after a completed burn, app-local
+state matches a fresh install. That is now mechanically gated in CI on every Android change — files,
+`shared_prefs`, databases and **Android Keystore aliases** compared against a fresh baseline, plus the
+derived boot verdict (a fresh install has no durability hold raised, so a state matching on every byte
+but differing in what the app will DO with it is not fresh-install-equivalent). The gate carries a
+negative test that deliberately orphans an artifact and asserts the comparison catches it, so a green
+run means the comparison is live rather than empty.
+
+**THE LIMIT, STATED PLAINLY: the gate proves post-burn indistinguishability, NOT that the app is
+indistinguishable from never-used at ALL TIMES.** These are different claims and only the first is
+gated. An artifact created lazily on first use and then correctly wiped by a burn passes the gate
+while still being an oracle **at every moment between its creation and the burn** — a device seized in
+that window discloses that the feature was used. The signature to watch for is *"exists only if the
+feature was used"*, and it is a demonstrated defect class, not a hypothesis: the gate's first
+execution found the vault device-key Keystore alias surviving every burn, created lazily on first
+vault creation and absent on a device that never made one. It is fixed; the class is not closed by
+that fix.
+
+Artifacts audited for that signature: Keystore aliases (three families — the device key and biometric
+wraps are lazily created and wiped by burn; `_androidx_security_master_key_` is created at app startup
+and present on a fresh install, so it is not an oracle and is deliberately left alone), vault files
+and interrupted-write temps, delete markers, `shared_prefs`, and databases.
+
+**Explicitly NOT verified, and outside app control** — the app cannot claim fresh-install
+indistinguishability for these, and they are excluded from the gate with reasons recorded in the test
+itself: package install/update time, UsageStats and battery attribution, system-journaled notification
+history, MediaStore exports (user-initiated, leave the sandbox by design), and NAND-level residue —
+the guarantee is cryptographic erasure, not physical sanitisation.
+
+**One further disclosed artifact (0.9.2 W-A/W-B interaction).** If a cold-start reconciliation cannot
+prove its own durability, boot routing withholds the fresh-install presentation and shows a lock
+screen. Where that happens with no image on disk, the lock screen **cannot be passed** — every
+passphrase attempt fails before any slot is interpreted. It is fail-closed and clears on the next
+start, but it has no in-app exit and is documented rather than hidden.
+
 Two invariants from that architecture are restated here because they are permanent
 security properties, not implementation details:
 
