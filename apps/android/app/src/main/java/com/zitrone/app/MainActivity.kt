@@ -84,6 +84,7 @@ import com.zitrone.app.ui.theme.TextPrimary
 import com.zitrone.app.ui.theme.TextSecondary
 import com.zitrone.app.ui.theme.ZitroneTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.StateFlow
@@ -897,9 +898,49 @@ private fun ZitroneRoot(
     // Pucker Burn PR and slot 0 is unarmed until burn-setup ships, so Burn is currently UNREACHABLE — and
     // until the wipe lands, a burn match is surfaced exactly like a wrong passphrase (uniform failure), a
     // deniable no-op. When the burn-wipe PR lands, this becomes the wipe trigger.
+    /**
+     * THE DURESS WIPE (0.9.2 Unit W-B) — replaces the inert stub that showed a uniform failure and
+     * destroyed nothing.
+     *
+     * WIRING INVARIANT (pin it, do not weaken): this is the ONLY consumer of
+     * [PassphraseOutcome.Burn] that wipes. `attemptUnlockOrAdd` has a single caller and returns
+     * `Burn` only on a real slot-0 match — a create-collision returns `Rejected`, never `Burn` — so a
+     * second-vault create can never trigger a wipe. Any future consumer of `Burn` must treat it as
+     * "reject candidate".
+     *
+     * TERMINAL EXCLUSION BEFORE THE FIRST DESTRUCTIVE MUTATION: `beginTerminalWipe()` fences the
+     * auto-lock timer and shuts the unlock gate, so no successor session can be built over stores
+     * that are being torn out from under it, and no background timer races the wipe.
+     *
+     * NonCancellable: a duress wipe that a rotation could interrupt is a duress wipe that a coercer
+     * can interrupt. Once the first unlink is attempted this runs to completion or to a recorded
+     * failure — never to a silent abandonment.
+     *
+     * PRESENTATION IS DELIBERATELY UNIFORM ON FAILURE. Success routes to ordinary onboarding (P2:
+     * VISIBLE RESET, no special screen — the fresh-install presentation IS the outcome). Failure
+     * shows the SAME uniform failure a wrong passphrase shows: an observer who watches the screen
+     * must not learn that a burn was attempted, let alone that it failed. The durability hold raised
+     * inside [AppContainer.burnVault] is what keeps that safe — a failed burn leaves the doubt
+     * recorded, so the next boot cannot present a fresh install over an unproven wipe.
+     */
     val onBurn: () -> Unit = {
-        lockError = VaultUnlockRouter.UNIFORM_FAILURE
-        unlocking = false
+        container.unlockController.beginTerminalWipe()
+        container.scope.launch {
+            val wiped = withContext(NonCancellable + Dispatchers.IO) {
+                runCatching { container.burnVault() }.isSuccess
+            }
+            withContext(Dispatchers.Main.immediate) {
+                container.unlockController.endTerminalWipe()
+                unlocking = false
+                if (wiped) {
+                    vaultExists = false
+                    route = Route.Onboarding
+                } else {
+                    // Indistinguishable from a wrong passphrase. See the presentation note above.
+                    lockError = VaultUnlockRouter.UNIFORM_FAILURE
+                }
+            }
+        }
     }
 
     val onUnlockPassphrase: (String) -> Unit = onUnlockPassphrase@{ pass ->

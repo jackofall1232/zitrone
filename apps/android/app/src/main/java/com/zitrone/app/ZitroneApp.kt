@@ -361,7 +361,14 @@ class AppContainer(private val app: Application) {
      */
     fun burnVault() = runBurnWipe(
         raiseHold = { raiseDurabilityHold() },
-        obliterate = { imageStore.burnObliterate() },
+        obliterate = {
+            imageStore.burnObliterate()
+            // Keystore/prefs teardown is INSIDE the guarded region, not after it: an orphaned alias
+            // is a surviving artifact, and a wipe with a surviving artifact is not a wipe. It runs
+            // AFTER the image so a failure here cannot strand a recoverable vault — the image is
+            // already proven gone by the time this can fail.
+            if (!wipeBiometricMaterial()) throw VaultImageException.DestroyFailed()
+        },
         lowerHold = { durabilityHold.value = false },
     )
 
@@ -842,14 +849,38 @@ class AppContainer(private val app: Application) {
     fun destroyVaultForAccountDeletion() {
         // Under the same lock as enable-commit, so a racing in-flight enable cannot re-persist a wrap
         // after this cleanup (it would abort on the keyExists check once these aliases are gone).
-        tolerateCleanup {
-            synchronized(biometricWriteLock) {
-                biometricStore.clear()
-                biometricCipher.deleteAllAliasesExcept(null)
-            }
-        }
+        wipeBiometricMaterial()
         // NOT tolerated: a DestroyFailed (a surviving file) MUST reach the caller as a NOT-deleted signal.
         imageStore.destroy()
+    }
+
+    /**
+     * Remove every biometric wrap and Keystore alias — shared by the account-delete path and the
+     * duress burn (0.9.2 Unit W-B), so the two can never drift into clearing different sets.
+     *
+     * Under [biometricWriteLock], the same lock as enable-commit, so a racing in-flight enable cannot
+     * re-persist a wrap after this runs (it aborts on its `keyExists` check once the aliases are
+     * gone).
+     *
+     * Returns true iff the cleanup completed. **The burn path CONSUMES that boolean** — an orphaned
+     * Keystore alias is "something was here" residue, and post-burn ≡ fresh install is this feature's
+     * purpose. The account-delete path keeps the historical best-effort semantics: there the
+     * load-bearing step is the image destroy, and a Keystore already unhealthy must not strand it.
+     */
+    internal fun wipeBiometricMaterial(): Boolean {
+        var ok = true
+        tolerateCleanup {
+            try {
+                synchronized(biometricWriteLock) {
+                    biometricStore.clear()
+                    biometricCipher.deleteAllAliasesExcept(null)
+                }
+            } catch (t: Throwable) {
+                ok = false
+                throw t
+            }
+        }
+        return ok
     }
 
     /**
