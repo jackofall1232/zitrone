@@ -113,7 +113,39 @@ class BurnByteForByteGateTest {
         else root.walkTopDown().filter { it.isFile }
             .associate { it.relativeTo(root).path to runCatching { digest(it) }.getOrDefault("<unreadable>") }
 
+    /**
+     * FLUSH BARRIER — found by this gate's own negative control, on its first execution.
+     *
+     * Production writes preferences with `apply()` ([SettingsRepository.put],
+     * [BiometricUnlockStore]), which updates memory immediately and schedules the disk write on a
+     * background thread. A snapshot taken straight after a seeded write therefore read the PREVIOUS
+     * bytes, and the comparison reported "no difference" over residue that genuinely existed. The
+     * first run failed on exactly that: the per-domain control for "a KEY inside the store a fresh
+     * install also has" planted `onboarding_done` and saw nothing change.
+     *
+     * **That failure is the control doing its job, and it is worth being precise about what it did
+     * and did not find.** The defect is in the GATE, not the burn: the burn's own writes use
+     * `commit()`, and a `commit()` is ordered FIFO behind any in-flight `apply()` on the same store,
+     * so the cleared map is what reaches disk last — and each lazy store is cleared-and-committed
+     * before it is unlinked, so a queued write cannot resurrect a file after the burn proved it
+     * absent. What the control caught is a gate that compared a racing disk, which is the kind of
+     * gate that reports green over residue.
+     *
+     * An empty `commit()` is the barrier: it awaits its own write, and any earlier `apply()` to that
+     * store is queued ahead of it. Only stores whose file ALREADY exists are opened — opening one
+     * that a fresh install lacks would create it, and after a burn these three must stay absent.
+     */
+    private fun flushPendingPrefsWrites() {
+        val prefsDir = File(ctx.filesDir.parentFile!!, "shared_prefs")
+        ALL_PREFS_STORES.forEach { name ->
+            if (File(prefsDir, "$name.xml").exists()) {
+                runCatching { container.keyStoreManager.prefs(name).edit().commit() }
+            }
+        }
+    }
+
     private fun snapshot(): StateSnapshot {
+        flushPendingPrefsWrites()
         val dataDir = ctx.filesDir.parentFile!!
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         return StateSnapshot(
@@ -472,6 +504,14 @@ class BurnByteForByteGateTest {
             "zitrone_signal_store.xml",
             "zitrone_auth.xml",
             "zitrone_contacts.xml",
+        )
+
+        /** Every store [KeyStoreManager] can open — the flush barrier must cover all of them. */
+        val ALL_PREFS_STORES = listOf(
+            KeyStoreManager.PREFS_SETTINGS,
+            KeyStoreManager.PREFS_SIGNAL_STORE,
+            KeyStoreManager.PREFS_AUTH,
+            KeyStoreManager.PREFS_CONTACTS,
         )
     }
 }
