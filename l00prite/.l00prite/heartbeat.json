@@ -45,6 +45,6 @@
       "stop_signal"
     ]
   },
-  "active_unit": "0.9.2-beta RELEASE CUT in progress (vaults-only scope). Unit S (burn arming) PARKED for 0.9.3.",
-  "loop": "Version bumped vc17->vc18 / 0.9.1-beta->0.9.2-beta. Signed APK built and cert-verified against 6c7f92a7...892753. NEXT (both need explicit go-ahead, both outward-facing): GitHub release publish, then website flip."
+  "active_unit": "0.9.3 Unit S \u2014 Pucker Burn ARMING (feat/0.9.3-unit-s-burn-arming). DoD = the burn works end-to-end.",
+  "loop": "Unit S build loop STARTED, autonomous. Rule of 6, no HIL except: a decision is needed, or converged/ready-to-merge. Invariant table written and source-verified."
 }

@@ -194,6 +194,38 @@ enum class ResidueSweepResult {
  * unlock / burn-detect / maybe-create passphrase operation (0.9.2). SLOT-AGNOSTIC:
  * the CALLER learns only which of the four happened, never which slot or how many exist.
  */
+/**
+ * The outcome of arming (or re-arming) the Pucker Burn credential in slot 0 — 0.9.3 Unit S.
+ *
+ * There is deliberately NO "is it armed?" query anywhere in this API. An armed install and an
+ * unarmed one are byte-indistinguishable by design (spec P1): slot 0 holds a fixed-size
+ * `{salt, wrapped-key}` region that is uniformly random either way, so "armed" is not a readable
+ * property — it is only ever demonstrated by entering the credential. A readback would be the
+ * discoverable artifact this whole feature exists to avoid.
+ */
+sealed interface ArmBurn {
+    /** Slot 0 now opens under the supplied passphrase, and that write is durable. */
+    data object Armed : ArmBurn
+
+    /**
+     * REFUSED: the candidate also opens an occupied VAULT-pool slot (1..SLOT_COUNT-1).
+     *
+     * This is a CORRECTNESS refusal, not a usability nicety. `tryPassphrase` records the FIRST match
+     * by ASCENDING slot index and slot 0 is index 0, so slot 0 outranks every vault slot — arming a
+     * colliding credential would mean the next ordinary unlock of that vault WIPES THE DEVICE instead
+     * of opening it. Surfacing it is safe here because setup runs inside an already-unlocked session,
+     * so "pick a different passphrase" is not a lock-screen oracle.
+     */
+    data object CollidesWithVault : ArmBurn
+
+    /**
+     * REFUSED: an account deletion is in flight (either marker present). Arming rewrites the shared
+     * image, and the delete state machine owns it until it finishes. Fail closed and let the caller
+     * ask the user to retry — never touch a marker from here.
+     */
+    data object DeletePending : ArmBurn
+}
+
 sealed interface UnlockOrAdd {
     /** An existing VAULT slot (1..SLOT_COUNT-1) matched — a normal unlock. */
     data class Unlocked(val open: VaultOpen) : UnlockOrAdd
@@ -715,6 +747,84 @@ class VaultImageStore internal constructor(
      * if a MATCHED VAULT slot's payload is unreadable; [NotDurable] if the create write is not confirmed
      * durable; [IllegalStateException] if the candidate self-verify fails (a miscomputing AEAD provider).
      */
+    /**
+     * ARM (or RE-ARM) the Pucker Burn duress credential into slot 0 — the 0.9.3 Unit S writer, and the
+     * FIRST writer ever to put a meaningful value in slot 0. Call off-main (Argon2id).
+     *
+     * Every existing reader of slot 0 was written when it could only hold filler, so the WRITER/READER
+     * table for this change lives in `reviews/vault-0.9.x/unit-s-invariant-table.md`. The one real
+     * interaction it found is [ArmBurn.CollidesWithVault]; read that before touching this.
+     *
+     * **What arming is:** seal a fresh random key into slot 0's existing `{salt, wrapped}` region so
+     * that `tryPassphrase` matches it. That is all a duress credential needs to be — the burn path
+     * never opens slot 0 as a vault, and its payload region stays filler (the burn-match branch opens
+     * the payload only for timing parity and tolerates a filler payload via `runCatching`).
+     *
+     * **What arming deliberately is NOT:**
+     *  - no format change and no DEK write (the existing DEK re-encrypts the image; slot 0's payload
+     *    is untouched and stays identically sized);
+     *  - no armed flag, marker, preference or length difference — see [ArmBurn];
+     *  - never a placement decision: `randomVaultSlotIndex` excludes slot 0 and must keep doing so, or
+     *    an ordinary second-vault create could clobber the burn credential.
+     *
+     * **Crash safety comes free from the existing write discipline**, and was verified rather than
+     * assumed: the whole image is re-encrypted and committed through [atomicWrite] (temp + rename +
+     * dir-fsync). There is no partial in-place slot write, so a crash mid-arm leaves either the old
+     * image (slot 0 still filler, burn unarmed) or the new one (armed) — both structurally valid. A
+     * "half-armed" slot 0 does not exist, which is why arming needs no marker of its own.
+     *
+     * A re-arm silently replaces the current credential; that is the documented semantics (P1:
+     * permanence means "unrecoverable and unknowable", not "unrewritable").
+     *
+     * @throws VaultImageException.NotDurable if the write landed but its durability was unconfirmed —
+     *   the caller must NOT tell the user the credential is set.
+     */
+    fun armBurnSlot(passphrase: String): ArmBurn {
+        imageLock.withLock {
+            // Refuse while EITHER delete marker is present. Same critical section as the write, and the
+            // marker writers take imageLock too, so no marker can appear between check and write.
+            // Proven-absence, not exists(): an indeterminate stat must not read as "safe to proceed".
+            if (!Files.notExists(serverDeletedFile.toPath()) || !Files.notExists(deleteIntentFile.toPath())) {
+                return ArmBurn.DeletePending
+            }
+            val image = canonical ?: run { open(); canonical!! }
+            val activeDek = dek ?: throw IllegalStateException("vault image not open")
+            val decoded = decodeImage(image)
+
+            // COLLISION SWEEP — see ArmBurn.CollidesWithVault. A match on slot 0 is the RE-ARM case and
+            // is fine: the seal below overwrites it.
+            tryPassphrase(passphrase, decoded.slots, ops, deriver)?.let { match ->
+                val collides = match.slotIndex in VAULT_SLOT_RANGE
+                wipe(match.vaultKey)
+                if (collides) return ArmBurn.CollidesWithVault
+            }
+
+            // The credential key is pure filler: nothing ever opens slot 0's payload with it. It exists
+            // only so the wrapped blob decrypts under the derived master key, which is what makes
+            // tryPassphrase match. Generated inside the try so a throw cannot strand it.
+            var burnKey: ByteArray? = null
+            try {
+                burnKey = ops.randomBytes(VAULT_KEY_BYTES)
+                // Self-verifying: proves the wrap actually opens under this passphrase BEFORE persisting.
+                // A silently-wrong wrap here is the worst failure this feature can produce — a user who
+                // believes they armed a duress credential that will never match.
+                val armed = sealSlotSelfVerifying(passphrase, burnKey, ops, deriver)
+                val newSlots = decoded.slots.toMutableList().also { it[BURN_SLOT_INDEX] = armed }
+                // PAYLOADS UNTOUCHED — slot 0's payload stays filler, identically sized.
+                val newInner = encodeImage(VaultImage(newSlots, decoded.payloads))
+                val outer = ops.aeadEncrypt(activeDek, newInner, VAULT_IMAGE_OUTER_AD)
+                val sync = atomicWrite(binFile, outer)
+                // Rename committed → advance canonical BEFORE the durability check, so nothing later
+                // works from stale state even on the NotDurable throw.
+                canonical = newInner
+                if (sync != DirSyncResult.DURABLE) throw VaultImageException.NotDurable()
+                return ArmBurn.Armed
+            } finally {
+                burnKey?.let { wipe(it) }
+            }
+        }
+    }
+
     fun attemptUnlockOrAdd(passphrase: String, genesisPayload: ByteArray, create: Boolean): UnlockOrAdd {
         imageLock.withLock {
             val image = canonical ?: run { open(); canonical!! }
