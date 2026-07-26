@@ -134,8 +134,17 @@ class KeystoreDeviceKeyCipher(
      * never throw. An indeterminate Keystore read reports PRESENT (fail-closed): the cost of a
      * needless retry of an idempotent delete is nothing, and the cost of missing real residue is the
      * feature's purpose.
+     *
+     * **`containsAlias`, NOT [existingKey] (round 5, Codex — BLOCKING).** This first used
+     * `existingKey() != null`, which tests whether the key is USABLE, not whether the alias EXISTS —
+     * and `existingKey` deliberately swallows `UnrecoverableEntryException` / `GeneralSecurityException`
+     * for a corrupted or hardware-invalidated entry, returning null. So an alias that was still
+     * present but no longer loadable reported ABSENT, and the fail-closed `getOrDefault(true)` never
+     * fired because the callee had already eaten the exception. The forensic question is whether the
+     * ALIAS is there — a coercer enumerating the Keystore does not care whether its key still
+     * decrypts — and [deleteKeyMaterial] four lines below was already using the right criterion.
      */
-    fun keyMaterialExists(): Boolean = runCatching { existingKey() != null }.getOrDefault(true)
+    fun keyMaterialExists(): Boolean = runCatching { keyStore.containsAlias(alias) }.getOrDefault(true)
 
     private fun existingKey(): SecretKey? = try {
         (keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.secretKey

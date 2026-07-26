@@ -177,7 +177,12 @@ class BurnByteForByteGateTest {
                 nm.activeNotifications
                     .filter { it.packageName == ctx.packageName }
                     .associate { "id=${it.id}:tag=${it.tag}" to it.notification.channelId }
-            }.getOrDefault(emptyMap()),
+            }.getOrElse {
+                // A SENTINEL, NOT emptyMap() (round 5, Codex). Defaulting an unreadable domain to
+                // "empty" makes a snapshot failure indistinguishable from a clean device, so the
+                // comparison would pass while observing nothing at all.
+                mapOf("<unreadable>" to it.toString())
+            },
         )
     }
 
@@ -333,6 +338,12 @@ class BurnByteForByteGateTest {
         container.bootDiagnostics.record(DIAGNOSTIC_LINE)
         File(ctx.cacheDir, CACHE_ARTIFACT).writeText("plaintext attachment stand-in")
         plantBiometricAlias(BIOMETRIC_ALIAS)
+        // A REAL posted notification (round 5, both lenses). The domain was added to the snapshot and
+        // the baseline in round 4 and NEVER SEEDED, so `fresh.activeNotifications` and
+        // `burned.activeNotifications` were both empty and compared equal on every run — a wrong
+        // implementation that deleted the cancel step passed. Non-discriminating assertion, sixth
+        // occurrence, committed in the very fix for the notification finding.
+        MessagingNotifications.showNewMessage(ctx)
     }
 
     /**
@@ -378,6 +389,11 @@ class BurnByteForByteGateTest {
         assertTrue(
             "cache: the plaintext cache artifact",
             provisioned.caches.containsKey(CACHE_ARTIFACT),
+        )
+        assertTrue(
+            "notifications: a posted notification must be visible to the snapshot before the burn, " +
+                "or the post-burn comparison is empty-equals-empty",
+            provisioned.activeNotifications.isNotEmpty(),
         )
     }
 
@@ -558,6 +574,14 @@ class BurnByteForByteGateTest {
                 File(dataDir, "databases/gate-negative.db").writeText("residue")
             },
             cleanup = { File(dataDir, "databases/gate-negative.db").delete() },
+        )
+
+        assertDiscriminates(
+            domain = "notifications",
+            artifact = "id=${MessagingNotifications.NOTIFICATION_ID}:tag=null",
+            view = { it.activeNotifications },
+            plant = { MessagingNotifications.showNewMessage(ctx) },
+            cleanup = { MessagingNotifications.cancelAll(ctx) },
         )
 
         assertDiscriminates(

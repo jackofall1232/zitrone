@@ -134,13 +134,29 @@ class BiometricVaultKeyCipher {
      * Leftover aliases it fails to reap are harmless: unlock uses the wrap's own alias, not an enumeration.
      */
     /**
+     * THE ONE PREDICATE both the wiper and the postcondition use (round 5, both lenses — BLOCKING).
+     *
+     * They used to differ, and the difference was a live deniability defect: the wiper deleted
+     * `PREFIX*` **and** [LEGACY_ALIAS], while the probe checked only `startsWith(PREFIX)`.
+     * [LEGACY_ALIAS] has no trailing underscore, so it does not match the prefix — a surviving
+     * pre-0.9.2 alias therefore passed verification, the burn reported success, the hold was lowered,
+     * and boot's completion pass treated the step as already clean. An "exists only if the feature was
+     * used" artifact outliving a successful burn, on exactly the upgrade-path devices that have it.
+     *
+     * Two predicates that must agree are one predicate. Sharing it is what makes them unable to drift
+     * again; the previous arrangement drifted the moment the legacy alias was added to one of them.
+     */
+    private fun isBiometricAlias(alias: String): Boolean =
+        alias.startsWith(PREFIX) || alias == LEGACY_ALIAS
+
+    /**
      * POSTCONDITION PROBE for the burn plan's `biometric-material` step (0.9.2 W-B round 4) — does
      * ANY alias in this family survive? Fail-closed on an unreadable Keystore (reports that aliases
      * remain), for the same reason as [KeystoreDeviceKeyCipher.keyMaterialExists].
      */
     fun noAliasesRemain(): Boolean = runCatching {
         val ks = java.security.KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-        ks.aliases().toList().none { it.startsWith(PREFIX) }
+        ks.aliases().toList().none { isBiometricAlias(it) }
     }.getOrDefault(false)
 
     fun deleteAllAliasesExcept(keepAliasId: String?) {
@@ -149,7 +165,7 @@ class BiometricVaultKeyCipher {
             // Per-enable aliases (PREFIX + id) AND the pre-0.9.2 single fixed alias (no id suffix), which
             // otherwise never matches PREFIX and would linger as forensic/hygiene residue after upgrade.
             keyStore.aliases().toList()
-                .filter { (it.startsWith(PREFIX) || it == LEGACY_ALIAS) && it != keep }
+                .filter { isBiometricAlias(it) && it != keep }
         } catch (e: Exception) {
             return // enumeration hiccup → best-effort; leftover aliases are harmless
         }

@@ -11,6 +11,7 @@ import com.zitrone.app.burn.CleanupCompletion
 import com.zitrone.app.burn.Durability
 import com.zitrone.app.burn.completeInterruptedCleanup
 import com.zitrone.app.burn.runBurnPlan
+import com.zitrone.app.crypto.vault.ResidueSweepResult
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -222,6 +223,51 @@ class BurnCleanupOrderingTest {
 
         assertEquals(CleanupCompletion.NOTHING_TO_DO, result)
         assertTrue("running before the sweep must not mutate anything", !cleaned)
+    }
+
+    /**
+     * **THE REAL ORDERING PIN** (round 5, Grok — the previous claim that a test pinned this was
+     * false). The two tests below exercise the pure cleanup function; THIS one observes the ORDER in
+     * which the production fold evaluates its inputs, which is the property that was claimed and
+     * unpinned.
+     *
+     * `imageProvenAbsentAfterSweep` is a lambda precisely so a test can see WHEN it is called. If a
+     * future change hoists the cleanup above the sweep, the gate it consults is evaluated against a
+     * pre-sweep disk and this assertion fails.
+     *
+     * MUTATION UNIQUELY CAUGHT: computing image-absence before the sweep and passing it in as a
+     * value — which is exactly what the production code did before this fold was extracted.
+     */
+    @Test
+    fun `the cleanup gate is evaluated only after the sweep has run`() {
+        val order = mutableListOf<String>()
+        var gateReadAt = -1
+
+        foldBootMutators(
+            reconcileUnproven = false,
+            sweepResult = ResidueSweepResult.NO_MUTATION.also { order += "sweep" },
+            imageProvenAbsentAfterSweep = { gateReadAt = order.size; true },
+            completeCleanup = { order += "cleanup"; CleanupCompletion.NOTHING_TO_DO },
+        )
+
+        assertEquals(
+            "the image-absence gate must be read AFTER the sweep, which is what can flip it",
+            1,
+            gateReadAt,
+        )
+        assertEquals(listOf("sweep", "cleanup"), order)
+    }
+
+    /** An INCOMPLETE cleanup must raise the hold, exactly as a non-durable sweep does. */
+    @Test
+    fun `an incomplete cleanup publishes SWEPT_NOT_DURABLE`() {
+        val result = foldBootMutators(
+            reconcileUnproven = false,
+            sweepResult = ResidueSweepResult.NO_MUTATION,
+            imageProvenAbsentAfterSweep = { true },
+            completeCleanup = { CleanupCompletion.INCOMPLETE },
+        )
+        assertEquals(ResidueSweepResult.SWEPT_NOT_DURABLE, result)
     }
 
     /** After the sweep has proven the image absent, the same residue IS now actionable. */

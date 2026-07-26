@@ -5,6 +5,7 @@
 
 package com.zitrone.app.burn
 
+import com.zitrone.app.crypto.vault.VaultImageException
 import java.io.File
 
 /**
@@ -31,14 +32,22 @@ import java.io.File
  *
  * **The fix that was taken, in two parts.**
  *
- * 1. **ORDERING CHOSEN BY WHICH FAILURE STATE IS INNOCUOUS.** Non-cryptographic cleanups
- *    ([BurnPhase.BEFORE_IMAGE]) run BEFORE the image is destroyed. A crash there leaves an intact,
- *    unlockable vault whose caches and preferences were cleared — indistinguishable from routine OS
- *    cache eviction, so no oracle. Keystore material ([BurnPhase.AFTER_IMAGE]) must run AFTER the
- *    image: deleting the device key or biometric wrap while a live image remains would render that
- *    image permanently unopenable, which is a DIFFERENT and worse oracle (a vault nobody can open is
- *    not a vault nobody had). The order is derived from which interruption is innocuous, never from
- *    convenience.
+ * 1. **ORDERING CHOSEN BY WHICH FAILURE STATE IS INNOCUOUS — and the test is per STEP, not per
+ *    category.** [BurnPhase.BEFORE_IMAGE] holds only cleanups whose interruption leaves state a user
+ *    or the OS produces routinely anyway: an emptied cache, a cleared diagnostics log, a dismissed
+ *    notification. Keystore material ([BurnPhase.AFTER_IMAGE]) must run AFTER the image, because
+ *    deleting the device key or biometric wrap while a live image remains renders that image
+ *    permanently unopenable — a vault nobody can open is a worse oracle than the residue it replaces.
+ *
+ *    **PREFERENCES ARE IN `AFTER_IMAGE`, AND ROUND 5 IS WHY.** They were first placed in
+ *    `BEFORE_IMAGE` on the reasoning that "non-cryptographic" meant "innocuous". That was false for
+ *    this one step: resetting preferences wipes Tor, I2P, read receipts, default TTL, burn-on-read,
+ *    unread reminders and auto-lock. An interruption between that step and the image left an INTACT,
+ *    unlockable vault with every setting reverted, and boot's completion pass correctly refuses to
+ *    run while an image is present, so nothing repairs it — the user unlocks a working vault and sees
+ *    their settings wiped. **The phase ordering introduced exactly the durable tell it exists to
+ *    prevent.** "Non-cryptographic" is a statement about what a step touches; "innocuous" is a
+ *    statement about what its interruption LOOKS LIKE, and the two are not the same test.
  *
  * 2. **THE RESIDUE IS ITS OWN SIGNATURE — no marker required.** `{image PROVEN ABSENT and any step's
  *    postcondition FALSE}` is a shape a fresh install cannot produce: a never-used device has no
@@ -63,8 +72,12 @@ import java.io.File
  */
 internal enum class BurnPhase {
     /**
-     * Non-cryptographic app-local state. Interruption here leaves an intact vault with cleared
-     * caches/preferences — innocuous, so this phase goes FIRST.
+     * Cleanups whose interruption leaves a state the OS or the user produces routinely anyway — an
+     * emptied cache, a cleared diagnostics log, a dismissed notification. So this phase goes FIRST.
+     *
+     * **The bar is "would an interruption here be a tell?", NOT "is this non-cryptographic?"** Round
+     * 5 removed preferences from this phase for exactly that distinction: they are non-cryptographic
+     * and their loss is very much a tell.
      */
     BEFORE_IMAGE,
 
@@ -99,6 +112,21 @@ internal sealed interface Durability {
      * created files, unlink plus an fsync of `shared_prefs`.
      */
     data class PrefsStores(val names: List<String>) : Durability
+
+    /**
+     * State owned by another process (system_server), mutated through a SYNCHRONOUS binder call and
+     * confirmed by reading it back. There is nothing for THIS process to make durable — the write is
+     * not ours — so the durability story is the read-back postcondition plus boot's re-verification.
+     *
+     * Added in round 5 after both lenses caught `active-notifications` declaring
+     * [KeystoreTransactional], which it is not: no Keystore transaction is involved. That was the
+     * generic escape hatch this type exists to forbid, wearing a specific-sounding name — the exact
+     * failure the "no `NotApplicable` variant" rule was written to prevent, committed in the same
+     * change that wrote the rule. This variant is narrow ON PURPOSE: it names a real mechanism
+     * (cross-process, synchronous, read-back-verified) rather than an absence of one, so a step that
+     * writes to our own disk still cannot honestly select it.
+     */
+    data object ExternalSynchronousVerified : Durability
 }
 
 /**
@@ -130,7 +158,25 @@ internal class BurnStep(
 internal fun runBurnPlan(steps: List<BurnStep>) {
     require(steps.isNotEmpty()) { "an empty burn plan would report success having wiped nothing" }
     BurnPhase.entries.forEach { phase ->
-        steps.filter { it.phase == phase }.forEach { it.action() }
+        steps.filter { it.phase == phase }.forEach { step ->
+            step.action()
+            // EVERY STEP PROVES ITSELF, IN THE BURN PATH TOO (round 5, Grok — BLOCKING).
+            //
+            // This runner previously called `action()` and nothing else. `verify()` existed on every
+            // step and was consumed ONLY by boot, so the live burn — the registry's primary consumer
+            // — trusted actions alone. The table's own kdoc claimed "one enumeration, three
+            // consumers" while the first consumer never read the postconditions: **enumeration as
+            // comfort**, the same shape as a gate that passes without discriminating. The registry
+            // half-landed while reading as complete.
+            //
+            // Two steps were provably weaker for it: a biometric wipe whose probe missed the legacy
+            // alias, and a device-key probe that tested usability rather than presence. Both reported
+            // success against surviving Keystore residue, and re-verifying here would have caught
+            // either regardless of the probe bug, because a false postcondition fails the burn.
+            if (!runCatching { step.verify() }.getOrDefault(false)) {
+                throw VaultImageException.DestroyFailed()
+            }
+        }
     }
 }
 

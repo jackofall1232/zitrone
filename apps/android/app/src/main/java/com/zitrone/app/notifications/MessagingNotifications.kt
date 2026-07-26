@@ -40,7 +40,10 @@ object MessagingNotifications {
     // one. Bump this suffix (v2 -> v3 -> ...) any time the sound changes.
     private const val CHANNEL_ID = "messages_v2"
     private val LEGACY_CHANNEL_IDS = listOf("messages")
-    private const val NOTIFICATION_ID = 1001
+    // `internal`, not private (round 5): the byte-for-byte gate's notification negative
+    // control must NAME the artifact it plants, and a literal in the test is the same constant in
+    // two places — the copy that drifts is the test, which then asserts against an id nothing posts.
+    internal const val NOTIFICATION_ID = 1001
 
     /** URI of the bundled custom sound in res/raw/new_message.(wav|ogg). */
     private fun soundUri(context: Context): Uri =

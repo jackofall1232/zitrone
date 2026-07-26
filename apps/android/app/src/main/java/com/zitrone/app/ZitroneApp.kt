@@ -477,20 +477,9 @@ class AppContainer(private val app: Application) {
                 action = { deleteTreeDurably(app.cacheDir) },
             ),
             BurnStep(
-                name = "vault-use-preferences",
-                phase = BurnPhase.BEFORE_IMAGE,
-                durability = Durability.PrefsStores(LAZY_PREFS_STORES),
-                verify = { vaultUsePreferencesAreFresh() },
-                action = {
-                    if (!wipeVaultUsePreferences()) throw VaultImageException.DestroyFailed()
-                },
-            ),
-            BurnStep(
                 name = "active-notifications",
                 phase = BurnPhase.BEFORE_IMAGE,
-                // No filesystem entry: the notification lives in system_server, and cancelling it is
-                // a synchronous binder call, not a write this process must make durable.
-                durability = Durability.KeystoreTransactional,
+                durability = Durability.ExternalSynchronousVerified,
                 // ROUND 4, Codex: `MessagingNotifications.cancelAll` existed with ZERO call sites
                 // while `showNewMessage` posted real notifications — so a message notification could
                 // outlive the burn AND the process death. A fresh install has none, and it sits on
@@ -515,6 +504,29 @@ class AppContainer(private val app: Application) {
                 durability = Durability.KeystoreTransactional,
                 verify = { biometricCipher.noAliasesRemain() },
                 action = { if (!wipeBiometricMaterial()) throw VaultImageException.DestroyFailed() },
+            ),
+            BurnStep(
+                name = "vault-use-preferences",
+                phase = BurnPhase.AFTER_IMAGE,
+                durability = Durability.PrefsStores(LAZY_PREFS_STORES),
+                // MOVED OUT OF BEFORE_IMAGE IN ROUND 5 (Codex, BLOCKING) — the "innocuous if
+                // interrupted" argument was FALSE for this step and true for its neighbours. Clearing
+                // a cache or a diagnostics log on a live vault is something the OS and the user do
+                // routinely. Resetting PREFERENCES is not: this wipes Tor, I2P, read receipts, default
+                // TTL, burn-on-read, unread reminders and auto-lock. A crash between this step and the
+                // image left an INTACT, unlockable vault with every setting reverted — and boot's
+                // completion pass correctly refuses to run while an image is present, so nothing
+                // repairs it. The user unlocks a working vault and sees their settings wiped, which is
+                // a durable, user-visible tell that the duress credential was entered. That is the
+                // oracle this whole phase ordering exists to avoid, introduced by the ordering itself.
+                //
+                // AFTER the image, and after `biometric-material`: the biometric wrap lives in the
+                // settings store, so clearing it earlier would empty that store out from under the
+                // biometric step.
+                verify = { vaultUsePreferencesAreFresh() },
+                action = {
+                    if (!wipeVaultUsePreferences()) throw VaultImageException.DestroyFailed()
+                },
             ),
             BurnStep(
                 name = "device-key",
@@ -592,15 +604,12 @@ class AppContainer(private val app: Application) {
                 // they mutate disjoint artifacts (image-bearing residue vs diagnostics / cache /
                 // preferences / aliases), so "at most one fires" applies to the three, never to all
                 // four. Pinned by `BootReconcileOwnerTest`; moving this call must fail a test.
-                val cleanup = completeInterruptedCleanup(
-                    steps = burnPlan,
-                    imageProvenAbsent = imageStore.imageBearingProvenAbsent(),
+                foldBootMutators(
+                    reconcileUnproven = reconcileUnproven,
+                    sweepResult = sweepResult,
+                    imageProvenAbsentAfterSweep = { imageStore.imageBearingProvenAbsent() },
+                    completeCleanup = { absent -> completeInterruptedCleanup(burnPlan, absent) },
                 )
-                if (reconcileUnproven || cleanup == CleanupCompletion.INCOMPLETE) {
-                    ResidueSweepResult.SWEPT_NOT_DURABLE
-                } else {
-                    sweepResult
-                }
             },
             publish = { hold ->
                 durabilityHold.value = hold
@@ -1082,7 +1091,11 @@ class AppContainer(private val app: Application) {
                 throw t
             }
         }
-        return ok
+        // RETURN THE POSTCONDITION, NOT "nothing threw" (round 5, both lenses — BLOCKING).
+        // `deleteAllAliasesExcept` swallows per-alias failures, so "no exception" was compatible with
+        // an alias surviving. The burn CONSUMES this boolean, so it has to mean the aliases are gone —
+        // which is a question only the Keystore can answer, and now does.
+        return ok && biometricCipher.noAliasesRemain()
     }
 
     /**
@@ -1583,6 +1596,41 @@ internal fun sealDurableOrFalse(seal: () -> Unit): Boolean =
  * (Round-4 review, Kimi: this line previously said production "passes … `Dispatchers.IO`", which
  * reads as an explicit argument and would send a reader looking for a call site that does not exist.)
  */
+/**
+ * FOLD THE BOOT MUTATORS' VERDICTS INTO THE ONE DURABILITY ANSWER, with the fourth mutator's
+ * ORDERING made testable (0.9.2 W-B round 5, Grok — the previous "pinned by test" claim was FALSE).
+ *
+ * **Why this function exists at all.** The call-site comment and the invariant table both claimed the
+ * fourth mutator's position was "pinned by `BootReconcileOwnerTest`". It was not: that file contains
+ * zero references to it, and the ordering test exercised the pure cleanup function with a hand-passed
+ * flag — so hoisting the cleanup above the sweep in production left every test green. The claim was
+ * written in the commit whose subject was fixing a different false claim.
+ *
+ * A claim that a test pins a behaviour is CHECKABLE — grep the named test for the named symbol — and
+ * this one failed that check. The repair is to make the claim true rather than to soften it: the
+ * order now lives in a function whose contract a test can actually observe.
+ *
+ * **THE ORDER IS THE CONTRACT.** [imageProvenAbsentAfterSweep] must be evaluated AFTER the sweep has
+ * run, because `sweepOrphanedResidue` is precisely what can flip image-bearing absence from false to
+ * true in this same boot (by removing an orphaned DEK or temp). Evaluated earlier it reads a stale
+ * "image still present", and [completeCleanup] then silently skips the cleanup it exists to perform.
+ * Taking it as a LAMBDA rather than a Boolean is what makes that observable: a caller cannot pass a
+ * value computed too early without the test seeing when it was invoked.
+ */
+internal fun foldBootMutators(
+    reconcileUnproven: Boolean,
+    sweepResult: ResidueSweepResult,
+    imageProvenAbsentAfterSweep: () -> Boolean,
+    completeCleanup: (Boolean) -> CleanupCompletion,
+): ResidueSweepResult {
+    val cleanup = completeCleanup(imageProvenAbsentAfterSweep())
+    return if (reconcileUnproven || cleanup == CleanupCompletion.INCOMPLETE) {
+        ResidueSweepResult.SWEPT_NOT_DURABLE
+    } else {
+        sweepResult
+    }
+}
+
 internal fun runBootReconcile(
     scope: CoroutineScope,
     claim: () -> Boolean,
@@ -1763,8 +1811,14 @@ internal class BurnCompletionCoordinator {
  *  4. **[terminate] runs LAST, and ONLY on the success path** (0.9.2 W-B round-3, authorized
  *     architecture change). A successful burn ends by KILLING THE PROCESS. See [AppContainer.burnVault]
  *     for why; the ordering is the safety argument, so it lives here:
- *       - killed BEFORE [lowerHold] (a crash mid-wipe) → no hold survives in RAM, but the disk
- *         reconcilers re-derive the doubt at next boot → lock screen. Fail-closed.
+ *       - killed BEFORE [lowerHold] (a crash mid-wipe) → no hold survives in RAM. Whether the next
+ *         boot re-derives the doubt depends on WHERE it died, and the honest statement is per-shape,
+ *         not universal (this is the born-wrong claim round 4 retracted in [AppContainer.burnVault]'s
+ *         kdoc and round 5 found still standing HERE — the sibling was corrected and this one was
+ *         not): while the image still exists the three image-bearing reconcilers re-derive it; once
+ *         the image is gone they are blind, and it is
+ *         [com.zitrone.app.burn.completeInterruptedCleanup] — recognising leftover state from the
+ *         RESIDUE ITSELF, with no durable marker — that withholds the fresh-install presentation.
  *       - killed AFTER [lowerHold] → the wipe proved itself → next boot presents onboarding.
  *     There is no interruption point at which process death produces a fresh-install presentation
  *     over an unproven wipe, which is the property that makes killing the process safe rather than
