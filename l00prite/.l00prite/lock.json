@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "lock_id": null,
-  "owner_agent": null,
-  "owner_session": null,
-  "acquired_at": null,
-  "expires_at": null,
+  "lock_id": "lock-20260726T150527Z-unit-s-r2",
+  "owner_agent": "claude",
+  "owner_session": "735105b5-4f01-4cb3-95b8-87721f553561",
+  "acquired_at": "2026-07-26T15:05:27Z",
+  "expires_at": "2026-07-26T15:35:27Z",
   "ttl_seconds": 1800,
-  "purpose": null,
+  "purpose": "record Unit S round-1 fix + round-2 clean convergence in todos.md; commit review artifacts",
   "protected_paths": [
     "ledger.md",
     "memory.md",
@@ -18,5 +18,5 @@
     "reviews/",
     "sessions/"
   ],
-  "status": "unlocked"
+  "status": "active"
 }

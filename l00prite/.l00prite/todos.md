@@ -286,6 +286,112 @@ User intent recorded 2026-07-24: "at some point we need to cut 0.9.1 apk and fli
 - [ ] **Storage-format stability GATE:** before external testers, either commit to storage-format
       stability or disclose wipe-on-breaking-change (migrations aren't built).
 
+## 0.9.3-beta — Unit S (Pucker Burn ARMING): REVIEW CONVERGED, awaiting device re-test then CUT
+
+Branch `feat/0.9.3-unit-s-burn-arming` (PR #63 draft). Unit S = the setup/arming half that makes the
+0.9.2 wipe mechanism reachable. **Human confirmed the burn + password working on a real device
+2026-07-26** against TEST build `2e1f2ccf…` — that build is now STALE, see below.
+
+- [x] **Round 1 — BLOCKING finding, fixed in `d3680570`.** Codex HIGH / Grok F2 (deferrable);
+      adjudicated against source to Codex. `burnSetupOpen/Busy/Error` were composition-local
+      `remember` while the Argon2id arm ran on `container.scope`, so an Activity recreation reset
+      them and dismissed the dialog. **Because a successful arm is signalled ONLY by the dialog
+      closing (no success toast), that dismissal was indistinguishable from success** — a
+      `CollidesWithVault`/`DeletePending`/`NotDurable` arm read as armed, leaving the user believing
+      they hold a duress credential they do not have. Grok's reason for deferring ("no success toast
+      on failure") is false vs source: there is no success toast at all. Fix = process-scoped
+      `AppContainer.burnArm: MutableStateFlow<BurnArmUi>`, mirroring `vaultCreating`.
+      Also closed: F1 stale "slot 0 is UNARMED" comment, F4 missing `vault.delete-confirmed` test,
+      F3 copy re-scoped from "this vault" to "everything Zitrone holds on this device" (device-local
+      fresh install; deliberately does NOT count vaults — PD holds).
+- [x] **Round 2 — CLEAN CONVERGENCE. Codex READY TO MERGE + Grok READY TO MERGE**, blocking finding
+      confirmed closed, no CRITICAL/HIGH. Their one SHARED finding fixed in `643a842b`:
+      **`burnArmOutcome()` was extracted for testability and then production kept an inline COPY of
+      the mapping** — so the suite pinned the helper while the shipped path went untested, and the
+      round-1 mutation proof exercised a function the app never ran. Codex: "proves only the helper
+      test, not the production mapping." Same failure as F1 one level up: a TEST outliving the code
+      it describes. Now `MainActivity.kt:1192` calls `burnArmOutcome(outcome)`; mutation re-proven
+      against the production path. Grok B1 (LOW, unreachable) also closed via `closeBurnSetupState()`.
+- [x] Suite **574 / 571 passed / 0 failures / 0 errors / 3 skipped**; `assembleDebug` +
+      `assembleRelease` green; signed cert `6c7f92a7…892753` verified.
+- [ ] **Device re-test (HUMAN) — build `fd4c301b…` = commit `643a842b`**, uploaded to the existing
+      DRAFT release `unit-s-test-build`. The patch changed the exact screen that was device-tested,
+      so the earlier confirmation does not carry. Key new checks: **rotate the phone mid-arm** (dialog
+      must survive, not vanish) and **rotate during a refused arm** (the refusal must still appear).
+- [ ] **THEN CUT 0.9.3-beta** (explicit per-action approval each step): merge PR #63 → bump vc18→vc19
+      / 0.9.2-beta→0.9.3-beta → signed build + cert verify → GH release → website flip
+      (`links.ts` ANDROID_BETA_VERSION + SHA + `onion-site/SHA256SUMS`, verify the LIVE asset hash
+      before flipping, per the 0.9.2 procedure).
+- Reviewer residuals ACCEPTED, not patched: real Compose-recreation + process-death behaviour are not
+  unit-testable here (the instrumented gate covers the burn path); JVM `String` contents cannot be
+  wiped (pre-existing, same class as lock-screen entry); ABA on `burnArm` needs a hypothetical future
+  non-UI caller, mitigated by the `closeBurnSetupState` fence.
+- Artifacts: `reviews/vault-0.9.x/unit-s-r{1,2}-{prompt,codex,grok}.md`, `unit-s-invariant-table.md`.
+
+## RELAY (CX23) — from the 2026-07-26 429 diagnostic. PRIORITY ORDER IS AS LISTED (user-set)
+
+All three need **CX23 access, which CX33 does not have** (see Housekeeping + constraints.md
+"Box roles"). Diagnostic was read-only; nothing on CX23 was changed. Evidence: `ratelimit.go`,
+`handlers.go:48/160`, `cmd/server/main.go` fiber.Config, `docker-compose.tor.yml:32`, plus
+external probes from CX33 (TLS handshake, `GET /healthz` on 443 and 8443, `dig`).
+
+- [ ] **P1 — PORT 8443 IS PUBLICLY REACHABLE OVER PLAIN HTTP. Highest priority, above the limiter.**
+      `http://178.104.19.240:8443/healthz` returned 200 from CX33 over the open internet; the same
+      app serves the FULL API there. This defeats TLS, defeats cert pinning for any client induced
+      onto it, and hands an attacker their own rate-limit bucket (a direct-to-8443 peer is not
+      Caddy, so it gets a distinct `c.IP()` key). Likely an artifact of Docker publishing
+      `8443:8443` past the host firewall (`docker-compose.yml:26-27`) rather than a deliberate
+      choice — **CONFIRM INTENT FIRST**, then close it: bind the publish to `127.0.0.1:8443` or
+      firewall 8443 so only Caddy can reach it. NOTE: changing the published port is a compose
+      change — three-file invocation required
+      (`-f docker-compose.yml -f docker-compose.tor.yml -f docker-compose.i2p.yml`).
+- [ ] **P2 — `registerLimit` is 5/HOUR on a key that collapses to Caddy's socket address.**
+      `handlers.go:48` = `ratelimit.New(5, time.Hour, ...)`, keyed on `c.IP()` at `handlers.go:160`.
+      **No `ProxyHeader`/`TrustedProxy` is set anywhere in the Go source** (Fiber v2.52.11 →
+      `c.IP()` is the raw socket peer), and the relay sits behind Caddy, so **every clearnet user
+      worldwide shares ONE bucket of 5 registrations/hour**. Tor/I2P collapse the same way via the
+      sidecars — worse than per-exit-node, and Tor is NOT distinguishable to the limiter (`onion.go`
+      routes by Host header; the limiter never sees it).
+      - The limiter is **FIXED window, not rolling** (`ratelimit.go:50-52` returns false WITHOUT
+        incrementing `count` or moving `w.start`). Retries do NOT extend the lockout — the earlier
+        self-refreshing-lockout hypothesis is FALSIFIED by source. The bucket clears exactly one
+        hour after the FIRST request in the window; client backoff caps at ~60s so it cannot
+        outlast it. That fully explains `boot[0]` already being 429 with no preceding error.
+      - **DO NOT apply the `ProxyHeader` route unverified.** It requires reading the Caddyfile first
+        and is only safe if Caddy **OVERWRITES** rather than appends `X-Forwarded-For` — otherwise
+        clients spoof their own bucket, which is strictly worse than the collapse.
+      - Widening the limit is the cheap interim. **Keying registration on something other than IP is
+        the real fix and needs design** (not a drive-by patch).
+- [ ] **P3 — the KNOWN LIMIT comment is under-scoped.** `handlers.go:60-64` documents sidecar
+      collapse for `dropLimit`/`blobLimit`/`qrDropLimit` only. It omits `registerLimit` and omits the
+      clearnet/Caddy case — which is the one that actually bit. Fix when the limiter is touched.
+
+### ACCEPTED COST, not a defect — the relay cannot answer "one client or many"
+The relay does **no request logging** by design (`cmd/server/main.go:54` "No access logging, no body
+logging — application errors only"; `handlers.go:156-158` — the client address is used transiently
+for rate limiting and never stored or logged). So "was this one IP or many?" is **unanswerable by
+construction**, even with CX23 access. That is the zero-knowledge property working as intended.
+The cost is that this class of incident is **undiagnosable after the fact** — recorded here so it is
+known before the next one rather than rediscovered. Do not "fix" it by adding access logs.
+
+### Operational note (no production change)
+The bucket self-clears one hour after the first request in the window. Pausing burn testing for an
+hour restores registration without touching production. Burn testing is a plausible consumer:
+`MessagingCoordinator.kt:385` registers only when `api.accountId == null`, which is exactly the
+post-wipe state every Pucker Burn test produces — but this was NOT confirmed (see accepted cost).
+
+### Also confirmed clean (2026-07-26) — no action
+DNS `relay.sublemonable.com` → `178.104.19.240` (CX23), TTL 600. **Nothing half-migrated to CX-IS:**
+CX-IS (89.127.235.188) appears nowhere in DNS, and the live cert SPKI
+`TZbasNP1niaVV0fEtpn2QbjY1QiIS8R7w4zhaU5Yw3U=` matches `CertificatePinning.kt:50` PRIMARY_PIN
+exactly (NOT CX-IS's `CEe6/ep5…`). Android's configured host matches reality. The two
+`UnknownHostException`s at 12:11/12:12 fit a transient resolver failure at a TTL-600 re-resolution
+boundary and are independent of the 429s. Relay is NOT behind on anything meaningful: newest
+`server/` commit on main is `2cda83a9` (2026-07-21); no local branch has real pending relay work
+(the three that appear "ahead" are stale pre-squash remnants). "We're on 0.9.x" is a CLIENT-version
+fact — the whole 0.9.x vault/burn track is Android-side. Deployed SHA is unknowable without CX23
+(compose uses `build: ./server`).
+
 ## Housekeeping
 - [ ] **Reconcile the two ledgers:** in-repo `.l00prite/ledger.md` (0.7.5→0.8.1 era) vs
       `/root/l00prite/zitrone-vault-ledger.md` (0.9.x vault arc) are separate, non-overlapping
