@@ -7,66 +7,72 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
+## [0.9.2-beta] - 2026-07-26
 
-- **Android: a successful Pucker Burn now CLOSES THE APP.** When the duress passphrase triggers a
-  completed wipe, the app terminates its own process instead of returning to a screen; reopening it
-  presents onboarding, exactly as a fresh install does. A burn that **fails** does not terminate — it
-  shows the same uniform error as a mistyped passphrase and stays open, because a failed burn must
-  stay indistinguishable from a wrong password. **Why:** no in-process wipe can be durable against a
-  live writer — cached preference instances, in-memory buffers and lazily-initialised components can
-  rewrite state after the wipe proved it absent (a defect of exactly this shape was found in review),
-  and the remaining safety argument rested on Android `SharedPreferences` internals that three
-  independent reviewers read three different ways and none could confirm. Ending the process drains
-  the **userspace** write queue — a pending write can never start — though not the kernel's, so this
-  is defence in depth rather than the proof; the proof is the wipe ordering and a boot-time
-  completion (next entry). See `docs/SECURITY_MODEL.md` for the full rationale and the deniability
-  tradeoff in both directions.
-- **Android: the Pucker Burn orders its cleanups so an interrupted wipe leaves an innocuous state**,
-  and cancels any active notification. The diagnostics log, plaintext cache and notifications are
-  cleared before the vault image is destroyed — a crash there leaves an intact, unlockable vault in a
-  state the OS or user produces routinely. Preferences and key material are cleared after the image,
-  because resetting a user's settings on a vault that still works would be a visible tell rather than
-  an innocuous one. If a burn is interrupted *after* the image is gone,
-  the next launch detects the leftover state from the residue itself and finishes the cleanup before
-  presenting anything. No "burn in progress" marker is ever written to disk — such a marker would
-  survive on a device with an intact vault and prove the duress passphrase had been used.
+**The second (decoy) vault ships — plausible deniability becomes usable on Android.** 0.9.1-beta
+shipped only the everyday vault, so the deniability *guarantee* had nothing to reveal under coercion.
+This release adds second-vault creation, which is the piece that makes it real.
+
+**The Pucker Burn duress wipe is NOT usable in this release.** Its wipe mechanism landed and is
+gated in CI, but there is **no way to set a burn password**, so nothing can trigger it. Do not rely
+on it, and do not read the burn entries below as a working feature — they describe an engine with no
+ignition, shipped early and deliberately unreachable so the riskiest destructive code could be
+reviewed while nothing could fire it. **Arming lands in 0.9.3-beta**, and until then a duress
+credential does not exist.
+
+**Fresh install required — there is no upgrade path.** The vault image format moves v2 → v3. A 0.9.1
+image is recognised as a prior format and is **retired on the next onboarding**, which means an
+existing install does **not** carry its identity, contacts, or history forward. Uninstall first or
+wipe app data. This is the storage-format stance stated in 0.9.1 and it still holds: the on-disk
+format is not frozen, and a breaking change means a fresh install.
 
 ### Added
 
-- **Android: second (decoy) vault is now creatable — plausible deniability becomes usable.**
-  0.9.1-beta shipped only the everyday vault; 0.9.2-beta adds the second-vault creation path, so
-  an Android user can create and reveal a decoy account under coercion. There is **no setup
-  wizard and no discoverable UI** (that would be the tell): the ceremony is the **triple-entry**
-  gate — at the ordinary lock screen, enter the same never-before-used passphrase **three times,
-  consecutively and uninterrupted**, and the third entry creates and opens the new vault. Built
-  on the burn-aware fused writer (`attemptUnlockOrAdd`), the silent unlock router
-  (`VaultUnlockRouter`), and a biometric **A-only** guard (the single biometric wrap is bound to
-  one vault and never repointed). Read the accepted limitations before relying on it
-  (`docs/SECURITY_MODEL.md`): creation **blind-overwrites** a pseudorandom pool slot — ~1/3
-  chance of destroying a given existing vault per creation, and a certainty once the 3-slot pool
-  is full; the triple-entry gate means a coercer who makes you type one chosen wrong passphrase
-  three times will create an (empty) vault (while systematic *different* guesses never do);
-  creation **fails closed** (silently, like a wrong passphrase) while an account deletion is
-  pending; a successful create carries an accepted **disk-persistence timing residual** (it shares
-  the unlock UI path and KDF budget but is not wall-clock identical to a read-only unlock); and
-  biometric binds to **one vault at a time on a first-enable-wins basis** (never repointed while it
-  exists), so only whichever vault enabled biometric is biometric-openable and the rest are
-  passphrase-only.
-  **Not yet included:** per-vault destruction (only whole-image account delete exists) and the
-  Pucker Burn duress credential's setup/wipe (slot 0 is reserved and the store is burn-aware, but
-  it is not yet user-settable). No version bump yet — the 0.9.2 phase is still in progress.
+- **Second (decoy) vault creation.** There is **no setup wizard and no discoverable UI** — that would
+  be the tell. The ceremony is the **triple-entry** gate: at the ordinary lock screen, enter the same
+  never-before-used passphrase **three times, consecutively and uninterrupted**, and the third entry
+  creates and opens the new vault. Built on the burn-aware fused writer (`attemptUnlockOrAdd`), the
+  silent unlock router, and a biometric **A-only** guard (the single biometric wrap is bound to one
+  vault and never repointed).
+
+  **Read these limits before relying on it.** Creation **blind-overwrites** a pseudorandom pool slot —
+  roughly a 1-in-3 chance of destroying a given existing vault per creation, and a certainty once the
+  3-slot pool is full. The triple-entry gate means a coercer who makes you type one chosen wrong
+  passphrase three times will create an (empty) vault, though systematic *different* guesses never
+  will. Creation **fails closed** (silently, like a wrong passphrase) while an account deletion is
+  pending. A successful create carries an accepted **disk-persistence timing residual**. Biometric
+  binds to **one vault at a time, first-enable-wins**, so only that vault is biometric-openable and
+  the rest are passphrase-only.
 
 - **iOS: full contact deletion (cryptographic teardown, not soft-delete).**
-  Long-press / context-menu on a conversation → confirm to burn known local
-  messages (best-effort peer burn), destroy the Double Ratchet session and
-  remote identity in Keychain for that peer only, remove the roster entry, and
-  persist a TTL-bounded tombstone (UserDefaults) so stragglers cannot resurrect
-  the contact after restart. Durable fail-abort if keychain teardown fails.
-  Re-add requires a fresh X3DH handshake. **Merged unverified** — there is no
-  Xcode/iOS toolchain in CI, and iOS has no distributed build yet, so this
-  needs an Xcode build + on-device test before it ships to users. Held out of
-  the 0.8.6-beta release notes for that reason.
+  Long-press / context-menu on a conversation → confirm to burn known local messages (best-effort
+  peer burn), destroy the Double Ratchet session and remote identity in Keychain for that peer only,
+  remove the roster entry, and persist a TTL-bounded tombstone so stragglers cannot resurrect the
+  contact after restart. Durable fail-abort if keychain teardown fails; re-add requires a fresh X3DH
+  handshake. **Merged unverified** — there is no Xcode/iOS toolchain in CI and iOS has no distributed
+  build, so this still needs an Xcode build and an on-device test before it reaches users.
+
+### Changed — Pucker Burn internals (mechanism only; still unreachable, see above)
+
+- The duress wipe orders its cleanups so an **interrupted** wipe leaves an innocuous state:
+  diagnostics, cache and notifications are cleared before the vault image is destroyed; preferences
+  and key material after it, because resetting a user's settings on a vault that still works would be
+  a visible tell rather than an innocuous one.
+- An interrupted wipe is recognised at the next launch **from the residue itself** and finished
+  before anything is presented. No "burn in progress" marker is ever written — such a marker would
+  survive on a device with an intact vault and prove the duress passphrase had been used.
+- A completed wipe **ends the app's process**, which drains pending writes that could otherwise
+  recreate state after it was proven gone.
+- A **failed** wipe is indistinguishable from a wrong passphrase and leaves the device on a lock
+  screen rather than presenting a fresh install.
+
+### Verification
+
+Android unit suite 552/549 passing, and an instrumented **byte-for-byte gate** runs on a real
+emulator in CI asserting that post-burn app-local state matches a fresh install across files,
+preferences, databases, cache, active notifications and Keystore aliases — with per-domain negative
+controls proving each comparison can actually fail. Known limits are documented in
+`docs/SECURITY_MODEL.md` rather than implied away.
 
 ## [0.9.1-beta] - 2026-07-24
 

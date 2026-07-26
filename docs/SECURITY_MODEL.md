@@ -561,9 +561,13 @@ while a delete is pending, self-verifying seal), the silent **triple-entry** rou
 (the single wrap is never repointed). An Android user can therefore create and reveal a second
 vault, and plausible deniability is a **usable** guarantee here, within the limits above. **What
 is NOT built yet:** per-vault destruction (whole-image account delete only — there is no
-single-slot destroy primitive) and the **Pucker Burn** setup UX (slot 0 is reserved and the store is
-burn-*aware*, but the credential is **not yet user-settable**, so the burn cannot be triggered by a
-real user even though the wipe behind it is wired and gated — see the section below). Those, plus the full dual-slot destruction design, remain a **locked design** in
+single-slot destroy primitive) and the **Pucker Burn** setup UX. **As of 0.9.2-beta the duress wipe is
+UNREACHABLE, not merely unpolished:** slot 0 holds uniformly-random filler that no passphrase derives
+to, there is no settings entry for a burn password, and no code path writes a credential into slot 0 —
+so no input at the lock screen can trigger a burn. The wipe mechanism behind it is wired, reviewed and
+CI-gated (see the sections below), and arming lands in **0.9.3-beta**. Until then, treat Pucker Burn as
+absent: a user who believes they have a duress credential would be relying on something that does not
+exist. Those, plus the full dual-slot destruction design, remain a **locked design** in
 [`docs/VAULT_ARCHITECTURE.md`](VAULT_ARCHITECTURE.md) §3.4, landing as their own adversarially-
 reviewed PRs. **Do not describe per-vault destruction or a working Pucker Burn as shipped.**
 

@@ -45,6 +45,6 @@
       "stop_signal"
     ]
   },
-  "active_unit": "0.9.2 Unit S \u2014 Pucker Burn SETUP/arming (the last DoD item before an honest 0.9.2-beta cut)",
-  "loop": "Unit S opened. WRITER/READER invariant table written FIRST (hard rule) and source-verified. Implementation next, then paired-blind review, then version bump + cut on explicit authorization."
+  "active_unit": "0.9.2-beta RELEASE CUT in progress (vaults-only scope). Unit S (burn arming) PARKED for 0.9.3.",
+  "loop": "Version bumped vc17->vc18 / 0.9.1-beta->0.9.2-beta. Signed APK built and cert-verified against 6c7f92a7...892753. NEXT (both need explicit go-ahead, both outward-facing): GitHub release publish, then website flip."
 }
