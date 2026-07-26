@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "max_iterations": 6,
-  "current_iteration": 3,
+  "current_iteration": 4,
   "stop_conditions": [
     "definition_of_done_met",
     "blocked",
@@ -46,5 +46,5 @@
     ]
   },
   "active_unit": "0.9.2 Unit W-B \u2014 Pucker Burn wipe mechanism (feat/0.9.2-unit-wb-burn-wipe)",
-  "loop": "security-review-loop paired-blind; round 3 of 6 DISPATCHED on the combined round-2 fix delta (c1d5cb0, 882da6c, 2bd7af0, 62bb0fd). All three round-2 HIGHs fixed; byte-for-byte gate REBUILT and EXECUTED GREEN on CI run 30179007260 (its first run was RED in its own new assertions). Merge + version bump remain human-gated regardless of convergence."
+  "loop": "security-review-loop paired-blind; round 4 of 6 DISPATCHED on the round-3 fix delta (2146cee). Four round-3 blockers fixed + AUTHORIZED architecture change: a successful burn now ends in Process.killProcess(). Gate GREEN on CI run 30180579742 (5 tests) with the new fresh-baseline assertion active. Kimi k3 authorized as THIRD LENS on round 4 if Codex and Grok diverge. Merge + version bump remain human-gated regardless of convergence; hard cap at round 6."
 }
