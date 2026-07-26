@@ -1561,3 +1561,27 @@ claim/test, terminal sequence/gate).
 **Still open and tracked, NOT claimed closed:** the BurnPlan-registry follow-ups, notification
 channel reset, a next-launch gate assertion (the gate passes `terminate = {}` and so exercises a
 weaker arrangement than production ships), and the standing pre-tester hygiene items.
+
+---
+
+## 2026-07-26 — 0.9.4 PoW UI: lemon-squeeze pitcher replaces the stub (session: registration-pow-ui-art)
+
+`RegistrationPowScreen.kt` stub art replaced with the real screen against
+`REGISTRATION_POW_UI_CONTRACT.md`, on `feat/0.9.4-registration-pow-client` (`4db92a8a`, local,
+not pushed). Interface unchanged (state enum, UiState, copy object, callbacks, testTags).
+Pitcher fill is a pure function of `fractionOfExpectedWork`; overfull (>1.0) renders as a
+data-driven overflow (spill + puddle grow with the fraction — moves under reduced motion too);
+60s prompt is a non-blocking card below live progress; background→return and arrive-COMPLETE
+render the current frame, no replay.
+
+**Raised for human sign-off, not silently decided:**
+1. Contract §3 lists prompt options lowercase (*keep waiting* / *try later*); the pre-existing
+   constants were capitalized. Constants now match the contract — product owner should confirm.
+2. New unlocked microcopy: `OVERFULL_NOTE` "some lemons are juicier than others"; reworded
+   `BACKGROUNDED_NOTE`.
+3. At COMPLETE the pitcher renders full and the readout drops the percent (completion is a
+   state, not a fraction — an early solve at e.g. 80% of expected must still look finished).
+
+Evidence: `:app:testDebugUnitTest` + `:app:assembleDebug` BUILD SUCCESSFUL exit 0 (2026-07-26).
+Blocker unchanged: Revvl 6x Argon2id floor measurement; `REGISTRATION_POW_ENABLED` stays false.
+Independent review still owed on the PoW client branch before merge.
