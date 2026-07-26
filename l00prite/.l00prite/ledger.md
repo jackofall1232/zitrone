@@ -1366,3 +1366,52 @@ state), the `terminate` recorder asserted exactly one process-death request on t
 **Standing limit, restated so the green is not overread:** the gate passes `terminate = {}`, so it
 exercises a strictly WEAKER in-process arrangement than production ships. A next-launch assertion is
 tracked in todos.md. Unit suite 536/533/0/3 — MY number; neither round-3 lens could corroborate it.
+
+### 2026-07-26 — W-B ROUND 4 — the worked example for the third-lens rule
+
+**Round 4 is the round that justifies the whole paired-blind-plus-tie-breaker structure, so it is
+recorded as a worked example rather than a result.**
+
+| Lens | Verdict | On the problem | On the fix |
+|---|---|---|---|
+| Codex | NOT READY, 3 HIGH | **RIGHT** — derived the blocking defect | **WRONG** — proposed a durable burn-in-progress marker |
+| Grok | READY TO MERGE | **WRONG** — rated it MEDIUM/DEFERRABLE | **RIGHT** — refused the marker as a vault-use oracle |
+| Gemini 3.1 Pro (tie-break) | BLOCKING | upheld Codex | rejected BOTH: found a marker-free signature |
+
+**Neither lens alone reaches the shipped outcome.** Codex's severity plus Grok's objection plus a
+third lens's synthesis produced a fix neither had proposed: the residue is its own signature —
+`{image proven absent ∧ some step's postcondition false}` is a shape a fresh install cannot produce,
+so boot recognises an interrupted burn with no durable artifact at all. Same structural move that
+retired the pre-burn intent marker in W-A. **This is the second time in this project that a "we need
+a durable marker for this" conclusion turned out to be wrong because the disk state already carried
+the fact.**
+
+Both lenses independently derived the SAME mechanism from the SAME source lines and disagreed only
+about what it meant — which is the precise signature of a genuine divergence, and the only case where
+spending the third lens is warranted. Spending it on a MISSING lens (Grok died mid-round and was
+re-dispatched) would have manufactured a third opinion instead of completing the pair.
+
+**Tie-breaker selection matters and was corrected mid-round:** Kimi k3 was barred because it had
+authored the process-death design in round 3 — a lens cannot independently adjudicate its own
+proposal; that is the same opinion with more confidence, not a third one.
+
+### Round 4 — what else it found, and what it cost
+
+- **The born-wrong claim** (own entry in `failures.md`): the process-death safety claim was FALSE THE
+  DAY IT WAS WRITTEN, in the commit that shipped process death, while the unit's whole subject was
+  false confident prose. Every prior instance was a STALE claim that drifted. Re-derivation cannot
+  catch this class — it asks "has this drifted?" and correctly answers "no".
+- **An active notification survived the burn.** `MessagingNotifications.cancelAll` existed with ZERO
+  call sites while `showNewMessage` posted real notifications. Found in the same file whose CHANNEL
+  claim had been corrected one round earlier: the audit asked what the gate CLAIMED about
+  notifications and never asked what the file DID.
+- **`vault.dek.tmp` finally enumerated** after being deferred in rounds 2 AND 3. 32 → 64 states,
+  exclusivity still holds — the enumeration scaled without the property breaking.
+- **`git add -A` committed a reviewer's sandbox** (`.gradle-home/`, 1.5GB, 6370 files) into two
+  commits. Caught ONLY by GitHub's pre-receive size limit, two commits later. Nothing in the loop can
+  see this class: it changes no behaviour, so tests and the gate are silent and a reviewer reads the
+  diff they are given. Constraint added; note that the single commit which skipped `git status` is
+  the one that broke, which is the cleanest evidence that the discipline was what held.
+- **Corrections were made IN PLACE WITH THE CORRECTION STATED**, not silently swapped. A quietly
+  replaced claim is indistinguishable from a claim that was always right, which destroys the
+  information that it was wrong once — and in this unit that information is the asset.

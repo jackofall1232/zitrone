@@ -13,6 +13,21 @@ Hard rules, user preferences, security boundaries, and architecture constraints 
 - Fixes to security-sensitive code get an **independent** review before merge (never a
   self-re-read). Hardest surfaces get two blind reviewers.
 - Deliver-then-claim: report real command/exit-code evidence; never claim an unrun/failed check.
+- **THE WORKING TREE IS A SHARED MUTABLE RESOURCE — STAGE EXPLICITLY, or run `git status` before
+  `git add -A`.** Binding 2026-07-26. Codex and Grok execute builds INSIDE this checkout; when the
+  shared Gradle cache is read-only they retry with a repo-local Gradle home. One `git add -A` with no
+  `git status` in between committed `.gradle-home/` — 1.5GB across 6370 files — into two commits, and
+  the only thing that caught it was GitHub's pre-receive size limit rejecting the push two commits
+  later. **Nothing in the loop can catch this class**: it does not change behaviour, so tests and the
+  gate are silent, and a reviewer reads the diff they are given.
+  This is the SAME underlying fact as the rule that a reviewer lens must run read-only
+  (`--approval-mode plan`, never `--yolo`), pointed the other way: that rule protects the reviewer
+  from mutating the tree it judges; this one protects the repo from what the reviewer leaves behind.
+  Both follow from multiple agents sharing one working tree.
+  Evidence that the discipline is load-bearing rather than ceremonial: every other commit in the
+  session ran `git add -A && git status` and was fine; the single commit that skipped the status is
+  the one that broke.
+
 - **THE LEDGER IS WRITTEN AT THE END OF EVERY ROUND AND EVERY FIX COMMIT — never batched at session
   end.** Binding 2026-07-26, after rounds 1, 2 and 3 of Unit W-B all closed with no ledger entry and
   had to be reconstructed afterwards from the reviewer reports. A running ledger written retroactively
