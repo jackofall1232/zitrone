@@ -118,14 +118,38 @@ class ApiClient(
     // -- endpoints --------------------------------------------------------------
 
     /**
+     * POST /api/v1/register/challenge — fetches a proof-of-work challenge token
+     * (0.9.4-beta registration PoW; see crypto/RegistrationPow.kt).
+     *
+     * Registration is TWO round-trips as of 0.9.4: request a challenge, solve it, then
+     * submit the proof with the registration. The token is opaque here — it is HMAC-signed
+     * and verified by the relay; the client only decodes its body to bind work against.
+     *
+     * Served by the relay unconditionally, even with enforcement off, so calling it against
+     * a relay that has not flipped `REGISTRATION_POW_ENABLED` is harmless. A relay that
+     * predates the PoW deploy entirely 404s — the caller decides whether to proceed without
+     * a proof, which is the behaviour that keeps this client working against both.
+     */
+    suspend fun registrationChallenge(): String {
+        val json = execute(post("/api/v1/register/challenge", JSONObject(), authenticated = false))
+        return json.getString("challenge_token")
+    }
+
+    /**
      * POST /api/v1/register — creates the account. The server receives ONLY
      * public keys; it can never learn anything else about this identity.
+     *
+     * [powProof] carries the solved registration proof-of-work when one was obtained. It is
+     * omitted entirely when null, which is exactly what every 0.9.3-and-earlier client sends
+     * — and what the relay ignores while `REGISTRATION_POW_ENABLED` is false. A relay with
+     * enforcement ON answers a proofless registration with 403 `pow_required`.
      */
     suspend fun register(
         identityKeyBase64: String,
         registrationId: Int,
         signedPreKey: SignalProtocolManager.SignedPreKeyDto,
         oneTimePreKeys: List<SignalProtocolManager.OneTimePreKeyDto>,
+        powProof: Map<String, String>? = null,
     ): String {
         val body = JSONObject().apply {
             put("identity_key", identityKeyBase64)
@@ -134,6 +158,9 @@ class ApiClient(
             put("one_time_prekeys", JSONArray().apply {
                 oneTimePreKeys.forEach { put(it.toJson()) }
             })
+            if (powProof != null) {
+                put("pow_proof", JSONObject().apply { powProof.forEach { (k, v) -> put(k, v) } })
+            }
         }
         val json = execute(post("/api/v1/register", body, authenticated = false))
         val newAccountId = json.getString("account_id")
