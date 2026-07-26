@@ -43,6 +43,9 @@ object MessagingNotifications {
     // `internal`, not private (round 5): the byte-for-byte gate's notification negative
     // control must NAME the artifact it plants, and a literal in the test is the same constant in
     // two places — the copy that drifts is the test, which then asserts against an id nothing posts.
+    private const val CANCEL_CONFIRM_TIMEOUT_NANOS = 3_000_000_000L
+    private const val CANCEL_POLL_MS = 25L
+
     internal const val NOTIFICATION_ID = 1001
 
     /** URI of the bundled custom sound in res/raw/new_message.(wav|ogg). */
@@ -157,6 +160,21 @@ object MessagingNotifications {
 
     fun cancelAll(context: Context) {
         NotificationManagerCompat.from(context).cancelAll()
+        // WAIT FOR system_server TO REFLECT THE CANCEL (0.9.2 W-B round 5, found by the gate).
+        //
+        // `cancelAll()` is a binder call into another process; `activeNotifications` is that other
+        // process's view. The two are not synchronous with each other, so a read-back immediately
+        // after the cancel can still observe the notification — which made the burn's postcondition
+        // fail intermittently and throw DestroyFailed over a cancel that had in fact worked.
+        //
+        // The action is what must achieve the postcondition, so the wait belongs HERE and not in the
+        // check: weakening `noneActive()` to tolerate a lingering notification would make it unable
+        // to see a REAL survivor, which is the whole reason the step exists. Bounded and fail-open —
+        // if the wait expires, `noneActive()` reports the truth and the burn fails closed on it.
+        val deadline = System.nanoTime() + CANCEL_CONFIRM_TIMEOUT_NANOS
+        while (System.nanoTime() < deadline && !noneActive(context)) {
+            Thread.sleep(CANCEL_POLL_MS)
+        }
     }
 
     /**

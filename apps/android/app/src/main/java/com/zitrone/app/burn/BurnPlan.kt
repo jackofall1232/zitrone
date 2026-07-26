@@ -174,6 +174,11 @@ internal fun runBurnPlan(steps: List<BurnStep>) {
             // success against surviving Keystore residue, and re-verifying here would have caught
             // either regardless of the probe bug, because a false postcondition fails the burn.
             if (!runCatching { step.verify() }.getOrDefault(false)) {
+                // NAME THE STEP. `DestroyFailed` carries the fixed message "a file survives", which
+                // is accurate for the image and misleading for the other six steps — the first time
+                // this threw on CI the report identified only a line number. A gate failure a human
+                // cannot localise costs a full emulator round trip to diagnose.
+                android.util.Log.e("ZitroneBurn", "burn step '${step.name}' failed its postcondition")
                 throw VaultImageException.DestroyFailed()
             }
         }
