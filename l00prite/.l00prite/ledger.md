@@ -1506,3 +1506,23 @@ recorded above with their advocates.
 
 **Gate GREEN on af60d50 (run 30184456372, first try). Suite 552/549/0/3.** Both are evidence about
 the scenario run, which is the finding.
+
+### 2026-07-26 — W-B ROUND-7 FINDING RESOLVED — one terminal-burn sequence; gate GREEN
+
+Maintainer decision: the finding was test-side, so **fix and merge** rather than re-scope.
+
+The fix is the SHARED CALLABLE, not the mirror, and the distinction was load-bearing: mirroring
+`lock()` into the gate restores FIDELITY but not DISCRIMINATION, because the gate would then hold its
+own copy and deleting production's would still leave it green. `AppContainer.runTerminalBurn` is now
+the one definition, called by `MainActivity.onBurn` and by every burn in the gate. It also PROVES the
+quiesce (`session.value != null` fails closed before the first mutation, hold not yet raised), so
+deleting the `lock()` makes the gate — which provisions a published session — throw. **Automatic
+discrimination rather than an argued one.**
+
+That point came from the advisory lens; both paired reviewers offered "mirror the call" and "extract
+a shared callable" as equivalent options, and they are not. Recorded because the same shape has now
+appeared three times in this unit: two copies of something that must agree, drifting (the biometric
+wiper and its probe; the ordering claim and its test; the terminal sequence and its gate).
+
+**Gate GREEN on 2c5fd0b, run 30187991596 — 5 tests, BUILD SUCCESSFUL in 5m33s. CI green. Suite
+552/549/0/3. PR #62 open, DRAFT, mergeable.** Not merged: merge remains a per-action human decision.
