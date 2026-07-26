@@ -674,8 +674,25 @@ deliberately left — lives in `AppContainer.wipeVaultUsePreferences`.
 **Explicitly NOT verified, and outside app control** — the app cannot claim fresh-install
 indistinguishability for these, and they are excluded from the gate with reasons recorded in the test
 itself: package install/update time, UsageStats and battery attribution, system-journaled notification
-history, MediaStore exports (user-initiated, leave the sandbox by design), and NAND-level residue —
-the guarantee is cryptographic erasure, not physical sanitisation.
+history, MediaStore exports (user-initiated, leave the sandbox by design), NAND-level residue —
+the guarantee is cryptographic erasure, not physical sanitisation — and, added in 0.9.3-beta,
+androidx **ProfileInstaller**'s `profileInstalled` marker in `filesDir`.
+
+**On that last one, stated plainly rather than buried in the list.** The marker is written by the
+library at launch, never by this app, and was never in the burn's delete set: the burn unlinks a
+*named* list (the wrapped DEK, the ciphertext image, their temporaries), it does not clear `filesDir`
+wholesale. So a burned device carries this file, and **so does any fresh install that has been
+launched once** — which is every install a user ever sees, since the marker is written before
+onboarding finishes. It records that the app ran; it records nothing about whether a vault existed,
+whether one was burned, or whether a duress credential was ever set, and its contents are a profile
+hash. It is therefore not a vault-use oracle and not a deniability break.
+
+It is disclosed here because it was found the honest way and the honest way is worth recording: the
+gate had been passing only because the marker happened to appear in both the baseline and the
+post-burn snapshot. A change elsewhere shifted the library's asynchronous write until after the
+baseline was taken, and the gate went red — revealing that its idea of a "fresh install" had been an
+empty `filesDir` that no launched install actually has. The exclusion corrects the gate's model of a
+fresh install. It does not excuse a residue, and no vault-bearing file is covered by it.
 
 **One further disclosed artifact (0.9.2 W-A/W-B interaction).** If a cold-start reconciliation cannot
 prove its own durability, boot routing withholds the fresh-install presentation and shows a lock

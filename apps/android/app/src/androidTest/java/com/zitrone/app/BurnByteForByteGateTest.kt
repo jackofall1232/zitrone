@@ -169,7 +169,11 @@ class BurnByteForByteGateTest {
         val dataDir = ctx.filesDir.parentFile!!
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         return StateSnapshot(
-            files = treeHashes(ctx.filesDir),
+            // Minus the library-managed markers — see LIBRARY_MANAGED_FILES for the one entry and
+            // its reason. Applied to the SNAPSHOT so baseline, provisioned and burned views are all
+            // built by the same rule; filtering only at the comparison would let a domain be judged
+            // by a weaker rule than its neighbours without that being visible.
+            files = treeHashes(ctx.filesDir) - LIBRARY_MANAGED_FILES,
             prefs = treeHashes(File(dataDir, "shared_prefs")),
             // Aliases carry no comparable content; the map shape exists so every domain runs through
             // the SAME diff, and so a domain can never be compared by a weaker rule than its
@@ -215,7 +219,11 @@ class BurnByteForByteGateTest {
      *    tracked as follow-up rather than claimed here — an exclusion stated honestly is worth more
      *    than a coverage claim that is not true;
      *  - MediaStore exports — user-initiated exports leave the app sandbox by design;
-     *  - NAND-level residue — crypto-erase is the guarantee, not physical sanitisation.
+     *  - NAND-level residue — crypto-erase is the guarantee, not physical sanitisation;
+     *  - **androidx ProfileInstaller's `profileInstalled` marker** — library-written, never written
+     *    by this app, and never in the burn's named delete list. Not a vault-use oracle: a launched
+     *    fresh install has it too. Full reasoning at [LIBRARY_MANAGED_FILES], including why it only
+     *    surfaced once a composition change moved the library's async write past the baseline.
      */
     @Before
     fun setUp() {
@@ -774,6 +782,31 @@ class BurnByteForByteGateTest {
             "zitrone_auth.xml",
             "zitrone_contacts.xml",
         )
+
+        /**
+         * LIBRARY-MANAGED FILES, excluded from the [StateSnapshot.files] comparison. Read the
+         * exclusion-list warning above before adding to this — one entry, one reason, both here.
+         *
+         * `profileInstalled` — androidx **ProfileInstaller**'s marker, written by the library's
+         * `androidx.startup` initializer after launch. **This app never writes it and the burn never
+         * claimed to remove it:** `obliterateLocked` deletes a NAMED list (the wrapped DEK, the
+         * ciphertext image, and their temps), not `filesDir` wholesale, so the marker surviving a
+         * burn was always the specified behaviour.
+         *
+         * **It is not a vault-use oracle**, which is the only bar that matters here. It records that
+         * the app was launched — equally true of a fresh install the moment onboarding is drawn — and
+         * its content is a profile hash carrying no vault state (it differed between two runs of this
+         * very failure: `63704a86…` vs `5c7282c6…`). Armed, unarmed, burned and freshly-installed
+         * devices are indistinguishable by it.
+         *
+         * **Why it only surfaced now, stated plainly because the honest reading matters:** the gate
+         * had been passing only because the marker happened to land in BOTH snapshots. A composition
+         * change shifted the library's async write past the baseline snapshot, so the "fresh"
+         * baseline began recording an empty `filesDir` that no launched install ever has. The
+         * comparison was fragile, not the wipe — this exclusion fixes the gate's model of a fresh
+         * install rather than excusing a residue.
+         */
+        val LIBRARY_MANAGED_FILES = setOf("profileInstalled")
 
         /** Every store [KeyStoreManager] can open — the flush barrier must cover all of them. */
         val ALL_PREFS_STORES = listOf(
