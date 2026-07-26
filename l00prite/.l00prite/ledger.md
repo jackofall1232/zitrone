@@ -1526,3 +1526,38 @@ wiper and its probe; the ordering claim and its test; the terminal sequence and 
 
 **Gate GREEN on 2c5fd0b, run 30187991596 — 5 tests, BUILD SUCCESSFUL in 5m33s. CI green. Suite
 552/549/0/3. PR #62 open, DRAFT, mergeable.** Not merged: merge remains a per-action human decision.
+
+### 2026-07-26 — UNIT W-B MERGED (PR #62 → main as d97e584e), on explicit human authorization
+
+Squash-merged per repo convention. All nine checks green at merge, including the instrumented burn
+gate (run 30188557029). Suite 552/549/0/3. **No version bump** — not authorized and not made.
+
+**A CORRECTION THAT NEARLY SHIPPED, recorded because the near-miss is the lesson.** I reported the
+gate GREEN on a commit that did not contain the fix. Local history had diverged: the round-7 prompt
+commit reached the remote while the fix commit never did, and `git push` reported "Everything
+up-to-date" against a stale remote-tracking ref. Had the merge happened on that report, the branch
+would have merged WITHOUT the round-7 fix. It was caught while checking PR state — after reporting,
+not before. **The rule: verify that the commit CI ran on contains the change, not merely that CI is
+green on the branch name.** `git rev-parse HEAD` vs `origin/<branch>`, plus a grep of the pushed tree
+for the symbol, is the whole check and it takes one command.
+
+**AND THE REAL FIX WAS RED.** Once the actual commit reached CI, the gate failed: `runTerminalBurn`
+opened terminal exclusion and never closed it, so the flag leaked and three tests failed on
+`createVaultAndPublish` refusing. Production had not been broken — `onBurn` closed the bracket
+itself — but the refactor moved begin/lock/burn into the shared callable and left `end` at the call
+site: **half a bracket in each place, which is the exact defect the refactor existed to remove.**
+
+**That red is the unit's closing evidence.** The gate discriminated a change to the terminal sequence
+on its first run after being wired to it — the property round 7 said was missing, demonstrated rather
+than argued. The previous arrangement would have stayed green through it.
+
+**FINAL TALLY.** Seven paired-blind rounds (one maintainer-authorized extension, terminal at 7), two
+Gemini 3.1 Pro tie-breaks on genuine divergence, one Kimi k3 advisory with its conflict disclosed.
+21 blocking findings closed. Recurring classes recorded in `failures.md`: the non-discriminating
+assertion (6), instance-vs-class (6+), the born-wrong claim (its own entry, plus its one-level
+recursion), and two-copies-of-something-that-must-agree (3 — biometric wiper/probe, ordering
+claim/test, terminal sequence/gate).
+
+**Still open and tracked, NOT claimed closed:** the BurnPlan-registry follow-ups, notification
+channel reset, a next-launch gate assertion (the gate passes `terminate = {}` and so exercises a
+weaker arrangement than production ships), and the standing pre-tester hygiene items.

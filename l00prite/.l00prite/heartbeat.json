@@ -19,9 +19,9 @@
     "before declaring completion"
   ],
   "last_run_time": "2026-07-25",
-  "completion_status": "ready_to_merge_awaiting_explicit_human_merge",
+  "completion_status": "merged",
   "should_continue": false,
-  "pause_reason": "Round-7 finding RESOLVED via shared runTerminalBurn (one definition for production and the gate, with a fail-closed session-quiesce proof so deleting lock() turns the gate red). Gate GREEN on 2c5fd0b (run 30187991596), CI green, suite 552/549/0/3. PR #62 is DRAFT and mergeable. MERGE + version bump still require explicit per-action human authorization; undrafting may dispatch the PR-attached bot lens, so that is also being asked rather than assumed.",
+  "pause_reason": null,
   "execution": {
     "enabled": false,
     "preflight_confirmed": false,
@@ -45,6 +45,6 @@
       "stop_signal"
     ]
   },
-  "active_unit": "0.9.2 Unit W-B \u2014 Pucker Burn wipe mechanism (feat/0.9.2-unit-wb-burn-wipe)",
-  "loop": "Unit W-B complete pending human merge. Loop closed at round 7 of 7."
+  "active_unit": "0.9.2 Unit W-B \u2014 MERGED (PR #62, d97e584e). Next: W-A merge, the W-A follow-up delta, docs-honesty delta, then the 0.9.2 flip. No version bump authorized.",
+  "loop": "Unit W-B closed and merged at round 7 of 7. Loop complete."
 }
