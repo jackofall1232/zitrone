@@ -265,6 +265,37 @@ fail loudly if `afterPublish` ever becomes suspending. **Characterisation, hones
 false coverage claim.** Pairs with the rule above: the same test carries `MUTATION UNIQUELY CAUGHT:
 NONE` because the mutation was run and survived.
 
+### THE CLAIM THAT WAS BORN WRONG — false at authorship, not drifted into falsehood (W-B round 4)
+Every other prose defect in this project was a STALE claim: true when written, falsified later by a
+change nobody propagated. This one was **false the day it was committed**, in the commit that shipped
+the thing it described — process death — while the entire unit was about false confident prose.
+
+The claim: *"killed BEFORE lowerHold → the disk reconcilers re-derive the doubt at next boot → lock
+screen. Fail-closed… There is no interruption point at which process death produces a fresh-install
+presentation over an unproven wipe."* Written into `runBurnWipe`'s kdoc, `SECURITY_MODEL.md` and the
+commit message simultaneously. **Both round-4 lenses independently derived from the same source lines
+that it is false** for the failed-but-clean shape: once `burnObliterate()` succeeds, every reconciler
+trigger (`completeInterruptedBurn` needs `vault.bin` PRESENT; `reconcileOrphanedBurnMarkers` needs a
+marker; the sweep needs image-bearing residue) is gone, so a later cleanup failure plus process death
+publishes `durabilityHold=false` over surviving residue.
+
+**WHY THIS IS A DIFFERENT DETECTION PROBLEM, and the reason it gets its own entry.** The project's
+existing defence is re-derivation against source when something changes. That defence is structurally
+blind here: **re-deriving a born-wrong claim confirms it still says what it said.** The question
+re-derivation asks is "has this drifted?", and the answer is correctly "no" — it has been false and
+unchanged since birth. A claim can pass every future staleness audit and never once have been true.
+
+**THE RULE: a claim introduced WITH a change must be proven on the same terms as the change — not
+merely reviewed later for staleness.** If the change ships with a test, the claim needs the test. If
+the claim is about behaviour under interruption, enumerate the interruption points and say which are
+covered and which are not, in the same commit. "I reasoned it through while writing it" is exactly
+the evidence that failed here, twice in one commit (this, and the "deterministic drain" claim about
+`killProcess`, which prevents FUTURE userspace work but cannot roll back a write already submitted by
+a thread already running).
+
+Corollary for reviewers: **new prose is not lower-risk than new code.** Attack a claim's first
+appearance hardest, not its tenth.
+
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
   round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked
