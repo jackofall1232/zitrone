@@ -6,6 +6,7 @@
 package com.zitrone.app.ui.components
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -26,6 +27,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -98,6 +100,15 @@ fun BurnSetupDialog(
                 WarningPoint("Using it consumes it — after a burn you must set a new one.")
                 WarningPoint("Setting one again silently replaces the old one.")
                 Spacer(Modifier.height(12.dp))
+                // KeyboardType.Password is NOT cosmetic and NOT redundant with the visual
+                // transformation: the transformation only masks what is DRAWN, while the keyboard
+                // type is what tells the IME not to learn the input. Without it Gboard and friends
+                // may treat this as ordinary text and cache the credential in the personal
+                // dictionary — and for a DURESS password that is doubly bad, because an adversary
+                // with the device (exactly this feature's threat model) could both recover it and
+                // find, in the dictionary, evidence that a duress credential exists at all. The
+                // lock screen and onboarding already set this; this dialog was the one passphrase
+                // field in the app that did not. Caught by the PR review bot on the pre-fix branch.
                 OutlinedTextField(
                     value = password,
                     onValueChange = { password = it },
@@ -105,6 +116,7 @@ fun BurnSetupDialog(
                     singleLine = true,
                     enabled = !busy,
                     visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                 )
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
@@ -115,6 +127,7 @@ fun BurnSetupDialog(
                     enabled = !busy,
                     isError = mismatch,
                     visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                 )
                 if (mismatch) {
                     Spacer(Modifier.height(4.dp))
