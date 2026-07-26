@@ -561,11 +561,123 @@ while a delete is pending, self-verifying seal), the silent **triple-entry** rou
 (the single wrap is never repointed). An Android user can therefore create and reveal a second
 vault, and plausible deniability is a **usable** guarantee here, within the limits above. **What
 is NOT built yet:** per-vault destruction (whole-image account delete only — there is no
-single-slot destroy primitive) and the **Pucker Burn** setup/wipe UX (slot 0 is reserved and the
-store is burn-*aware*, but the credential is not yet user-settable and the wipe is a fail-closed
-stub). Those, plus the full dual-slot destruction design, remain a **locked design** in
+single-slot destroy primitive) and the **Pucker Burn** setup UX (slot 0 is reserved and the store is
+burn-*aware*, but the credential is **not yet user-settable**, so the burn cannot be triggered by a
+real user even though the wipe behind it is wired and gated — see the section below). Those, plus the full dual-slot destruction design, remain a **locked design** in
 [`docs/VAULT_ARCHITECTURE.md`](VAULT_ARCHITECTURE.md) §3.4, landing as their own adversarially-
 reviewed PRs. **Do not describe per-vault destruction or a working Pucker Burn as shipped.**
+
+### Pucker Burn — a successful burn CLOSES THE APP (0.9.2 Unit W-B)
+
+**Behaviour, stated plainly because it is visible to the user:** when the duress passphrase triggers
+a completed wipe, the app does not return to a screen — it **terminates its own process**. Reopening
+it presents onboarding, exactly as a fresh install does. A burn that FAILS does not terminate: it
+shows the same uniform error as a mistyped passphrase and stays open, because a failed burn must be
+indistinguishable from a wrong password.
+
+**Why.** No in-process wipe can be durable against a live writer. While the process runs, cached
+`SharedPreferences` instances, in-memory buffers and lazily-initialised components can rewrite state
+*after* the wipe proved it absent — a real defect of exactly this shape (an in-memory diagnostics
+buffer rewriting a deleted log) was found in review. The preference wipe's safety additionally rested
+on an ordering argument about Android's `SharedPreferences` internals that three independent reviewers
+read three different ways and none could confirm. When a correctness claim rests on a platform
+implementation detail nobody can independently confirm, the answer is to stop needing the claim.
+Process death drains the **userspace** write queue: a pending `apply()` can never start its write,
+and no lazily initialised component can recreate a file after the wipe. It is **not** a drain of the
+kernel block layer — a thread already inside a write syscall completes regardless — so process death
+is defence in depth here, not the proof.
+
+**The proof is the ordering plus a boot-time completion.** The diagnostics log, the plaintext cache
+and any active notification are cleared BEFORE the vault image is destroyed, so an interruption in
+that phase leaves an intact, unlockable vault in a state the OS or the user produces routinely
+anyway. **Preferences are cleared AFTER the image**, because resetting a user's settings on a vault
+that still works is a durable, visible tell rather than an innocuous one — an earlier version of this
+design cleared them first and that was corrected in review. Key material is removed AFTER the image, because deleting it while an image remained
+would leave a vault nobody can open, which is a worse tell than the residue it would replace. And if
+a burn is interrupted after the image is gone, the next boot recognises the leftover state **from the
+residue itself** — a device with no vault image but a diagnostics log, a plaintext cache, or
+vault-use preference files is in a state a fresh install cannot be in — finishes the cleanup, and
+withholds the fresh-install presentation until it proves. No durable "burn in progress" marker is
+written, deliberately: such a marker would survive a crash on a device whose vault is still intact
+and would itself prove the duress passphrase had been entered.
+
+**An earlier version of this section claimed process death was safe at every interruption point
+because boot re-derived the doubt. That was false when written** — the boot reconcilers all keyed on
+vault-image state, so once the image was destroyed they were blind to a later cleanup failure. The
+mechanism described above is what makes the claim true; it is recorded here because the wrong version
+shipped first.
+
+**Which state an interrupted burn can leave, stated so it is not mistaken for a bug.** A burn that
+fails before the image is destroyed leaves an intact, unlockable vault whose diagnostics log, cache
+and notifications were cleared — all routine states. A burn that fails *after* the image is gone
+leaves no vault, and the next launch detects the leftover state from the residue itself and finishes
+the cleanup. The ordering is chosen step by step so that whichever point it is interrupted at, the
+state left behind is one a device could plausibly be in anyway.
+
+**Active notifications are cancelled by the burn.** A posted message notification would otherwise
+outlive the wipe — on the lock screen, where it is most visible — and a fresh install has none.
+
+**The tradeoff, both directions.** A closed app is arguably more duress-appropriate than an animation
+playing out. It is also a visible event that a coerced user cannot explain away as a typo — whereas
+the failure path stays silent. This is a deliberate choice, not an oversight.
+
+### Pucker Burn — what the byte-for-byte gate proves, and what it does NOT (0.9.2 Unit W-B)
+
+The duress wipe's guarantee is **post-burn indistinguishability**: after a completed burn, app-local
+state matches a fresh install. That is now mechanically gated in CI on every Android change — files,
+`shared_prefs`, databases, the plaintext **cache**, **active system notifications**, and **Android
+Keystore aliases** compared by CONTENT HASH against a fresh baseline, plus the derived boot verdict (a fresh install has no
+durability hold raised, so a state matching on every byte but differing in what the app will DO with
+it is not fresh-install-equivalent).
+
+Two properties make a green run mean something, and both were added after a review found the gate
+green over residue it structurally could not see:
+
+- **It provisions through the PRODUCTION create/publish path**, not by writing a vault image
+  directly, so the residue it compares is the residue the field produces — `onboarding_done`, device
+  settings, the lazily-created preference files, a live session. A gate that provisions its own
+  simplified state certifies whatever it happens to create.
+- **Every domain the burn wipes carries a named seeded artifact asserted PRESENT before the burn, and
+  a per-domain NEGATIVE CONTROL** that plants residue and asserts the comparison names it. The one
+  exception is `databases`, which is a TRIPWIRE rather than burn coverage: the app creates none, so
+  there is nothing to seed, and the assertion proves "no database exists to leak" rather than "the
+  burn removes databases". If the app gains one it needs an enumerated burn step. A comparison can be
+  sound for files and structurally blind for caches; the aggregate green run looks identical either
+  way, so each domain is proven able to fail rather than trusted to be.
+
+**THE LIMIT, STATED PLAINLY: the gate proves post-burn indistinguishability, NOT that the app is
+indistinguishable from never-used at ALL TIMES.** These are different claims and only the first is
+gated. An artifact created lazily on first use and then correctly wiped by a burn passes the gate
+while still being an oracle **at every moment between its creation and the burn** — a device seized in
+that window discloses that the feature was used. The signature to watch for is *"exists only if the
+feature was used"*, and it is a demonstrated defect class, not a hypothesis: the gate's first
+execution found the vault device-key Keystore alias surviving every burn, created lazily on first
+vault creation and absent on a device that never made one. It is fixed; the class is not closed by
+that fix.
+
+Artifacts audited for that signature: Keystore aliases (three families — the device key and biometric
+wraps are lazily created and wiped by burn; `_androidx_security_master_key_` is created at app startup
+and present on a fresh install, so it is not an oracle and is deliberately left alone), vault files
+and interrupted-write temps, delete markers, the boot diagnostics log, plaintext caches, databases
+(the app creates none, which the gate asserts rather than assumes), and **preferences — in both
+shapes**. The second shape is the one a file-level audit misses and a review had to find: three of the
+four preference stores are opened lazily and a never-used device has no such FILE, while the fourth is
+opened at startup by every install and its residue is the KEYS INSIDE it (`onboarding_done`, every
+device setting the user touched). "A fresh install has this file too" is true of the fourth store and
+settles nothing about its contents. The burn's per-store table — reset in place, unlinked, or
+deliberately left — lives in `AppContainer.wipeVaultUsePreferences`.
+
+**Explicitly NOT verified, and outside app control** — the app cannot claim fresh-install
+indistinguishability for these, and they are excluded from the gate with reasons recorded in the test
+itself: package install/update time, UsageStats and battery attribution, system-journaled notification
+history, MediaStore exports (user-initiated, leave the sandbox by design), and NAND-level residue —
+the guarantee is cryptographic erasure, not physical sanitisation.
+
+**One further disclosed artifact (0.9.2 W-A/W-B interaction).** If a cold-start reconciliation cannot
+prove its own durability, boot routing withholds the fresh-install presentation and shows a lock
+screen. Where that happens with no image on disk, the lock screen **cannot be passed** — every
+passphrase attempt fails before any slot is interpreted. It is fail-closed and clears on the next
+start, but it has no in-app exit and is documented rather than hidden.
 
 Two invariants from that architecture are restated here because they are permanent
 security properties, not implementation details:
@@ -904,6 +1016,42 @@ modal itself:** the saved file contains the drop link, persisted to disk by the 
 The app treats it exactly like the printed sticker — it does not track, manage, or delete it. On
 desktop the file write happens natively behind the OS save dialog; the WebView never supplies a
 filesystem path.
+
+## Cold-start residue sweep (0.9.2 Unit W-A)
+
+The vault directory can legitimately end up holding a `vault.dek`, a `vault.bin.tmp` or a
+`vault.dek.tmp` with **no `vault.bin`**. Two ordinary interruptions produce that state:
+
+- an interrupted **create** — the DEK is written and fsynced *before* the image (the DEK-first
+  durability barrier, which makes a `{bin present, dek absent}` brick unreachable), so a crash between
+  the two leaves a stray DEK and no image;
+- an interrupted **legacy-image retirement** — it unlinks the image and *then* the DEK, so a crash
+  between those unlinks leaves the same shape.
+
+Boot routing keys on `vault.bin` alone, so it read that state as "no vault" and presented ordinary
+first-run onboarding. That matters because `vault.bin.tmp` stages a **complete** outer image: the
+first-run screen could be shown while a recoverable encrypted vault was still on disk.
+
+**What now happens.** Before any routing decision reads disk state, a cold-start sweep deletes that
+orphaned residue, proves it gone by re-stat, and makes the deletion durable. It runs **only** when the
+image is *proven* absent (`Files.notExists`, so an unstattable image refuses) **and** no
+`vault.delete-confirmed` marker is present or indeterminate — so it can never touch a live vault's key
+or state that an in-flight account deletion owns. It is idempotent and silent.
+
+**Onboarding over an empty directory requires proven absence.** Where the first-run screen is shown
+because the device appears to have no vault, it now requires the whole directory to be provably clean —
+not merely "no `vault.bin`". (Re-onboarding a prior-format image is the one first-run presentation that
+does not rest on that test: there the image is present and is retired by the create.) If a sweep
+unlinked residue but could not confirm the deletion durable, the lock screen is held for the rest of
+that boot instead of claiming a clean device — absence that is not durable is not absence. A sweep that
+simply refuses (a live image, a pending deletion, an unstattable path) changes nothing and reports
+nothing; the routing outcome then follows from the other disk facts.
+
+**Honest limits.** The sweep is cryptographic hygiene, not media sanitization: unlinking does not erase
+data from wear-levelled flash, and the guarantee remains that the DEK is destroyed so surviving blocks
+are ciphertext. The routing decision itself is exhaustively unit-tested; its *delivery to the screen*
+(the Compose wiring, and behaviour across an Activity recreation) is verified by inspection, because
+this project has no Compose UI test infrastructure — tracked as follow-up work.
 
 ## Audit history
 

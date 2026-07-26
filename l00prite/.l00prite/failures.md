@@ -115,6 +115,195 @@ self-heals. **Don't over-claim "self-healing" — trace the exact failure result
 vs INVALIDATED) and which of them actually clears the wrap.** The reviewer with the less convenient
 fact was right both times; source, not severity or self-interest, decides.
 
+### PROCESS FIX (BINDING) — run the mutation BEFORE writing the header, not after (0.9.2 Unit W-A, round 4)
+**The rule: a `MUTATION UNIQUELY CAUGHT:` line may not be WRITTEN until the named mutation has been
+applied to production, the test run, and the failure observed. It is a precondition of writing the
+claim, not a verification performed afterwards.** If the mutation survives, the header must say the
+test catches nothing and is characterisation — or the test must be strengthened until it does.
+
+Why this is mechanical and not a reminder: I wrote a header claiming a cancellation test uniquely
+caught hoisting `runCatching` outside `withContext`. I ran the mutation. The test stayed green —
+cancellation is Job state, so once the parent is cancelled the child is cancelled regardless of what
+any enclosing `runCatching` swallows, and no assertion on `isCancelled` can separate the two forms.
+
+**Knowledge did not prevent this.** I knew the pattern, it was recorded here, and Moonshot had caught
+the identical shape three rounds earlier in *the same file* (`BootReconcileOwnerTest.kt:88-97`, whose
+header still carries its own correction). I produced it anyway, in the round that closed the unit.
+What caught it was running the mutation and observing green — a mechanism, not care. So the remedy is
+the same shape as every structural fix that worked in this unit (remove the default param so omission
+is a compile error; move the dispatcher inside the function; contain the fault in the wrapper): **make
+the wrong thing impossible rather than remembered.** An unrun mutation claim is an unverified claim,
+and a false coverage claim is worse than no claim — it retires scrutiny from a path nothing guards.
+
+### PROCESS FIX (BINDING) — verify CI by head SHA, and never write to the branch after verifying
+**The rule, both halves — the second is not optional:**
+1. **Poll CI by head SHA, never by PR number alone.** `gh pr checks <n>` answers "are there results?"
+   The question you actually need answered is "are there results **for THIS commit**?" Use
+   `gh run list --commit <sha>`.
+2. **Do not commit or push to a branch between verifying CI and acting on that verification.** A
+   write after verification makes the verification **stale by construction** — the run you cited no
+   longer covers the head you are merging.
+
+**Why it is mechanical and not a reminder — I recorded half of it and then reproduced the failure
+within minutes.** After force-pushing the W-A rebase, my poller reported "settled" while reading the
+**pre-rebase** run, still attached because the new run had not been created yet. I caught it, wrote
+the by-SHA rule, re-verified correctly, reported green — and then immediately committed a ledger
+update to the same branch, moving the head off the SHA I had just certified. Knowing rule 1 did not
+produce rule 2; only doing the thing and watching it break did.
+
+**LINEAGE — this is NOT a new shape.** It is the same producer/consumer family that generated most of
+Unit W: *an authoritative result exists, and a consumer uses something weaker.* Here the authoritative
+signal is "CI result for commit X" and the consumer accepted "CI results exist on this PR" — form (a),
+the weaker proxy, exactly as boot routing consumed proxies for verdicts it did not own. The second
+half is form (b), the lifecycle one: **the verification and the artifact it certifies must share a
+head**, the same shape as "claim and work must share a lifetime" from `runBootReconcile`. Recognizing
+it as the same family matters more than the individual rule — when this family appears, look for the
+stronger signal that already exists and the consumer that settled for less.
+
+### PROCESS FIX (BINDING) — correcting a stated fact means finding EVERY instance of it, and enumerating the hits
+**The rule:** a correction is not done when the line you were pointed at is fixed. Before committing,
+`grep -rn` the whole file AND the whole delta for every OTHER place that states the same fact, and
+**enumerate the hits in the commit message** — "N instances found, N corrected". Two of three is the
+failure mode. Applies to PROSE, not just code: sibling-call-site hunting is already binding for code
+(item A0 in every review prompt), and this is the same hunt one layer up.
+
+**Why it is mechanical and not care — the delta whose stated purpose was closing the sibling pattern
+reproduced the sibling pattern INSIDE itself.** `bdde066` corrected three stale claims. One of them —
+"production wraps `afterPublish` in a local `runCatching`" — was stated in THREE places, not one: the
+production call site at `ZitroneApp.kt:287` (correct, and stated in the negative), the
+`BootReconcileOwnerTest` header (stale, fixed), and the implementation comment at
+`ZitroneApp.kt:1172` (stale, MISSED) — four lines above the wrapper that actually supplies the
+containment and one screen from the call site that says the opposite. Both follow-up lenses raised
+it independently. Had the grep been run, the third hit was one command away.
+
+**AND THE FIRST WRITING OF THIS RULE GOT ITS OWN ENUMERATION WRONG** (follow-up round, Codex; Grok
+checked the count and passed it). It listed the third instance as the `runBootReconcile` kdoc. That
+kdoc was corrected in the same commit, but for a DIFFERENT fact — "production passes
+`Dispatchers.IO`" — and it never carried the containment claim at all. `git show bdde066 --
+ZitroneApp.kt` is a single hunk touching only the dispatcher sentence; source settles it. The count
+of three was right by accident, over the wrong set. **So the rule needs its second half: enumerate by
+GREPPING FOR THE FACT, then verify each hit actually asserts that fact — a correction landing in the
+same commit is not evidence it is the same claim.** Adjacent-and-also-fixed is the trap.
+
+**LINEAGE — same shape as the mutation-header incident above: knowing the pattern did not prevent
+producing it.** Both times the person writing the correction had just articulated the rule. That is
+the signal a rule is not enough — the remedy has to be a step in the close-out (`grep`, count, state
+the count), not an intention to be careful.
+
+### THE AFFIRMATIVE CASE FOR RE-DERIVING — a stale claim hid a real capability (W-B, C4)
+Every other entry here records re-derivation catching an OVERCLAIM. This one records it recovering
+something. The Pucker Burn invariant table listed residual **R1** — a crash between the keys-first
+unlinks leaves an image whose DEK is gone, visibly damaged rather than cleanly reset — and accepted
+it as **"unavoidable without a durable pre-burn intent marker"**, with the marker ruled out because
+it would be exactly the discoverable armed/in-progress artifact the design forbids. Sound reasoning,
+stated confidently, and **false**.
+
+Re-deriving it against source found `completeInterruptedBurn()` already built on the parent branch,
+resolving R1 with **no marker at all**: it keys on `{vault.bin PRESENT, vault.dek PROVEN absent}`, a
+signature `create()` structurally cannot produce, because create renames the DEK envelope into place
+FIRST and the image SECOND — a partial create is the exact INVERSE. No ordering in the codebase
+produces that state except an interrupted keys-first obliteration or genuine DEK media loss, and both
+are unrecoverable, so completing the wipe destroys nothing still readable.
+
+**The lesson: re-derivation is not just an overclaim filter.** A residual accepted as unavoidable is
+a claim like any other, and "we couldn't do better" ages exactly as badly as "this is safe". When a
+doc records something as impossible, the cost of re-checking is one derivation and the payoff can be
+a capability the project already paid for and then forgot it had. Do NOT treat the residuals section
+of a design doc as settled just because the defects section has been reviewed.
+
+### THE NON-DISCRIMINATING ASSERTION — satisfied by BOTH the correct and the broken behaviour (6 occurrences)
+Distinct from a vacuous test (asserts nothing) and from a stand-in test (asserts against a copy of the
+logic). This one asserts something REAL about something REAL — it just cannot tell the two apart, so
+it passes against the very defect it exists to catch.
+
+**Six occurrences in one unit** — and note where the last two were found: inside the FIX for this
+class, and inside the gate written to enforce it. Naming a class does not close it.
+1. `assertFalse(store.reconcileOrphanedBurnMarkers())` on a non-durable reconcile. `false` was exactly
+   what the BROKEN code returned — the Boolean conflated "did not fire" with "mutated, not durable".
+   The assertion passed against the bug. Now asserts `MUTATED_NOT_DURABLE` specifically.
+2. The gate's negative test asserted only `fresh != burnedWithResidue`. That held anyway because of an
+   unrelated defect (the device-key alias surviving every burn), so it could not distinguish "caught
+   my planted artifact" from "caught someone else's residue". Now names its artifact.
+3. `bootRoute` composed routing: "held + provably clean → LOCKED" alone would pass if ONBOARDING were
+   unreachable for any unrelated reason. Needed its second half — the same disk WITHOUT the doubt →
+   ONBOARDING — to prove the hold was the discriminator.
+4. **The gate's own positive comparison** (round 2, both lenses, found INSIDE the commit that fixed
+   occurrence 2). `assertEquals(fresh.prefs, burned.prefs)` is a real assertion over real state — and
+   it was satisfied by a burn that wipes preferences AND by one that does not, because the scenario
+   provisioned via `imageStore.create()` and never created preference residue at all. Same for
+   databases, caches and diagnostics. **The assertion was strong and the SCENARIO was empty**, which
+   is the form this class takes at the harness level: content hashing fixed how faithfully the gate
+   compared, and changed nothing about whether there was anything to compare. Fixed by provisioning
+   through the production create/publish path and asserting each seeded artifact PRESENT by name
+   before the burn.
+5. `burn_requires_the_biometric_wipe_to_succeed` — "no biometric alias remains" asserted after a
+   scenario that never enabled biometrics. No alias existed, so the assertion held for a burn that
+   consumes `wipeBiometricMaterial()`'s boolean, for one that ignores it, and for a wipe that is a
+   successful no-op. **The test named the defect in its own title and could not discriminate against
+   it.** Fixed by planting a real alias with production's prefix and asserting it present first.
+
+6. **The gate's notification domain** (round 5, both lenses) — added to the snapshot, the baseline
+   AND the post-burn comparison, and never SEEDED. `fresh.activeNotifications` and
+   `burned.activeNotifications` were both empty on every run, so the comparison passed and a burn
+   with the cancel step deleted would have passed identically. **Committed inside the fix for the
+   notification finding itself** — the domain was added because a reviewer found active
+   notifications surviving a burn, and the fix for that finding shipped without the seed that would
+   prove it. Scenario-level form of the class, third time.
+
+**THE DETECTION RULE, mechanical: for every assertion, ask what WRONG implementation would also
+satisfy it. If the answer includes the one this test exists to catch, the assertion is too weak.**
+Occurrences 4 and 5 add the SCENARIO-level form of the same question, which the assertion-level one
+misses entirely: **ask what the test actually CREATED before it compared.** An assertion cannot
+discriminate over state the scenario never produced, so a strong assertion over an empty scenario
+reads in review exactly like proof. For any gate, list the domains it claims and name the artifact it
+seeded in each; a domain with no named seed is not being tested, however rigorous the comparison
+looks.
+Applies especially to `assertFalse`/`assertNotEquals`/`!= null`: a negative assertion is satisfied by
+enormous numbers of wrong states, so it must name WHICH wrong state it rejects, or pair with a
+positive assertion that fails when the discriminator is removed.
+
+### GOOD HANDLING — demonstrate why a concern is latent; never assert a property the test cannot prove
+Grok's round-4 INFO-3 said `runCatching { afterPublish() }` swallows `CancellationException` while the
+sweep path deliberately rethrows. Rather than "fix" the asymmetry or wave the label away, the test
+was written to answer whether it was live: `afterPublish` is `() -> Unit`, not `suspend`, so it has no
+suspension point at which a real cancellation could ever reach it — the only CE it can raise is one it
+constructs itself; and the `runCatching` sits INSIDE `withContext`, which rechecks its job on exit, so
+a genuine cancellation still propagates. Latent, not live, and the reasoning is executable and will
+fail loudly if `afterPublish` ever becomes suspending. **Characterisation, honestly labelled, beats a
+false coverage claim.** Pairs with the rule above: the same test carries `MUTATION UNIQUELY CAUGHT:
+NONE` because the mutation was run and survived.
+
+### THE CLAIM THAT WAS BORN WRONG — false at authorship, not drifted into falsehood (W-B round 4)
+Every other prose defect in this project was a STALE claim: true when written, falsified later by a
+change nobody propagated. This one was **false the day it was committed**, in the commit that shipped
+the thing it described — process death — while the entire unit was about false confident prose.
+
+The claim: *"killed BEFORE lowerHold → the disk reconcilers re-derive the doubt at next boot → lock
+screen. Fail-closed… There is no interruption point at which process death produces a fresh-install
+presentation over an unproven wipe."* Written into `runBurnWipe`'s kdoc, `SECURITY_MODEL.md` and the
+commit message simultaneously. **Both round-4 lenses independently derived from the same source lines
+that it is false** for the failed-but-clean shape: once `burnObliterate()` succeeds, every reconciler
+trigger (`completeInterruptedBurn` needs `vault.bin` PRESENT; `reconcileOrphanedBurnMarkers` needs a
+marker; the sweep needs image-bearing residue) is gone, so a later cleanup failure plus process death
+publishes `durabilityHold=false` over surviving residue.
+
+**WHY THIS IS A DIFFERENT DETECTION PROBLEM, and the reason it gets its own entry.** The project's
+existing defence is re-derivation against source when something changes. That defence is structurally
+blind here: **re-deriving a born-wrong claim confirms it still says what it said.** The question
+re-derivation asks is "has this drifted?", and the answer is correctly "no" — it has been false and
+unchanged since birth. A claim can pass every future staleness audit and never once have been true.
+
+**THE RULE: a claim introduced WITH a change must be proven on the same terms as the change — not
+merely reviewed later for staleness.** If the change ships with a test, the claim needs the test. If
+the claim is about behaviour under interruption, enumerate the interruption points and say which are
+covered and which are not, in the same commit. "I reasoned it through while writing it" is exactly
+the evidence that failed here, twice in one commit (this, and the "deterministic drain" claim about
+`killProcess`, which prevents FUTURE userspace work but cannot roll back a write already submitted by
+a thread already running).
+
+Corollary for reviewers: **new prose is not lower-risk than new code.** Attack a claim's first
+appearance hardest, not its tenth.
+
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
   round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked

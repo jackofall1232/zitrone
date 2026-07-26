@@ -7,6 +7,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Android: a successful Pucker Burn now CLOSES THE APP.** When the duress passphrase triggers a
+  completed wipe, the app terminates its own process instead of returning to a screen; reopening it
+  presents onboarding, exactly as a fresh install does. A burn that **fails** does not terminate — it
+  shows the same uniform error as a mistyped passphrase and stays open, because a failed burn must
+  stay indistinguishable from a wrong password. **Why:** no in-process wipe can be durable against a
+  live writer — cached preference instances, in-memory buffers and lazily-initialised components can
+  rewrite state after the wipe proved it absent (a defect of exactly this shape was found in review),
+  and the remaining safety argument rested on Android `SharedPreferences` internals that three
+  independent reviewers read three different ways and none could confirm. Ending the process drains
+  the **userspace** write queue — a pending write can never start — though not the kernel's, so this
+  is defence in depth rather than the proof; the proof is the wipe ordering and a boot-time
+  completion (next entry). See `docs/SECURITY_MODEL.md` for the full rationale and the deniability
+  tradeoff in both directions.
+- **Android: the Pucker Burn orders its cleanups so an interrupted wipe leaves an innocuous state**,
+  and cancels any active notification. The diagnostics log, plaintext cache and notifications are
+  cleared before the vault image is destroyed — a crash there leaves an intact, unlockable vault in a
+  state the OS or user produces routinely. Preferences and key material are cleared after the image,
+  because resetting a user's settings on a vault that still works would be a visible tell rather than
+  an innocuous one. If a burn is interrupted *after* the image is gone,
+  the next launch detects the leftover state from the residue itself and finishes the cleanup before
+  presenting anything. No "burn in progress" marker is ever written to disk — such a marker would
+  survive on a device with an intact vault and prove the duress passphrase had been used.
+
 ### Added
 
 - **Android: second (decoy) vault is now creatable — plausible deniability becomes usable.**

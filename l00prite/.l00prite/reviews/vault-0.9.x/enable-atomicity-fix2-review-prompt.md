@@ -1,0 +1,12 @@
+You are an INDEPENDENT ADVERSARIAL SECURITY / DOCS-ACCURACY REVIEWER. Report findings only. Verify claims against ACTUAL SHIPPED CODE. CONFIRM round for the biometric enable-atomicity change after two fix rounds. Report ONLY a real defect or a claim the code does not support (blocking) — NOT wording/style preferences.
+
+## Delta to review
+`33dcfdb..8748d8a` on branch `feat/0.9.2-vault-enable-atomicity` (/root/zitrone). `git diff 33dcfdb..8748d8a`. Read the full surrounding text.
+
+## What round 2 changed (doc/comment-only — verify each is now ACCURATE, no behavior change)
+1. `docs/SECURITY_MODEL.md` + `docs/VAULT_ARCHITECTURE.md` §3.2: the absolute "cannot leave a wrap referencing a wrong or DELETED key / always references its own existing key" was softened to: no concurrent/interrupted/disable-racing enable can leave a **wrong-key** orphan; but a process kill in the window between the async prefs write (`apply()`) and the synchronous Keystore delete can leave a **missing-key** wrap that the next unlock auto-clears (pre-existing, unavoidable, self-heals). Verify this matches code: (a) prefs `save`/`clear` use `apply()` (async); (b) Keystore delete is synchronous; (c) a crash there yields a missing-key (absent-alias) wrap, NOT a wrong-key one — i.e. Approach B still makes a wrong-key orphan impossible; (d) the missing-key wrap auto-clears via `cipherForDecrypt`→null→UNAVAILABLE→`disableBiometric`. Is the softened claim now correct and non-overclaiming? Did it introduce any UNDERSTATEMENT (e.g. implying a wrong-key orphan is possible)?
+2. KDocs on `BiometricVaultKeyCipher.deleteAllAliasesExcept`, `AppContainer.reapStaleBiometricAliases`, and the cold-start GC comment: the stale "quiescent only / never concurrent with enable" was replaced with "safe under concurrency because callers hold `biometricWriteLock` and the enable-commit re-checks `keyExists`." Verify that is TRUE against the code (the lock + keyExists abort genuinely make concurrent GC∥enable safe).
+3. Any NEW inaccuracy or contradiction introduced by these edits, across the four docs + the code comments. Confirm the round-1/round-2 code invariants (INV-1 no-wrong-key-orphan under concurrency, never-repoint, serialized mutations, load() hardening, legacy GC) are unchanged and still hold.
+
+## Output
+For each of 1-3: CONFIRMED-ACCURATE (code cite) or a real finding (SEVERITY, FILE+line, claim vs code). One-line verdict (CLEAN or the blocking finding). Report ONLY.

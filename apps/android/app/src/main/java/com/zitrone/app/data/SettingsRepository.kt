@@ -15,9 +15,16 @@ import kotlinx.coroutines.flow.asStateFlow
  * All defaults follow the master spec: Tor OFF (opt-in), biometric gate ON,
  * burn-on-read OFF, no default TTL.
  */
-class SettingsRepository(keyStoreManager: KeyStoreManager) {
+class SettingsRepository(private val prefs: android.content.SharedPreferences) {
 
-    private val prefs = keyStoreManager.prefs(KeyStoreManager.PREFS_SETTINGS)
+    /**
+     * What production wires — the same [KeyStoreManager.PREFS_SETTINGS] file the device settings and
+     * the biometric wrap share. The [prefs] constructor is the seam under test, matching
+     * [BiometricUnlockStore]'s shape over the same store; the only other construction site is
+     * `AppContainer`, which uses this one.
+     */
+    constructor(keyStoreManager: KeyStoreManager) :
+        this(keyStoreManager.prefs(KeyStoreManager.PREFS_SETTINGS))
 
     data class Settings(
         val onboardingDone: Boolean = false,
@@ -88,6 +95,33 @@ class SettingsRepository(keyStoreManager: KeyStoreManager) {
         put { putBoolean(KEY_UNREAD_REMINDER, enabled) }
 
     fun setAutoLockTimeoutSeconds(seconds: Int) = put { putInt(KEY_AUTOLOCK, seconds) }
+
+    /**
+     * Return this store to its FRESH-INSTALL baseline, synchronously and provably (0.9.2 Unit W-B
+     * round-2 review, BLOCKING).
+     *
+     * The baseline is "the file exists, holds the two androidx keyset entries, and has no app key" —
+     * which is exactly the state `EncryptedSharedPreferences.create()` leaves behind when this
+     * repository's constructor opens the store at startup on a never-used device. So the reset is an
+     * in-place key clear, NOT a file delete: `EncryptedSharedPreferences`'s `clear()` removes every
+     * non-reserved key and deliberately preserves the keysets (verified against the 1.1.0-alpha06
+     * bytecode: `clearKeysIfNeeded()` iterates `getAll()`, which skips reserved keys, and guards
+     * `isReservedKey` again before each remove). Deleting the file instead would regenerate a fresh
+     * random keyset on the next open, and the gate compares CONTENT HASHES — a new keyset is a new
+     * difference, not an erased one.
+     *
+     * `commit()`, not `apply()`: the burn must not lower the durability hold over a write still
+     * queued on another thread. Proven by re-reading `all` (which excludes the keyset entries), so
+     * the return value is evidence rather than the editor's own optimism.
+     *
+     * The in-memory [settings] flow is reloaded from the cleared store, so a live observer sees
+     * `onboardingDone = false` and the shipped defaults rather than the burned vault's values.
+     */
+    fun resetToFreshInstallDefaults(): Boolean {
+        val committed = runCatching { prefs.edit().clear().commit() }.getOrDefault(false)
+        _settings.value = load()
+        return committed && runCatching { prefs.all.isEmpty() }.getOrDefault(false)
+    }
 
     private fun put(edit: android.content.SharedPreferences.Editor.() -> Unit) {
         prefs.edit().apply(edit).apply()

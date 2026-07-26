@@ -1,0 +1,1342 @@
+You are auditing a VENDORED semgrep ruleset used as a CI security gate (SAST). The gate runs:
+  semgrep scan --config .semgrep --error --strict
+
+CRITICAL FRAMING: --strict catches rules that FAIL TO PARSE. It CANNOT catch a rule that parses
+fine but is SEMANTICALLY WRONG — such a rule matches nothing, the gate stays green, and nobody
+ever finds out. That is a SILENTLY DEAD RULE and it is the failure class I am hunting.
+
+A known example already confirmed in this ruleset: two rules use the character class [a-zA-Z0-10].
+In regex, 0-10 parses as the range 0-1 followed by a literal 0, so it matches ONLY digits 0 and 1,
+not 2-9. (In those two rules it sits in a sanitizer/CLEAN node, so its effect is false POSITIVES,
+not a miss — direction matters, so always state the DIRECTION of any defect you find.)
+
+TASK: audit EVERY rule below for semantic defects that --strict would not catch. For each defect:
+  - rule id + file
+  - the exact defect
+  - DIRECTION: does it cause FALSE NEGATIVES (misses real issues / dead rule) or FALSE POSITIVES
+    (flags safe code)? This is the single most important field.
+  - a concrete code/workflow snippet that demonstrates it
+  - severity for a gate whose job is catching supply-chain + injection issues
+
+Specifically look for: character-class/range errors; missing ellipsis making patterns too literal;
+overly narrow paths: include scoping; language constructs the pattern misses (e.g. Go's 'any'
+alias vs interface{}, which one rule here already misses); metavariable-regex anchoring mistakes;
+patterns that can never match due to structural nesting; taint sources/sinks that don't connect.
+
+Be precise and skeptical. Do NOT invent defects — if a rule is correct, do not list it.
+Rank findings by severity. Keep it dense.
+
+===== THE RULES =====
+
+----- FILE: .semgrep/go/bad_tmp.yaml -----
+rules:
+- id: bad-tmp-file-creation
+  message: File creation in shared tmp directory without using `io.CreateTemp`.
+  languages: [go]
+  severity: WARNING
+  metadata:
+    cwe:
+    - 'CWE-377: Insecure Temporary File'
+    source-rule-url: https://github.com/securego/gosec
+    category: security
+    technology:
+    - go
+    confidence: LOW
+    owasp:
+    - A01:2021 - Broken Access Control
+    - A01:2025 - Broken Access Control
+    references:
+    - https://owasp.org/Top10/A01_2021-Broken_Access_Control
+    - https://pkg.go.dev/io/ioutil#TempFile
+    - https://pkg.go.dev/os#CreateTemp
+    - https://github.com/securego/gosec/blob/5fd2a370447223541cddb35da8d1bc707b7bb153/rules/tempfiles.go#L67
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: LOW
+  pattern-either:
+  - pattern: ioutil.WriteFile("=~//tmp/.*$/", ...)
+  - pattern: os.Create("=~//tmp/.*$/", ...)
+  - pattern: os.WriteFile("=~//tmp/.*$/", ...)
+
+----- FILE: .semgrep/go/decompression_bomb.yaml -----
+rules:
+- id: potential-dos-via-decompression-bomb
+  message: >-
+    Detected a possible denial-of-service via a zip bomb attack. By limiting the max
+    bytes read, you can mitigate this attack.
+    `io.CopyN()` can specify a size. 
+  severity: WARNING
+  languages: [go]
+  patterns:
+  - pattern-either:
+    - pattern: io.Copy(...)
+    - pattern: io.CopyBuffer(...)
+  - pattern-either:
+    - pattern-inside: |
+        gzip.NewReader(...)
+        ...
+    - pattern-inside: |
+        zlib.NewReader(...)
+        ...
+    - pattern-inside: |
+        zlib.NewReaderDict(...)
+        ...
+    - pattern-inside: |
+        bzip2.NewReader(...)
+        ...
+    - pattern-inside: |
+        flate.NewReader(...)
+        ...
+    - pattern-inside: |
+        flate.NewReaderDict(...)
+        ...
+    - pattern-inside: |
+        lzw.NewReader(...)
+        ...
+    - pattern-inside: |
+        tar.NewReader(...)
+        ...
+    - pattern-inside: |
+        zip.NewReader(...)
+        ...
+    - pattern-inside: |
+        zip.OpenReader(...)
+        ...
+  fix-regex:
+    regex: (.*)(Copy|CopyBuffer)\((.*?),(.*?)(\)|,.*\))
+    replacement: \1CopyN(\3, \4, 1024*1024*256)
+  metadata:
+    cwe:
+    - 'CWE-400: Uncontrolled Resource Consumption'
+    source-rule-url: https://github.com/securego/gosec
+    references:
+    - https://golang.org/pkg/io/#CopyN
+    - https://github.com/securego/gosec/blob/master/rules/decompression-bomb.go
+    category: security
+    technology:
+    - go
+    confidence: LOW
+    cwe2022-top25: true
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: MEDIUM
+
+----- FILE: .semgrep/go/filepath-clean-misuse.yaml -----
+rules:
+- id: filepath-clean-misuse
+  message: >-
+    `Clean` is not intended to sanitize against path traversal attacks.
+    This function is for finding the shortest path name equivalent to the given input.
+    Using `Clean` to sanitize file reads may expose this application to
+    path traversal attacks, where an attacker could access arbitrary files on the server.
+    To fix this easily, write this: `filepath.FromSlash(path.Clean("/"+strings.Trim(req.URL.Path, "/")))`
+    However, a better solution is using the `SecureJoin` function in the package `filepath-securejoin`.
+    See https://pkg.go.dev/github.com/cyphar/filepath-securejoin#section-readme.
+  severity: ERROR
+  languages: [go]
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: |
+          ($REQUEST : *http.Request).$ANYTHING
+      - pattern: |
+          ($REQUEST : http.Request).$ANYTHING
+    - metavariable-regex:
+        metavariable: $ANYTHING
+        regex: ^(BasicAuth|Body|Cookie|Cookies|Form|FormValue|GetBody|Host|MultipartReader|ParseForm|ParseMultipartForm|PostForm|PostFormValue|Referer|RequestURI|Trailer|TransferEncoding|UserAgent|URL)$
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: filepath.Clean($...INNER)
+      - pattern: path.Clean($...INNER)
+  pattern-sanitizers:
+  - pattern-either:
+    - pattern: |
+        "/" + ...
+  fix: filepath.FromSlash(filepath.Clean("/"+strings.Trim($...INNER, "/")))
+  options:
+    interfile: true
+  metadata:
+    references:
+    - https://pkg.go.dev/path#Clean
+    - http://technosophos.com/2016/03/31/go-quickly-cleaning-filepaths.html
+    - https://labs.detectify.com/2021/12/15/zero-day-path-traversal-grafana/
+    - https://dzx.cz/2021/04/02/go_path_traversal/
+    - https://pkg.go.dev/github.com/cyphar/filepath-securejoin#section-readme
+    cwe:
+    - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+    owasp:
+    - A05:2017 - Broken Access Control
+    - A01:2021 - Broken Access Control
+    - A01:2025 - Broken Access Control
+    category: security
+    technology:
+    - go
+    cwe2022-top25: true
+    cwe2021-top25: true
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    interfile: true
+
+----- FILE: .semgrep/go/open-redirect.yaml -----
+rules:
+  - id: open-redirect
+    languages: [ go ]
+    severity: WARNING
+    message: An HTTP redirect was found to be crafted from user-input `$REQUEST`.
+      This can lead to open redirect vulnerabilities, potentially allowing attackers
+      to redirect users to malicious web sites. It is recommend where possible to
+      not allow user-input to craft the redirect URL. When user-input is necessary
+      to craft the request, it is recommended to follow OWASP best practices to
+      restrict the URL to domains in an allowlist.
+    options:
+      interfile: true
+    metadata:
+      cwe:
+        - "CWE-601: URL Redirection to Untrusted Site ('Open Redirect')"
+      references:
+        - https://knowledge-base.secureflag.com/vulnerabilities/unvalidated_redirects___forwards/open_redirect_go_lang.html
+      category: security
+      technology:
+        - go
+      confidence: HIGH
+      description: "An HTTP redirect was found to be crafted from user-input leading to an open redirect vulnerability"
+      subcategory:
+        - vuln
+      impact: MEDIUM
+      likelihood: MEDIUM
+      interfile: true
+    mode: taint
+    pattern-sources:
+      - label: INPUT
+        patterns:
+          - pattern-either:
+              - pattern: |
+                  ($REQUEST : *http.Request).$ANYTHING
+              - pattern: |
+                  ($REQUEST : http.Request).$ANYTHING
+          - metavariable-regex:
+              metavariable: $ANYTHING
+              regex: ^(BasicAuth|Body|Cookie|Cookies|Form|FormValue|GetBody|Host|MultipartReader|ParseForm|ParseMultipartForm|PostForm|PostFormValue|Referer|RequestURI|Trailer|TransferEncoding|UserAgent|URL)$
+      - label: CLEAN
+        requires: INPUT
+        patterns:
+          - pattern-either:
+              - pattern: |
+                  "$URLSTR" + $INPUT
+              - patterns:
+                  - pattern-either:
+                      - pattern: fmt.Fprintf($F, "$URLSTR", $INPUT, ...)
+                      - pattern: fmt.Sprintf("$URLSTR", $INPUT, ...)
+                      - pattern: fmt.Printf("$URLSTR", $INPUT, ...)
+          - metavariable-regex:
+              metavariable: $URLSTR
+              regex: .*//[a-zA-Z0-10]+\..*
+    pattern-sinks:
+      - requires: INPUT and not CLEAN
+        patterns:
+          - pattern: http.Redirect($W, $REQ, $URL, ...)
+          - focus-metavariable: $URL
+
+----- FILE: .semgrep/go/raw-html-format.yaml -----
+rules:
+- id: raw-html-format
+  languages: [go]
+  severity: WARNING
+  message: >-
+    Detected user input flowing into a manually constructed HTML string. You may be
+    accidentally bypassing secure methods
+    of rendering HTML by manually constructing HTML and this could create a cross-site
+    scripting vulnerability, which could
+    let attackers steal sensitive user data. Use the `html/template` package which
+    will safely render HTML instead, or inspect
+    that the HTML is rendered safely.
+  metadata:
+    cwe:
+    - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+    owasp:
+    - A07:2017 - Cross-Site Scripting (XSS)
+    - A03:2021 - Injection
+    - A05:2025 - Injection
+    category: security
+    technology:
+    - go
+    references:
+    - https://blogtitle.github.io/robn-go-security-pearls-cross-site-scripting-xss/
+    confidence: MEDIUM
+    cwe2022-top25: true
+    cwe2021-top25: true
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: MEDIUM
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: |
+          ($REQUEST : *http.Request).$ANYTHING
+      - pattern: |
+          ($REQUEST : http.Request).$ANYTHING
+    - metavariable-regex:
+        metavariable: $ANYTHING
+        regex: ^(BasicAuth|Body|Cookie|Cookies|Form|FormValue|GetBody|Host|MultipartReader|ParseForm|ParseMultipartForm|PostForm|PostFormValue|Referer|RequestURI|Trailer|TransferEncoding|UserAgent|URL)$
+  pattern-sanitizers:
+  - pattern: html.EscapeString(...)
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: fmt.Printf("$HTMLSTR", ...)
+      - pattern: fmt.Sprintf("$HTMLSTR", ...)
+      - pattern: fmt.Fprintf($W, "$HTMLSTR", ...)
+      - pattern: '"$HTMLSTR" + ...'
+    - metavariable-pattern:
+        metavariable: $HTMLSTR
+        language: generic
+        pattern: <$TAG ...
+
+----- FILE: .semgrep/go/reverseproxy-director.yaml -----
+rules:
+- id: reverseproxy-director
+  message: >-
+    ReverseProxy can remove headers added by Director. Consider using ReverseProxy.Rewrite
+    instead of ReverseProxy.Director.
+  languages: [go]
+  severity: WARNING
+  patterns:
+  - pattern-inside: |
+      import "net/http/httputil"
+      ...
+  - pattern-either:
+      - pattern: $PROXY.Director = $FUNC
+      - patterns:
+          - pattern-inside: |
+              httputil.ReverseProxy{
+                  ...
+              }
+          - pattern: |
+              Director: $FUNC
+  metadata:
+    cwe:
+    - "CWE-115: Misinterpretation of Input"
+    category: security
+    subcategory:
+    - audit
+    technology:
+      - go
+    confidence: MEDIUM
+    likelihood: LOW
+    impact: LOW
+    references:
+      - https://github.com/golang/go/issues/50580
+
+----- FILE: .semgrep/go/shared-url-struct-mutation.yaml -----
+rules:
+- id: shared-url-struct-mutation
+  message: >-
+    Shared URL struct may have been accidentally mutated. Ensure that
+    this behavior is intended.
+  languages: [go]
+  severity: WARNING
+  patterns:
+  - pattern-inside: |
+      import "net/url"
+      ...
+  - pattern-not-inside: |
+      ... = url.Parse(...)
+      ...
+  - pattern-not-inside: |
+      ... = url.ParseRequestURI(...)
+      ...
+  - pattern-not-inside: |
+      ... = url.URL{...}
+      ...
+  - pattern-not-inside: |
+      var $URL *$X.URL
+      ...
+  - pattern-either:
+      - pattern: $URL.RawQuery = ...
+      - pattern: $URL.Path = ...
+      - pattern: $URL.RawPath = ...
+      - pattern: $URL.Fragment = ...
+      - pattern: $URL.RawFragment = ...
+      - pattern: $URL.Scheme = ...
+      - pattern: $URL.Opaque = ...
+      - pattern: $URL.Host = ...
+      - pattern: $URL.User = ...
+  - metavariable-pattern:
+      metavariable: $URL
+      patterns:
+        - pattern-not: $X.$Y
+        - pattern-not: $X[...]
+  metadata:
+    cwe:
+    - "CWE-436: Interpretation Conflict"
+    category: security
+    subcategory:
+    - audit
+    technology:
+      - go
+    confidence: LOW
+    likelihood: LOW
+    impact: LOW
+    references:
+      - https://github.com/golang/go/issues/63777
+            
+
+----- FILE: .semgrep/go/tainted-sql-string.yaml -----
+rules:
+- id: tainted-sql-string
+  languages: [go]
+  message: >-
+    User data flows into this manually-constructed SQL string. User data
+    can be safely inserted into SQL strings using prepared statements or an
+    object-relational mapper (ORM). Manually-constructed SQL strings is a
+    possible indicator of SQL injection, which could let an attacker steal
+    or manipulate data from the database.
+    Instead, use prepared statements (`db.Query("SELECT * FROM t WHERE id = ?", id)`)
+    or a safe library.
+  options:
+    interfile: true
+  metadata:
+    cwe:
+    - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+    owasp:
+    - A01:2017 - Injection
+    - A03:2021 - Injection
+    - A05:2025 - Injection
+    references:
+    - https://golang.org/doc/database/sql-injection
+    - https://www.stackhawk.com/blog/golang-sql-injection-guide-examples-and-prevention/
+    category: security
+    technology:
+    - go
+    confidence: HIGH
+    cwe2022-top25: true
+    cwe2021-top25: true
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: MEDIUM
+    interfile: true
+  mode: taint
+  severity: ERROR
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: |
+          ($REQUEST : *http.Request).$ANYTHING
+      - pattern: |
+          ($REQUEST : http.Request).$ANYTHING
+    - metavariable-regex:
+        metavariable: $ANYTHING
+        regex: ^(BasicAuth|Body|Cookie|Cookies|Form|FormValue|GetBody|Host|MultipartReader|ParseForm|ParseMultipartForm|PostForm|PostFormValue|Referer|RequestURI|Trailer|TransferEncoding|UserAgent|URL)$
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - patterns:
+        - pattern-either:
+          - pattern: |
+              "$SQLSTR" + ...
+          - patterns:
+            - pattern-inside: |
+                $VAR = "$SQLSTR";
+                ...
+            - pattern: $VAR += ...
+          - patterns:
+            - pattern-inside: |
+                var $SB strings.Builder
+                ...
+            - pattern-inside: |
+                $SB.WriteString("$SQLSTR")
+                ...
+                $SB.String(...)
+            - pattern: |
+                $SB.WriteString(...)
+        - metavariable-regex:
+            metavariable: $SQLSTR
+            regex: (?i)(select|delete|insert|create|update|alter|drop).*
+      - patterns:
+        - pattern-either:
+          - pattern: fmt.Fprintf($F, "$SQLSTR", ...)
+          - pattern: fmt.Sprintf("$SQLSTR", ...)
+          - pattern: fmt.Printf("$SQLSTR", ...)
+        - metavariable-regex:
+            metavariable: $SQLSTR
+            regex: \s*(?i)(select|delete|insert|create|update|alter|drop)\b.*%(v|s|q).*
+  pattern-sanitizers:
+  - pattern-either:
+    - pattern: strconv.Atoi(...)
+    - pattern: |
+        ($X: bool)
+
+----- FILE: .semgrep/go/tainted-url-host.yaml -----
+rules:
+  - id: tainted-url-host
+    languages:
+      - go
+    message: A request was found to be crafted from user-input `$REQUEST`. This can
+      lead to Server-Side Request Forgery (SSRF) vulnerabilities, potentially
+      exposing sensitive data. It is recommend where possible to not allow
+      user-input to craft the base request, but to be treated as part of the
+      path or query parameter. When user-input is necessary to craft the
+      request, it is recommended to follow OWASP best practices to prevent
+      abuse, including using an allowlist.
+    options:
+      interfile: true
+    metadata:
+      cwe:
+        - "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp:
+        - A10:2021 - Server-Side Request Forgery (SSRF)
+        - A01:2025 - Broken Access Control
+      references:
+        - https://goteleport.com/blog/ssrf-attacks/
+      category: security
+      technology:
+        - go
+      confidence: HIGH
+      cwe2022-top25: true
+      cwe2021-top25: true
+      subcategory:
+        - vuln
+      impact: MEDIUM
+      likelihood: MEDIUM
+      interfile: true
+    mode: taint
+    pattern-sources:
+      - label: INPUT
+        patterns:
+          - pattern-either:
+              - pattern: |
+                  ($REQUEST : *http.Request).$ANYTHING
+              - pattern: |
+                  ($REQUEST : http.Request).$ANYTHING
+          - metavariable-regex:
+              metavariable: $ANYTHING
+              regex: ^(BasicAuth|Body|Cookie|Cookies|Form|FormValue|GetBody|Host|MultipartReader|ParseForm|ParseMultipartForm|PostForm|PostFormValue|Referer|RequestURI|Trailer|TransferEncoding|UserAgent|URL)$
+      - label: CLEAN
+        requires: INPUT
+        patterns:
+          - pattern-either:
+              - pattern: |
+                  "$URLSTR" + $INPUT
+              - patterns:
+                  - pattern-either:
+                      - pattern: fmt.Fprintf($F, "$URLSTR", $INPUT, ...)
+                      - pattern: fmt.Sprintf("$URLSTR", $INPUT, ...)
+                      - pattern: fmt.Printf("$URLSTR", $INPUT, ...)
+          - metavariable-regex:
+              metavariable: $URLSTR
+              regex: .*//[a-zA-Z0-10]+\..*
+    pattern-sinks:
+      - requires: INPUT and not CLEAN
+        patterns:
+          - pattern-either:
+              - patterns:
+                  - pattern-either:
+                      - patterns:
+                          - pattern-inside: |
+                              $CLIENT := &http.Client{...}
+                              ...
+                          - pattern: $CLIENT.$METHOD($URL, ...)
+                      - pattern: http.$METHOD($URL, ...)
+                  - metavariable-regex:
+                      metavariable: $METHOD
+                      regex: ^(Get|Head|Post|PostForm)$
+              - patterns:
+                  - pattern: |
+                      http.NewRequest("$METHOD", $URL, ...)
+                  - metavariable-regex:
+                      metavariable: $METHOD
+                      regex: ^(GET|HEAD|POST|POSTFORM)$
+          - focus-metavariable: $URL
+    severity: WARNING
+----- FILE: .semgrep/go/unsafe-deserialization-interface.yaml -----
+rules:
+  - id: go-unsafe-deserialization-interface
+    languages:
+      - go
+    message: >-
+      Deserializing into `interface{}` allows arbitrary data structures and types,
+      which can lead to security vulnerabilities (CWE-502). Use a concrete struct
+      type instead.
+    severity: WARNING
+    metadata:
+      cwe:
+        - "CWE-502: Deserialization of Untrusted Data"
+      owasp:
+        - A08:2017 - Insecure Deserialization
+        - A08:2021 - Software and Data Integrity Failures
+      category: security
+      technology:
+        - go
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory:
+        - vuln
+      references:
+        - https://cwe.mitre.org/data/definitions/502.html
+    patterns:
+      - pattern-either:
+          - pattern: |
+              var $VAR interface{}
+              ...
+              json.Unmarshal($DATA, &$VAR)
+          - pattern: |
+              var $VAR interface{}
+              ...
+              yaml.Unmarshal($DATA, &$VAR)
+          - pattern: |
+              var $VAR interface{}
+              ...
+              xml.Unmarshal($DATA, &$VAR)
+
+----- FILE: .semgrep/go/zip.yaml -----
+rules:
+- id: path-traversal-inside-zip-extraction
+  message: File traversal when extracting zip archive
+  metadata:
+    cwe:
+    - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+    source_rule_url: https://github.com/securego/gosec/issues/205
+    category: security
+    technology:
+    - go
+    confidence: LOW
+    owasp:
+    - A05:2017 - Broken Access Control
+    - A01:2021 - Broken Access Control
+    - A01:2025 - Broken Access Control
+    references:
+    - https://owasp.org/Top10/A01_2021-Broken_Access_Control
+    cwe2022-top25: true
+    cwe2021-top25: true
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: LOW
+  languages: [go]
+  severity: WARNING
+  pattern: |
+    reader, $ERR := zip.OpenReader($ARCHIVE)
+    ...
+    for _, $FILE := range reader.File {
+      ...
+      path := filepath.Join($TARGET, $FILE.Name)
+      ...
+    }
+
+----- FILE: .semgrep/github-actions/allowed-unsecure-commands.yaml -----
+rules:
+- id: allowed-unsecure-commands
+  languages: [yaml]
+  severity: WARNING
+  message: >-
+    The environment variable `ACTIONS_ALLOW_UNSECURE_COMMANDS` grants this workflow permissions
+    to use the `set-env` and `add-path` commands. There is a vulnerability in these commands
+    that could result in environment variables being modified by an attacker. Depending on the
+    use of the environment variable, this could enable an attacker to, at worst,
+    modify the system path to run a different command than intended, resulting in arbitrary
+    code execution. This could result in stolen code or secrets.
+    Don't use `ACTIONS_ALLOW_UNSECURE_COMMANDS`. Instead, use Environment Files. See
+    https://github.com/actions/toolkit/blob/main/docs/commands.md#environment-files for
+    more information.
+  metadata:
+    cwe:
+    - 'CWE-749: Exposed Dangerous Method or Function'
+    owasp: 'A06:2017 - Security Misconfiguration'
+    references:
+    - https://github.blog/changelog/2020-10-01-github-actions-deprecating-set-env-and-add-path-commands/
+    - https://github.com/actions/toolkit/security/advisories/GHSA-mfwh-5m23-j46w
+    - https://github.com/actions/toolkit/blob/main/docs/commands.md#environment-files
+    category: security
+    technology:
+    - github-actions
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+  patterns:
+  - pattern-either:
+    - patterns:
+      - pattern-inside: '{env: ...}'
+      - pattern: 'ACTIONS_ALLOW_UNSECURE_COMMANDS: true'
+
+----- FILE: .semgrep/github-actions/curl-eval.yaml -----
+rules:
+- id: curl-eval
+  languages:
+  - yaml
+  message: Data is being eval'd from a `curl` command. An attacker with control of the server in the `curl`
+    command could inject malicious code into the `eval`, resulting in a system comrpomise. Avoid eval'ing
+    untrusted data if you can. If you must do this, consider checking the SHA sum of the content returned
+    by the server to verify its integrity.
+  metadata:
+    category: security
+    cwe:
+    - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+    owasp:
+    - A01:2017 - Injection
+    - A03:2021 - Injection
+    - A05:2025 - Injection
+    references:
+    - https://docs.github.com/en/actions/learn-github-actions/security-hardening-for-github-actions#understanding-the-risk-of-script-injections
+    technology:
+    - github-actions
+    - bash
+    - curl
+    cwe2022-top25: true
+    cwe2021-top25: true
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+  patterns:
+  - pattern-inside: 'steps: [...]'
+  - pattern-inside: |
+      - run: ...
+        ...
+  - pattern: 'run: $SHELL'
+  - metavariable-pattern:
+      language: bash
+      metavariable: $SHELL
+      patterns:
+      - pattern: |
+          $DATA=<... curl ...>
+          ...
+          eval <... $DATA ...>
+  severity: ERROR
+
+----- FILE: .semgrep/github-actions/detect-shai-hulud-backdoor.yaml -----
+rules:
+  - id: detect-shai-hulud-backdoor
+    languages:
+      - yaml
+    message: The Shai-hulud backdoor creates a purposefully vulnerable github action
+      with the name `discussion.yaml`. 
+    paths:
+      include:
+        - "**/.github/workflows/discussion.yaml"
+    metadata:
+      category: security
+      cwe:
+        - "CWE-509: Replicating Malicious Code (Virus or Worm)"
+      owasp:
+        - A01:2017 - Injection
+        - A03:2021 - Injection
+        - A05:2025 - Injection
+      technology:
+        - github-actions
+      cwe2022-top25: true
+      cwe2021-top25: true
+      subcategory:
+        - vuln
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      license: Semgrep Rules License v1.0. For more details, visit
+        semgrep.dev/legal/rules-license
+      vulnerability_class:
+        - Command Injection
+      source_rule_url: https://www.wiz.io/blog/shai-hulud-2-0-ongoing-supply-chain-attack
+      references:
+        - https://www.aikido.dev/blog/shai-hulud-strikes-again-hitting-zapier-ensdomains
+    patterns:
+      - pattern-inside: "steps: [...]"
+      - pattern-inside: |
+          - run: ...
+            ...
+      - pattern: "run: $SHELL"
+      - metavariable-pattern:
+          language: generic
+          metavariable: $SHELL
+          patterns:
+            - pattern-either:
+                - pattern: ${{ github.event.issue.title }}
+                - pattern: ${{ github.event.issue.body }}
+                - pattern: ${{ github.event.pull_request.title }}
+                - pattern: ${{ github.event.pull_request.body }}
+                - pattern: ${{ github.event.comment.body }}
+                - pattern: ${{ github.event.review.body }}
+                - pattern: ${{ github.event.review_comment.body }}
+                - pattern: ${{ github.event.pages. ... .page_name}}
+                - pattern: ${{ github.event.head_commit.message }}
+                - pattern: ${{ github.event.head_commit.author.email }}
+                - pattern: ${{ github.event.head_commit.author.name }}
+                - pattern: ${{ github.event.commits ... .author.email }}
+                - pattern: ${{ github.event.commits ... .author.name }}
+                - pattern: ${{ github.event.pull_request.head.ref }}
+                - pattern: ${{ github.event.pull_request.head.label }}
+                - pattern: ${{ github.event.pull_request.head.repo.default_branch }}
+                - pattern: ${{ github.head_ref }}
+                - pattern: ${{ github.event.inputs ... }}
+                - pattern: ${{ github.event.discussion.title }}
+                - pattern: ${{ github.event.discussion.body }}
+                - pattern: ${{ inputs ... }}
+    severity: ERROR
+
+
+----- FILE: .semgrep/github-actions/gha-curl-pipe-shell.yaml -----
+rules:
+- id: gha-curl-pipe-shell
+  languages:
+  - yaml
+  message: >-
+    A `run:` step pipes the output of `curl` or `wget` directly into a shell interpreter.
+    This is the "curl | bash" install pattern — if the remote server is compromised or the
+    URL is hijacked, an attacker can execute arbitrary code in your CI runner. Consider
+    downloading the file first, verifying its checksum or signature, and then executing it.
+  metadata:
+    category: security
+    cwe:
+    - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+    owasp:
+    - A03:2021 - Injection
+    - A03:2025 - Injection
+    references:
+    - https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+    - https://www.idontplaydarts.com/2016/04/detecting-curl-pipe-bash-server-side/
+    technology:
+    - github-actions
+    - bash
+    - curl
+    cwe2021-top25: true
+    cwe2022-top25: true
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+  patterns:
+  - pattern-inside: 'steps: [...]'
+  - pattern-inside: |
+      - run: ...
+        ...
+  - pattern: 'run: $SHELL'
+  - metavariable-pattern:
+      language: bash
+      metavariable: $SHELL
+      patterns:
+      - pattern-either:
+        - pattern: curl ... | $CMD ...
+        - pattern: wget ... | $CMD ...
+      - metavariable-regex:
+          metavariable: $CMD
+          regex: '^(bash|sh|python3?|ruby|perl)$'
+  severity: ERROR
+
+----- FILE: .semgrep/github-actions/gha-workflow-env-secret.yaml -----
+rules:
+- id: gha-workflow-env-secret
+  languages:
+  - yaml
+  message: >-
+    A secret is exposed in the workflow-level `env:` block, making it available to every
+    job and step in this workflow — including any untrusted code run in pull-request
+    workflows. Scope secrets as narrowly as possible: prefer step-level `env:` so the
+    secret is only available where it is actually needed.
+  metadata:
+    category: security
+    cwe:
+    - "CWE-732: Incorrect Permission Assignment for Critical Resource"
+    owasp:
+    - A01:2021 - Broken Access Control
+    - A01:2025 - Broken Access Control
+    references:
+    - https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-secrets
+    - https://docs.github.com/en/actions/learn-github-actions/variables#defining-environment-variables-for-a-single-workflow
+    technology:
+    - github-actions
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+  patterns:
+  - pattern-inside: |
+      env:
+        ...
+  - pattern-regex: '\$\{\{\s*secrets\.'
+  - pattern-not-inside: 'jobs: ...'
+  severity: WARNING
+
+----- FILE: .semgrep/github-actions/github-script-injection.yaml -----
+rules:
+- id: github-script-injection
+  languages:
+  - yaml
+  message: >-
+    Using variable interpolation `${{...}}` with `github` context data in a `actions/github-script`'s
+    `script:` step could allow an attacker to
+    inject their own code into the runner. This would allow them to steal secrets and code. `github` context
+    data can have
+    arbitrary user input and should be treated as untrusted. Instead, use an intermediate environment
+    variable with `env:`
+    to store the data and use the environment variable in the `run:` script. Be sure to use double-quotes
+    the environment
+    variable, like this: "$ENVVAR".
+  metadata:
+    category: security
+    cwe:
+    - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+    owasp:
+    - A03:2021 - Injection
+    - A05:2025 - Injection
+    references:
+    - https://docs.github.com/en/actions/learn-github-actions/security-hardening-for-github-actions#understanding-the-risk-of-script-injections
+    - https://securitylab.github.com/research/github-actions-untrusted-input/
+    - https://github.com/actions/github-script
+    technology:
+    - github-actions
+    cwe2022-top25: true
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+  patterns:
+  - pattern-inside: 'steps: [...]'
+  - pattern-inside: |
+      uses: $ACTION
+      ...
+  - pattern-inside: |
+      with:
+        ...
+        script: ...
+        ...
+  - pattern: 'script: $SHELL'
+  - metavariable-regex:
+      metavariable: $ACTION
+      regex: actions/github-script@.*
+  - metavariable-pattern:
+      language: generic
+      metavariable: $SHELL
+      patterns:
+      - pattern-either:
+        - pattern: ${{ ... github.event.issue.title ... }}
+        - pattern: ${{ ... github.event.issue.body ... }}
+        - pattern: ${{ ... github.event.pull_request.title ... }}
+        - pattern: ${{ ... github.event.pull_request.body ... }}
+        - pattern: ${{ ... github.event.comment.body ... }}
+        - pattern: ${{ ... github.event.review.body ... }}
+        - pattern: ${{ ... github.event.review_comment.body ... }}
+        - pattern: ${{ ... github.event.pages ... .page_name ... }}
+        - pattern: ${{ ... github.event.head_commit.message ... }}
+        - pattern: ${{ ... github.event.head_commit.author.email ... }}
+        - pattern: ${{ ... github.event.head_commit.author.name ... }}
+        - pattern: ${{ ... github.event.commits ... .author.email ... }}
+        - pattern: ${{ ... github.event.commits ... .author.name ... }}
+        - pattern: ${{ ... github.event.commits ... .message ... }}
+        - pattern: ${{ ... github.event.pull_request.head.ref ... }}
+        - pattern: ${{ ... github.event.pull_request.head.label ... }}
+        - pattern: ${{ ... github.event.pull_request.head.repo.default_branch ... }}
+        - pattern: ${{ ... github.ref ... }}
+        - pattern: ${{ ... github.base_ref ... }}
+        - pattern: ${{ ... github.head_ref ... }}
+        - pattern: ${{ ... github.ref_name ... }}
+        - pattern: ${{ ... github.event.inputs ... }}
+        - pattern: ${{ ... github.event.discussion.title ... }}
+        - pattern: ${{ ... github.event.discussion.body ... }}
+        - pattern: ${{ ... github.event.workflow_run.head_branch ... }}
+        - pattern: ${{ ... github.event.workflow_run.head_commit.message ... }}
+        - pattern: ${{ ... github.event.milestone.title ... }}
+        - pattern: ${{ ... github.event.milestone.description ... }}
+        - pattern: ${{ ... github.event.project_card.note ... }}
+        - pattern: ${{ ... github.event.project.name ... }}
+        - pattern: ${{ ... github.event.project_column.name ... }}
+        - pattern: ${{ ... github.event.release.name ... }}
+        - pattern: ${{ ... github.event.release.body ... }}
+        - pattern: ${{ ... github.event.deployment.ref ... }}
+        - pattern: ${{ ... inputs ... }}
+      # Exclude safe patterns where variable is only checked for truthiness (left of &&)
+      # e.g., ${{ github.head_ref && 'literal' }} is safe - value not interpolated
+      - pattern-not: ${{ ... github.event.issue.title && ... }}
+      - pattern-not: ${{ ... github.event.issue.body && ... }}
+      - pattern-not: ${{ ... github.event.pull_request.title && ... }}
+      - pattern-not: ${{ ... github.event.pull_request.body && ... }}
+      - pattern-not: ${{ ... github.event.comment.body && ... }}
+      - pattern-not: ${{ ... github.event.review.body && ... }}
+      - pattern-not: ${{ ... github.event.review_comment.body && ... }}
+      - pattern-not: ${{ ... github.event.pages ... .page_name && ... }}
+      - pattern-not: ${{ ... github.event.head_commit.message && ... }}
+      - pattern-not: ${{ ... github.event.head_commit.author.email && ... }}
+      - pattern-not: ${{ ... github.event.head_commit.author.name && ... }}
+      - pattern-not: ${{ ... github.event.commits ... .author.email && ... }}
+      - pattern-not: ${{ ... github.event.commits ... .author.name && ... }}
+      - pattern-not: ${{ ... github.event.commits ... .message && ... }}
+      - pattern-not: ${{ ... github.event.pull_request.head.ref && ... }}
+      - pattern-not: ${{ ... github.event.pull_request.head.label && ... }}
+      - pattern-not: ${{ ... github.event.pull_request.head.repo.default_branch && ... }}
+      - pattern-not: ${{ ... github.ref && ... }}
+      - pattern-not: ${{ ... github.base_ref && ... }}
+      - pattern-not: ${{ ... github.head_ref && ... }}
+      - pattern-not: ${{ ... github.ref_name && ... }}
+      - pattern-not: ${{ ... github.event.inputs && ... }}
+      - pattern-not: ${{ ... github.event.discussion.title && ... }}
+      - pattern-not: ${{ ... github.event.discussion.body && ... }}
+      - pattern-not: ${{ ... github.event.workflow_run.head_branch && ... }}
+      - pattern-not: ${{ ... github.event.workflow_run.head_commit.message && ... }}
+      - pattern-not: ${{ ... github.event.milestone.title && ... }}
+      - pattern-not: ${{ ... github.event.milestone.description && ... }}
+      - pattern-not: ${{ ... github.event.project_card.note && ... }}
+      - pattern-not: ${{ ... github.event.project.name && ... }}
+      - pattern-not: ${{ ... github.event.project_column.name && ... }}
+      - pattern-not: ${{ ... github.event.release.name && ... }}
+      - pattern-not: ${{ ... github.event.release.body && ... }}
+      - pattern-not: ${{ ... github.event.deployment.ref && ... }}
+  severity: ERROR
+
+----- FILE: .semgrep/github-actions/pull-request-target-code-checkout.yaml -----
+rules:
+- id: pull-request-target-code-checkout
+  languages:
+  - yaml
+  message: >-
+    This GitHub Actions workflow file uses `pull_request_target` and checks out code
+    from the incoming pull request. When using `pull_request_target`, the Action
+    runs in the context of the target repository, which includes access to all repository
+    secrets. Normally, this is safe because the Action only runs code from the target
+    repository, not the incoming PR. However, by checking out the incoming PR code, you're now using
+    the incoming code for the rest of the action. You may be inadvertently executing arbitrary code
+    from the incoming PR with access to repository secrets, which would let an attacker steal repository
+    secrets.
+    This normally happens by running build scripts (e.g., `npm build` and `make`) or dependency installation
+    scripts (e.g., `python setup.py install`).
+    Audit your workflow file to make sure no code from the incoming PR is executed.
+    Please see https://securitylab.github.com/research/github-actions-preventing-pwn-requests/ for additional
+    mitigations.
+  metadata:
+    category: security
+    owasp:
+    - A08:2021 - Software and Data Integrity Failures
+    - A08:2025 - Software and Data Integrity Failures
+    cwe:
+    - 'CWE-829: Inclusion of Functionality from Untrusted Control Sphere'
+    references:
+    - https://securitylab.github.com/research/github-actions-preventing-pwn-requests/
+    - https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#pull_request_target
+    - https://github.com/justinsteven/advisories/blob/master/2021_github_actions_checkspelling_token_leak_via_advice_symlink.md
+    technology:
+    - github-actions
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+  patterns:
+  - pattern-either:
+    - pattern-inside: |
+        on:
+          ...
+          pull_request_target: ...
+          ...
+        ...
+    - pattern-inside: |
+        on: [..., pull_request_target, ...]
+        ...
+    - pattern-inside: |
+        on: pull_request_target
+        ...
+  - pattern-inside: |
+      jobs:
+        ...
+        $JOBNAME:
+          ...
+          steps:
+            ...
+  - pattern: |
+      ...
+      uses: "$ACTION"
+      with:
+        ...
+        ref: $EXPR
+  - metavariable-regex:
+      metavariable: $ACTION
+      regex: actions/checkout@.*
+  - metavariable-pattern:
+      language: generic
+      metavariable: $EXPR
+      patterns:
+      - pattern-inside: "${{ ... }}"
+      - pattern-either:
+        - pattern: github.event.pull_request ...
+        - pattern: github.head_ref ...
+  severity: ERROR
+
+----- FILE: .semgrep/github-actions/run-shell-injection.yaml -----
+rules:
+- id: run-shell-injection
+  languages:
+  - yaml
+  message: 'Using variable interpolation `${{...}}` with `github` context data in a `run:` step could
+    allow an attacker to inject their own code into the runner. This would allow them to steal secrets
+    and code. `github` context data can have arbitrary user input and should be treated as untrusted.
+    Instead, use an intermediate environment variable with `env:` to store the data and use the environment
+    variable in the `run:` script. Be sure to use double-quotes the environment variable, like this: "$ENVVAR".'
+  metadata:
+    category: security
+    cwe:
+    - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+    owasp:
+    - A01:2017 - Injection
+    - A03:2021 - Injection
+    - A05:2025 - Injection
+    references:
+    - https://docs.github.com/en/actions/learn-github-actions/security-hardening-for-github-actions#understanding-the-risk-of-script-injections
+    - https://securitylab.github.com/research/github-actions-untrusted-input/
+    technology:
+    - github-actions
+    cwe2022-top25: true
+    cwe2021-top25: true
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+  patterns:
+  - pattern-inside: 'steps: [...]'
+  - pattern-inside: |
+      - run: ...
+        ...
+  - pattern: 'run: $SHELL'
+  - metavariable-pattern:
+      language: generic
+      metavariable: $SHELL
+      patterns:
+      - pattern-either:
+        - pattern: ${{ ... github.event.issue.title ... }}
+        - pattern: ${{ ... github.event.issue.body ... }}
+        - pattern: ${{ ... github.event.pull_request.title ... }}
+        - pattern: ${{ ... github.event.pull_request.body ... }}
+        - pattern: ${{ ... github.event.comment.body ... }}
+        - pattern: ${{ ... github.event.review.body ... }}
+        - pattern: ${{ ... github.event.review_comment.body ... }}
+        - pattern: ${{ ... github.event.pages ... .page_name ... }}
+        - pattern: ${{ ... github.event.head_commit.message ... }}
+        - pattern: ${{ ... github.event.head_commit.author.email ... }}
+        - pattern: ${{ ... github.event.head_commit.author.name ... }}
+        - pattern: ${{ ... github.event.commits ... .author.email ... }}
+        - pattern: ${{ ... github.event.commits ... .author.name ... }}
+        - pattern: ${{ ... github.event.commits ... .message ... }}
+        - pattern: ${{ ... github.event.pull_request.head.ref ... }}
+        - pattern: ${{ ... github.event.pull_request.head.label ... }}
+        - pattern: ${{ ... github.event.pull_request.head.repo.default_branch ... }}
+        - pattern: ${{ ... github.ref ... }}
+        - pattern: ${{ ... github.base_ref ... }}
+        - pattern: ${{ ... github.head_ref ... }}
+        - pattern: ${{ ... github.ref_name ... }}
+        - pattern: ${{ ... github.event.inputs ... }}
+        - pattern: ${{ ... github.event.discussion.title ... }}
+        - pattern: ${{ ... github.event.discussion.body ... }}
+        - pattern: ${{ ... github.event.workflow_run.head_branch ... }}
+        - pattern: ${{ ... github.event.workflow_run.head_commit.message ... }}
+        - pattern: ${{ ... github.event.milestone.title ... }}
+        - pattern: ${{ ... github.event.milestone.description ... }}
+        - pattern: ${{ ... github.event.project_card.note ... }}
+        - pattern: ${{ ... github.event.project.name ... }}
+        - pattern: ${{ ... github.event.project_column.name ... }}
+        - pattern: ${{ ... github.event.release.name ... }}
+        - pattern: ${{ ... github.event.release.body ... }}
+        - pattern: ${{ ... github.event.deployment.ref ... }}
+        - pattern: ${{ ... inputs ... }}
+      # Exclude safe patterns where variable is only checked for truthiness (left of &&)
+      # e.g., ${{ github.head_ref && 'literal' }} is safe - value not interpolated
+      - pattern-not: ${{ ... github.event.issue.title && ... }}
+      - pattern-not: ${{ ... github.event.issue.body && ... }}
+      - pattern-not: ${{ ... github.event.pull_request.title && ... }}
+      - pattern-not: ${{ ... github.event.pull_request.body && ... }}
+      - pattern-not: ${{ ... github.event.comment.body && ... }}
+      - pattern-not: ${{ ... github.event.review.body && ... }}
+      - pattern-not: ${{ ... github.event.review_comment.body && ... }}
+      - pattern-not: ${{ ... github.event.pages ... .page_name && ... }}
+      - pattern-not: ${{ ... github.event.head_commit.message && ... }}
+      - pattern-not: ${{ ... github.event.head_commit.author.email && ... }}
+      - pattern-not: ${{ ... github.event.head_commit.author.name && ... }}
+      - pattern-not: ${{ ... github.event.commits ... .author.email && ... }}
+      - pattern-not: ${{ ... github.event.commits ... .author.name && ... }}
+      - pattern-not: ${{ ... github.event.commits ... .message && ... }}
+      - pattern-not: ${{ ... github.event.pull_request.head.ref && ... }}
+      - pattern-not: ${{ ... github.event.pull_request.head.label && ... }}
+      - pattern-not: ${{ ... github.event.pull_request.head.repo.default_branch && ... }}
+      - pattern-not: ${{ ... github.event.workflow_run.head_commit.message && ... }}
+      - pattern-not: ${{ ... github.ref && ... }}
+      - pattern-not: ${{ ... github.base_ref && ... }}
+      - pattern-not: ${{ ... github.head_ref && ... }}
+      - pattern-not: ${{ ... github.ref_name && ... }}
+      - pattern-not: ${{ ... github.event.inputs && ... }}
+      - pattern-not: ${{ ... github.event.discussion.title && ... }}
+      - pattern-not: ${{ ... github.event.discussion.body && ... }}
+      - pattern-not: ${{ ... github.event.workflow_run.head_branch && ... }}
+      - pattern-not: ${{ ... github.event.milestone.title && ... }}
+      - pattern-not: ${{ ... github.event.milestone.description && ... }}
+      - pattern-not: ${{ ... github.event.project_card.note && ... }}
+      - pattern-not: ${{ ... github.event.project.name && ... }}
+      - pattern-not: ${{ ... github.event.project_column.name && ... }}
+      - pattern-not: ${{ ... github.event.release.name && ... }}
+      - pattern-not: ${{ ... github.event.release.body && ... }}
+      - pattern-not: ${{ ... github.event.deployment.ref && ... }}
+  severity: ERROR
+
+----- FILE: .semgrep/github-actions/secrets-inherit.yaml -----
+rules:
+  - id: secrets-inherit
+    languages:
+      - yaml
+    severity: ERROR
+    message: >-
+      This workflow uses `secrets: inherit` to pass all of the calling
+      workflow's secrets to a reusable workflow. This violates the principle
+      of least privilege because the called workflow receives access to every
+      secret in the repository, not just the ones it needs. If the called
+      workflow is compromised or sourced from a third party, an attacker
+      gains access to all repository secrets. Instead, explicitly pass only
+      the secrets that the called workflow requires using the `secrets:` map,
+      e.g. `secrets: { MY_SECRET: ${{ secrets.MY_SECRET }} }`.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-250: Execution with Unnecessary Privileges"
+      owasp:
+        - A01:2021 - Broken Access Control
+        - A01:2025 - Broken Access Control
+      references:
+        - https://docs.github.com/en/actions/sharing-automations/reusing-workflows#passing-inputs-and-secrets-to-a-reusable-workflow
+        - https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions
+      technology:
+        - github-actions
+      subcategory:
+        - vuln
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: HIGH
+    patterns:
+      - pattern-inside: |
+          jobs:
+            ...
+      - pattern: "secrets: inherit"
+
+----- FILE: .semgrep/github-actions/workflow-run-target-code-checkout.yaml -----
+rules:
+- id: workflow-run-target-code-checkout
+  languages:
+    - yaml
+  message: >-
+    This GitHub Actions workflow file uses `workflow_run` and checks out code
+    from the incoming pull request. When using `workflow_run`, the Action
+    runs in the context of the target repository, which includes access to all repository
+    secrets. Normally, this is safe because the Action only runs code from the target
+    repository, not the incoming PR. However, by checking out the incoming PR code, you're now using
+    the incoming code for the rest of the action. You may be inadvertently executing arbitrary code
+    from the incoming PR with access to repository secrets, which would let an attacker steal repository secrets.
+    This normally happens by running build scripts (e.g., `npm build` and `make`) or dependency installation
+    scripts (e.g., `python setup.py install`).
+    Audit your workflow file to make sure no code from the incoming PR is executed.
+    Please see https://securitylab.github.com/research/github-actions-preventing-pwn-requests/ for additional
+    mitigations.
+  metadata:
+    category: security
+    owasp: "A01:2017 - Injection"
+    cwe: "CWE-913: Improper Control of Dynamically-Managed Code Resources"
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    subcategory:
+    - vuln
+    references:
+      - https://securitylab.github.com/research/github-actions-preventing-pwn-requests/
+      - https://github.com/justinsteven/advisories/blob/master/2021_github_actions_checkspelling_token_leak_via_advice_symlink.md
+      - https://www.legitsecurity.com/blog/github-privilege-escalation-vulnerability
+    technology:
+      - github-actions
+  patterns:
+    - pattern-inside: |
+        on:
+          ...
+          workflow_run: ...
+          ...
+        ...
+    - pattern-inside: |
+        jobs:
+          ...
+          $JOBNAME:
+            ...
+            steps:
+              ...
+    - pattern: |
+        ...
+        uses: "$ACTION"
+        with:
+          ...
+          ref: $EXPR
+    - metavariable-regex:
+        metavariable: $ACTION
+        regex: actions/checkout@.*
+    - metavariable-pattern:
+        language: generic
+        metavariable: $EXPR
+        patterns:
+          - pattern: ${{ github.event.workflow_run ... }}
+  severity: WARNING
+
+----- FILE: .semgrep/local/no-run-block-interpolation.yaml -----
+# Zitrone — Copyright (C) 2026 Zitrone contributors
+# Licensed under the GNU Affero General Public License v3.0 or later.
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# LOCAL rule (our own — NOT vendored from semgrep-rules). Closes a coverage gap in the upstream
+# `run-shell-injection` rule, which matches only an ENUMERATED set of direct `github.event.*` fields
+# and does NOT flag `${{ steps.*.outputs.* }}` (a step output derived from an attacker-influenceable
+# input) or other contexts interpolated into a `run:` script — the exact variant that produced the
+# release-apk.yml injection (the release TAG flowed through steps.meta.outputs.tag / steps.stage.outputs.apk).
+#
+# Policy: NEVER interpolate `${{ … }}` into a `run:` script. GitHub substitutes it as text BEFORE the
+# shell parses, so ANY interpolated value (github.*, inputs.*, or a derived step output) is arbitrary
+# command execution. Always pass the value via `env:` and use a quoted "$VAR". This rule is intentionally
+# stricter than the upstream one (it flags every interpolation in a run block, safe-looking ones
+# included) — that is the point: the gate should catch a re-introduction regardless of which context is used.
+rules:
+  - id: zitrone-no-interpolation-in-run
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      Do not interpolate `${{ ... }}` into a `run:` script — it is substituted as text before the shell
+      parses, so any attacker-influenceable value (github.*, inputs.*, or a step output derived from them)
+      becomes shell injection in the runner. Pass the value via `env:` and reference a quoted "$VAR".
+    metadata:
+      category: security
+      technology: [github-actions]
+      cwe:
+        - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+      owasp:
+        - "A03:2021 - Injection"
+      confidence: HIGH
+      references:
+        - https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#understanding-the-risk-of-script-injections
+    # Semgrep's generic `...` ellipsis matches at most `generic_ellipsis_max_span` newlines (default 10),
+    # so a `${{ … }}` expression split across many blank lines inside a `run: |` block (GitHub ignores the
+    # whitespace) could evade the `${{ ... }}` pattern below. Raise the span to a bound no reviewable
+    # workflow could plausibly exceed — a single interpolation spanning 10 000 lines of one run scalar is
+    # absurd and would be obvious in review — so line-split obfuscation cannot hide the injection.
+    options:
+      generic_ellipsis_max_span: 10000
+    patterns:
+      - pattern-inside: "steps: [...]"
+      - pattern-inside: |
+          - run: ...
+            ...
+      - pattern: "run: $SHELL"
+      - metavariable-pattern:
+          language: generic
+          metavariable: $SHELL
+          patterns:
+            - pattern: ${{ ... }}

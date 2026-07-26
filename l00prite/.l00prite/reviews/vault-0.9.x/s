@@ -1,0 +1,11 @@
+[0;1;32m●[0m l00prite-cli-os.service - l00prite CLI-OS Gateway
+     Loaded: loaded (]8;;file://ubuntu-4gb-hel1-3/etc/systemd/system/l00prite-cli-os.service/etc/systemd/system/l00prite-cli-os.service]8;;; [0;1;32menabled[0m; preset: [0;1;32menabled[0m)
+     Active: [0;1;32mactive (running)[0m since Sat 2026-07-04 19:51:18 UTC; 8ms ago
+   Main PID: 7178 (cli-os)
+      Tasks: 4 (limit: 4538)
+     Memory: 1.4M (peak: 1.6M)
+        CPU: 4ms
+     CGroup: /system.slice/l00prite-cli-os.service
+             └─[0;38;5;245m7178 /root/l00prite/cli-os/cli-os serve --host 100.126.41.36 --port 8787[0m
+
+Jul 04 19:51:18 ubuntu-4gb-hel1-3 systemd[1]: Started l00prite-cli-os.service - l00prite CLI-OS Gateway.

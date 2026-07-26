@@ -16,6 +16,8 @@ import com.zitrone.app.crypto.ZitroneSignalStore
 import com.zitrone.app.crypto.vault.BiometricVaultKeyCipher
 import com.zitrone.app.crypto.vault.KeystoreDeviceKeyCipher
 import com.zitrone.app.crypto.vault.LibsodiumVaultOps
+import com.zitrone.app.crypto.vault.ReconcileResult
+import com.zitrone.app.crypto.vault.ResidueSweepResult
 import com.zitrone.app.crypto.vault.VaultImageStore
 import com.zitrone.app.crypto.vault.UnlockOrAdd
 import com.zitrone.app.crypto.vault.VaultImageException
@@ -25,7 +27,16 @@ import com.zitrone.app.crypto.vault.VaultSession
 import com.zitrone.app.crypto.vault.VaultSodiumOps
 import com.zitrone.app.crypto.vault.VaultState
 import com.zitrone.app.crypto.vault.VaultStateCodec
+import com.zitrone.app.burn.BurnPhase
+import com.zitrone.app.burn.BurnStep
+import com.zitrone.app.burn.CleanupCompletion
+import com.zitrone.app.burn.Durability
+import com.zitrone.app.burn.completeInterruptedCleanup
+import com.zitrone.app.burn.runBurnPlan
+import com.zitrone.app.crypto.vault.DirSyncResult
+import com.zitrone.app.crypto.vault.defaultFsyncDir
 import com.zitrone.app.crypto.vault.wipe
+import com.zitrone.app.data.wipeLazyPrefsFilesProven
 import com.zitrone.app.data.BiometricUnlockStore
 import com.zitrone.app.data.ConversationRepository
 import com.zitrone.app.data.DeviceSettings
@@ -155,7 +166,14 @@ class AppContainer(private val app: Application) {
      * device-key layer is not a slot secret, so keeping it open is fine, and a fresh
      * unlock reuses this instance rather than re-registering the directory.
      */
-    val imageStore = VaultImageStore(app.filesDir, vaultOps, KeystoreDeviceKeyCipher())
+    /**
+     * The device-key cipher, held as a field rather than constructed inline so the BURN path can
+     * reach it — its alias is lazily created and therefore an oracle (see [wipeBiometricMaterial]
+     * and `KeystoreDeviceKeyCipher.deleteKeyMaterial`).
+     */
+    private val deviceKeyCipher = KeystoreDeviceKeyCipher()
+
+    val imageStore = VaultImageStore(app.filesDir, vaultOps, deviceKeyCipher)
 
     /** The auth-gated biometric key that wraps the slot-A vault key (dual-wrap, posture B). */
     val biometricCipher = BiometricVaultKeyCipher()
@@ -226,6 +244,471 @@ class AppContainer(private val app: Application) {
     fun hasVault(): Boolean = imageStore.exists()
 
     /**
+     * FAIL-CLOSED routing truth: "there is provably nothing here", the only state that may present as
+     * a fresh install. [hasVault] is NOT a substitute — it keys on `vault.bin` alone, so a surviving
+     * `vault.dek` or `vault.bin.tmp` (which stages a COMPLETE outer image) reads as "no vault" and
+     * would route ONBOARDING over recoverable ciphertext.
+     */
+    fun vaultProvenAbsent(): Boolean = imageStore.imageBearingProvenAbsent()
+
+    /**
+     * Read the four disk facts and produce ONE boot decision — the single derivation every routing
+     * consumer uses.
+     *
+     * SUSPEND, and it moves itself to IO (round-2 review, Gemini). This was a plain function with a
+     * kdoc saying "call off the main thread", and one of its three callers — the session collector —
+     * called it bare on the composition dispatcher, running a ~1 MiB decrypt on the main thread. A
+     * requirement stated in a comment is a requirement that will eventually be violated by one call
+     * site; the dispatcher move belongs INSIDE, where no caller can get it wrong. Callers now simply
+     * `deriveBootDecisionFromDisk()`.
+     */
+    internal suspend fun deriveBootDecisionFromDisk(
+        supersedeCompletedDestroy: Boolean = false,
+    ): BootDecision = withContext(Dispatchers.IO) {
+        // ONE classification, not two independently-timed reads. [hasVault] and [vaultProvenAbsent]
+        // each take the image lock separately, so calling them as a pair could pair up readings taken
+        // at different instants — including the contradiction "present AND proven absent", which
+        // [Residence] cannot represent. The mapping below is DELIBERATELY the identity of today's
+        // semantics: Present ⇔ `hasVault()`, ProvenAbsent ⇔ `vaultProvenAbsent()`.
+        //
+        // DO NOT "simplify" this to `imagePresent = residence.treatAsPresent`. It looks equivalent
+        // and is not: `bootRoute` orders the LEGACY arm AHEAD of the present arm, and legacy routes
+        // to ONBOARDING. Mapping Indeterminate onto imagePresent would send an image that cannot be
+        // stat'd into the ~1 MiB legacy probe, and a `true` there would present a fresh install over
+        // exactly the unprovable material this type exists to withhold. Indeterminate must fall
+        // through to the LOCKED arm, which is what leaving BOTH booleans false does.
+        val residence = vaultResidence()
+        val confirmed = serverDeleteConfirmed()
+        // THE SUPERSEDE DECISION LIVES HERE, not at the call site (0.9.2 Unit W-B, items #1 + #5).
+        //
+        // The delete-completion callback used to take TWO fresh stats of its own to decide this and
+        // then call this function, which stats the disk AGAIN — three defects in one place: disk I/O
+        // on the Main thread, a SECOND re-derivation of a fact this function owns, and a TORN
+        // PAIR-READ whose two halves could land either side of a disk change.
+        //
+        // Now it is decided from the SAME snapshot the route is derived from. A completed destroy
+        // proved image-bearing absence with its OWN required dirSync and retired both markers only
+        // after that proof — evidence strictly stronger than the doubt any producer raised — so it,
+        // and only it, may lower the hold.
+        val hold =
+            if (supersedeCompletedDestroy &&
+                destroySupersedesDurabilityHold(
+                    vaultProvenAbsent = residence.mayRouteToOnboarding,
+                    serverDeleteConfirmed = confirmed,
+                )
+            ) {
+                durabilityHold.value = false
+                false
+            } else {
+                durabilityHold.value
+            }
+        deriveBootDecision(
+            serverDeleteConfirmed = confirmed,
+            imagePresent = residence is Residence.Present,
+            durabilityHold = hold,
+            vaultProvenAbsent = residence.mayRouteToOnboarding,
+            isLegacyImage = { isLegacyImage() },
+        )
+    }
+
+    /**
+     * The image's [Residence] — the tri-state read that [hasVault] and [vaultProvenAbsent] encode
+     * as two booleans a caller has to pair correctly.
+     */
+    internal fun vaultResidence(): Residence = Residence.classify(::hasVault, ::vaultProvenAbsent)
+
+    /**
+     * PROCESS-scoped reconciliation state.
+     *
+     * [bootReconciled] gates the fresh-install presentation: no route may be derived from disk until
+     * boot reconciliation has finished, because its mutators CHANGE what disk says.
+     *
+     * ## [durabilityHold] — ONE OWNER, THREE PRODUCERS (0.9.2 Unit W-B)
+     *
+     * **It means exactly one thing: SOME DESTRUCTIVE MUTATION OF LOCAL STATE DID NOT PROVE DURABLE.
+     * Full stop.** It carries forward the one fact a later stat cannot recover — files were unlinked
+     * but a journal replay could bring them back — and withholds the fresh-install presentation for
+     * the rest of this process.
+     *
+     * Three producers publish into this ONE field:
+     *  1. [VaultImageStore.sweepOrphanedResidue] — the cold-start orphan sweep (W-A).
+     *  2. [VaultImageStore.completeInterruptedBurn] / [VaultImageStore.reconcileOrphanedBurnMarkers] —
+     *     the boot reconcilers (W-B).
+     *  3. **[VaultImageStore.burnObliterate] — the duress wipe itself**, which runs at RUNTIME rather
+     *     than at boot. This is the producer whose absence was the round-6 HIGH: the hold covered the
+     *     boot sweep but not the burn's own obliterate, so a burn whose unlinks landed while its
+     *     `dirSync` failed left a directory that STATS CLEAN — and the next boot presented ONBOARDING,
+     *     a fresh install over a wipe that was never proven durable and that a journal replay can
+     *     bring back. Closed STRUCTURALLY: same field, same meaning, one more producer.
+     *
+     * **ROUTING CARES ONLY THAT IT IS RAISED, NEVER WHICH PRODUCER RAISED IT.** There is deliberately
+     * no discriminator, and adding one is not a fix. **If any consumer ever needs to know WHICH
+     * mutation failed, that is the signal this single-field design has broken down — surface it as a
+     * FINDING rather than working around it by widening the field.**
+     *
+     * PROCESS-scoped, not composition-scoped, and deliberately so: composition state resets on an
+     * Activity recreation, and a rotation that cleared this hold would restore exactly the
+     * fresh-install-over-unproven-absence presentation it exists to prevent.
+     */
+    val bootReconciled = MutableStateFlow(false)
+    val durabilityHold = MutableStateFlow(false)
+
+    /**
+     * Apply-once carrier for the duress wipe's outcome. PROCESS-scoped for the same reason the hold
+     * is: the wipe outlives the composition that started it, so an Activity recreation mid-wipe must
+     * neither lose the outcome nor apply it twice.
+     */
+    internal val burnCompletion = BurnCompletionCoordinator()
+
+    /**
+     * Raise the [durabilityHold] — the single entry point for every producer.
+     *
+     * Monotonic within a process: a raised hold is never lowered by another producer's success, only
+     * by evidence STRICTLY STRONGER than the doubt that raised it (a completed destroy's own proven
+     * absence + `dirSync`, via [destroySupersedesDurabilityHold]). A producer that lowered it on its
+     * own success would let a clean sweep erase a failed burn's doubt.
+     */
+    internal fun raiseDurabilityHold() {
+        durabilityHold.value = true
+    }
+
+    /**
+     * The DURESS wipe (0.9.2 Unit W-B) — producer 3 of the [durabilityHold].
+     *
+     * Fail-closed by construction: the hold is raised BEFORE the first destructive mutation is
+     * attempted, and lowered only once the wipe has PROVEN itself durable. Raising it afterwards on
+     * failure would lose the crash window — a process death mid-obliterate would leave no hold at all,
+     * and the next boot would present a fresh install over an unproven wipe.
+     *
+     * Rethrows whatever [VaultImageStore.burnObliterate] throws: the caller decides presentation, but
+     * the hold it leaves behind is what makes a failed burn safe regardless of what the caller does.
+     *
+     * ─── A SUCCESSFUL BURN ENDS BY KILLING THE PROCESS (0.9.2 W-B round 3, authorized) ───────────
+     *
+     * **The reason is not tidiness; it is that no in-process wipe can be durable against a live
+     * writer.** While this process runs, `SharedPreferencesImpl` singletons, `StateFlow`s and any
+     * lazily-initialised component can rewrite state AFTER the burn proved it absent. Round 3 found
+     * exactly that defect in memory form (the diagnostics buffer rewriting a deleted log), and the
+     * preference wipe's safety rested on an ORDERING ARGUMENT about `commit()` versus queued
+     * `apply()` writes — an argument two independent reviewers could neither refute nor confirm,
+     * and which a third lens read as resting on a DIFFERENT platform mechanism again.
+     *
+     * When a correctness claim rests on a platform implementation detail that cannot be
+     * independently confirmed, the answer is to stop needing the claim rather than to win the
+     * argument.
+     *
+     * **WHAT PROCESS DEATH ACTUALLY BUYS — narrowed after round 4 found the first version of this
+     * paragraph overclaimed.** It is a deterministic drain of the USERSPACE QUEUE: `QueuedWork` dies
+     * with the process, so a pending `apply()` can never initiate its write, and no lazily
+     * initialised component can recreate a file after the wipe. That is a real class of race, closed.
+     * It is **NOT** a drain of the kernel block layer: a thread already inside `write()`/`fsync()`
+     * lands regardless, so the window between the final absence proof and SIGKILL is not closed by
+     * killing the process. The original wording here — "the only deterministic drain", full stop —
+     * was false in that second sense on the day it was written.
+     *
+     * **This is why process death is DEFENCE IN DEPTH and not the proof.** The proof is
+     * [burnPlan]'s ordering (a crash before the image leaves an innocuous state) plus boot's
+     * marker-free completion of any outstanding step
+     * ([com.zitrone.app.burn.completeInterruptedCleanup]). Round 4 established that the earlier claim
+     * — that boot re-derives the doubt at every interruption point — was ALSO false: every
+     * reconciler keyed on image-bearing state, so once the image was gone they were blind.
+     *
+     * **BEHAVIOUR CHANGE, documented rather than discovered:** the app CLOSES on a successful burn
+     * instead of returning to an onboarding screen. Stated in `SECURITY_MODEL.md` and the changelog.
+     * The guarantee this feature makes — post-burn state is indistinguishable from a fresh install —
+     * is a property of state evaluated at the NEXT LAUNCH, and that is unchanged: reopening presents
+     * onboarding exactly as before. What changed is the in-the-moment presentation, and it is a real
+     * tradeoff in both directions: a closed app is arguably more duress-shaped than an animation,
+     * but it is also a visible event a coerced user cannot explain as a mistyped passphrase, whereas
+     * the failure path (WB-1) still silently shows the uniform error. Reviewers should weigh that.
+     */
+    /**
+     * @param terminate what a SUCCESSFUL burn does last. Production passes process death; the
+     *   byte-for-byte gate passes a recorder, because a test that killed its own process could
+     *   assert nothing about the state the burn left behind. NO DEFAULT — a call site that does not
+     *   name its terminal behaviour must not compile.
+     */
+    /**
+     * THE TERMINAL BURN SEQUENCE — ONE definition, used by production AND by the byte-for-byte gate.
+     *
+     * **Why this exists (0.9.2 W-B round 7, terminal round).** Round 6 added
+     * `unlockController.lock()` to `MainActivity.onBurn` to quiesce a live session before the wipe.
+     * It was not mirrored into the gate, so the gate burned a PUBLISHED session without the quiesce —
+     * and deleting `lock()` from production would have left the gate GREEN. The load-bearing gate
+     * could not discriminate removal of the repair it exists to validate.
+     *
+     * **Mirroring the call into the gate would NOT have fixed that**, and this is the subtlety that
+     * decided the shape: the gate would then hold its own copy of `lock()`, so deleting production's
+     * would still leave it green. Two copies of a sequence that must agree is the same defect one
+     * level up — the same shape as the biometric wiper and its probe using two predicates that had to
+     * agree and drifted. **One callable, two callers, no copy to drift.**
+     *
+     * @param terminate what a successful burn does last — process death in production, a recorder in
+     *   the gate. See [burnVault].
+     */
+    internal fun runTerminalBurn(terminate: () -> Unit) {
+        unlockController.beginTerminalWipe()
+        try {
+            runTerminalBurnLocked(terminate)
+        } finally {
+            // THE BRACKET IS WHOLE, and this is the half the first version left out. Terminal
+            // exclusion gates successor unlocks; opening it without a guaranteed close leaks the flag
+            // to whoever runs next. In production the success path never reaches here — `terminate`
+            // kills the process — and the failure path must reopen unlock so the user can retry,
+            // which is exactly what `onBurn` used to do explicitly. Moving it inside the shared
+            // callable is the point of having one: begin/lock/burn/end is ONE sequence, not a
+            // sequence plus a cleanup the caller has to remember.
+            //
+            // The gate found this immediately: its teardown burns with `terminate = {}`, so the
+            // process survives, and a leaked flag made every later `createVaultAndPublish` refuse
+            // with "the production create/publish path must succeed". Three tests failed on that
+            // precondition — the gate discriminating a change to the terminal sequence, which is the
+            // property this refactor existed to establish.
+            unlockController.endTerminalWipe()
+        }
+    }
+
+    private fun runTerminalBurnLocked(terminate: () -> Unit) {
+        unlockController.lock()
+        // PROVE THE QUIESCE RATHER THAN ASSUMING IT — and this assertion is what makes the gate
+        // DISCRIMINATING rather than merely faithful. `lock()` tears the session down synchronously
+        // (`lockCurrent` nulls `current` and publishes null), so a surviving session here means the
+        // quiesce did not happen: writers on the session scope — `NotificationScheduler`'s deferred
+        // re-fire jobs among them — are still live and can recreate residue after a step has verified
+        // its absence. Fail closed BEFORE the first destructive mutation, with the hold not yet
+        // raised and nothing yet destroyed.
+        //
+        // Delete the `lock()` above and this throws in the gate, which provisions a real published
+        // session. That is the discrimination the round-7 finding asked for, and it is automatic.
+        if (session.value != null) throw VaultImageException.DestroyFailed.step("session-quiesce")
+        burnVault(terminate)
+    }
+
+    fun burnVault(terminate: () -> Unit) = runBurnWipe(
+        raiseHold = { raiseDurabilityHold() },
+        obliterate = { runBurnPlan(burnPlan) },
+        lowerHold = { durabilityHold.value = false },
+        terminate = terminate,
+    )
+
+    /**
+     * THE BURN, AS AN ENUMERABLE TABLE. See [com.zitrone.app.burn.BurnPlan] for why it is data
+     * rather than statements, and why the PHASE ORDER is a safety property.
+     *
+     * Ordering is chosen by WHICH INTERRUPTION IS INNOCUOUS, not by convenience, and the test is
+     * applied PER STEP rather than per category:
+     *  - `BEFORE_IMAGE` — diagnostics, plaintext cache, active notifications ONLY. A crash here
+     *    leaves an intact, unlockable vault whose log was cleared, cache emptied and notification
+     *    dismissed: all states the OS or the user produces routinely anyway.
+     *  - `AFTER_IMAGE` — Keystore material, because deleting the device key while a live image
+     *    remained would make that image permanently unopenable (a vault nobody can open is a worse
+     *    oracle than the residue it replaces) — **and PREFERENCES**, because their interruption is a
+     *    durable user-visible tell, not an innocuous one.
+     *
+     * **Preferences are NOT in `BEFORE_IMAGE`, and this prose has been wrong once already.** Round 4
+     * put them there on the reasoning that "non-cryptographic" implies "innocuous"; round 5 found
+     * that false and moved the step. A crash between a preferences wipe and the image left an intact
+     * vault with Tor, I2P, read receipts, TTL, burn-on-read and auto-lock all reset — and boot's
+     * completion pass correctly refuses to run while an image is present, so nothing repairs it. If
+     * you are reading this while "restoring the documented ordering", that is the regression this
+     * paragraph exists to stop.
+     *
+     * Every step carries a `verify()` postcondition, and BOOT re-checks the same postconditions to
+     * finish an interrupted burn ([com.zitrone.app.burn.completeInterruptedCleanup]) — one
+     * enumeration, three consumers (burn, boot, gate).
+     *
+     * NOT wiped, deliberately, and therefore absent from this table: `_androidx_security_master_key_`
+     * and the `zitrone_settings` prefs FILE itself. `EncryptedSharedPreferences` creates both at
+     * STARTUP on every install, so a fresh device has them — removing them would CREATE a difference
+     * rather than erase one. (The KEYS inside that file are reset; see `wipeVaultUsePreferences`.)
+     */
+    internal val burnPlan: List<BurnStep> by lazy {
+        listOf(
+            // ── BEFORE_IMAGE — innocuous if interrupted ───────────────────────────────────────
+            BurnStep(
+                name = "boot-diagnostics",
+                phase = BurnPhase.BEFORE_IMAGE,
+                durability = Durability.FsyncedDir(app.filesDir),
+                // Memory AND disk: round 3 found `clearProven()` leaving the in-memory buffer intact,
+                // so a later record() rewrote pre-burn lines to a file the burn had proved absent.
+                verify = { bootDiagnostics.isErased() },
+                action = { if (!bootDiagnostics.erase()) throw VaultImageException.DestroyFailed() },
+            ),
+            BurnStep(
+                name = "plaintext-cache",
+                phase = BurnPhase.BEFORE_IMAGE,
+                durability = Durability.FsyncedDir(app.cacheDir),
+                // The one place in this burn where the residue IS vault content (decrypted
+                // attachments, QR artifacts) rather than metadata about use.
+                verify = { app.cacheDir?.let { it.listFiles()?.isEmpty() ?: false } ?: true },
+                action = { deleteTreeDurably(app.cacheDir) },
+            ),
+            BurnStep(
+                name = "active-notifications",
+                phase = BurnPhase.BEFORE_IMAGE,
+                durability = Durability.ExternalSynchronousVerified,
+                // ROUND 4, Codex: `MessagingNotifications.cancelAll` existed with ZERO call sites
+                // while `showNewMessage` posted real notifications — so a message notification could
+                // outlive the burn AND the process death. A fresh install has none, and it sits on
+                // the lock screen where a coercer is already looking. Found in the same file whose
+                // CHANNEL claim was corrected the round before: auditing what the gate CLAIMED about
+                // notifications, and never asking what the file DID.
+                verify = { MessagingNotifications.noneActive(app) },
+                action = { MessagingNotifications.cancelAll(app) },
+            ),
+            // ── IMAGE — the point of no return ────────────────────────────────────────────────
+            BurnStep(
+                name = "vault-image",
+                phase = BurnPhase.IMAGE,
+                durability = Durability.FsyncedDir(app.filesDir),
+                verify = { imageStore.imageBearingProvenAbsent() },
+                action = { imageStore.burnObliterate() },
+            ),
+            // ── AFTER_IMAGE — would brick a live image if run earlier ─────────────────────────
+            BurnStep(
+                name = "biometric-material",
+                phase = BurnPhase.AFTER_IMAGE,
+                durability = Durability.KeystoreTransactional,
+                verify = { biometricCipher.noAliasesRemain() },
+                action = { if (!wipeBiometricMaterial()) throw VaultImageException.DestroyFailed() },
+            ),
+            BurnStep(
+                name = "vault-use-preferences",
+                phase = BurnPhase.AFTER_IMAGE,
+                durability = Durability.PrefsStores(LAZY_PREFS_STORES),
+                // MOVED OUT OF BEFORE_IMAGE IN ROUND 5 (Codex, BLOCKING) — the "innocuous if
+                // interrupted" argument was FALSE for this step and true for its neighbours. Clearing
+                // a cache or a diagnostics log on a live vault is something the OS and the user do
+                // routinely. Resetting PREFERENCES is not: this wipes Tor, I2P, read receipts, default
+                // TTL, burn-on-read, unread reminders and auto-lock. A crash between this step and the
+                // image left an INTACT, unlockable vault with every setting reverted — and boot's
+                // completion pass correctly refuses to run while an image is present, so nothing
+                // repairs it. The user unlocks a working vault and sees their settings wiped, which is
+                // a durable, user-visible tell that the duress credential was entered. That is the
+                // oracle this whole phase ordering exists to avoid, introduced by the ordering itself.
+                //
+                // AFTER the image, and after `biometric-material`: the biometric wrap lives in the
+                // settings store, so clearing it earlier would empty that store out from under the
+                // biometric step.
+                verify = { vaultUsePreferencesAreFresh() },
+                action = {
+                    if (!wipeVaultUsePreferences()) throw VaultImageException.DestroyFailed()
+                },
+            ),
+            BurnStep(
+                name = "device-key",
+                phase = BurnPhase.AFTER_IMAGE,
+                durability = Durability.KeystoreTransactional,
+                // Created LAZILY by the first `wrapDek`, so a device that never made a vault does not
+                // have this alias — leaving it behind proves one existed. The gate's first execution
+                // found exactly this.
+                verify = { !deviceKeyCipher.keyMaterialExists() },
+                action = {
+                    if (!deviceKeyCipher.deleteKeyMaterial()) throw VaultImageException.DestroyFailed()
+                },
+            ),
+        )
+    }
+
+    private val bootReconcileStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Start boot reconciliation ONCE PER PROCESS; later callers no-op and observe [bootReconciled]. */
+    fun startBootReconcile() {
+        runBootReconcile(
+            scope = scope,
+            claim = { bootReconcileStarted.compareAndSet(false, true) },
+            // ALL THREE boot mutators, ordered but ORDER-INDEPENDENT BY PROOF: their trigger
+            // predicates are pairwise exclusive over the enumerated state space, asserted in
+            // `BurnReconcilerTriggersTest`. That is a proof rather than the reasoning "they can't
+            // both fire" — if a future change widens a trigger, the test fails loudly instead of the
+            // ordering silently starting to matter.
+            //
+            // Each returns whether IT proved its own mutation durable; the results fold into the ONE
+            // durability verdict below. A reconciler that mutated without proving durability raises
+            // the hold exactly as a non-durable sweep does — one owner, one meaning.
+            sweep = {
+                val burnCompleted = imageStore.completeInterruptedBurn()
+                val markersCleared = imageStore.reconcileOrphanedBurnMarkers()
+
+                // Both reconcilers are best-effort and never throw: `false` means either "did not
+                // fire" or "fired and could not prove itself durable", and those must not be
+                // conflated. Re-derive the distinction from disk: if either reconciler's precondition
+                // still holds after it ran, it mutated (or tried to) without landing — fail closed.
+                // FOLD THE TRI-STATE (round-1 review, both lenses). The previous re-derivation
+                // inspected only reconcilers that returned TRUE, so it structurally could not see the
+                // ambiguous FALSE it claimed to resolve: a reconciler that unlinked and then failed
+                // its dirSync reported `false`, the disk then stat'd clean, and the hold published
+                // FALSE over a wipe that a journal replay can undo. Each reconciler now reports its
+                // own durability, and any MUTATED_NOT_DURABLE raises the hold.
+                val reconcileUnproven =
+                    burnCompleted == ReconcileResult.MUTATED_NOT_DURABLE ||
+                        markersCleared == ReconcileResult.MUTATED_NOT_DURABLE
+                // FOURTH BOOT MUTATOR (0.9.2 W-B round 4, BLOCKING — Codex, severity upheld by an
+                // independent third lens). The three reconcilers above ALL key on image-bearing state,
+                // so once `burnObliterate()` had succeeded they were structurally blind to a burn that
+                // then failed a LATER cleanup: every trigger reported "nothing to do", the RAM hold
+                // died with the process, and boot presented ONBOARDING over surviving residue —
+                // plaintext cache, diagnostics, preference keys, orphaned Keystore aliases.
+                //
+                // NO DURABLE MARKER, and that is deliberate: a "burn in progress" marker written
+                // before the first mutation survives a crash on a device whose vault is still FULLY
+                // INTACT, which is a discoverable artifact proving the duress passphrase was entered.
+                // Two independent lenses rejected it. THE RESIDUE IS ITS OWN SIGNATURE instead —
+                // `{image proven absent AND some step's postcondition false}` is a shape a fresh
+                // install cannot produce, which is the same structural move that retired the pre-burn
+                // intent marker in W-A.
+                //
+                // Gated on a PROVEN absence, never `File.exists()`: this DELETES, so an indeterminate
+                // stat read as "absent" would run cleanups against a live vault.
+                //
+                // ORDERED LAST, AND THE ORDER IS LOAD-BEARING (WB-7, revised in round 4). This is
+                // the FOURTH boot mutator, and unlike the three above it is NOT part of their
+                // pairwise-exclusivity proof — it is a DEPENDENCY on them. Its gate is
+                // `imageBearingProvenAbsent()`, and `sweepOrphanedResidue` is exactly what can flip
+                // that from false to true in this same boot by removing an orphaned DEK or temp.
+                // Running it before the sweep would read a stale "image still present" and silently
+                // skip the cleanup it exists to perform. It also CO-FIRES with the sweep by design:
+                // they mutate disjoint artifacts (image-bearing residue vs diagnostics / cache /
+                // preferences / aliases), so "at most one fires" applies to the three, never to all
+                // four. Pinned by `BurnCleanupOrderingTest` (which references `foldBootMutators`
+                // directly — the previous comment named `BootReconcileOwnerTest`, which has zero
+                // references to it, so the claim failed its own grep check twice).
+                // The ORDER now lives inside `foldBootMutators`, which invokes the sweep itself, so
+                // hoisting cleanup above it is no longer expressible at this call site.
+                foldBootMutators(
+                    reconcileUnproven = reconcileUnproven,
+                    sweep = { imageStore.sweepOrphanedResidue() },
+                    imageProvenAbsent = { imageStore.imageBearingProvenAbsent() },
+                    completeCleanup = { absent -> completeInterruptedCleanup(burnPlan, absent) },
+                )
+            },
+            publish = { hold ->
+                durabilityHold.value = hold
+                bootReconciled.value = true
+            },
+            afterPublish = {
+                // Non-routing hygiene AFTER the gate opens — a slow cache clear must not hold splash.
+                // No local runCatching: runBootReconcile contains faults here by contract.
+                retryPlaintextCacheClearIfNoVault()
+            },
+        )
+    }
+
+    /**
+     * Retry the plaintext-cache clear on a cold start. Cheap (a directory list), silent, self-healing.
+     *
+     * TRISTATE GATE: this DELETES on "no vault", so the gate must be a PROVEN absence
+     * ([VaultImageStore.primaryImageProvenAbsent]) and not the `File.exists()`-backed routing signal —
+     * a stat/I/O fault read as "absent" would clear the cache out from under a LIVE vault. The fail
+     * direction is the safe one (over-clearing an OS-evictable cache at cold start), but the caller of
+     * a destructive operation must not use the looser test.
+     */
+    fun retryPlaintextCacheClearIfNoVault(): Boolean {
+        if (!imageStore.primaryImageProvenAbsent()) return false
+        return runCatching { clearCacheDir(app.cacheDir) }.getOrDefault(false)
+    }
+
+    /**
      * Routing signal (0.9.2): a present image is the PRIOR (v2 / 0.9.1) format, which the burn-slot
      * reservation makes unsafe to unlock — route to fresh onboarding instead of the lock screen. A
      * cheap Argon2id-free peek (see [VaultImageStore.isLegacyImage]); call off-main. Safety does NOT
@@ -249,7 +732,15 @@ class AppContainer(private val app: Application) {
      * clears this stale intent — it NEVER authorises destruction. See
      * [VaultImageStore.deleteIntentPending].
      */
-    fun vaultDeleteIntentPending(): Boolean = imageStore.deleteIntentPending()
+    /**
+     * SUSPEND, and it moves itself to IO (0.9.2 Unit W-B, item #5) — the same discipline as
+     * [deriveBootDecisionFromDisk]. This was a plain function taking `imageLock` and stat'ing disk,
+     * and its only caller invoked it bare from a composition `LaunchedEffect` on the Main thread.
+     * The dispatcher move belongs INSIDE, where no caller can get it wrong; a requirement stated in
+     * a comment is a requirement that will eventually be violated by one call site.
+     */
+    suspend fun vaultDeleteIntentPending(): Boolean =
+        withContext(Dispatchers.IO) { imageStore.deleteIntentPending() }
 
     /** Persist the delete INTENT durably (throws if not durable; caller fails closed). */
     fun markVaultDeleteIntent() = imageStore.markDeleteIntent()
@@ -640,14 +1131,119 @@ class AppContainer(private val app: Application) {
     fun destroyVaultForAccountDeletion() {
         // Under the same lock as enable-commit, so a racing in-flight enable cannot re-persist a wrap
         // after this cleanup (it would abort on the keyExists check once these aliases are gone).
-        tolerateCleanup {
-            synchronized(biometricWriteLock) {
-                biometricStore.clear()
-                biometricCipher.deleteAllAliasesExcept(null)
-            }
-        }
+        wipeBiometricMaterial()
         // NOT tolerated: a DestroyFailed (a surviving file) MUST reach the caller as a NOT-deleted signal.
         imageStore.destroy()
+    }
+
+    /**
+     * Remove every biometric wrap and Keystore alias — shared by the account-delete path and the
+     * duress burn (0.9.2 Unit W-B), so the two can never drift into clearing different sets.
+     *
+     * Under [biometricWriteLock], the same lock as enable-commit, so a racing in-flight enable cannot
+     * re-persist a wrap after this runs (it aborts on its `keyExists` check once the aliases are
+     * gone).
+     *
+     * Returns true iff the cleanup completed. **The burn path CONSUMES that boolean** — an orphaned
+     * Keystore alias is "something was here" residue, and post-burn ≡ fresh install is this feature's
+     * purpose. The account-delete path keeps the historical best-effort semantics: there the
+     * load-bearing step is the image destroy, and a Keystore already unhealthy must not strand it.
+     */
+    internal fun wipeBiometricMaterial(): Boolean {
+        var ok = true
+        tolerateCleanup {
+            try {
+                synchronized(biometricWriteLock) {
+                    biometricStore.clear()
+                    biometricCipher.deleteAllAliasesExcept(null)
+                }
+            } catch (t: Throwable) {
+                ok = false
+                throw t
+            }
+        }
+        // RETURN THE POSTCONDITION, NOT "nothing threw" (round 5, both lenses — BLOCKING).
+        // `deleteAllAliasesExcept` swallows per-alias failures, so "no exception" was compatible with
+        // an alias surviving. The burn CONSUMES this boolean, so it has to mean the aliases are gone —
+        // which is a question only the Keystore can answer, and now does.
+        return ok && biometricCipher.noAliasesRemain()
+    }
+
+    /**
+     * Return EVERY preference store to its fresh-install baseline (0.9.2 Unit W-B round-2 review,
+     * BLOCKING, both lenses). The burn CONSUMES this boolean.
+     *
+     * **The enumeration is the fix.** Round 1 fixed the artifact a reviewer named and stopped; the
+     * class here is "preference state a never-used device does not have", and the class has exactly
+     * four members. Every store the app creates, and what the burn does with it:
+     *
+     * | Store | Created by | A never-used device has | Burn |
+     * |---|---|---|---|
+     * | `zitrone_settings` | [SettingsRepository]'s ctor, at STARTUP, every launch | the file, keysets only, no app key | RESET IN PLACE — keys cleared, file and keysets kept |
+     * | `zitrone_signal_store` | session store / `wipeLegacyPrefs()` | nothing | FILE DELETED, proven absent |
+     * | `zitrone_auth` | session store / `wipeLegacyPrefs()` | nothing | FILE DELETED, proven absent |
+     * | `zitrone_contacts` | session store / `wipeLegacyPrefs()` | nothing | FILE DELETED, proven absent |
+     *
+     * DELIBERATELY NOT TOUCHED: the `_androidx_security_master_key_` Keystore alias (created at
+     * startup by `EncryptedSharedPreferences` on every install — removing it would CREATE a
+     * difference AND break the settings store this function has to leave readable). No other
+     * `getSharedPreferences` / `EncryptedSharedPreferences.create` call site exists in the app: the
+     * only factory is [KeyStoreManager.prefs], and its four names are the four rows above. The app
+     * creates no databases and instantiates no WebView, so those stores have no rows to enumerate.
+     *
+     * The three deletes come with a caveat stated rather than hidden: production wipes what it
+     * ENUMERATES, so a future store added without a row here would be missed. That is precisely why
+     * the gate compares the whole `shared_prefs` tree instead of these four names — the gate can see
+     * a store this function has never heard of.
+     *
+     * ORDERED AFTER [wipeBiometricMaterial] at the call site, and that order is load-bearing: the
+     * biometric wrap lives in `zitrone_settings`, so clearing the store first would make
+     * `biometricStore.clear()` a no-op on an already-empty store and its boolean would stop meaning
+     * "the wrap is gone".
+     */
+    internal fun wipeVaultUsePreferences(): Boolean {
+        val sharedPrefsDir = java.io.File(app.filesDir.parentFile, "shared_prefs")
+        // Row 1 — reset in place, synchronously proven.
+        if (!settingsRepository.resetToFreshInstallDefaults()) return false
+        // Rows 2-4 — empty the contents FIRST (so no handle, ours or the platform's, holds app data
+        // that a later write could put back), then unlink the files. Only stores that ALREADY have a
+        // file are opened: opening one that a fresh install lacks would CREATE it, and a delete that
+        // then failed would have manufactured the very residue this is removing.
+        LAZY_PREFS_STORES.forEach { name ->
+            if (java.io.File(sharedPrefsDir, "$name.xml").exists()) {
+                runCatching { keyStoreManager.prefs(name).edit().clear().commit() }
+            }
+            keyStoreManager.forget(name)
+        }
+        return wipeLazyPrefsFilesProven(
+            sharedPrefsDir = sharedPrefsDir,
+            names = LAZY_PREFS_STORES,
+            dirSync = { defaultFsyncDir(it) == DirSyncResult.DURABLE },
+        )
+    }
+
+    /**
+     * POSTCONDITION for the burn plan's `vault-use-preferences` step (0.9.2 W-B round 4).
+     *
+     * Mirrors the table in [wipeVaultUsePreferences] exactly: the three LAZILY created stores must
+     * have no file at all (a never-used device has none), and the STARTUP settings store must have no
+     * app keys (a never-used device has the file, holding only the androidx keysets — which is why
+     * `prefs.all`, whose implementation skips reserved keys, is the right probe and file presence is
+     * not).
+     *
+     * Boot calls this on every cold start, so it must be cheap and must never throw. Fail-closed: an
+     * unreadable store reports NOT fresh, costing at most one idempotent retry.
+     */
+    internal fun vaultUsePreferencesAreFresh(): Boolean {
+        val sharedPrefsDir = java.io.File(app.filesDir.parentFile, "shared_prefs")
+        val lazyStoresAbsent = LAZY_PREFS_STORES.all { name ->
+            java.nio.file.Files.notExists(java.io.File(sharedPrefsDir, "$name.xml").toPath()) &&
+                java.nio.file.Files.notExists(java.io.File(sharedPrefsDir, "$name.xml.bak").toPath())
+        }
+        val settingsHasNoAppKeys = runCatching {
+            keyStoreManager.prefs(KeyStoreManager.PREFS_SETTINGS).all.isEmpty()
+        }.getOrDefault(false)
+        return lazyStoresAbsent && settingsHasNoAppKeys
     }
 
     /**
@@ -772,6 +1368,19 @@ class AppContainer(private val app: Application) {
     }
 
     companion object {
+        /**
+         * The preference stores opened LAZILY — a never-used device has no such file, so the burn's
+         * fresh-install baseline for these is ABSENCE (see [wipeVaultUsePreferences], whose table
+         * enumerates all four stores and states which of them this list deliberately excludes).
+         * [KeyStoreManager.PREFS_SETTINGS] is NOT here: it is opened at startup on every install and
+         * is reset in place instead.
+         */
+        internal val LAZY_PREFS_STORES = listOf(
+            KeyStoreManager.PREFS_SIGNAL_STORE,
+            KeyStoreManager.PREFS_AUTH,
+            KeyStoreManager.PREFS_CONTACTS,
+        )
+
         // Self-hosters: point these at your deployment AND replace the
         // certificate pin in net/CertificatePinning.kt.
         // TODO(zitrone-cutover): live relay endpoint — repoint only at deploy cutover.
@@ -1035,3 +1644,426 @@ internal fun sealDurableOrFalse(seal: () -> Unit): Boolean =
     } catch (t: Throwable) {
         false
     }
+
+
+/**
+ * The boot-reconciliation OWNER, extracted so its lifecycle contract is testable on the host JVM.
+ * Four properties, each of which is a real failure mode:
+ *
+ *  1. **Once only.** [claim] is the CAS; a second call does nothing.
+ *  2. **Publication ordering.** [publish] runs before any consumer is released — consumers await the
+ *     published verdict instead of reading a field's default.
+ *  3. **Fail-closed default.** The verdict starts at [ResidueSweepResult.SWEPT_NOT_DURABLE], so a run
+ *     that dies before proving the disk durably clean releases waiters WITHHOLDING the fresh-install
+ *     presentation. A permissive default would make the race invisible and wrong exactly when it
+ *     matters.
+ *  4. **Cancellation cannot strand the claim.** [publish] is in a `finally`, so a claimant cancelled
+ *     after claiming and before publishing still releases every waiter. Without this the CAS stays
+ *     true with no other writer and every later consumer blocks forever.
+ *
+ * [scope] and [ioDispatcher] are injected precisely so a test can drive cancellation deterministically
+ * in virtual time. Production passes the process-scoped [AppContainer.scope] explicitly and does NOT
+ * pass [ioDispatcher] at all — it relies on the `Dispatchers.IO` default in the signature below.
+ * (Round-4 review, Kimi: this line previously said production "passes … `Dispatchers.IO`", which
+ * reads as an explicit argument and would send a reader looking for a call site that does not exist.)
+ */
+/**
+ * FOLD THE BOOT MUTATORS' VERDICTS INTO THE ONE DURABILITY ANSWER, with the fourth mutator's
+ * ORDERING made testable (0.9.2 W-B round 5, Grok — the previous "pinned by test" claim was FALSE).
+ *
+ * **Why this function exists at all.** The call-site comment and the invariant table both claimed the
+ * fourth mutator's position was "pinned by `BootReconcileOwnerTest`". It was not: that file contains
+ * zero references to it, and the ordering test exercised the pure cleanup function with a hand-passed
+ * flag — so hoisting the cleanup above the sweep in production left every test green. The claim was
+ * written in the commit whose subject was fixing a different false claim.
+ *
+ * A claim that a test pins a behaviour is CHECKABLE — grep the named test for the named symbol — and
+ * this one failed that check. The repair is to make the claim true rather than to soften it: the
+ * order now lives in a function whose contract a test can actually observe.
+ *
+ * **THE ORDER IS THE CONTRACT.** [imageProvenAbsentAfterSweep] must be evaluated AFTER the sweep has
+ * run, because `sweepOrphanedResidue` is precisely what can flip image-bearing absence from false to
+ * true in this same boot (by removing an orphaned DEK or temp). Evaluated earlier it reads a stale
+ * "image still present", and [completeCleanup] then silently skips the cleanup it exists to perform.
+ * Taking it as a LAMBDA rather than a Boolean is what makes that observable: a caller cannot pass a
+ * value computed too early without the test seeing when it was invoked.
+ */
+internal fun foldBootMutators(
+    reconcileUnproven: Boolean,
+    sweep: () -> ResidueSweepResult,
+    imageProvenAbsent: () -> Boolean,
+    completeCleanup: (Boolean) -> CleanupCompletion,
+): ResidueSweepResult {
+    // THE FOLD OWNS THE SEQUENCE. Round 6 found the previous signature took `sweepResult` as an
+    // already-computed VALUE, so a caller could evaluate image-absence first, run the cleanup on that
+    // stale reading, and only then run the sweep — and the test, which recorded "sweep" at argument
+    // evaluation, still passed. Taking the sweep as a LAMBDA is what makes the order a property of
+    // this function rather than of the call site's discipline.
+    val sweepResult = sweep()
+    val cleanup = completeCleanup(imageProvenAbsent())
+    return if (reconcileUnproven || cleanup == CleanupCompletion.INCOMPLETE) {
+        ResidueSweepResult.SWEPT_NOT_DURABLE
+    } else {
+        sweepResult
+    }
+}
+
+internal fun runBootReconcile(
+    scope: CoroutineScope,
+    claim: () -> Boolean,
+    sweep: () -> ResidueSweepResult,
+    publish: (hold: Boolean) -> Unit,
+    afterPublish: () -> Unit = {},
+    ioDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.IO,
+) {
+    if (!claim()) return
+    scope.launch {
+        // FAIL-CLOSED default: only a completed, proven-durable sweep may lower this.
+        var result = ResidueSweepResult.SWEPT_NOT_DURABLE
+        try {
+            withContext(ioDispatcher) {
+                // NOT `runCatching` — that swallows CancellationException too, turning a cancelled
+                // boot into a "successful" one. A cancellation must propagate to the `finally`, which
+                // publishes the fail-closed default; only a genuine fault degrades and continues.
+                result = try {
+                    sweep()
+                } catch (c: CancellationException) {
+                    throw c
+                } catch (t: Throwable) {
+                    ResidueSweepResult.SWEPT_NOT_DURABLE
+                }
+            }
+        } finally {
+            // On EVERY exit — normal, throw, or cancellation. Non-suspending, so it still runs while
+            // the coroutine is being cancelled.
+            publish(result == ResidueSweepResult.SWEPT_NOT_DURABLE)
+        }
+        // CONTAINED (round-3 review, Gemini). This runs AFTER the verdict is published, so it can
+        // never affect routing — but an uncaught throw here propagates out of the launch and, on
+        // Android, reaches the default handler and takes the process down. Production deliberately
+        // passes a BARE lambda (`startBootReconcile`, ~line 285) and relies on containment HERE: a
+        // local runCatching at the call site would protect only today's caller, so the guarantee
+        // belongs in the wrapper, where it covers every future one. A fault in post-publication
+        // hygiene must not be able to kill the app.
+        // (Follow-up review, Codex + Grok independently: this line said "Production's lambda wraps
+        // itself" — the SAME stale fact `bdde066` corrected in two other places and missed in this
+        // third one. See failures.md: enumerate every instance before committing a correction.)
+        withContext(ioDispatcher) { runCatching { afterPublish() } }
+    }
+}
+
+/**
+ * Derive a boot decision from disk in ONE place. All three consumers (the Splash decision, the
+ * post-boot re-derive, and the session collector) call this rather than each assembling the five
+ * `bootRoute` inputs themselves.
+ *
+ * Round-1 review (Gemini): the derivation — including the ~1 MiB `isLegacyImage()` decrypt and its
+ * skip conditions — was copy-pasted across all three call sites. Three copies of a safety derivation
+ * drift silently: change one and the others keep the old rule, with no test able to catch the
+ * divergence. One owner, one derivation. This is also why the legacy probe's cost and its
+ * "only when it can matter" guard live here rather than being restated three times.
+ *
+ * MUST be called off the main thread — `isLegacyImage()` reads and decrypts the outer layer.
+ */
+internal fun deriveBootDecision(
+    serverDeleteConfirmed: Boolean,
+    imagePresent: Boolean,
+    durabilityHold: Boolean,
+    vaultProvenAbsent: Boolean,
+    isLegacyImage: () -> Boolean,
+): BootDecision {
+    // Computed only when it can matter: never over a confirmed delete (that state is owned elsewhere)
+    // and never with no image to inspect.
+    val legacy = if (imagePresent && !serverDeleteConfirmed) {
+        runCatching { isLegacyImage() }.getOrDefault(false)
+    } else {
+        false
+    }
+    return BootDecision(
+        present = imagePresent,
+        legacy = legacy,
+        route = bootRoute(
+            serverDeleteConfirmed = serverDeleteConfirmed,
+            vaultImagePresent = imagePresent,
+            durabilityHold = durabilityHold,
+            vaultProvenAbsent = vaultProvenAbsent,
+            legacyImage = legacy,
+        ),
+    )
+}
+
+/**
+ * Does a completed account destroy SUPERSEDE an earlier residue-sweep hold?
+ *
+ * The hold exists because a cold-start orphan sweep unlinked residue without being able to prove the
+ * unlink crash-durable. A destroy that completed proves image-bearing absence with its OWN required
+ * `dirSync`, and retires both delete markers only after that proof — so once it has completed, the
+ * earlier uncertainty is resolved by strictly stronger evidence. Leaving the hold raised would
+ * withhold onboarding over a directory this delete has just proven durably clean, for the rest of the
+ * process.
+ *
+ * Both conditions are required. [vaultProvenAbsent] alone is not enough — a fresh stat reports absence
+ * the instant a file is unlinked — and `!`[serverDeleteConfirmed] is what says the destroy actually
+ * reached its marker retire rather than throwing part-way.
+ *
+ * Extracted as a pure predicate so the decision is testable: it is the one behavioural change in an
+ * otherwise-documentation delta, and it sits in the account-delete surface.
+ */
+internal fun destroySupersedesDurabilityHold(
+    vaultProvenAbsent: Boolean,
+    serverDeleteConfirmed: Boolean,
+): Boolean = vaultProvenAbsent && !serverDeleteConfirmed
+
+/** The outcome of a duress wipe, awaiting exactly one application to the UI. */
+internal sealed interface BurnCompletion {
+    /** The wipe proved itself durable. Present the fresh install (P2: visible reset). */
+    data object Wiped : BurnCompletion
+
+    /** The wipe failed. Present the UNIFORM failure — see invariant WB-1 before changing it. */
+    data object Failed : BurnCompletion
+}
+
+/**
+ * APPLY-ONCE for the burn's completion (0.9.2 Unit W-B, "snapshot → claim → apply/ack").
+ *
+ * The burn runs on the PROCESS scope under `NonCancellable` (WB-2), so it outlives the composition
+ * that started it. An Activity recreation mid-wipe — a rotation, a configuration change, the system
+ * rebuilding the window — must therefore not lose the outcome, and must not apply it twice.
+ *
+ * Extracted as a class so **apply-once is exercised against production code rather than a test
+ * stand-in**: the same reason `runBootReconcile` owns its CAS claim instead of the composition owning
+ * it. The shape is the one this codebase has converged on:
+ *  - **snapshot** — read the pending completion without consuming it, so a composition that is about
+ *    to be destroyed cannot swallow an outcome it will never render;
+ *  - **claim** — CAS the exact snapshot away, so exactly one caller may apply it even if two
+ *    compositions observe it concurrently;
+ *  - **apply/ack** — the winner renders it; losers see `false` and do nothing.
+ *
+ * [pending] is observable so a freshly-created composition picks up an outcome signalled while it did
+ * not exist.
+ */
+internal class BurnCompletionCoordinator {
+    private val state = MutableStateFlow<BurnCompletion?>(null)
+
+    /** Observable pending completion — collect this to learn an outcome landed. */
+    val pending: StateFlow<BurnCompletion?> = state.asStateFlow()
+
+    /** Publish an outcome. Overwrites any unclaimed one: the LATEST wipe outcome is the true one. */
+    fun signal(outcome: BurnCompletion) {
+        state.value = outcome
+    }
+
+    /** Read without consuming. */
+    fun snapshot(): BurnCompletion? = state.value
+
+    /**
+     * Consume [snapshot] if it is still the pending one. Returns true to EXACTLY ONE caller per
+     * signalled outcome; a caller that loses the race must not render.
+     *
+     * `compareAndSet` on the flow's value is the whole guarantee — a `value == snapshot` check
+     * followed by a separate `value = null` would let two claimants both pass the check.
+     */
+    fun claim(snapshot: BurnCompletion): Boolean = state.compareAndSet(snapshot, null)
+}
+
+/**
+ * THE DURESS WIPE ORCHESTRATION (0.9.2 Unit W-B) — extracted so the ORDER is testable against
+ * production code rather than asserted in a comment.
+ *
+ * Three properties, and they are the whole contract:
+ *  1. [raiseHold] runs STRICTLY BEFORE [obliterate] — never after, and never "on failure". A hold
+ *     raised only in a catch block loses the crash window: a process death mid-obliterate would leave
+ *     NO hold, and the next boot would present a fresh install over a wipe that was never proven
+ *     durable. Raising first is what makes the failed-but-clean state safe.
+ *  2. [lowerHold] runs ONLY after [obliterate] returns normally — i.e. only when the wipe proved
+ *     every image-bearing path absent, fsynced the directory, and retired both markers. That is
+ *     evidence strictly stronger than the doubt raised in (1), and it is the ONLY thing that may
+ *     lower the hold.
+ *  3. A throw from [obliterate] propagates with the hold STILL RAISED. The caller owns presentation;
+ *     the hold is what makes a failed burn safe regardless of what the caller decides to show.
+ *
+ * This closes the round-6 HIGH structurally: the durability hold gains a third producer rather than a
+ * second field. See [AppContainer.durabilityHold].
+ *
+ *  4. **[terminate] runs LAST, and ONLY on the success path** (0.9.2 W-B round-3, authorized
+ *     architecture change). A successful burn ends by KILLING THE PROCESS. See [AppContainer.burnVault]
+ *     for why; the ordering is the safety argument, so it lives here:
+ *       - killed BEFORE [lowerHold] (a crash mid-wipe) → no hold survives in RAM. Whether the next
+ *         boot re-derives the doubt depends on WHERE it died, and the honest statement is per-shape,
+ *         not universal (this is the born-wrong claim round 4 retracted in [AppContainer.burnVault]'s
+ *         kdoc and round 5 found still standing HERE — the sibling was corrected and this one was
+ *         not): while the image still exists the three image-bearing reconcilers re-derive it; once
+ *         the image is gone they are blind, and it is
+ *         [com.zitrone.app.burn.completeInterruptedCleanup] — recognising leftover state from the
+ *         RESIDUE ITSELF, with no durable marker — that withholds the fresh-install presentation.
+ *       - killed AFTER [lowerHold] → the wipe proved itself → next boot presents onboarding.
+ *     There is no interruption point at which process death produces a fresh-install presentation
+ *     over an unproven wipe, which is the property that makes killing the process safe rather than
+ *     merely convenient.
+ *
+ * No parameter carries a default: omitting one must be a COMPILE ERROR, not a silently weaker call.
+ * [terminate] is injected rather than calling `Process.killProcess` inline so the wiring is testable —
+ * a test that actually killed its own process could assert nothing.
+ */
+internal fun runBurnWipe(
+    raiseHold: () -> Unit,
+    obliterate: () -> Unit,
+    lowerHold: () -> Unit,
+    terminate: () -> Unit,
+) {
+    raiseHold()
+    obliterate()
+    lowerHold()
+    terminate()
+}
+
+/**
+ * The account-delete RETRY orchestration, extracted from the Compose lambda so the WIRING is
+ * testable (follow-up review, Codex: the sole behavioural change of the W-A follow-up had no direct
+ * test, and the truth-table tests over [bootRoute] cannot catch this CALL SITE reverting to the
+ * weaker `!hasVault() && !serverDeleteConfirmed()` predicate it used to carry).
+ *
+ * Four properties, and they are the whole contract:
+ *  1. [destroy] runs BEFORE [derive] — a decision taken over pre-destroy disk is meaningless.
+ *  2. The verdict is the DERIVED one. This function does not re-decide, does not consult
+ *     `hasVault()`, and does not assemble [bootRoute] inputs of its own. One authority.
+ *  3. ONLY [BootRoute.ONBOARDING] is success. Every other route — including LOCKED over a residue
+ *     sweep hold — leaves the caller on `Route.DeleteIncomplete` reporting failure.
+ *  4. NO hold supersede. The completion callback owns that; doing it here too would be a second
+ *     writer of the same state. See the call site for why the omission is accepted and tracked.
+ *
+ * [destroy] is expected to contain its own faults (the caller wraps it): a throw here propagates.
+ */
+internal suspend fun runDeleteRetry(
+    destroy: suspend () -> Unit,
+    derive: suspend () -> BootDecision,
+): Boolean {
+    destroy()
+    return derive().route == BootRoute.ONBOARDING
+}
+
+/** Where a composition must route out of Splash on a cold start — see [bootRoute]. */
+internal enum class BootRoute { DELETE_INCOMPLETE, LOCKED, ONBOARDING }
+
+/**
+ * One boot decision plus the disk facts it was taken from, so a caller applies a SINGLE consistent
+ * snapshot instead of re-reading disk after the decision.
+ */
+internal data class BootDecision(
+    val present: Boolean,
+    val legacy: Boolean,
+    val route: BootRoute,
+)
+
+/**
+ * The cold-start route decision, extracted as a PURE function so the fail-closed precedence is
+ * unit-testable without Compose.
+ *
+ * PRECEDENCE:
+ *  1. **A CONFIRMED server delete outbids everything** — `Route.DeleteIncomplete` owns that state.
+ *  2. **A LEGACY (v2) image goes to onboarding** — present but unusable, and its create() retires it.
+ *     Ordered AFTER the confirmed marker (a legacy image must never preempt finishing a confirmed
+ *     delete, whose create() would clear the marker authorising it) and BEFORE "a present image is a
+ *     lock screen" (a legacy image IS present, so it would otherwise fall through to a lock screen the
+ *     user can never pass).
+ *  3. **A present image is a lock screen.**
+ *  4. **A non-durable sweep withholds onboarding for the rest of this boot.** The residue is currently
+ *     unlinked, so [AppContainer.vaultProvenAbsent] says "clean" and would authorise a fresh install —
+ *     but a crash could replay the journal and bring it back. Absence that is not durable is not
+ *     absence.
+ *  5. **Onboarding requires PROVEN absence**, never merely "no `vault.bin`".
+ *  6. Anything else is a lock screen.
+ *
+ * No parameter carries a default: omitting an input must be a COMPILE ERROR, not a silently weaker
+ * call.
+ */
+internal fun bootRoute(
+    serverDeleteConfirmed: Boolean,
+    vaultImagePresent: Boolean,
+    durabilityHold: Boolean,
+    vaultProvenAbsent: Boolean,
+    legacyImage: Boolean,
+): BootRoute = when {
+    serverDeleteConfirmed -> BootRoute.DELETE_INCOMPLETE
+    // `&& vaultImagePresent` is DEFENCE, not behaviour: [deriveBootDecision] computes `legacy` only
+    // when the image is present, so on every reachable input this conjunct is a no-op and every
+    // existing row of the table is unchanged. Without it, the rule "only a PROVEN absence may present
+    // a fresh install" lives in the derivation's probe guard and NOT in this router — a future caller
+    // passing `legacyImage = true` over an image it could not stat would onboard over unprovable
+    // material, because this arm outranks both the present arm and the proven-absence arm. The rule
+    // belongs where it cannot be bypassed. (Found by a test written to pin the invariant, which
+    // failed against this function: the router did not enforce what its caller was enforcing for it.)
+    legacyImage && vaultImagePresent -> BootRoute.ONBOARDING
+    vaultImagePresent -> BootRoute.LOCKED
+    durabilityHold -> BootRoute.LOCKED
+    vaultProvenAbsent -> BootRoute.ONBOARDING
+    else -> BootRoute.LOCKED
+}
+
+/**
+ * Clear a cache directory, FAIL-CLOSED. `!exists()` conflates "confirmed absent" with "stat failed",
+ * and `listFiles()` returning null on an I/O or permission fault is exactly when plaintext is most
+ * likely still present — a directory we cannot read is a directory we cannot claim to have emptied.
+ */
+internal fun clearCacheDir(cacheDir: java.io.File?): Boolean =
+    runCatching { deleteTreeDurably(cacheDir); true }.getOrDefault(false)
+
+/**
+ * Empty a directory tree and make every unlink DURABLE (0.9.2 W-B round-3 review, BLOCKING).
+ *
+ * **RETURNS `Unit` AND THROWS — deliberately, and this is the point of the shape.** The previous
+ * version returned a Boolean that meant "the directory currently lists empty", which is a statement
+ * about the namespace RIGHT NOW and not about durability: a crash could replay the journal and
+ * restore the files. The obvious repair was a tri-state (`ProvenDurable | NotDurable | Failed`), and
+ * it was rejected on advice: at the burn boundary `NotDurable` and `Failed` do the same thing
+ * (throw, hold stays raised), so the middle value has no legitimate consumer — it is a trap with a
+ * name, and the predictable accident is a future call site writing `if (outcome != Failed)` and
+ * shipping this defect again with type safety making it look checked. **There is no overload that
+ * skips the fsync and no Boolean to misread.** Make the wrong thing impossible, not discouraged.
+ *
+ * **WHY THIS MATTERS MORE HERE THAN ANYWHERE ELSE IN THE BURN.** `cacheDir` holds DECRYPTED
+ * attachment plaintext and QR artifacts. Everywhere else in this wipe the residue is metadata that
+ * a vault EXISTED; here the residue IS vault content. The "the OS may evict caches anyway" argument
+ * is a category error: eviction is the OS's prerogative BEFORE the burn, and after it a
+ * replay-restored plaintext file is the payload itself. This is not a place to narrow the claim.
+ *
+ * **FSYNC IS PER-DIRECTORY AND POST-ORDER.** An unlink of `cache/a/b` is recorded in `a`'s metadata;
+ * the removal of `a` is recorded in `cacheDir`. Fsyncing only `cacheDir` would make "a is gone"
+ * durable while saying nothing about "b was gone from a". A directory that is itself being deleted
+ * needs no fsync of its own — once its parent's rmdir is durable there is no `a` left to contain a
+ * replayed `b` — so each directory is fsynced exactly once, after its children are gone. It is
+ * O(directories), not O(files): a handful of syscalls.
+ *
+ * There is a tempting shortcut — on ext4 with ordered journaling, fsyncing the last-touched
+ * directory commits the preceding transactions, so one fsync "works". It does, on ext4, today. f2fs
+ * has its own checkpoint and roll-forward semantics. That is the same species of claim as the
+ * SharedPreferences ordering argument this unit already had to abandon: correct on current AOSP,
+ * resting on platform internals, one filesystem migration away from being a silent lie. Pay the
+ * syscalls.
+ *
+ * FAIL-CLOSED: an unreadable directory (`listFiles()` null on an I/O or permission fault) is exactly
+ * when plaintext is most likely still there, so it throws rather than reporting an empty tree.
+ *
+ * @throws java.io.IOException if any entry survives, any directory cannot be read, or any fsync fails.
+ */
+internal fun deleteTreeDurably(dir: java.io.File?) {
+    if (dir == null) return
+    if (java.nio.file.Files.notExists(dir.toPath())) return
+    // POST-ORDER: empty the children (recursing into subdirectories first), then remove them, then
+    // fsync THIS directory once — at which point every removal it records is durable.
+    val entries = dir.listFiles()
+        ?: throw java.io.IOException("cannot list ${dir.name} — a directory we cannot read is one we cannot claim to have emptied")
+    entries.forEach { entry ->
+        if (entry.isDirectory) deleteTreeDurably(entry)
+        if (!entry.delete() && java.nio.file.Files.exists(entry.toPath())) {
+            throw java.io.IOException("could not remove ${entry.name}")
+        }
+    }
+    if (defaultFsyncDir(dir) != DirSyncResult.DURABLE) {
+        throw java.io.IOException("unlinks in ${dir.name} are not durable")
+    }
+    // PROVE, rather than trusting delete()'s boolean.
+    val remaining = dir.listFiles()
+        ?: throw java.io.IOException("cannot re-list ${dir.name} to prove it empty")
+    if (remaining.isNotEmpty()) throw java.io.IOException("${remaining.size} entries survived in ${dir.name}")
+}

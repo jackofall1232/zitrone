@@ -1,0 +1,17 @@
+You are a documentation-accuracy checker for a security product. Verify ONE sentence-block from a security doc against the described shipped Android code behavior. Answer only: (A) is the recovery claim accurate? (B) does it introduce any NEW overclaim or inaccuracy? Then a one-line verdict CLEAN or FINDING.
+
+## The doc text under review (docs/SECURITY_MODEL.md, the biometric "known robustness gap" disclosure):
+"[the enable flow is not yet serialized, so two overlapping first-enables] can race the shared Keystore alias and leave the single wrap orphaned — its stored blob sealed under one key while the alias now holds another. It does not self-heal: a subsequent biometric unlock finds the (present) key, so its cipher initialises but AEAD opening fails, yielding a plain FAILED that leaves the wrap in place and does not re-offer enrollment; recovery is a passphrase unlock followed by a manual disable and re-enable of biometric. (Only a missing/invalidated key auto-clears and re-offers.) This never repoints an already-established wrap to a different slot (the write-path guard refuses that), never destroys a pre-existing valid binding, and exposes no which-vault or second-vault information — it is a self-inflicted availability glitch, not a deniability break, and its atomicity fix is a scheduled follow-up."
+
+## Verified shipped-code facts (from two independent code reviews of the actual source):
+1. Biometric enable (`startBiometricEnableFromSession`) has NO single-flight; `newEncryptCipher()` does `deleteKey()` then `generateKey()`, replacing the SHARED Keystore alias. Two overlapping first-enables (both see no wrap) can race it, leaving a persisted wrap whose blob was sealed under key K1 while the alias now holds a different key K2 (key-REPLACED orphan).
+2. `cipherForDecrypt(nonce)` returns null ONLY if the Keystore key is ABSENT; if a key is present (K2), it returns an initialised decrypt Cipher.
+3. On a biometric unlock attempt with the key-replaced orphan: the cipher initialises (K2 present) but `openVaultKey`/`doFinal` AEAD-open FAILS (K2 cannot open a blob sealed under K1).
+4. The unlock result mapping: SUCCESS -> open; INVALIDATED or UNAVAILABLE (key gone/invalidated) -> auto-clear the wrap + re-offer enrollment; FAILED -> sets a uniform failure message ONLY, does NOT clear the wrap and does NOT re-offer enrollment; CANCELLED -> nothing.
+5. Therefore the AEAD-open failure of a key-replaced orphan maps to FAILED (not UNAVAILABLE/INVALIDATED), so it does NOT auto-clear or re-offer; the user recovers by unlocking with the passphrase and manually toggling biometric off then on.
+6. The write-path guard `biometricEnableAllowed(boundSlot, sessionSlot)` = (boundSlot == null || boundSlot == sessionSlot); `enableBiometricFromSession` fail-closes on false, so an ALREADY-ESTABLISHED wrap is never repointed to a different slot; the race is a first-bind (no pre-existing established wrap), and never destroys a pre-existing valid binding.
+
+## Questions
+(A) Does the doc text accurately state the recovery is user-driven (passphrase + manual disable/re-enable), NOT auto-healing on retry, matching facts 3-5?
+(B) Does the doc text introduce any NEW overclaim or inaccuracy vs facts 1-6 (e.g. mischaracterizing the FAILED path, the never-repoint guarantee, or the blast radius)?
+One-line verdict: CLEAN or FINDING(with the specific problem).

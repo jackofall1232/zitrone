@@ -87,6 +87,38 @@ credential in reserved slot 0** (replaces rejected "N wrong passwords wipes"); *
       failures.md: the round-3 Activity-scoped single-flight was reverted). Also fold in the disable-∥-enable
       race (disable/account-delete not synchronized with enable's seal/save). Own spec + invariant table +
       paired-blind loop. Pre-existing (predates 0.9.2); not release-blocking.
+- [ ] **FOLLOW-UP (new, from the Unit W-A follow-up review — Codex LOW): no in-app exit from a
+      PERSISTENT delete fault.** After W-A, `onRetryDestroy` routes to ONBOARDING only when
+      `vaultProvenAbsent` (`Files.notExists` over all four image-bearing files). Destroy is idempotent,
+      so retry is SAFE and a TRANSIENT fault clears — but a PERSISTENT unlink or stat fault (corrupt
+      or pathological filesystem; the new test's own non-empty `vault.dek` DIRECTORY is the shape)
+      keeps every retry on `Route.DeleteIncomplete`, and the app offers no other exit. **Not a routing
+      defect and must NOT be "fixed" by weakening the proven-absence criterion** — fail-closed is
+      correct and strictly safer than the pre-W-A onboarding it replaces. It is a PRODUCT/SUPPORT
+      question: what does a user do when the fault never clears (documented app-data reset? an
+      explicit last-resort action, with the deniability implications worked through? support
+      guidance?). Deliberately out of scope for the W-A delta — solving it there would be scope creep
+      into the release cut. Not release-blocking.
+- [ ] **FOLLOW-UP (new, from the Unit W-A follow-up review — Grok INFO): stale-hold strand on the
+      delete-retry path; FOLD INTO the 0.9.3 derivation work.** `onRetryDestroy` deliberately does not
+      supersede `residueSweepHold` (the delete-completion callback does). The omission was justified
+      with "a held boot admits no session — so hold and this path cannot coexist"; that is FALSE, and
+      the comment is now corrected in place. A hold raised while an image is PRESENT routes to LOCKED
+      via the image arm, and a lock screen admits an unlock → session → in-session delete → a failed
+      first destroy → `DeleteIncomplete` with the hold still up. Then a SUCCESSFUL retry over a clean
+      disk is reported as FAILURE for the rest of the process. Reachable only via the fail-closed
+      default (cancelled boot, or a throw escaping `sweepOrphanedResidue` before gate 1) — remote,
+      since the sweep's own gates return `NO_MUTATION` over a present image — and restart-recoverable.
+      The fix is the 0.9.3 fold of the hold into the derivation for every consumer at once, NOT two
+      more bare `imageLock` calls on the Main dispatcher at this one site. Not release-blocking.
+- [ ] **OPEN GAP (2026-07-25) — only ONE PR-attached reviewer.** GitHub-Codex is out of credits;
+      Gemini alone satisfies the PR gate by maintainer decision (recorded on the process branch,
+      `security-review-loop.md`, as a time-bounded (c) waiver). The paired-blind loop is unaffected —
+      four lenses on the delta. What is single-source is the **whole-repo view**, and Gemini has a
+      documented right-conclusion-wrong-MECHANISM pattern (3 occurrences), so every Gemini finding
+      must be VERIFIED against source and any wrong mechanism called out explicitly. **Restore a
+      second PR-attached lens when Codex credits return, or substitute one.** This is NOT resolved by
+      Gemini performing well — until it closes, every merged unit has had exactly one whole-repo look.
 - [ ] **PR-3 Unit 2 (docs) — SEPARATE PR, must land AFTER Unit 1 merges.** VAULT_ARCHITECTURE §3.3/§3.4
       wizard→silent triple-entry; SECURITY_MODEL flip to "two vaults creatable" + disclosures (triple-entry/
       systematic-entry limit, ~33% blind-overwrite, biometric A-only, burn permanence deferred to burn PR
@@ -96,6 +128,66 @@ credential in reserved slot 0** (replaces rejected "N wrong passwords wipes"); *
       (MainActivity no-match→create) already shipped in PR-2; biometric A-only guard (OQ4) = **Unit 1**
       (in review, above); docs (OQ5) = **Unit 2** (separate, after Unit 1, above). Enable-atomicity =
       the new follow-up above.
+- [ ] **UNIT W-B — burn mechanism + completion presentation. SCOPE APPROVED 2026-07-25; SPEC NEXT,
+      NO IMPL.** Scope statement: `/root/l00prite/unit-wb-scope.md` (approved with rulings A–E).
+      Sources `pucker-burn-spec.md` + `burn-unit-w-invariant-table.md` are PRE-SPLIT and STALE where
+      they conflict with shipped W-A code — **shipped code wins, and each staleness is corrected
+      explicitly, not silently.**
+
+      **DEFINITION OF DONE (binding):**
+      1. `obliterate()` marker-free, fail-closed, keys-first (dek before bin); markers cleared
+         STRICTLY last (after unlinks are proven durable); verify uses `Files.notExists`
+         PROVEN-ABSENCE — **ruling C: the spec's `exists()` verify is SUPERSEDED, not deviated from.**
+         `exists()` is fail-open on the one operation where fail-open is least acceptable.
+      2. `destroy()` behavioural equivalence verified AGAINST SOURCE; the unlink-order change
+         (bin-then-dek → dek-then-bin) named as a review item, never "identical by construction";
+         `keysFirst` param is the landing spot if a reviewer rejects it.
+      3. Burn NEVER writes `vault.delete-confirmed`; no burn-produced state can route to
+         `Route.DeleteIncomplete`.
+      4. **ONE DURABILITY OWNER WITH TWO PRODUCERS** (the boot sweep and burn's `obliterate`) — NOT a
+         second hold alongside the first. A failed-but-clean burn (unlinks landed, durability
+         unproven) MUST NOT present as a fresh install. **BLOCKING invariant, not a robustness
+         residual.**
+      5. Items #1 and #5 land as ONE change with one design: all five Main-thread disk reads
+         (`MainActivity.kt` 631, 1046, 1170, 1171, 1219) folded INTO the derivation — never wrapped
+         at the call sites — and the `destroySupersedesResidueHold` re-derivation + torn pair-read at
+         1170/1171 removed by the same fold. Every boot-routing consumer shown consuming the single
+         verdict.
+      6. Coordinator extracted ("snapshot → claim → apply/ack") so apply-once is tested against
+         PRODUCTION code, not a stand-in.
+      7. Reachability of `completeInterruptedBurn` and `reconcileOrphanedBurnMarkers` RE-DERIVED
+         against W-B's design — never restored from W-A-era comments, whose exclusion argument
+         explicitly cited the absence of the duress wipe and therefore voids by its own premise.
+      8. Byte-for-byte Robolectric gate green — and **ruling E: it compares the DERIVED VERDICT, not
+         only files/prefs/Keystore.** SPECIFIC ASSERTIONS OWED (a gap described precisely gets closed;
+         a gap described generally gets closed approximately): (a) **the burn path CONSUMES
+         `wipeBiometricMaterial()`'s boolean and FAILS the wipe on false** — currently untested because
+         it lives on `AppContainer`, which needs an `Application`; (b) post-burn `BootDecision` equals
+         post-fresh-install `BootDecision`, hold included. "Fresh install" now has a derived-verdict precondition (no hold
+         raised), so a file-only comparison would prove the wrong thing. Shadow gaps are in-test
+         exclusions WITH reasons + `SECURITY_MODEL.md` lines.
+      9. `SECURITY_MODEL.md` honesty pass: local-only scope, crypto-erase not NAND sanitisation,
+         single-snapshot indistinguishability, burn consumes the credential.
+      10. Item #4 residue: assert the sweep-hold VALUE is PRESERVED across `runDeleteRetry`, not
+          merely that a raised hold yields failure. The rest of #4 shipped in `1b5f5e0`; **W-B must
+          not re-do it.**
+
+      **DIVERGENCE BOUNDARY:** robustness residuals (R2 wall-clock) may defer to a later hardening
+      layer, tracked. **Anything that breaks post-burn ≡ fresh install BLOCKS** — that is the feature
+      failing at its purpose, not a hardening gap.
+
+      **PROCESS:** Rule of 6, HARD CAP, no self-reset, third lens blind at the cap, stop for the
+      maintainer regardless of outcome. Single whole-repo PR lens while Codex credits are out (see
+      the open-gap entry above) — front-loaded review matters MORE, not less.
+- [ ] **FOLLOW-UP (W-B, demonstrated defect class): sweep for "exists only if the feature was used"
+      artifacts BEYOND the burn window.** The byte-for-byte gate proves POST-BURN
+      indistinguishability, not indistinguishability from never-used at ALL TIMES. An artifact created
+      lazily and then correctly wiped passes the gate while still being an oracle **between creation
+      and burn** — a device seized in that window discloses the feature was used. Not a hypothesis:
+      the gate's first execution found the vault device-key Keystore alias surviving every burn.
+      Enumerate deliberately rather than trusting the diff (the diff only catches what a burn LEAVES
+      BEHIND): files, prefs KEYS, database tables, WorkManager job names, notification channels, cache
+      dirs. Disclosed in SECURITY_MODEL.md as a stated limit in the meantime.
 - [ ] **PUCKER BURN sibling PRs (0.9.2):** (a) burn SETUP UX — settings "Pucker Burn Password Setup"
       above "Delete Account", disappears once set, actively-acked permanence warning (3 points); (b) burn
       WIPE execution. Scope/sequencing TBD. PR-1 only makes the store burn-AWARE, not setup/wipe.
@@ -203,3 +295,98 @@ User intent recorded 2026-07-24: "at some point we need to cut 0.9.1 apk and fli
 ## Done recently (see ledger for detail)
 - 0.8.1-beta released (PR #8 + #9 merged @ `c78a606`, GH release live, website flipped PR #10).
 - 0.9.x vault track P1a/P1b-1/PR-A/B/C/D1/D2a/D2b then D2c all merged to `3c598ad`.
+
+## W-A FOLLOW-UP DELTA — ✅ LANDED as `bdde066`, follow-up round adjudicated (Codex + Grok, both READY TO MERGE)
+Held out of the convergence commit `acb5904` deliberately: adding them would have made the converged
+commit a new delta needing its own round. "It's only tests" is NOT a safety argument in this unit —
+three test-only edits here silently destroyed coverage (dropped `@Test`, deleted row 7, defanged the
+retry test). Batched into ONE delta and given ONE paired-blind round; the round's confirmed items are
+in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
+
+- [x] Apply `/root/l00prite/unit-wa-r4-info-tests.patch` — 4 tests closing the two uncovered
+      post-mutation branches (Kimi: post-unlink re-stat; Gemini: `catch (Throwable)`) + the two
+      afterPublish cancellation characterisation tests. Verified: applies cleanly to `acb5904`,
+      suite 487 → 491, 0 failures, 3 of 4 mutation-verified (the 4th is labelled as catching none).
+      Both follow-up lenses re-ran both mutations independently: each fails as claimed.
+- [x] `BootReconcileOwnerTest.kt:314` — stale docstring claiming production wraps `afterPublish` in a
+      local `runCatching`; `acb5904` removed that (the wrapper contains now). Raised independently by
+      Grok (INFO-1) and Kimi (LOW) — the only finding two lenses converged on. **The fix corrected 2
+      of the 3 instances of this fact; the third (`ZitroneApp.kt:1172`) was caught by BOTH follow-up
+      lenses and is fixed in the follow-up commit — see the binding close-out rule in failures.md.**
+- [x] `MainActivity.kt` ~697-704 `onRetryDestroy` — was still `!hasVault() && !serverDeleteConfirmed()`,
+      the weaker sibling of the predicate `acb5904` unified everywhere else; now routes through
+      `deriveBootDecisionFromDisk()`. **Kimi's safety derivation ("reachable only via
+      `Route.DeleteIncomplete`, which requires the confirmed marker; a held boot admits no session")
+      is REFUTED on its second clause** — follow-up Grok, adjudicated against source: a hold raised
+      while an image is PRESENT routes to LOCKED via the image arm, and a lock screen admits an
+      unlock, hence a session. Remote and restart-recoverable; tracked above with the 0.9.3 fold.
+- [x] `MainActivity.kt` ~1129-1130 — comment overstates: destroy's survival verify is `exists()`-based
+      (proven-present only), so the required `dirSync` is the real second barrier, not the verify.
+- [x] `runBootReconcile` kdoc — said "production passes `Dispatchers.IO`"; production relies on the
+      parameter default.
+- [ ] **SAME CLASS, TRACKED, NEXT** (reclassified 2026-07-25 — was "not a W-A regression, therefore
+      out of scope", which was true on provenance and wrong on framing):
+      `VaultImageStore.serverDeleteConfirmed()` uses `File.exists()`, not the `Files.notExists`
+      tristate discipline — an indeterminate marker stat reads "not confirmed" and fails **OPEN**
+      with respect to delete ownership (PR #60 gate, Codex, item E: it can admit legacy onboarding).
+      Pre-existing on main and uniform across routing inputs, so not a defect this unit introduced —
+      **but W-A exists to close a CLASS, and fixing the retry call site while leaving the identical
+      fail-open in the marker read closes an instance, not the class.** The honest changelog line is
+      "closes the fail-open at the retry-destroy call site", NOT "closes the fail-open class".
+      Does not block #60. The type and the rule now exist (`Residence`, and "only ProvenAbsent may
+      route to ONBOARDING"), so migrating this call site — and `hasVault()`'s other consumers — is
+      MECHANICAL rather than a second act of judgment. Do it next, as its own scoped unit with its
+      own round; do NOT fold it into a release cut.
+
+- [ ] **UNIT: BURNPLAN REGISTRY — make the burn's cleanup axes STRUCTURAL** (opened 2026-07-26,
+      from Kimi k3's advisory in round 3; explicitly NOT folded into W-B, and the reason matters:
+      restructuring the burn's cleanup path mid-loop would have made the delta under review a
+      REFACTOR instead of four verified fixes, and round 4 would have reviewed the wrong thing.
+      Same call as the `onRetryDestroy` scoping decision.)
+
+      **Problem it solves.** Three rounds of this unit produced the same failure in three costumes:
+      a cleanup that was gated but not durable, durable but not memory-clearing, enumerated on one
+      axis while another went unexamined. Enumerating harder has now failed twice — the round-2
+      commit enumerated all six cleanups correctly on the gating axis and still shipped two blocking
+      defects on axes it never named. You will never enumerate all axes; make the axes checkable
+      consequences instead of remembered properties.
+
+      **Shape to preserve (Kimi's, adjudicated sound):**
+      - A CLOSED SET OF PRIMITIVES that own delete+prove+fsync in one body. `deleteTreeDurably`
+        (landed in W-B) is the first: it returns `Unit` and throws, so "deleted but didn't fsync" is
+        unrepresentable rather than discouraged. NO tri-state result type — `NotDurable` has no
+        legitimate consumer at the burn boundary (it throws, same as `Failed`), so it is a trap with
+        a name: the predictable accident is `if (outcome != Failed)` shipping the defect again with
+        type safety making it look checked.
+      - `BurnPlan.steps: List<BurnStep>` as DATA, each step carrying a DECLARED durability mechanism
+        (`FsyncedDir(dir)` / `KeystoreTransactional` / `PrefsStore(name)`) and a `verify()`
+        postcondition. Per-mechanism names, NOT a generic `NotApplicable` — a step touching a file
+        cannot plausibly select `KeystoreTransactional`, whereas everything can select "n/a".
+      - ONE enumeration, THREE consumers: the burn executes the steps, the gate asserts every step
+        declares a mechanism (and asserts the step COUNT, so a cleanup added outside the registry
+        fails CI), and the gate's fresh-baseline assertion iterates the same `verify()` lambdas
+        instead of maintaining a parallel checklist that goes stale.
+      - Honest limit to write into the kdoc rather than overclaim: Kotlin cannot stop a call site
+        inside the burn from calling `file.delete()` directly. That is a LINT boundary, not a type
+        boundary — close it with an arch rule (a ~15-line source-tree test failing if
+        `deleteRecursively|Files.delete|SharedPreferences.edit` appears outside `wipe/` and the gate).
+      - The payoff to state in the spec: when the NEXT axis appears, add a field to `BurnStep` and
+        every existing step fails to compile until it is addressed.
+
+      Needs its own spec, its own invariant table, and its own paired-blind round. Do NOT fold into
+      a release cut.
+
+- [ ] **Notification channel state is NOT reset by the burn** (round 3, Codex; claim corrected in
+      W-B). `ensureChannel` runs in `Application.onCreate` on every launch including a fresh install,
+      so a channel's EXISTENCE is not a vault-use oracle — but a user's own importance/sound/vibration
+      changes survive a burn and differ from fresh. The FALSE gate claim ("channels ARE compared, via
+      prefs") is already fixed; the reset itself is deferred. If taken: delete+recreate channels in
+      the burn and add a `NotificationManager` domain to the snapshot. Note the one exclusion that
+      must remain and be documented — an app-level notification block (`areNotificationsEnabled()`
+      false) cannot be programmatically undone by any API.
+
+- [ ] **Gate follow-up: assert post-burn state at NEXT LAUNCH, not in-process** (round 3). Now that a
+      successful burn ends in process death, the gate's `terminate = {}` seam exercises a strictly
+      WEAKER in-process arrangement than production ships. A burn → relaunch → assert-at-boot test
+      would cover the contract actually shipped. Needs multi-process orchestration the current
+      harness lacks.

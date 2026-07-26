@@ -103,6 +103,49 @@ class KeystoreDeviceKeyCipher(
     // existingKey / wrap / unwrap. Lazily loaded on first use (mirrors lazy key generation).
     private val keyStore: KeyStore by lazy { KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) } }
 
+    /**
+     * Delete this install's device-key alias. Returns true iff the alias is PROVEN gone afterwards.
+     *
+     * **Why a burn must call this (0.9.2 Unit W-B, found by the byte-for-byte gate's first run).**
+     * The alias is created LAZILY — [getOrCreateKey] generates it on the first `wrapDek`, i.e. when a
+     * vault is first created. A device that never created a vault does not have it. So its mere
+     * EXISTENCE after a burn is an on-device oracle that a vault once lived here: post-burn state
+     * differs from post-fresh-install state by exactly this artifact, which is the property the
+     * duress wipe exists to provide.
+     *
+     * Safe to delete: [getOrCreateKey] regenerates on demand, and after an obliterate there is no
+     * wrapped DEK left for it to unwrap.
+     *
+     * Deliberately NOT called by the account-delete path: there the user is TOLD the account was
+     * deleted, so an alias proving a vault existed discloses nothing they do not already know.
+     * Deniability is the burn path's property, not that one's.
+     */
+    fun deleteKeyMaterial(): Boolean = try {
+        keyStore.deleteEntry(alias)
+        !keyStore.containsAlias(alias)
+    } catch (e: Exception) {
+        false
+    }
+
+    /**
+     * POSTCONDITION PROBE for the burn plan's `device-key` step (0.9.2 W-B round 4) — is the lazily
+     * created device-key alias still present? Boot calls this on every cold start to detect a burn
+     * that removed the image and then failed before reaching this step, so it must be cheap and must
+     * never throw. An indeterminate Keystore read reports PRESENT (fail-closed): the cost of a
+     * needless retry of an idempotent delete is nothing, and the cost of missing real residue is the
+     * feature's purpose.
+     *
+     * **`containsAlias`, NOT [existingKey] (round 5, Codex — BLOCKING).** This first used
+     * `existingKey() != null`, which tests whether the key is USABLE, not whether the alias EXISTS —
+     * and `existingKey` deliberately swallows `UnrecoverableEntryException` / `GeneralSecurityException`
+     * for a corrupted or hardware-invalidated entry, returning null. So an alias that was still
+     * present but no longer loadable reported ABSENT, and the fail-closed `getOrDefault(true)` never
+     * fired because the callee had already eaten the exception. The forensic question is whether the
+     * ALIAS is there — a coercer enumerating the Keystore does not care whether its key still
+     * decrypts — and [deleteKeyMaterial] four lines below was already using the right criterion.
+     */
+    fun keyMaterialExists(): Boolean = runCatching { keyStore.containsAlias(alias) }.getOrDefault(true)
+
     private fun existingKey(): SecretKey? = try {
         (keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.secretKey
     } catch (e: Exception) {
@@ -158,7 +201,12 @@ class KeystoreDeviceKeyCipher(
         return generator.generateKey()
     }
 
-    private companion object {
+    // `internal`, not `private` (0.9.2 Unit W-B): the byte-for-byte gate asserts the device-key
+    // alias is PRESENT before the burn and gone after, and it has to NAME it to do that. The
+    // alternative — a string literal in the test — is the same constant maintained in two places,
+    // and the one that drifts is the test, which then asserts the presence of an alias nothing
+    // creates and passes for the wrong reason.
+    internal companion object {
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
 
         /** The single device key that wraps this install's vault DEK. */

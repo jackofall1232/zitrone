@@ -1,0 +1,188 @@
+diff --git a/apps/android/app/src/test/java/com/zitrone/app/BootReconcileOwnerTest.kt b/apps/android/app/src/test/java/com/zitrone/app/BootReconcileOwnerTest.kt
+index beb9d41..3bfd3b3 100644
+--- a/apps/android/app/src/test/java/com/zitrone/app/BootReconcileOwnerTest.kt
++++ b/apps/android/app/src/test/java/com/zitrone/app/BootReconcileOwnerTest.kt
+@@ -7,7 +7,9 @@ package com.zitrone.app
+ 
+ import com.zitrone.app.crypto.vault.ResidueSweepResult
+ import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.ExperimentalCoroutinesApi
++import kotlinx.coroutines.Job
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.first
+ import kotlinx.coroutines.launch
+@@ -340,4 +342,90 @@ class BootReconcileOwnerTest {
+         assertTrue("and its waiters released", released)
+         assertFalse("a durable verdict must survive a later failure", h.hold.value)
+     }
++
++    /**
++     * `runCatching { afterPublish() }` catches CancellationException too, which the sweep path
++     * deliberately does NOT (it rethrows, so a cancelled boot cannot be mistaken for a successful
++     * one). Round-4 review (Grok, INFO-3) flagged the asymmetry. These two tests answer whether it
++     * is a live defect or a latent one, because the label alone does not say.
++     *
++     * Here: a SYNTHETIC cancellation — `afterPublish` is `() -> Unit`, not `suspend`, so it has no
++     * suspension point at which a real cancellation could ever be delivered to it. The only
++     * CancellationException it can raise is one it constructs itself: a fault wearing cancellation's
++     * clothes, which is precisely what the containment is for. It runs after the verdict is already
++     * published, so swallowing it strands nobody.
++     *
++     * MUTATION UNIQUELY CAUGHT: removing the `runCatching` — the CE then cancels the boot coroutine.
++     * (Asserted on the child Job, because a CancellationException from a child does not fail its
++     * parent, so nothing observable at the scope level would distinguish the two.)
++     */
++    @Test
++    fun `a synthetic cancellation from afterPublish is contained like any other fault`() = runTest {
++        val io = StandardTestDispatcher(testScheduler)
++        val h = Harness()
++        val parent = Job()
++        val scope = CoroutineScope(parent + io)
++
++        runBootReconcile(
++            scope = scope,
++            claim = h::claim,
++            sweep = { ResidueSweepResult.SWEPT_DURABLE },
++            publish = h::publish,
++            afterPublish = { throw CancellationException("a fault, not a real cancellation") },
++            ioDispatcher = io,
++        )
++        val boot = parent.children.first()
++        advanceUntilIdle()
++
++        assertTrue("the verdict was published before afterPublish ran", h.done.value)
++        assertFalse("and a durable sweep still authorises onboarding", h.hold.value)
++        assertTrue("the boot coroutine ran to completion", boot.isCompleted)
++        assertFalse("post-publication hygiene cannot cancel the boot coroutine", boot.isCancelled)
++    }
++
++    /**
++     * The other half: a REAL cancellation arriving while `afterPublish` runs must still propagate.
++     * It does, and not by luck — `runCatching` is INSIDE `withContext`, and `withContext` rechecks
++     * its job on exit regardless of what the block swallowed. So the containment cannot be used to
++     * outlive a cancelled scope.
++     *
++     * This is the assertion that would fail first if `afterPublish` ever became `suspend`, which is
++     * the condition under which INFO-3 stops being latent. It fails loudly rather than silently.
++     *
++     * MUTATION UNIQUELY CAUGHT: **NONE. This test catches no mutation of the containment, and the
++     * claim that it did was wrong.** The header first written here said it uniquely caught hoisting
++     * `runCatching` outside `withContext`. Running that mutation refutes it: the test stays green.
++     * The reason is structural — cancellation is Job state, so once `parent.cancel()` lands the boot
++     * coroutine is cancelled no matter what any enclosing `runCatching` swallows, and no assertion
++     * on `isCancelled` can separate the two forms. Removing the `runCatching` entirely does not move
++     * it either. The property asserted below is true under every variant considered.
++     *
++     * It is kept anyway, as the executable record of WHY INFO-3 is latent rather than live — but it
++     * is characterisation, not coverage, and is labelled as such so no later reader mistakes it for
++     * a guard. Writing a false MUTATION UNIQUELY CAUGHT line is this unit's signature failure, and
++     * this is the second header in this file to carry its own correction rather than a quiet reword.
++     */
++    @Test
++    fun `a real cancellation during afterPublish still cancels the boot coroutine`() = runTest {
++        val io = StandardTestDispatcher(testScheduler)
++        val h = Harness()
++        val parent = Job()
++        val scope = CoroutineScope(parent + io)
++        var ran = false
++
++        runBootReconcile(
++            scope = scope,
++            claim = h::claim,
++            sweep = { ResidueSweepResult.SWEPT_DURABLE },
++            publish = h::publish,
++            afterPublish = { ran = true; parent.cancel() },
++            ioDispatcher = io,
++        )
++        val boot = parent.children.first()
++        advanceUntilIdle()
++
++        assertTrue("afterPublish must actually have run", ran)
++        assertTrue("the verdict is published regardless", h.done.value)
++        assertTrue("a cancelled scope must cancel the boot coroutine", boot.isCancelled)
++    }
+ }
+diff --git a/apps/android/app/src/test/java/com/zitrone/app/SweepOrphanedResidueTest.kt b/apps/android/app/src/test/java/com/zitrone/app/SweepOrphanedResidueTest.kt
+index a2decaa..18406cb 100644
+--- a/apps/android/app/src/test/java/com/zitrone/app/SweepOrphanedResidueTest.kt
++++ b/apps/android/app/src/test/java/com/zitrone/app/SweepOrphanedResidueTest.kt
+@@ -23,6 +23,7 @@ import org.junit.Rule
+ import org.junit.Test
+ import org.junit.rules.TemporaryFolder
+ import java.io.File
++import java.io.IOException
+ import java.security.GeneralSecurityException
+ import java.security.MessageDigest
+ import java.security.SecureRandom
+@@ -340,6 +341,70 @@ class SweepOrphanedResidueTest {
+         )
+     }
+ 
++    /**
++     * A file that SURVIVES its unlink must fail the sweep. `File.delete()` reports failure by
++     * returning false, not by throwing, so without the post-unlink re-stat the sweep would walk
++     * straight into `dirSync` and report SWEPT_DURABLE over residue that is still on disk — a
++     * fresh-install screen presented over a surviving DEK, which is the exact failure this gate
++     * exists to prevent. That the DEK opens nothing on its own does not make the claim honest.
++     *
++     * Round-4 review (Kimi): the re-stat branch was uncovered — only the `dirSync` branch below it
++     * had a test, so deleting the re-stat left the suite green.
++     *
++     * The vector is a `vault.dek` that is a NON-EMPTY DIRECTORY, so the unlink fails with ENOTEMPTY.
++     * That shape is not itself a reachable production state; it is simply the one way to make
++     * `delete()` fail that does not depend on uid (these tests run as root, where a read-only parent
++     * directory would not refuse the unlink) or on a SecurityManager. What is under test is the
++     * branch, not the shape.
++     *
++     * MUTATION UNIQUELY CAUGHT: dropping the post-unlink `imageBearingFilesProvenAbsent()` re-stat.
++     */
++    @Test
++    fun `residue that survives its unlink fails the sweep instead of claiming durable success`() {
++        val dir = tmp.newFolder()
++        val undeletable = dek(dir)
++        undeletable.mkdirs()
++        File(undeletable, "occupant").writeBytes(byteArrayOf(1))
++
++        val store = newStore(dir) { DirSyncResult.DURABLE }
++        assertEquals(
++            "the unlink failed, so absence was never proven — SWEPT_DURABLE would authorise " +
++                "onboarding over residue that is still there, and NO_MUTATION would deny the sweep " +
++                "even tried",
++            ResidueSweepResult.SWEPT_NOT_DURABLE,
++            store.sweepOrphanedResidue(),
++        )
++        assertTrue("and the survivor is still on disk — the verdict is not cosmetic", undeletable.exists())
++    }
++
++    /**
++     * The total `catch` around the mutation is the sweep's last fail-closed backstop: if any step
++     * between the first unlink and the durability proof throws, the honest answer is "mutated, not
++     * proven durable". An escaping throw would instead unwind into `runBootReconcile`, which reaches
++     * the same verdict only by accident of a second, distant catch — and would take any future caller
++     * that lacks one down with it.
++     *
++     * Round-4 review (Gemini): the block was entirely uncovered — nothing in the suite drove a throw
++     * past the mutation point. `dirSync` is the only injectable step inside the `try`, so it is the
++     * vector; the branch is what matters, not which step raises.
++     *
++     * MUTATION UNIQUELY CAUGHT: removing the `catch` (the throw escapes `sweepOrphanedResidue`).
++     */
++    @Test
++    fun `a throwing step after the unlinks fails the sweep closed instead of escaping`() {
++        val dir = tmp.newFolder()
++        dek(dir).writeBytes(ByteArray(WRAPPED_KEY_BYTES) { 7 })
++
++        val store = newStore(dir) { throw IOException("fsync faulted after the unlinks landed") }
++        assertEquals(
++            "a fault after the mutation point must report SWEPT_NOT_DURABLE — the residue was " +
++                "already touched, so NO_MUTATION would be a lie, and durability was never proven",
++            ResidueSweepResult.SWEPT_NOT_DURABLE,
++            store.sweepOrphanedResidue(),
++        )
++        assertFalse("the unlink that did land is not rolled back", dek(dir).exists())
++    }
++
+     /** Safe to run on every cold start: a second pass finds nothing and reports nothing. */
+     @Test
+     fun `is idempotent across repeated cold starts`() {
