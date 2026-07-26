@@ -13,6 +13,7 @@ import com.zitrone.app.crypto.LemonDropSodiumOps
 import com.zitrone.app.crypto.SignalProtocolManager
 import com.zitrone.app.crypto.VaultSignalProtocolStore
 import com.zitrone.app.crypto.ZitroneSignalStore
+import com.zitrone.app.crypto.vault.ArmBurn
 import com.zitrone.app.crypto.vault.BiometricVaultKeyCipher
 import com.zitrone.app.crypto.vault.KeystoreDeviceKeyCipher
 import com.zitrone.app.crypto.vault.LibsodiumVaultOps
@@ -1221,6 +1222,20 @@ class AppContainer(private val app: Application) {
             dirSync = { defaultFsyncDir(it) == DirSyncResult.DURABLE },
         )
     }
+
+    /**
+     * ARM (or re-arm) the Pucker Burn duress credential — the settings entry point (0.9.3 Unit S).
+     *
+     * CPU-heavy (Argon2id over every slot for the collision sweep, plus the seal), so it runs on
+     * [Dispatchers.Default] and the caller drives the UI. Returns the store's outcome verbatim; the
+     * caller must NOT tell the user the credential is set on anything but [ArmBurn.Armed].
+     *
+     * There is deliberately no companion "is a burn password set?" query. Armed and unarmed installs
+     * are byte-indistinguishable by design, so the settings entry is permanent and identical either
+     * way — a readback would be exactly the discoverable artifact this feature exists to avoid.
+     */
+    suspend fun armBurnCredential(passphrase: String): ArmBurn =
+        withContext(Dispatchers.Default) { imageStore.armBurnSlot(passphrase) }
 
     /**
      * POSTCONDITION for the burn plan's `vault-use-preferences` step (0.9.2 W-B round 4).

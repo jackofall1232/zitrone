@@ -46,5 +46,5 @@
     ]
   },
   "active_unit": "0.9.3 Unit S \u2014 Pucker Burn ARMING (feat/0.9.3-unit-s-burn-arming). DoD = the burn works end-to-end.",
-  "loop": "Unit S build loop STARTED, autonomous. Rule of 6, no HIL except: a decision is needed, or converged/ready-to-merge. Invariant table written and source-verified."
+  "loop": "Unit S build loop, autonomous. DoD = READY FOR HUMAN TEST (user 2026-07-26): full user path built + reviewed + gated as far as automation reaches; on-device confirmation is the human step. Rule of 6."
 }

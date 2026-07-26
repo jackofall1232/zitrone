@@ -50,6 +50,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.lifecycleScope
+import com.zitrone.app.crypto.vault.ArmBurn
 import com.zitrone.app.crypto.vault.BiometricVaultKeyCipher
 import com.zitrone.app.data.Conversation
 import com.zitrone.app.data.LemonDropRedeemer
@@ -62,6 +63,7 @@ import com.zitrone.app.data.parseQrDropLink
 import com.zitrone.app.i2p.I2pIntegration
 import com.zitrone.app.security.RootDetection
 import com.zitrone.app.tor.TorIntegration
+import com.zitrone.app.ui.components.BurnSetupDialog
 import com.zitrone.app.ui.components.buildContactExchangePayload
 import com.zitrone.app.ui.screens.AddContactScreen
 import com.zitrone.app.ui.screens.ChatListScreen
@@ -1165,6 +1167,58 @@ private fun ZitroneRoot(
     // resealed image survives — do NOT rely on signalStore.wipe()/reseal (which keeps the crypto
     // on disk). hasVault() is then false, so route to Onboarding (fresh-install state), never
     // Splash→Locked.
+    // ── Pucker Burn password setup (0.9.3 Unit S) ───────────────────────────────────────────────
+    // Composition-scoped UI state only: no armed flag is kept anywhere, because none exists to keep.
+    var burnSetupOpen by remember { mutableStateOf(false) }
+    var burnSetupBusy by remember { mutableStateOf(false) }
+    var burnSetupError by remember { mutableStateOf<String?>(null) }
+
+    val onConfirmBurnPassword: (String) -> Unit = { candidate ->
+        if (!burnSetupBusy) {
+            burnSetupBusy = true
+            burnSetupError = null
+            // container.scope, not the composition's: the arming Argon2id sweep outlives a rotation,
+            // and a half-finished arm that lost its continuation would leave the user unsure whether
+            // the credential took. The store commits atomically either way, but the REPORT must survive.
+            container.scope.launch {
+                val outcome = runCatching { container.armBurnCredential(candidate) }
+                withContext(Dispatchers.Main.immediate) {
+                    burnSetupBusy = false
+                    outcome.fold(
+                        onSuccess = { result ->
+                            when (result) {
+                                is ArmBurn.Armed -> burnSetupOpen = false
+                                is ArmBurn.CollidesWithVault ->
+                                    // Safe to say plainly: setup runs inside an unlocked session, so
+                                    // this is not a lock-screen oracle. Saying nothing would leave the
+                                    // user with a credential that wipes on their next ordinary unlock.
+                                    burnSetupError =
+                                        "That's already one of your vault passwords. Pick a different " +
+                                            "one — otherwise unlocking would erase this vault instead."
+                                is ArmBurn.DeletePending ->
+                                    burnSetupError = "Can't set this right now. Please try again in a moment."
+                            }
+                        },
+                        onFailure = {
+                            // Includes NotDurable: the write may not survive a crash, so the user must
+                            // NOT be told the credential is set.
+                            burnSetupError = "Couldn't save that. Please try again."
+                        },
+                    )
+                }
+            }
+        }
+    }
+
+    if (burnSetupOpen) {
+        BurnSetupDialog(
+            onDismiss = { burnSetupOpen = false },
+            onConfirm = onConfirmBurnPassword,
+            busy = burnSetupBusy,
+            error = burnSetupError,
+        )
+    }
+
     val onDeleteAccount: () -> Unit = onDeleteAccount@{
         val live = session ?: return@onDeleteAccount
         container.unlockController.beginTerminalWipe()
@@ -1478,6 +1532,7 @@ private fun ZitroneRoot(
                     onDismissRootWarning = { rootWarningVisible = false },
                     onNavigate = { route = it },
                     onDeleteAccount = onDeleteAccount,
+                    onSetBurnPassword = { burnSetupError = null; burnSetupOpen = true },
                     biometricEnabled = biometricEnabled,
                     biometricAvailable = canAuthenticateStrong,
                     onToggleBiometric = onToggleBiometric,
@@ -1551,6 +1606,7 @@ private fun SessionUi(
     onDismissRootWarning: () -> Unit,
     onNavigate: (Route) -> Unit,
     onDeleteAccount: () -> Unit,
+    onSetBurnPassword: () -> Unit,
     biometricEnabled: Boolean,
     biometricAvailable: Boolean,
     onToggleBiometric: (Boolean) -> Unit,
@@ -1713,6 +1769,7 @@ private fun SessionUi(
                 onToggleBiometric = onToggleBiometric,
                 onBack = { onNavigate(Route.ChatList) },
                 onDeleteAccount = onDeleteAccount,
+                onSetBurnPassword = onSetBurnPassword,
                 onOpenDiagnostics = { onNavigate(Route.Diagnostics) },
             )
         }
