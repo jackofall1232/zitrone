@@ -1,20 +1,20 @@
 {
   "schema_version": 2,
   "project_name": "Zitrone",
-  "current_goal": "0.9.2-beta: second vault (slot B) + Pucker Burn duress credential (Android)",
-  "current_phase": "0.9.2 — PR-1 merged (2de2bac); PR-2 (router + triple-entry) spec awaiting human review",
+  "current_goal": "0.9.4-beta: registration proof-of-work (relay code on a CX23 branch; client built this session)",
+  "current_phase": "0.9.4 — client solver + UI contract landed on local branch feat/0.9.4-registration-pow-client; BLOCKED on the Revvl 6x Argon2id floor measurement",
   "active_agent": null,
   "last_agent": "claude",
-  "last_updated": "2026-07-24",
+  "last_updated": "2026-07-26",
   "status": "in_progress",
-  "blocked": false,
-  "blocker_reason": null,
+  "blocked": true,
+  "blocker_reason": "Argon2id difficulty constants are unmeasured on the CLIENT side. No Android device is attached to CX33 (adb devices empty, no emulator images) and the Revvl 6x is with the maintainer. The instrumented harness (RegistrationPowCalibrationTest) is written and compiles — it needs a phone in battery saver, not more work. REGISTRATION_POW_ENABLED must stay false until the measurement lands. Relay-side cost IS measured.",
   "active_event_id": null,
   "last_event_processed": null,
   "pending_event_count": 0,
   "review_response_required": false,
-  "ci_status": "green (PR #51 all 8 checks passed at merge)",
+  "ci_status": "local only — :app:testDebugUnitTest 585 tests / 0 failures / 3 skipped; :app:assembleDebug exit 0. Nothing pushed, so no CI run.",
   "execution_active": false,
   "execution_stop_reason": null,
-  "next_recommended_action": "Human: review the PR-2 spec (/root/l00prite/pr2-router-triple-entry-spec.md). Then implement PR-2 (router fusion + triple-entry gate + uninterrupted-sequence guard). PR-3 must NOT precede PR-2. No version bump until the 0.9.2 phase completes."
+  "next_recommended_action": "Human: (1) run RegistrationPowCalibrationTest on the Revvl 6x in battery saver, unplugged, and record the sweep; (2) pick Argon2DifficultyBits from it — the shipped placeholder 8 is measurably far too high, likely landing zone 4-5; (3) review the two local branches (feat/0.9.4-registration-pow-client, docs/four-file-compose-correction) and decide push/PR. Independent review is owed on the PoW client before merge (security-sensitive). Still unbuilt: the Argon2id verification concurrency semaphore on the relay, and the foreground service + wiring behind the UI stub."
 }

@@ -11,7 +11,42 @@
 - [x] Added the `security-review-loop.md` prompt to `l00prite/.l00prite/prompts/` + the prompt index
       (PR #52 `b8eb652` / PR #53, merged). It drove PR-2's paired-blind loop to clean convergence.
 
-## NEXT — 0.9.4-beta: REGISTRATION PROOF-OF-WORK. Spec brief, not started.
+## IN PROGRESS — 0.9.4-beta: REGISTRATION PROOF-OF-WORK.
+
+> **STATUS 2026-07-26 (CX33 session).** Client code landed on LOCAL branch
+> `feat/0.9.4-registration-pow-client` (4 commits, NOTHING PUSHED, no version bump).
+> Suite 585/0 failures, assembleDebug exit 0.
+>
+> **THE ONE BLOCKER: the Argon2id constants are still unmeasured, and step 5 of the deploy
+> cannot happen until they are.** No Android device is attached to CX33 (`adb devices` empty,
+> no emulator images) and the Revvl 6x is with the maintainer, so the floor measurement could
+> not be taken. No number was estimated in its place. The instrumented harness is written and
+> COMPILES — `RegistrationPowCalibrationTest`, one gradle command, records
+> model/power-save/charging/thermal so a result proves its own conditions.
+>
+> Done: relay-side cost MEASURED across the full m×t sweep (`docs/REGISTRATION_POW_CALIBRATION.md`);
+> client solver + challenge fetch + identity-key binding + debug difficulty override;
+> cross-implementation agreement between libsodium and Go x/crypto/argon2 VERIFIED by pinned
+> vectors (not assumed — a disagreement would silently reject every proof); UI contract +
+> functional stub (`ui/components/REGISTRATION_POW_UI_CONTRACT.md`, written to be read cold by
+> Fable); deployment runbook + CX23 branch-base decision (`docs/DEPLOY_0.9.4_POW.md`).
+>
+> Findings that did NOT need the phone: the shipped placeholder
+> `REGISTRATION_ARGON2_DIFFICULTY_BITS=8` is far too high (256 expected evals = 5.9 s on a
+> 4-core SERVER; likely landing zone D=4–5). The SHA-256 pre-stage does not protect Argon2id
+> from a GPU attacker, so the real DoS defence is rate-limited issuance plus a CONCURRENCY
+> SEMAPHORE on verification **that does not exist yet** — unbounded concurrency at ~19 MiB per
+> verify is an OOM vector. Solve time is geometrically distributed, so UI progress can
+> legitimately exceed 100%.
+>
+> Also on this branch: BurnSetupDialog now qualifies the burn's scope (device-local; the relay
+> account survives), which was the 0.9.3 docs correction's open in-app item.
+>
+> Separate LOCAL branch `docs/four-file-compose-correction` (1 commit): the recorded THREE-file
+> compose invocation was WRONG — production needs FOUR files with `-p sublemonable`, or the
+> relay comes up on an empty `zitrone` DB while looking healthy.
+
+### Original spec brief (below) — decisions 1–8 remain settled.
 
 **PROBLEM.** `/api/v1/register` is rate-limited 5/hour keyed on `c.IP()`, which resolves to Caddy's
 socket address (no `ProxyHeader` configured), so **every clearnet client worldwide shares one global
