@@ -17,8 +17,18 @@ Confirmed working on a real device before this cut, not only in CI.
 
 **What a burn actually does.** It erases everything Zitrone holds on the device — every slot in the
 shared vault image, preferences, keystore material, caches — and terminates the process. Reopening
-presents onboarding, exactly as a fresh install does. It is **device-local**: it does **not** delete
-your account on the relay, and it does not reach any other device.
+presents onboarding, exactly as a fresh install does **locally**. It is **device-local**: it does
+**not** delete your account on the relay, and it does not reach any other device.
+
+> **Correction (2026-07-26, after this release was published).** "Exactly as a fresh install does"
+> was stated without qualification above and is true of **local state only**. Your account remains
+> **registered on the relay** after a burn — its identity key and prekey bundle stay servable, and a
+> contact who still holds it can still send, with those envelopes accumulating until their TTL. The
+> burn deliberately makes no network call (a relay call at that moment is itself a signal, and would
+> fail closed offline). The relay is zero-knowledge and keeps no request logs, so the surviving
+> account is not a link to you — but its existence is a fact on the server that a fresh install would
+> not have. Full scope statement in
+> [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md) → "Pucker Burn — SCOPE".
 
 **Read this before setting one.**
 

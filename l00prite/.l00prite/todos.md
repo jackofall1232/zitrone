@@ -65,6 +65,23 @@ A complete, shipped, cross-platform hashcash PoW already exists and is reusable:
 6. **No hard fail.** PoW is a computation that completes, just slowly on weak hardware. Failing it
    at a timer discards completed work and gains nothing. User-controlled exit instead.
 7. **Debug-build difficulty override**, so burn testing does not cost a PoW wait every cycle.
+8. **SHA-256 pre-stage before Argon2id — SETTLED 2026-07-26** (was an open question; closed once the
+   prerequisite check showed the primitive already ships). **The verification ladder is:**
+   1. **HMAC'd challenge** — verify signature + expiry. Microseconds. Rejects all garbage.
+   2. **SHA-256 pre-stage** — `pow.Verify`, the EXISTING production primitive. Also cheap.
+   3. **Argon2id** — only for submissions that cleared both.
+
+   **Why it flipped:** the pre-stage was questionable when it meant a new implementation, and is
+   clearly worth it when it is reuse of a production-proven primitive already written, tested, and
+   implemented on server, Android and TypeScript. **The only cost is protocol surface — which was
+   already being paid for the two-round-trip challenge flow regardless.**
+
+   **The gap it closes:** challenge issuance is unauthenticated, so an attacker holding a VALID
+   challenge could otherwise force memory-hard Argon2id verification with wrong proofs. With the
+   pre-stage, they cannot force memory-hard work without doing real work first. That no longer
+   depends on challenge-issuance rate limiting being tuned exactly right — which, given that
+   mis-tuned IP-keyed rate limiting is the entire reason this unit exists, is the right place not
+   to rely on a limiter.
 
 ### UX (settled)
 - Progress driven by **actual hash count**, not a spinner. Lemon-squeezing-into-pitcher SVG; pitcher
@@ -110,15 +127,14 @@ A complete, shipped, cross-platform hashcash PoW already exists and is reusable:
 gated by something an attacker cannot satisfy.
 
 ### OPEN QUESTIONS — decide at spec time, do not assume
-- **Hybrid SHA-256 pre-stage before Argon2id?** The HMAC'd challenge already gives cheap rejection
-  of garbage. The gap it does NOT close: an attacker holding a VALID challenge (issuance is
-  unauthenticated) can force Argon2id verification with wrong proofs. A cheap SHA-256 first stage
-  closes that; rate-limiting challenge issuance bounds it. Decide whether the extra round-trip and
-  protocol surface is worth not depending on that limit being tuned right.
-  **Note the prerequisite finding:** the pre-stage is `pow.Verify`, already shipped on server,
-  Android and TS — so the cost of this option is protocol surface only, not implementation.
-- **Argon2id parameters (memory, iterations)** — server verification cost is real and scales with
-  them. Size for tolerable relay cost at expected volume.
+- ~~Hybrid SHA-256 pre-stage~~ — **SETTLED, see decision 8 above.** No longer open.
+- **Argon2id parameters (memory, iterations) — THE MAIN OPEN SIZING DECISION.** Server verification
+  cost is real and scales with them; size for tolerable relay cost at expected volume.
+  **Explicitly NOT answered by the prerequisite check:** difficulty 20 calibrates the **SHA-256**
+  stage, not the Argon2id one. There is no shipped Argon2id-as-PoW data point in this codebase, and
+  the vault's own Argon2id parameters are the wrong reference (different purpose — see decision 1).
+  This needs its own measurement on both sides: client cost on a Revvl 6x in battery saver, and
+  relay verification cost at expected registration volume.
 - **Does slot 0 (burn credential) register with the relay?** — **ANSWERED: NO.** Arming seals slot 0
   in place with the payload staying filler-sized and no DEK written, and a slot-0 match returns
   `Burn` (wipe) rather than opening a session — so it never registers. **Onboarding is 2
@@ -142,12 +158,27 @@ arguably an oracle (an account that never again sends or receives is distinguish
 one).
 
 **Not necessarily a defect** — the relay is zero-knowledge, holds no linkage, and does no request
-logging, so the account is not obviously tied to a person or device. But it is **not currently
-disclosed anywhere**, and "returns the app to a fresh install" in the 0.9.3 release notes and
-`SECURITY_MODEL.md` could be read as covering it. **Decide: disclose the residual, or make the burn
-best-effort-delete the account (which has its own problem — a relay call at burn time is a network
-signal at exactly the wrong moment, and it fails closed on no connectivity).** Track independently
-of 0.9.4; it is a deniability question, not a rate-limiting one.
+logging, so the account is not obviously tied to a person or device. But it was **not disclosed
+anywhere**, and "returns the app to a fresh install" in the 0.9.3 release notes and
+`SECURITY_MODEL.md` could be read as covering it.
+
+- [x] **DISCLOSURE SHIPPED 2026-07-26**, merged immediately rather than bundled into 0.9.4, because
+      it is a claim correction on something already published. `SECURITY_MODEL.md` gained a
+      "Pucker Burn — SCOPE: what a burn does NOT reach" section; the burn-behaviour paragraph and the
+      CHANGELOG 0.9.3 entry now qualify "fresh install" to LOCAL state; and the **published GitHub
+      release notes for v0.9.3-beta were edited in place** with a visible post-publication correction
+      rather than a silent rewrite. Wording states all three parts: all local state is destroyed; the
+      relay account remains registered; the relay holds no linkage and no logs so it is not a link to
+      the user, but the account's existence is a fact on the server a fresh install would not have.
+- [ ] **STILL OPEN — the fix itself.** Disclosure bounds the damage; it does not remove the residual.
+      Decide: leave it disclosed, or make the burn best-effort-delete the account. The latter has its
+      own problem — a relay call at burn time is a network signal at exactly the wrong moment, and it
+      fails closed with no connectivity. Track independently of 0.9.4; it is a deniability question,
+      not a rate-limiting one.
+- [ ] **Consider whether the in-app warning needs it too.** `BurnSetupDialog` says "everything
+      Zitrone holds on this device", which is accurate and already device-scoped — but a user under
+      duress may still assume the account is gone. Changing UI copy needs a release, so it was NOT
+      done as part of the doc correction; decide whether it rides along with 0.9.4.
 
 ### DOES NOT BLOCK — ships separately and sooner (CX23, direct access required)
 See the RELAY (CX23) section below for the full record. Both need HoboJoe.

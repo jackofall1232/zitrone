@@ -397,7 +397,7 @@ the others.
 
 ### Plausible deniability (key-slot vaults)
 
-> **Status (0.9.2-beta), read first.** This section describes the key-slot **design**, the
+> **Status (0.9.3-beta), read first.** This section describes the key-slot **design**, the
 > **web/desktop** reference implementation, and — as of **0.9.2-beta** — the **Android**
 > runtime, which now supports **creating a second (decoy) vault**. On Android today: the everyday
 > vault runs over the sealed image with dual-wrap biometric unlock, the slot-agnostic
@@ -595,9 +595,39 @@ adversarially-reviewed PR. **Do not describe per-vault destruction as shipped.**
 
 **Behaviour, stated plainly because it is visible to the user:** when the duress passphrase triggers
 a completed wipe, the app does not return to a screen — it **terminates its own process**. Reopening
-it presents onboarding, exactly as a fresh install does. A burn that FAILS does not terminate: it
-shows the same uniform error as a mistyped passphrase and stays open, because a failed burn must be
-indistinguishable from a wrong password.
+it presents onboarding, exactly as a fresh install does **on this device** — see the scope
+correction immediately below, which bounds that comparison to LOCAL state. A burn that FAILS does not
+terminate: it shows the same uniform error as a mistyped passphrase and stays open, because a failed
+burn must be indistinguishable from a wrong password.
+
+### Pucker Burn — SCOPE: what a burn does NOT reach (correction, 2026-07-26)
+
+**A burn is device-local. It does not delete your account on the relay.** This corrects wording
+already published in 0.9.3-beta, where "returns the app to a fresh install" was stated without
+qualification and could reasonably be read as covering the server side. It does not.
+
+What a burn **does** destroy: all local state. The vault image and its wrapped key, every slot in it,
+the account credential (`account_id` and tokens in the auth store), preferences, Keystore material,
+caches, diagnostics and notifications. That is the part gated byte-for-byte against a fresh-install
+baseline in CI, and it is complete.
+
+What **survives**, on the relay: the account created at registration — its **identity key and prekey
+bundle remain registered and remain servable to peers**. A contact who still holds the account can
+still send to it, and those envelopes accumulate server-side until their TTL expires. The burn makes
+no network call at all (deliberately: a relay call at the moment of a burn is itself a signal, and it
+would fail closed with no connectivity), so nothing on the server is told the device is gone.
+
+**What that does and does not mean.** The relay is zero-knowledge: it stores no plaintext, no keys it
+can use, no social graph, and it keeps **no request logs** — so the surviving account is not a link to
+you, to your device, or to your IP. But its **existence is a fact on the server that a fresh install
+would not have**, and an account that is registered yet never again sends or receives is, in
+principle, distinguishable from a live one by whoever runs or subpoenas the relay. Against a local
+adversary holding your phone — the threat model Pucker Burn is built for — this residual is not
+reachable. Against an adversary correlating server-side state, it is.
+
+Stated here rather than left implicit because the failure mode is a user believing a burn erased more
+than it did. Whether to close it — by disclosure alone, or by a best-effort account delete with its
+own tradeoffs — is tracked as open work, not claimed as solved.
 
 **Why.** No in-process wipe can be durable against a live writer. While the process runs, cached
 `SharedPreferences` instances, in-memory buffers and lazily-initialised components can rewrite state
