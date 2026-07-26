@@ -1585,3 +1585,11 @@ render the current frame, no replay.
 Evidence: `:app:testDebugUnitTest` + `:app:assembleDebug` BUILD SUCCESSFUL exit 0 (2026-07-26).
 Blocker unchanged: Revvl 6x Argon2id floor measurement; `REGISTRATION_POW_ENABLED` stays false.
 Independent review still owed on the PoW client branch before merge.
+
+**Correction (same day, maintainer catch):** the reworded `BACKGROUNDED_NOTE` claimed "the
+notification keeps count while you're away" — but the PoW foreground service is UNBUILT and
+nothing yet guarantees its notification shows progress. Same class as the docs corrections:
+copy claiming behavior the app doesn't back. Softened to "we'll finish in the background"
+(`4a...` follow-up commit on the client branch). When the foreground service IS built, contract
+§6.5 calls the notification "the progress indicator" — build it with a real count, then the
+richer copy can return.
