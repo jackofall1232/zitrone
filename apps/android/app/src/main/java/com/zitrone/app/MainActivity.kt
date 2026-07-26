@@ -944,6 +944,20 @@ private fun ZitroneRoot(
      */
     val onBurn: () -> Unit = {
         container.unlockController.beginTerminalWipe()
+        // QUIESCE ANY LIVE SESSION BEFORE THE WIPE (round 6, Codex). `beginTerminalWipe()` only
+        // gates SUCCESSOR sessions and auto-lock — it does not stop the current one, cancel its
+        // scope, or cancel `NotificationScheduler`, whose deferred re-fire jobs run on the SESSION
+        // scope and can post a notification after the burn's notification step has verified an empty
+        // system-server view.
+        //
+        // Reachability, stated honestly rather than overclaimed either way: production reaches
+        // `onBurn` only from the LOCK screen, where the session has already been torn down, so the
+        // race is not reachable by the intended path. Two things make the call worth making anyway —
+        // `lockCurrent()` waits only a BOUNDED time for the session scope to drain, so a straggler in
+        // uninterruptible I/O is possible; and the byte-for-byte gate burns with a published session,
+        // so without this the gate tests an arrangement production does not have. `lock()` is
+        // idempotent and a no-op when nothing is live.
+        container.unlockController.lock()
         // The PROCESS scope, not the composition's: the wipe must survive an Activity recreation
         // (WB-2). Its outcome is SIGNALLED rather than applied here, because the composition that
         // started it may not be the one alive when it finishes.

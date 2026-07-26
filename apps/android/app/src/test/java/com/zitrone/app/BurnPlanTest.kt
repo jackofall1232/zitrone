@@ -12,6 +12,7 @@ import com.zitrone.app.burn.Durability
 import com.zitrone.app.burn.completeInterruptedCleanup
 import com.zitrone.app.burn.runBurnPlan
 import com.zitrone.app.crypto.vault.ResidueSweepResult
+import com.zitrone.app.crypto.vault.VaultImageException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -83,6 +84,63 @@ class BurnPlanTest {
         }.isFailure
         assertTrue("the failure must reach the caller", thrown)
         assertEquals("nothing after the failure may run", emptyList<String>(), ran)
+    }
+
+    /**
+     * **THE PIN FOR ROUND 5's PRIMARY REPAIR** (round 6, Grok — it was shipped with no test).
+     *
+     * `runBurnPlan` must fail the burn when a step's ACTION succeeds but its POSTCONDITION is false.
+     * Before round 5 the runner called `action()` only, so the registry's primary consumer never read
+     * the postconditions at all — and that regression was re-expressible without breaking a single
+     * test: phase-order, empty-plan and boot-completion tests all stayed green.
+     *
+     * MUTATION UNIQUELY CAUGHT: reverting the body to `.forEach { it.action() }`.
+     */
+    @Test
+    fun `a step whose action succeeds but whose postcondition is false fails the burn`() {
+        var actionRan = false
+        val thrown = runCatching {
+            runBurnPlan(
+                listOf(
+                    step("cache", BurnPhase.BEFORE_IMAGE, verify = { false }) { actionRan = true },
+                ),
+            )
+        }.exceptionOrNull()
+
+        assertTrue("the action must have run — this is not an action failure", actionRan)
+        assertTrue(
+            "a false postcondition must fail the burn; without this the runner can silently stop " +
+                "verifying and every other test stays green",
+            thrown is VaultImageException.DestroyFailed,
+        )
+    }
+
+    /** A postcondition that THROWS is a failed postcondition, never a passed one. */
+    @Test
+    fun `a throwing postcondition fails the burn`() {
+        val thrown = runCatching {
+            runBurnPlan(
+                listOf(
+                    step("cache", BurnPhase.BEFORE_IMAGE, verify = { throw IllegalStateException("io") }),
+                ),
+            )
+        }.exceptionOrNull()
+        assertTrue(thrown is VaultImageException.DestroyFailed)
+    }
+
+    /** Later phases must not run once a postcondition has failed. */
+    @Test
+    fun `a failed postcondition stops later phases`() {
+        val ran = mutableListOf<String>()
+        runCatching {
+            runBurnPlan(
+                listOf(
+                    step("cache", BurnPhase.BEFORE_IMAGE, verify = { false }) { ran += "before" },
+                    step("image", BurnPhase.IMAGE) { ran += "image" },
+                ),
+            )
+        }
+        assertEquals(listOf("before"), ran)
     }
 
     // ── boot-side completion ─────────────────────────────────────────────────────────────────
@@ -241,21 +299,24 @@ class BurnCleanupOrderingTest {
     @Test
     fun `the cleanup gate is evaluated only after the sweep has run`() {
         val order = mutableListOf<String>()
-        var gateReadAt = -1
 
         foldBootMutators(
             reconcileUnproven = false,
-            sweepResult = ResidueSweepResult.NO_MUTATION.also { order += "sweep" },
-            imageProvenAbsentAfterSweep = { gateReadAt = order.size; true },
+            // A LAMBDA the fold must INVOKE. Round 6 caught the previous version passing an
+            // already-computed value and recording "sweep" at ARGUMENT EVALUATION — which made the
+            // assertion true for any body that called the gate lambda at all, including one that had
+            // read image-absence before the sweep ever ran.
+            sweep = { order += "sweep"; ResidueSweepResult.NO_MUTATION },
+            imageProvenAbsent = { order += "gate"; true },
             completeCleanup = { order += "cleanup"; CleanupCompletion.NOTHING_TO_DO },
         )
 
         assertEquals(
-            "the image-absence gate must be read AFTER the sweep, which is what can flip it",
-            1,
-            gateReadAt,
+            "the sweep must RUN before the image-absence gate is read — the sweep is what can flip " +
+                "that gate in the same boot, so a gate read first is read stale",
+            listOf("sweep", "gate", "cleanup"),
+            order,
         )
-        assertEquals(listOf("sweep", "cleanup"), order)
     }
 
     /** An INCOMPLETE cleanup must raise the hold, exactly as a non-durable sweep does. */
@@ -263,8 +324,8 @@ class BurnCleanupOrderingTest {
     fun `an incomplete cleanup publishes SWEPT_NOT_DURABLE`() {
         val result = foldBootMutators(
             reconcileUnproven = false,
-            sweepResult = ResidueSweepResult.NO_MUTATION,
-            imageProvenAbsentAfterSweep = { true },
+            sweep = { ResidueSweepResult.NO_MUTATION },
+            imageProvenAbsent = { true },
             completeCleanup = { CleanupCompletion.INCOMPLETE },
         )
         assertEquals(ResidueSweepResult.SWEPT_NOT_DURABLE, result)

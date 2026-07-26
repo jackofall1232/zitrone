@@ -587,10 +587,12 @@ and no lazily initialised component can recreate a file after the wipe. It is **
 kernel block layer — a thread already inside a write syscall completes regardless — so process death
 is defence in depth here, not the proof.
 
-**The proof is the ordering plus a boot-time completion.** Non-cryptographic cleanups (caches,
-diagnostics, preferences) run BEFORE the vault image is destroyed, so an interruption in that phase
-leaves an intact, unlockable vault whose caches were cleared — indistinguishable from routine OS
-cache eviction. Key material is removed AFTER the image, because deleting it while an image remained
+**The proof is the ordering plus a boot-time completion.** The diagnostics log, the plaintext cache
+and any active notification are cleared BEFORE the vault image is destroyed, so an interruption in
+that phase leaves an intact, unlockable vault in a state the OS or the user produces routinely
+anyway. **Preferences are cleared AFTER the image**, because resetting a user's settings on a vault
+that still works is a durable, visible tell rather than an innocuous one — an earlier version of this
+design cleared them first and that was corrected in review. Key material is removed AFTER the image, because deleting it while an image remained
 would leave a vault nobody can open, which is a worse tell than the residue it would replace. And if
 a burn is interrupted after the image is gone, the next boot recognises the leftover state **from the
 residue itself** — a device with no vault image but a diagnostics log, a plaintext cache, or
@@ -605,12 +607,12 @@ vault-image state, so once the image was destroyed they were blind to a later cl
 mechanism described above is what makes the claim true; it is recorded here because the wrong version
 shipped first.
 
-**A visible consequence of the ordering, stated so it is not mistaken for a bug.** Because
-preferences are cleared *before* the vault image is destroyed, a burn that FAILS partway can leave an
-intact, unlockable vault whose device settings have been reset to defaults. That is deliberate: the
-ordering is chosen so that an interruption leaves an *innocuous* state rather than a distinguishing
-one, and reset settings on a working vault is the innocuous option. The vault itself is never
-damaged, and the passphrase still opens it.
+**Which state an interrupted burn can leave, stated so it is not mistaken for a bug.** A burn that
+fails before the image is destroyed leaves an intact, unlockable vault whose diagnostics log, cache
+and notifications were cleared — all routine states. A burn that fails *after* the image is gone
+leaves no vault, and the next launch detects the leftover state from the residue itself and finishes
+the cleanup. The ordering is chosen step by step so that whichever point it is interrupted at, the
+state left behind is one a device could plausibly be in anyway.
 
 **Active notifications are cancelled by the burn.** A posted message notification would otherwise
 outlive the wipe — on the lock screen, where it is most visible — and a fresh install has none.
@@ -623,8 +625,8 @@ the failure path stays silent. This is a deliberate choice, not an oversight.
 
 The duress wipe's guarantee is **post-burn indistinguishability**: after a completed burn, app-local
 state matches a fresh install. That is now mechanically gated in CI on every Android change — files,
-`shared_prefs`, databases, the plaintext **cache**, and **Android Keystore aliases** compared by
-CONTENT HASH against a fresh baseline, plus the derived boot verdict (a fresh install has no
+`shared_prefs`, databases, the plaintext **cache**, **active system notifications**, and **Android
+Keystore aliases** compared by CONTENT HASH against a fresh baseline, plus the derived boot verdict (a fresh install has no
 durability hold raised, so a state matching on every byte but differing in what the app will DO with
 it is not fresh-install-equivalent).
 
@@ -635,8 +637,11 @@ green over residue it structurally could not see:
   directly, so the residue it compares is the residue the field produces — `onboarding_done`, device
   settings, the lazily-created preference files, a live session. A gate that provisions its own
   simplified state certifies whatever it happens to create.
-- **Every domain carries a named seeded artifact asserted PRESENT before the burn, and a per-domain
-  NEGATIVE CONTROL** that plants residue and asserts the comparison names it. A comparison can be
+- **Every domain the burn wipes carries a named seeded artifact asserted PRESENT before the burn, and
+  a per-domain NEGATIVE CONTROL** that plants residue and asserts the comparison names it. The one
+  exception is `databases`, which is a TRIPWIRE rather than burn coverage: the app creates none, so
+  there is nothing to seed, and the assertion proves "no database exists to leak" rather than "the
+  burn removes databases". If the app gains one it needs an enumerated burn step. A comparison can be
   sound for files and structurally blind for caches; the aggregate green run looks identical either
   way, so each domain is proven able to fail rather than trusted to be.
 

@@ -439,12 +439,23 @@ class AppContainer(private val app: Application) {
      * THE BURN, AS AN ENUMERABLE TABLE. See [com.zitrone.app.burn.BurnPlan] for why it is data
      * rather than statements, and why the PHASE ORDER is a safety property.
      *
-     * Ordering is chosen by WHICH INTERRUPTION IS INNOCUOUS, not by convenience:
-     *  - `BEFORE_IMAGE` — a crash here leaves an intact, unlockable vault whose caches and
-     *    preferences were cleared, which is indistinguishable from routine OS cache eviction.
-     *  - `AFTER_IMAGE` — Keystore material MUST follow the image. Deleting the device key while a
-     *    live image remained would make that image permanently unopenable: a vault nobody can open is
-     *    a worse oracle than the residue it replaces.
+     * Ordering is chosen by WHICH INTERRUPTION IS INNOCUOUS, not by convenience, and the test is
+     * applied PER STEP rather than per category:
+     *  - `BEFORE_IMAGE` — diagnostics, plaintext cache, active notifications ONLY. A crash here
+     *    leaves an intact, unlockable vault whose log was cleared, cache emptied and notification
+     *    dismissed: all states the OS or the user produces routinely anyway.
+     *  - `AFTER_IMAGE` — Keystore material, because deleting the device key while a live image
+     *    remained would make that image permanently unopenable (a vault nobody can open is a worse
+     *    oracle than the residue it replaces) — **and PREFERENCES**, because their interruption is a
+     *    durable user-visible tell, not an innocuous one.
+     *
+     * **Preferences are NOT in `BEFORE_IMAGE`, and this prose has been wrong once already.** Round 4
+     * put them there on the reasoning that "non-cryptographic" implies "innocuous"; round 5 found
+     * that false and moved the step. A crash between a preferences wipe and the image left an intact
+     * vault with Tor, I2P, read receipts, TTL, burn-on-read and auto-lock all reset — and boot's
+     * completion pass correctly refuses to run while an image is present, so nothing repairs it. If
+     * you are reading this while "restoring the documented ordering", that is the regression this
+     * paragraph exists to stop.
      *
      * Every step carries a `verify()` postcondition, and BOOT re-checks the same postconditions to
      * finish an interrupted burn ([com.zitrone.app.burn.completeInterruptedCleanup]) — one
@@ -562,7 +573,7 @@ class AppContainer(private val app: Application) {
             sweep = {
                 val burnCompleted = imageStore.completeInterruptedBurn()
                 val markersCleared = imageStore.reconcileOrphanedBurnMarkers()
-                val sweepResult = imageStore.sweepOrphanedResidue()
+
                 // Both reconcilers are best-effort and never throw: `false` means either "did not
                 // fire" or "fired and could not prove itself durable", and those must not be
                 // conflated. Re-derive the distinction from disk: if either reconciler's precondition
@@ -603,11 +614,15 @@ class AppContainer(private val app: Application) {
                 // skip the cleanup it exists to perform. It also CO-FIRES with the sweep by design:
                 // they mutate disjoint artifacts (image-bearing residue vs diagnostics / cache /
                 // preferences / aliases), so "at most one fires" applies to the three, never to all
-                // four. Pinned by `BootReconcileOwnerTest`; moving this call must fail a test.
+                // four. Pinned by `BurnCleanupOrderingTest` (which references `foldBootMutators`
+                // directly — the previous comment named `BootReconcileOwnerTest`, which has zero
+                // references to it, so the claim failed its own grep check twice).
+                // The ORDER now lives inside `foldBootMutators`, which invokes the sweep itself, so
+                // hoisting cleanup above it is no longer expressible at this call site.
                 foldBootMutators(
                     reconcileUnproven = reconcileUnproven,
-                    sweepResult = sweepResult,
-                    imageProvenAbsentAfterSweep = { imageStore.imageBearingProvenAbsent() },
+                    sweep = { imageStore.sweepOrphanedResidue() },
+                    imageProvenAbsent = { imageStore.imageBearingProvenAbsent() },
                     completeCleanup = { absent -> completeInterruptedCleanup(burnPlan, absent) },
                 )
             },
@@ -1619,11 +1634,17 @@ internal fun sealDurableOrFalse(seal: () -> Unit): Boolean =
  */
 internal fun foldBootMutators(
     reconcileUnproven: Boolean,
-    sweepResult: ResidueSweepResult,
-    imageProvenAbsentAfterSweep: () -> Boolean,
+    sweep: () -> ResidueSweepResult,
+    imageProvenAbsent: () -> Boolean,
     completeCleanup: (Boolean) -> CleanupCompletion,
 ): ResidueSweepResult {
-    val cleanup = completeCleanup(imageProvenAbsentAfterSweep())
+    // THE FOLD OWNS THE SEQUENCE. Round 6 found the previous signature took `sweepResult` as an
+    // already-computed VALUE, so a caller could evaluate image-absence first, run the cleanup on that
+    // stale reading, and only then run the sweep — and the test, which recorded "sweep" at argument
+    // evaluation, still passed. Taking the sweep as a LAMBDA is what makes the order a property of
+    // this function rather than of the call site's discipline.
+    val sweepResult = sweep()
+    val cleanup = completeCleanup(imageProvenAbsent())
     return if (reconcileUnproven || cleanup == CleanupCompletion.INCOMPLETE) {
         ResidueSweepResult.SWEPT_NOT_DURABLE
     } else {

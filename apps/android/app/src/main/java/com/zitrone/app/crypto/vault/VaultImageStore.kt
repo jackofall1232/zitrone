@@ -105,7 +105,24 @@ sealed class VaultImageException(message: String) : Exception(message) {
      * removal we asked for did not take. Idempotent-safe: an ALREADY-absent file re-stats absent
      * and does NOT throw, so a retried destroy() over a partially-succeeded one still completes.
      */
-    class DestroyFailed : VaultImageException("vault image destruction failed — a file survives")
+    class DestroyFailed(what: String = "vault image destruction failed — a file survives") :
+        VaultImageException(what) {
+        companion object {
+            /**
+             * A burn STEP failed its postcondition (0.9.2 W-B round 6). The default message speaks
+             * of a surviving vault image, which is accurate for the image step and misleading for
+             * the other six — the first CI failure of the per-step verify reported only a line
+             * number and "a file survives", costing an emulator round trip to localise.
+             *
+             * The step name is carried in the EXCEPTION rather than logged next to the throw: a
+             * `Log` call in that position is not free. It threw under unit test (`android.util.Log`
+             * is stubbed to throw unless default values are enabled), which meant the runner raised
+             * a RuntimeException instead of `DestroyFailed` and the tests pinning that behaviour
+             * failed — a diagnostic aid that changed the type of the failure it was describing.
+             */
+            fun step(name: String) = DestroyFailed("burn step '$name' failed its postcondition")
+        }
+    }
 }
 
 /**

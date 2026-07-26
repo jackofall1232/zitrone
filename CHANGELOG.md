@@ -22,11 +22,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is defence in depth rather than the proof; the proof is the wipe ordering and a boot-time
   completion (next entry). See `docs/SECURITY_MODEL.md` for the full rationale and the deniability
   tradeoff in both directions.
-- **Android: the Pucker Burn wipes app-local state BEFORE destroying the vault image**, and cancels
-  any active notification. The ordering is chosen so that an interrupted burn leaves an innocuous
-  state: a crash before the image is destroyed leaves an intact, unlockable vault whose caches and
-  **device settings have been reset** — visible, but indistinguishable from routine cache clearing,
-  and the vault still opens with its passphrase. If a burn is interrupted *after* the image is gone,
+- **Android: the Pucker Burn orders its cleanups so an interrupted wipe leaves an innocuous state**,
+  and cancels any active notification. The diagnostics log, plaintext cache and notifications are
+  cleared before the vault image is destroyed — a crash there leaves an intact, unlockable vault in a
+  state the OS or user produces routinely. Preferences and key material are cleared after the image,
+  because resetting a user's settings on a vault that still works would be a visible tell rather than
+  an innocuous one. If a burn is interrupted *after* the image is gone,
   the next launch detects the leftover state from the residue itself and finishes the cleanup before
   presenting anything. No "burn in progress" marker is ever written to disk — such a marker would
   survive on a device with an intact vault and prove the duress passphrase had been used.
