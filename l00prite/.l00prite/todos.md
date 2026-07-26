@@ -11,6 +11,151 @@
 - [x] Added the `security-review-loop.md` prompt to `l00prite/.l00prite/prompts/` + the prompt index
       (PR #52 `b8eb652` / PR #53, merged). It drove PR-2's paired-blind loop to clean convergence.
 
+## NEXT — 0.9.4-beta: REGISTRATION PROOF-OF-WORK. Spec brief, not started.
+
+**PROBLEM.** `/api/v1/register` is rate-limited 5/hour keyed on `c.IP()`, which resolves to Caddy's
+socket address (no `ProxyHeader` configured), so **every clearnet client worldwide shares one global
+bucket**. Tor and I2P collapse identically via their sidecars, regardless of exit node. At 2
+registrations per user (slot A + slot B) that is **2 users per hour worldwide**. This blocks any
+public beta.
+
+IP-keying **cannot** be fixed for overlay transports at all — the sidecar collapse is structural.
+Proof-of-work is transport-agnostic, does not depend on network identity, and does not penalise
+Tor/I2P users for the transport they chose.
+
+### ⚠️ PREREQUISITE — ANSWERED 2026-07-26. **This is NOT greenfield.**
+A complete, shipped, cross-platform hashcash PoW already exists and is reusable:
+- **`server/internal/pow/pow.go`** — `Verify(challenge, nonce, difficulty)` +
+  `HasLeadingZeroBits`, `NonceBytes = 8`. SHA-256 over `challenge || nonce`, leading-zero-bits
+  difficulty, fail-closed on negative difficulty. Has its own `pow_test.go`.
+- **Config** `DROP_POW_DIFFICULTY` (`config.go:42,76`), default **20**, clamped non-negative.
+- **Call sites** `drops.go:61`, `qrdrops.go:111` — deposit admission control.
+- **Android solver** in `crypto/LemonDropCreate.kt` (`POW_DIFFICULTY = 20`, ~1M hashes), plus a
+  **TypeScript** implementation (`packages/crypto/src/deaddrop.ts` `DEFAULT_POW_DIFFICULTY`).
+- Tor's own onion-service PoW (0.4.8+) is circuit-layer and **not ours** — confirmed, no reusable
+  code from there.
+
+**Three consequences for the spec, none of them cosmetic:**
+1. The existing scheme **already binds work to a challenge** ("the challenge is the drop ID, binding
+   the work to one specific deposit so it cannot be precomputed or replayed across drops"). Settled
+   decision 4 (bind proof to the identity key) is the SAME pattern, already proven in production —
+   reuse the shape, do not reinvent it.
+2. The OPEN QUESTION on a SHA-256 pre-stage is now much cheaper than it looked: the pre-stage would
+   be `pow.Verify` verbatim, already written, already tested, already implemented on both clients.
+3. **Difficulty 20 ≈ 1M hashes is a real shipped calibration point** for what a phone tolerates on
+   this codebase. Start measurement from there rather than from zero.
+
+### SETTLED DESIGN DECISIONS (do not relitigate)
+1. **Argon2id, not SHA-256** for the main stage. Already in the app (no new dependency), memory-hard
+   so a phone and rented attacker hardware are closer in cost. `p=1` per the locked vault decision,
+   for cross-platform determinism. **Parameters WILL DIFFER from vault derivation** — different
+   purpose (seconds on a phone, not maximum brute-force resistance). **State this explicitly in
+   source so nobody later "harmonises" them.**
+2. **Server-issued, HMAC'd, short-lived challenge.** Registration becomes two round-trips: request
+   challenge, submit proof. The challenge carries its own timestamp and is HMAC-signed by the
+   server, so verification is **stateless** — no challenge table, no state to exhaust.
+3. **Cheap-reject before expensive verify.** The relay MUST verify the challenge HMAC and expiry
+   BEFORE any Argon2id work. This is the DoS defence: garbage costs microseconds, not memory-hard
+   verification. Rate-limit challenge ISSUANCE as the second layer.
+4. **Proof binds to the identity key** being registered, so a solved proof cannot be replayed across
+   registrations or farmed in bulk ahead of time.
+5. **Difficulty floored on the Revvl 6x IN BATTERY SAVER** — the honest worst realistic case.
+   **Measure, do not assume:** Android throttles budget SoCs aggressively and registration often
+   follows install while the device is still busy. Do NOT tune to a flagship.
+6. **No hard fail.** PoW is a computation that completes, just slowly on weak hardware. Failing it
+   at a timer discards completed work and gains nothing. User-controlled exit instead.
+7. **Debug-build difficulty override**, so burn testing does not cost a PoW wait every cycle.
+
+### UX (settled)
+- Progress driven by **actual hash count**, not a spinner. Lemon-squeezing-into-pitcher SVG; pitcher
+  fill tracks real progress.
+- Primary copy: *"proving your device is real so we don't need your phone number"* — true, and the
+  audience is privacy-literate enough to value it.
+- Subline: *"you have to squeeze a few lemons to get lemonade."*
+  **⚠️ This copy implies seconds, not minutes. It is COUPLED to the difficulty setting — if
+  difficulty rises, the copy becomes a small lie.** Re-read it whenever difficulty changes.
+- **At 60s:** non-blocking prompt — *"this is taking longer than expected — your device may be in
+  battery saver or under heavy load. Try again with the app in the foreground, or plugged in."*
+  Options: keep waiting, or try later.
+  - **"Keep waiting" MUST NOT restart the work.** The prompt surfaces over a still-running loop.
+  - **"Try later" must abort cleanly** — no half-created identity, no consumed challenge, nothing
+    the next attempt trips over.
+- **Slow path:** foreground service so the user can background the app and be notified on
+  completion. Requires a persistent notification (which doubles as progress).
+  **⚠️ Disclosure to state, not hide:** this is a NEW persistent-notification surface on an app that
+  otherwise has none — "Zitrone is running" in the shade discloses the app is installed and active.
+  Acceptable, but say so.
+  **⚠️ Also:** battery saver throttles background work HARDER than foreground, so the device where
+  this matters most may benefit least. **Measure.**
+
+### REJECTED, with reasons — do not revisit without NEW information
+- **Device fingerprint / MAC keying** — client-supplied therefore forgeable; Android returns
+  `02:00:00:00:00:00` for MAC since Android 10 so it is unavailable anyway; and a stable device
+  identifier would let the relay **correlate slot A and slot B, breaking vault independence**.
+- **Range/subnet keying** — meaningless until `ProxyHeader` is fixed (one apparent IP = one range),
+  and afterwards CGNAT groups large numbers of unrelated mobile users. Viable only as a loose
+  SECOND layer behind per-IP, never instead of it.
+- **Clearnet fallback after N PoW failures** — an escape hatch reachable by FAILING the check is the
+  check being optional; an attacker fails twice deliberately. Also **deanonymising**: routing a Tor
+  user to clearnet because their device is slow sends their real IP at the moment they were most
+  trying to avoid it.
+- **Easier puzzle on third attempt** — same rule, same reason.
+- **"Your device is too old" messaging** — a guess presented as a diagnosis. At 60s the cause is
+  unknown (thermal, battery saver, load, or genuinely old hardware). **Never state a verdict you
+  cannot back.**
+- **RandomX** — enormous overkill for a one-time gate, heavy native dependency.
+
+### STANDING RULE FROM THIS DESIGN (generalise it)
+**An escape hatch reachable by failing the check is the check being optional.** The exit must be
+gated by something an attacker cannot satisfy.
+
+### OPEN QUESTIONS — decide at spec time, do not assume
+- **Hybrid SHA-256 pre-stage before Argon2id?** The HMAC'd challenge already gives cheap rejection
+  of garbage. The gap it does NOT close: an attacker holding a VALID challenge (issuance is
+  unauthenticated) can force Argon2id verification with wrong proofs. A cheap SHA-256 first stage
+  closes that; rate-limiting challenge issuance bounds it. Decide whether the extra round-trip and
+  protocol surface is worth not depending on that limit being tuned right.
+  **Note the prerequisite finding:** the pre-stage is `pow.Verify`, already shipped on server,
+  Android and TS — so the cost of this option is protocol surface only, not implementation.
+- **Argon2id parameters (memory, iterations)** — server verification cost is real and scales with
+  them. Size for tolerable relay cost at expected volume.
+- **Does slot 0 (burn credential) register with the relay?** — **ANSWERED: NO.** Arming seals slot 0
+  in place with the payload staying filler-sized and no DEK written, and a slot-0 match returns
+  `Burn` (wipe) rather than opening a session — so it never registers. **Onboarding is 2
+  registrations, not 3.** But see the separate finding below, which is the thing that question was
+  circling.
+- **Consequence for a device that genuinely cannot complete in reasonable time** — is that user
+  simply unable to use the app? Belongs in `SECURITY_MODEL.md` alongside the platform-honesty tiers
+  as a **known consequence, not a surprise**.
+
+### ⚠️ SEPARATE FINDING, independent of PoW — surfaced while checking the slot-0 question
+**A burn does not delete the relay account.** Verified from source: the burn plan never calls the
+relay (zero `deleteAccount`/`api.delete` in `runBurnPlan`), which matches the locked Q1 decision
+"wipe LOCAL-ONLY (no relay delete)". Locally the account credential IS destroyed —`accountId` lives
+in `PREFS_AUTH` (`zitrone_auth.xml`, `AuthStore.KEY_ACCOUNT_ID`), which the burn wipes and the gate
+asserts absent.
+
+So after a burn the device is a fresh install, **but the account persists server-side**: its
+identity key and prekey bundle remain registered and remain servable to peers, and a contact can
+still send to it. That is a server-side trace of the thing the burn exists to eliminate, and it is
+arguably an oracle (an account that never again sends or receives is distinguishable from a live
+one).
+
+**Not necessarily a defect** — the relay is zero-knowledge, holds no linkage, and does no request
+logging, so the account is not obviously tied to a person or device. But it is **not currently
+disclosed anywhere**, and "returns the app to a fresh install" in the 0.9.3 release notes and
+`SECURITY_MODEL.md` could be read as covering it. **Decide: disclose the residual, or make the burn
+best-effort-delete the account (which has its own problem — a relay call at burn time is a network
+signal at exactly the wrong moment, and it fails closed on no connectivity).** Track independently
+of 0.9.4; it is a deniability question, not a rate-limiting one.
+
+### DOES NOT BLOCK — ships separately and sooner (CX23, direct access required)
+See the RELAY (CX23) section below for the full record. Both need HoboJoe.
+- **P1:** port 8443 publicly reachable, plaintext, full API, bypassing Caddy/TLS.
+- **P2:** widen `registerLimit` as interim; read the Caddyfile to determine whether `ProxyHeader` is
+  safe — **only if Caddy OVERWRITES `X-Forwarded-For`, not appends**, otherwise clients spoof their
+  own bucket, which is worse than the collapse.
+
 ## 0.9.3-beta — ✅ SHIPPED 2026-07-26 (vc19). Pucker Burn is COMPLETE and settable.
 
 Unit S merged as PR #63 → `a961e2d7`; bump `29292309`; website flip `949ce033`.

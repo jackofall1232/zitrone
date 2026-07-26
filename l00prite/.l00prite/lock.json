@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "lock_id": "lock-20260726T150527Z-unit-s-r2",
+  "lock_id": "lock-20260726T171115Z-094-pow-brief",
   "owner_agent": null,
   "owner_session": null,
-  "acquired_at": "2026-07-26T15:05:27Z",
-  "expires_at": "2026-07-26T15:35:27Z",
+  "acquired_at": "2026-07-26T17:11:15Z",
+  "expires_at": "2026-07-26T17:41:15Z",
   "ttl_seconds": 1800,
   "purpose": null,
   "protected_paths": [
