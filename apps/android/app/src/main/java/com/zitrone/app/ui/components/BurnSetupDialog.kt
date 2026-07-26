@@ -45,8 +45,12 @@ import com.zitrone.app.ui.theme.TextSecondary
  *     by design, because that readback would itself be the discoverable artifact that proves a duress
  *     credential exists. The consequence for the user is that forgetting it is unrecoverable and they
  *     cannot verify it later, so they must be told before they commit.
- *  2. **Anyone who learns it can erase this vault forever.** It is not a second password to the same
- *     data; it is a destruction trigger.
+ *  2. **Anyone who learns it can erase everything, forever.** It is not a second password to the same
+ *     data; it is a destruction trigger. The copy says "everything Zitrone holds on this device"
+ *     rather than "this vault" (review round 1, both reviewers): the burn is a device-local fresh
+ *     install covering every slot in the shared image, prefs, keystore and caches — a user reading
+ *     "this vault" could reasonably think only the session they are in is at risk. It deliberately
+ *     does NOT count vaults or hint how many exist, which would break plausible deniability.
  *  3. **A burn CONSUMES the credential.** After a burn the device is a fresh install with no burn
  *     password at all, so it must be set again. Users otherwise assume protection persists.
  *  4. **Setting it again silently replaces it.** There is no confirmation that an old one existed,
@@ -82,14 +86,15 @@ fun BurnSetupDialog(
         text = {
             Column {
                 Text(
-                    "Entering this password at the lock screen erases this vault and everything in " +
-                        "it. There is no confirmation step and no undo.",
+                    "Entering this password at the lock screen erases everything Zitrone holds on " +
+                        "this device and returns the app to a fresh install. There is no " +
+                        "confirmation step and no undo.",
                     color = TextPrimary,
                     fontSize = 14.sp,
                 )
                 Spacer(Modifier.height(12.dp))
                 WarningPoint("It can never be recovered or checked. The app cannot tell you whether one is set.")
-                WarningPoint("Anyone who learns it can erase this vault forever.")
+                WarningPoint("Anyone who learns it can erase everything Zitrone holds here, forever.")
                 WarningPoint("Using it consumes it — after a burn you must set a new one.")
                 WarningPoint("Setting one again silently replaces the old one.")
                 Spacer(Modifier.height(12.dp))
@@ -124,7 +129,8 @@ fun BurnSetupDialog(
                         colors = CheckboxDefaults.colors(checkedColor = Lemon),
                     )
                     Text(
-                        "I understand this cannot be recovered and will erase this vault.",
+                        "I understand this cannot be recovered and will erase everything Zitrone " +
+                            "holds on this device.",
                         color = TextSecondary,
                         fontSize = 13.sp,
                     )

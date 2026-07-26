@@ -142,6 +142,65 @@ sealed interface PassphraseOutcome {
     data object Retry : PassphraseOutcome
 }
 
+/**
+ * Burn-password setup state (0.9.3 Unit S). PROCESS-scoped — see [AppContainer.burnArm] for why it
+ * cannot live in the composition.
+ *
+ * Deliberately carries a REASON, not a rendered string: the user-facing copy stays in the UI layer,
+ * and [Rejected] exists so a failure that lands after an Activity recreation still has somewhere
+ * real to be reported.
+ */
+sealed interface BurnArmUi {
+    /** Dialog not shown. Also the terminal state of a SUCCESSFUL arm — closing IS the success signal. */
+    data object Closed : BurnArmUi
+
+    /** Dialog shown, nothing in flight. */
+    data object Open : BurnArmUi
+
+    /** An arm is running. The dialog shows a spinner and is NOT dismissible while in this state. */
+    data object Arming : BurnArmUi
+
+    /** A terminal failure the user MUST see. Survives Activity recreation. */
+    data class Rejected(val reason: Reason) : BurnArmUi
+
+    enum class Reason { CollidesWithVault, DeletePending, NotDurable }
+}
+
+/**
+ * Maps an arming attempt's result to the state the user will be shown.
+ *
+ * Extracted from the composable deliberately (review round 1): this mapping carries the fail-closed
+ * invariant — **only [ArmBurn.Armed] may produce [BurnArmUi.Closed]**, because closing the dialog IS
+ * the success signal. Anything else, including a thrown `NotDurable`, must land on
+ * [BurnArmUi.Rejected] so the user is never told a credential is set when it is not. Inline in a UI
+ * lambda that invariant was unreachable by any test; here it is asserted directly.
+ */
+internal fun burnArmOutcome(outcome: Result<ArmBurn>): BurnArmUi =
+    outcome.fold(
+        onSuccess = { result ->
+            when (result) {
+                is ArmBurn.Armed -> BurnArmUi.Closed
+                is ArmBurn.CollidesWithVault -> BurnArmUi.Rejected(BurnArmUi.Reason.CollidesWithVault)
+                is ArmBurn.DeletePending -> BurnArmUi.Rejected(BurnArmUi.Reason.DeletePending)
+            }
+        },
+        onFailure = { BurnArmUi.Rejected(BurnArmUi.Reason.NotDurable) },
+    )
+
+/**
+ * Claims the arming single-flight on [state]: false iff an arm is already running.
+ *
+ * CAS-looped rather than a fixed expect-value because a retry after [BurnArmUi.Rejected] is
+ * legitimate and must not be silently dropped. Top-level so it is testable without an Application.
+ */
+internal fun beginBurnArm(state: MutableStateFlow<BurnArmUi>): Boolean {
+    while (true) {
+        val current = state.value
+        if (current is BurnArmUi.Arming) return false
+        if (state.compareAndSet(current, BurnArmUi.Arming)) return true
+    }
+}
+
 class AppContainer(private val app: Application) {
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -239,6 +298,45 @@ class AppContainer(private val app: Application) {
 
     fun endUnlock() {
         unlockInFlight.set(false)
+    }
+
+    /**
+     * PROCESS-scoped burn-password setup state (0.9.3 Unit S, paired-blind review round 1 — BOTH
+     * reviewers).
+     *
+     * This CANNOT be composition-local. [armBurnCredential] runs an Argon2id sweep on [scope] that
+     * outlives an Activity recreation, and a successful arm is signalled ONLY by the dialog closing —
+     * there is no success toast. So a rotation mid-arm reset the remembered flags, the dialog vanished,
+     * and the user saw EXACTLY the success signal while the continuation wrote its real outcome into a
+     * dead composition. A `CollidesWithVault` / `DeletePending` / `NotDurable` arm therefore read as an
+     * armed one: the user believes they hold a duress credential they do not have, which is precisely
+     * the harm this feature exists to prevent. Mirrors [vaultCreating], whose KDoc names the same
+     * rotation failure mode for vault creation.
+     *
+     * RAM-only, like [vaultCreating]: it reflects an attempt in THIS session and NEVER whether a
+     * credential exists, so it is not the durable armed-state oracle invariant P1 forbids. Process
+     * death clears it.
+     */
+    val burnArm = MutableStateFlow<BurnArmUi>(BurnArmUi.Closed)
+
+    fun openBurnSetup() {
+        burnArm.value = BurnArmUi.Open
+    }
+
+    fun closeBurnSetup() {
+        burnArm.value = BurnArmUi.Closed
+    }
+
+    /**
+     * Claims the arming single-flight, returning false iff one is already running. CAS-looped rather
+     * than a fixed expect-value because a retry after [BurnArmUi.Rejected] is legitimate and must not
+     * be silently dropped.
+     */
+    fun tryBeginBurnArm(): Boolean = beginBurnArm(burnArm)
+
+    /** Publishes the terminal outcome to the PROCESS-scoped state, where a recreated UI will find it. */
+    fun finishBurnArm(state: BurnArmUi) {
+        burnArm.value = state
     }
 
     /** Routing truth: a vault image is present → UNLOCK, absent → SETUP (onboarding). */

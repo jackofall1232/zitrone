@@ -268,7 +268,8 @@ fun SettingsScreen(
         // genuinely cannot query that state (there is no readback, by design).
         ClickableRow(
             title = "Pucker Burn password",
-            subtitle = "A separate password that erases this vault when entered at the lock screen.",
+            subtitle = "A separate password that erases everything Zitrone holds on this device " +
+                "when entered at the lock screen.",
             titleColor = ErrorRed,
             onClick = onSetBurnPassword,
         )

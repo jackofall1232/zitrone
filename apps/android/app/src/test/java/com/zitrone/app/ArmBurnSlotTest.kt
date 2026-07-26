@@ -284,6 +284,22 @@ class ArmBurnSlotTest {
         assertEquals(ArmBurn.DeletePending, s.armBurnSlot(BURN_PASS))
     }
 
+    /**
+     * The SECOND delete marker, which the test above did not cover (review round 1).
+     *
+     * `armBurnSlot` refuses on EITHER marker, but only `vault.delete-intent` was exercised — so a
+     * regression that dropped the `vault.delete-confirmed` half of the check would have passed the
+     * suite while letting an arm race a confirmed server-side deletion.
+     */
+    @Test
+    fun `arming is refused while a server-confirmed delete is pending`() {
+        val dir = tmp.newFolder("server-deleted")
+        val s = freshVault(dir)
+        File(dir, "vault.delete-confirmed").writeBytes(ByteArray(1))
+
+        assertEquals(ArmBurn.DeletePending, s.armBurnSlot(BURN_PASS))
+    }
+
     private companion object {
         const val VAULT_PASS = "everyday vault passphrase"
         const val BURN_PASS = "duress credential one"
