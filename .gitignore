@@ -53,3 +53,7 @@ coverage/
 
 # Claude Code agent worktrees/scratch
 .claude/
+
+# Reviewer sandboxes: Codex/Grok retry Gradle with a repo-local home when the shared
+# cache is read-only. 1.5GB of jars, never ours to commit.
+.gradle-home/
