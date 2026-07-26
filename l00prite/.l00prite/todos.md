@@ -1,4 +1,4 @@
-# Zitrone — open TODOs (as of 2026-07-24, 0.9.2-beta vault track)
+# Zitrone — open TODOs (as of 2026-07-26, 0.9.3-beta shipped: Pucker Burn complete)
 
 > Lives at `l00prite/.l00prite/todos.md` (TRACKED in-repo, new nested layout). The prior 0.8.1-era
 > list is archived verbatim at `todos.0.8.1.md`. Deep review detail: `ledger.md` +
@@ -11,7 +11,55 @@
 - [x] Added the `security-review-loop.md` prompt to `l00prite/.l00prite/prompts/` + the prompt index
       (PR #52 `b8eb652` / PR #53, merged). It drove PR-2's paired-blind loop to clean convergence.
 
-## Now — 0.9.2-beta SECOND VAULT (slot B) + PUCKER BURN, Android — PR-1 + PR-2 MERGED; PR-3 Unit 1 (A-only guard) in review round 5; Unit 2 (docs) + enable-atomicity follow-up queued
+## 0.9.3-beta — ✅ SHIPPED 2026-07-26 (vc19). Pucker Burn is COMPLETE and settable.
+
+Unit S merged as PR #63 → `a961e2d7`; bump `29292309`; website flip `949ce033`.
+Release **v0.9.3-beta** (prerelease), apk sha256 `db02cd09…8078`, cert `6c7f92a7…892753`
+(continuity holds — installs over 0.9.2). **Human confirmed burn + collision refusal on a real
+device.** Suite 574/571/0/3; all 9 CI checks green including the burn gate.
+
+**No fresh install required this time** — IMAGE_VERSION stays 3 and Unit S changed no format
+constant, so a 0.9.2 install upgrades in place. Verified against source, not carried from 0.9.2.
+
+### What shipped
+Store writer `armBurnSlot` (slot-0 seal in place, collision refusal, imageLock, refuse-while-
+delete-pending, durability-gated), permanent Settings entry, acknowledged warning dialog,
+MainActivity wiring, gate extended to cover the TRIGGER. No armed flag anywhere (P1 intact).
+
+### ACCEPTED RISK, recorded because it was a real decision
+Merged on explicit maintainer instruction with **two commits unreviewed**: `25e93756` (IME
+keyboard fix) and `578b4967` (gate exclusion + disclosure). **Device confirmation predates both**
+(it was against `fd4c301b` = `643a842b`). Neither can alter arming/burn behaviour, but no
+independent eyes saw them and no human ran the exact shipping binary.
+
+### THE LESSON TO CARRY — review scope
+Rounds 1–2 were scoped to MY diff. A real security defect in the ORIGINAL unit — the burn
+password fields declared no `KeyboardType.Password`, so an IME could learn a DURESS credential
+into its personal dictionary — was found by the PR review bot, not by either paired-blind
+reviewer, because it was outside the scope I gave them. It was the only passphrase field in the
+app missing it. **Future units: review the whole unit, not only your delta.** Scoping a review to
+your own change leaves the base with whatever it shipped with.
+
+### Also worth keeping
+- Gemini (PR bot) independently found the round-1 rotation defect → THREE reviewers on one
+  finding, retiring the Grok "deferrable" split.
+- Round 2 caught that `burnArmOutcome()` was extracted for testability while production kept an
+  inline COPY — the suite pinned a helper the app never ran, so the round-1 mutation proof was
+  true but beside the point. **A green suite pinning a parallel copy is worse than no test.**
+- Burn gate red on `profileInstalled` was NOT a wipe defect: `obliterateLocked` unlinks a NAMED
+  list and never claimed to clear `filesDir`. The gate's model of a fresh install was wrong.
+  Excluded in the snapshot + disclosed in SECURITY_MODEL.md (maintainer's call).
+- Gemini's i18n finding: premise FALSE vs source (`stringResource` used ZERO times app-wide).
+  App-wide i18n is a real pre-existing gap → standing item below, not a Unit S regression.
+
+### Follow-ups opened by this release
+- [ ] **App-wide i18n**: all Compose UI is hardcoded English; `strings.xml` holds 8 entries and
+      `stringResource` is never used. Pre-existing, not Unit S.
+- [ ] **Post-hoc review of `25e93756` + `578b4967`** if you want the coverage gap closed.
+- [ ] **Per-vault destruction** still NOT built (whole-image account delete only) — locked design
+      in VAULT_ARCHITECTURE.md §3.4. Docs must keep saying so.
+
+## DONE — 0.9.2-beta SECOND VAULT (slot B), Android (shipped vc18; Pucker Burn completed separately in 0.9.3, see above)
 Closes the PD gap (0.9.1 shipped ONE vault). Locked: slot-B creation ONLY via the PIN/passphrase router,
 NO discoverable UI. **Full decision record (REVISED 2026-07-24, supersedes the earlier double-entry/25%
 version): `/root/l00prite/zitrone-vault-ledger.md` top block.** Key deltas from the earlier plan:
@@ -285,48 +333,6 @@ User intent recorded 2026-07-24: "at some point we need to cut 0.9.1 apk and fli
       to the platform honesty hierarchy.
 - [ ] **Storage-format stability GATE:** before external testers, either commit to storage-format
       stability or disclose wipe-on-breaking-change (migrations aren't built).
-
-## 0.9.3-beta — Unit S (Pucker Burn ARMING): REVIEW CONVERGED, awaiting device re-test then CUT
-
-Branch `feat/0.9.3-unit-s-burn-arming` (PR #63 draft). Unit S = the setup/arming half that makes the
-0.9.2 wipe mechanism reachable. **Human confirmed the burn + password working on a real device
-2026-07-26** against TEST build `2e1f2ccf…` — that build is now STALE, see below.
-
-- [x] **Round 1 — BLOCKING finding, fixed in `d3680570`.** Codex HIGH / Grok F2 (deferrable);
-      adjudicated against source to Codex. `burnSetupOpen/Busy/Error` were composition-local
-      `remember` while the Argon2id arm ran on `container.scope`, so an Activity recreation reset
-      them and dismissed the dialog. **Because a successful arm is signalled ONLY by the dialog
-      closing (no success toast), that dismissal was indistinguishable from success** — a
-      `CollidesWithVault`/`DeletePending`/`NotDurable` arm read as armed, leaving the user believing
-      they hold a duress credential they do not have. Grok's reason for deferring ("no success toast
-      on failure") is false vs source: there is no success toast at all. Fix = process-scoped
-      `AppContainer.burnArm: MutableStateFlow<BurnArmUi>`, mirroring `vaultCreating`.
-      Also closed: F1 stale "slot 0 is UNARMED" comment, F4 missing `vault.delete-confirmed` test,
-      F3 copy re-scoped from "this vault" to "everything Zitrone holds on this device" (device-local
-      fresh install; deliberately does NOT count vaults — PD holds).
-- [x] **Round 2 — CLEAN CONVERGENCE. Codex READY TO MERGE + Grok READY TO MERGE**, blocking finding
-      confirmed closed, no CRITICAL/HIGH. Their one SHARED finding fixed in `643a842b`:
-      **`burnArmOutcome()` was extracted for testability and then production kept an inline COPY of
-      the mapping** — so the suite pinned the helper while the shipped path went untested, and the
-      round-1 mutation proof exercised a function the app never ran. Codex: "proves only the helper
-      test, not the production mapping." Same failure as F1 one level up: a TEST outliving the code
-      it describes. Now `MainActivity.kt:1192` calls `burnArmOutcome(outcome)`; mutation re-proven
-      against the production path. Grok B1 (LOW, unreachable) also closed via `closeBurnSetupState()`.
-- [x] Suite **574 / 571 passed / 0 failures / 0 errors / 3 skipped**; `assembleDebug` +
-      `assembleRelease` green; signed cert `6c7f92a7…892753` verified.
-- [ ] **Device re-test (HUMAN) — build `fd4c301b…` = commit `643a842b`**, uploaded to the existing
-      DRAFT release `unit-s-test-build`. The patch changed the exact screen that was device-tested,
-      so the earlier confirmation does not carry. Key new checks: **rotate the phone mid-arm** (dialog
-      must survive, not vanish) and **rotate during a refused arm** (the refusal must still appear).
-- [ ] **THEN CUT 0.9.3-beta** (explicit per-action approval each step): merge PR #63 → bump vc18→vc19
-      / 0.9.2-beta→0.9.3-beta → signed build + cert verify → GH release → website flip
-      (`links.ts` ANDROID_BETA_VERSION + SHA + `onion-site/SHA256SUMS`, verify the LIVE asset hash
-      before flipping, per the 0.9.2 procedure).
-- Reviewer residuals ACCEPTED, not patched: real Compose-recreation + process-death behaviour are not
-  unit-testable here (the instrumented gate covers the burn path); JVM `String` contents cannot be
-  wiped (pre-existing, same class as lock-screen entry); ABA on `burnArm` needs a hypothetical future
-  non-UI caller, mitigated by the `closeBurnSetupState` fence.
-- Artifacts: `reviews/vault-0.9.x/unit-s-r{1,2}-{prompt,codex,grok}.md`, `unit-s-invariant-table.md`.
 
 ## RELAY (CX23) — from the 2026-07-26 429 diagnostic. PRIORITY ORDER IS AS LISTED (user-set)
 
