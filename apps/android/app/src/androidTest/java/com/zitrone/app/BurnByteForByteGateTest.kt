@@ -242,8 +242,10 @@ class BurnByteForByteGateTest {
      * corrupts the baseline of whichever test runs next. Teardown is therefore part of the harness's
      * correctness, not tidiness.
      *
-     * `lock()` first: production's own burn leaves the session published (the composition routes to
-     * onboarding rather than locking), and `createVaultAndPublish` REFUSES to build over a live one.
+     * `lock()` first: `createVaultAndPublish` REFUSES to build over a live session. (Production's
+     * burn now quiesces the session itself via `runTerminalBurn`; the prose here used to say
+     * production deliberately left it published, which stopped being true in round 6 and was caught
+     * in round 7.)
      * A post-burn reseal cannot resurrect the image — `obliterateLocked` nulls `canonical` and `dek`,
      * so the reseal throws and `lockCurrent` swallows it — but the session must still go for the
      * next unlock to succeed.
@@ -258,7 +260,7 @@ class BurnByteForByteGateTest {
         // residue — which the next test then snapshotted as "fresh", putting the residue on BOTH
         // sides of its comparison and making the load-bearing gate pass for the wrong reason.
         // The burn is idempotent, so running it over an already-clean device is free.
-        runCatching { container.burnVault(terminate = {}) }
+        runCatching { container.runTerminalBurn(terminate = {}) }
     }
 
     /**
@@ -436,12 +438,13 @@ class BurnByteForByteGateTest {
         val provisioned = snapshot()
         assertProvisioned(fresh, provisioned)
 
-        // Through production's own terminal exclusion, as MainActivity's `onBurn` does — a live
-        // session must not be writing while the image is obliterated underneath it.
-        container.unlockController.beginTerminalWipe()
+        // THE SAME CALLABLE PRODUCTION USES (round 7). This was `beginTerminalWipe()` + `burnVault()`
+        // — production's session quiesce was NOT in it, so the gate burned a published session
+        // without the quiesce and deleting `lock()` from production would have left this green. The
+        // sequence now has ONE definition; a change to it cannot miss this test.
         var terminated = 0
         try {
-            container.burnVault(terminate = { terminated++ })
+            container.runTerminalBurn(terminate = { terminated++ })
         } finally {
             container.unlockController.endTerminalWipe()
         }
@@ -481,7 +484,7 @@ class BurnByteForByteGateTest {
         val freshDecision = container.deriveBootDecisionFromDisk()
 
         provisionThroughProduction()
-        container.burnVault(terminate = {})
+        container.runTerminalBurn(terminate = {})
 
         assertEquals(
             "a completed burn must leave NO durability doubt — a raised hold is not a fresh install",
@@ -518,7 +521,7 @@ class BurnByteForByteGateTest {
                 .aliases().toList().any { it.startsWith(BiometricVaultKeyCipher.PREFIX) },
         )
 
-        container.burnVault(terminate = {})
+        container.runTerminalBurn(terminate = {})
 
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         assertTrue(
@@ -644,7 +647,7 @@ class BurnByteForByteGateTest {
         container.keyStoreManager.prefs(KeyStoreManager.PREFS_AUTH)
             .edit().putString("in_flight_at_burn", "queued before the wipe").apply()
 
-        container.burnVault(terminate = {})
+        container.runTerminalBurn(terminate = {})
         assertFalse("the burn must prove the store absent", target.exists())
 
         val deadline = System.nanoTime() + 2_000_000_000L

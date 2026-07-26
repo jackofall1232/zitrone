@@ -943,21 +943,10 @@ private fun ZitroneRoot(
      * comment and invariant WB-1 are the objection.
      */
     val onBurn: () -> Unit = {
-        container.unlockController.beginTerminalWipe()
-        // QUIESCE ANY LIVE SESSION BEFORE THE WIPE (round 6, Codex). `beginTerminalWipe()` only
-        // gates SUCCESSOR sessions and auto-lock — it does not stop the current one, cancel its
-        // scope, or cancel `NotificationScheduler`, whose deferred re-fire jobs run on the SESSION
-        // scope and can post a notification after the burn's notification step has verified an empty
-        // system-server view.
-        //
-        // Reachability, stated honestly rather than overclaimed either way: production reaches
-        // `onBurn` only from the LOCK screen, where the session has already been torn down, so the
-        // race is not reachable by the intended path. Two things make the call worth making anyway —
-        // `lockCurrent()` waits only a BOUNDED time for the session scope to drain, so a straggler in
-        // uninterruptible I/O is possible; and the byte-for-byte gate burns with a published session,
-        // so without this the gate tests an arrangement production does not have. `lock()` is
-        // idempotent and a no-op when nothing is live.
-        container.unlockController.lock()
+        // The whole terminal sequence — terminal exclusion, session quiesce, wipe — lives in
+        // `AppContainer.runTerminalBurn`, which the byte-for-byte gate calls too. It is ONE callable
+        // deliberately: when the quiesce lived here only, the gate burned a published session without
+        // it and could not have failed if this call were deleted.
         // The PROCESS scope, not the composition's: the wipe must survive an Activity recreation
         // (WB-2). Its outcome is SIGNALLED rather than applied here, because the composition that
         // started it may not be the one alive when it finishes.
@@ -969,7 +958,7 @@ private fun ZitroneRoot(
                 // returns normally and must still present WB-1's uniform error — killing the process
                 // there would both lose the durability hold's RAM state and make a failed burn
                 // visibly different from a wrong passphrase.
-                runCatching { container.burnVault(terminate = ::killThisProcess) }.isSuccess
+                runCatching { container.runTerminalBurn(terminate = ::killThisProcess) }.isSuccess
             }
             container.unlockController.endTerminalWipe()
             container.burnCompletion.signal(

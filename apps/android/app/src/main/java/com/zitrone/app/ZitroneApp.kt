@@ -428,6 +428,41 @@ class AppContainer(private val app: Application) {
      *   assert nothing about the state the burn left behind. NO DEFAULT — a call site that does not
      *   name its terminal behaviour must not compile.
      */
+    /**
+     * THE TERMINAL BURN SEQUENCE — ONE definition, used by production AND by the byte-for-byte gate.
+     *
+     * **Why this exists (0.9.2 W-B round 7, terminal round).** Round 6 added
+     * `unlockController.lock()` to `MainActivity.onBurn` to quiesce a live session before the wipe.
+     * It was not mirrored into the gate, so the gate burned a PUBLISHED session without the quiesce —
+     * and deleting `lock()` from production would have left the gate GREEN. The load-bearing gate
+     * could not discriminate removal of the repair it exists to validate.
+     *
+     * **Mirroring the call into the gate would NOT have fixed that**, and this is the subtlety that
+     * decided the shape: the gate would then hold its own copy of `lock()`, so deleting production's
+     * would still leave it green. Two copies of a sequence that must agree is the same defect one
+     * level up — the same shape as the biometric wiper and its probe using two predicates that had to
+     * agree and drifted. **One callable, two callers, no copy to drift.**
+     *
+     * @param terminate what a successful burn does last — process death in production, a recorder in
+     *   the gate. See [burnVault].
+     */
+    internal fun runTerminalBurn(terminate: () -> Unit) {
+        unlockController.beginTerminalWipe()
+        unlockController.lock()
+        // PROVE THE QUIESCE RATHER THAN ASSUMING IT — and this assertion is what makes the gate
+        // DISCRIMINATING rather than merely faithful. `lock()` tears the session down synchronously
+        // (`lockCurrent` nulls `current` and publishes null), so a surviving session here means the
+        // quiesce did not happen: writers on the session scope — `NotificationScheduler`'s deferred
+        // re-fire jobs among them — are still live and can recreate residue after a step has verified
+        // its absence. Fail closed BEFORE the first destructive mutation, with the hold not yet
+        // raised and nothing yet destroyed.
+        //
+        // Delete the `lock()` above and this throws in the gate, which provisions a real published
+        // session. That is the discrimination the round-7 finding asked for, and it is automatic.
+        if (session.value != null) throw VaultImageException.DestroyFailed.step("session-quiesce")
+        burnVault(terminate)
+    }
+
     fun burnVault(terminate: () -> Unit) = runBurnWipe(
         raiseHold = { raiseDurabilityHold() },
         obliterate = { runBurnPlan(burnPlan) },
