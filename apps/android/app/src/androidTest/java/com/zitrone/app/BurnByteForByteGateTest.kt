@@ -9,8 +9,11 @@ import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.zitrone.app.crypto.KeyStoreManager
+import com.zitrone.app.crypto.vault.ArmBurn
 import com.zitrone.app.crypto.vault.BiometricVaultKeyCipher
 import com.zitrone.app.crypto.vault.KeystoreDeviceKeyCipher
+import com.zitrone.app.crypto.vault.PAYLOAD_PLAINTEXT_BYTES
+import com.zitrone.app.crypto.vault.UnlockOrAdd
 import com.zitrone.app.notifications.MessagingNotifications
 import java.io.File
 import java.security.KeyStore
@@ -618,6 +621,74 @@ class BurnByteForByteGateTest {
     }
 
     /**
+     * **THE 0.9.3 USER PATH, END TO END ON A REAL DEVICE** — arm the credential the way Settings
+     * does, enter it the way the lock screen does, and assert the device is byte-for-byte a fresh
+     * install afterwards.
+     *
+     * Until 0.9.3 the burn was reachable only by calling `burnVault()` directly, because slot 0 held
+     * filler no passphrase could match. Every prior gate run therefore proved the WIPE and nothing
+     * about the TRIGGER. This test is the difference between "the engine works" and "the feature
+     * works", and it is the evidence behind handing a human a device test.
+     *
+     * It runs against the REAL AndroidKeyStore-backed store and the REAL Argon2id — the unit tests
+     * for arming use a fast SHA-256 deriver and a fake device-key cipher, so this is the first
+     * execution of arming under production crypto.
+     */
+    @Test
+    fun the_armed_credential_burns_and_leaves_a_fresh_install() = runBlocking {
+        val fresh = snapshot()
+        provisionThroughProduction()
+
+        // ARM through the container entry point Settings calls — not the store directly.
+        assertEquals(
+            "arming must succeed on a provisioned device",
+            ArmBurn.Armed,
+            container.armBurnCredential(BURN_CREDENTIAL),
+        )
+
+        // ENTER IT the way the lock screen does. This is the step that did not exist before 0.9.3.
+        val outcome = container.imageStore.attemptUnlockOrAdd(
+            BURN_CREDENTIAL,
+            ByteArray(PAYLOAD_PLAINTEXT_BYTES),
+            create = false,
+        )
+        assertTrue(
+            "the armed credential must reach the BURN path through the ordinary passphrase entry — " +
+                "if this fails the feature is unreachable and the wipe below proves nothing",
+            outcome is UnlockOrAdd.Burn,
+        )
+
+        // And the wipe it triggers must still land the device on a fresh install.
+        var terminated = 0
+        container.runTerminalBurn(terminate = { terminated++ })
+        assertEquals("a successful burn must request process death exactly once", 1, terminated)
+
+        val burned = snapshot()
+        assertEquals("files must match a fresh install", fresh.files, burned.files)
+        assertEquals("shared_prefs must match a fresh install", fresh.prefs, burned.prefs)
+        assertEquals("the plaintext cache must match a fresh install", fresh.caches, burned.caches)
+        assertEquals("no Keystore alias may survive", fresh.keystoreAliases, burned.keystoreAliases)
+        assertEquals("no notification may survive", fresh.activeNotifications, burned.activeNotifications)
+    }
+
+    /**
+     * THE COLLISION REFUSAL, under production crypto. A burn credential that also opens a vault slot
+     * must be REFUSED: `tryPassphrase` takes the FIRST match by ascending index and slot 0 is index
+     * 0, so arming it would mean the user's next ordinary unlock WIPES the device instead of opening
+     * that vault. The unit test covers this against a stand-in deriver; this is the real one.
+     */
+    @Test
+    fun arming_refuses_a_credential_that_also_opens_a_vault() = runBlocking {
+        provisionThroughProduction()
+
+        assertEquals(
+            "the vault's own passphrase must never be accepted as the burn credential",
+            ArmBurn.CollidesWithVault,
+            container.armBurnCredential(PASSPHRASE),
+        )
+    }
+
+    /**
      * CANARY — not a proof, and the name says so.
      *
      * Stages the race that round 3 could not settle by argument: a preference write left IN FLIGHT
@@ -691,6 +762,7 @@ class BurnByteForByteGateTest {
 
     private companion object {
         const val PASSPHRASE = "correct horse battery staple"
+        const val BURN_CREDENTIAL = "duress credential for the gate"
         const val VAULT_IMAGE = "vault.bin"
         const val DIAGNOSTICS_LOG = "boot-diagnostics.log"
         const val SETTINGS_PREFS = "zitrone_settings.xml"
