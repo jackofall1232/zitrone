@@ -17,11 +17,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   live writer — cached preference instances, in-memory buffers and lazily-initialised components can
   rewrite state after the wipe proved it absent (a defect of exactly this shape was found in review),
   and the remaining safety argument rested on Android `SharedPreferences` internals that three
-  independent reviewers read three different ways and none could confirm. Ending the process is a
-  deterministic drain: pending writes die with it. It is safe at every interruption point because it
-  composes with the existing durability hold — killed before the hold is lowered, the next boot
-  presents a lock screen; killed after, onboarding. See `docs/SECURITY_MODEL.md` for the full
-  rationale and the deniability tradeoff in both directions.
+  independent reviewers read three different ways and none could confirm. Ending the process drains
+  the **userspace** write queue — a pending write can never start — though not the kernel's, so this
+  is defence in depth rather than the proof; the proof is the wipe ordering and a boot-time
+  completion (next entry). See `docs/SECURITY_MODEL.md` for the full rationale and the deniability
+  tradeoff in both directions.
+- **Android: the Pucker Burn wipes app-local state BEFORE destroying the vault image**, and cancels
+  any active notification. The ordering is chosen so that an interrupted burn leaves an innocuous
+  state: a crash before the image is destroyed leaves an intact, unlockable vault whose caches and
+  **device settings have been reset** — visible, but indistinguishable from routine cache clearing,
+  and the vault still opens with its passphrase. If a burn is interrupted *after* the image is gone,
+  the next launch detects the leftover state from the residue itself and finishes the cleanup before
+  presenting anything. No "burn in progress" marker is ever written to disk — such a marker would
+  survive on a device with an intact vault and prove the duress passphrase had been used.
 
 ### Added
 

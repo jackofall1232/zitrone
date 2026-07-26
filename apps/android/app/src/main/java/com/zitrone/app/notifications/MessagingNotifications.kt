@@ -133,6 +133,25 @@ object MessagingNotifications {
         NotificationManagerCompat.from(context).notify(NOTIFICATION_ID, notification)
     }
 
+    /**
+     * POSTCONDITION for the burn plan's `active-notifications` step (0.9.2 W-B round 4, Codex).
+     *
+     * **Why this step exists at all:** [cancelAll] was present in this file with ZERO call sites
+     * while [showNewMessage] posted real system notifications, so a message notification could
+     * outlive a successful burn AND the process death that follows it. A fresh install has none, and
+     * this residue sits on the LOCK SCREEN — the one surface a coercer is already looking at. It was
+     * missed by an audit of this very file one round earlier, which checked what the gate CLAIMED
+     * about notifications (channel state) and never asked what the file DID.
+     *
+     * `activeNotifications` is owned by system_server, not by this process, so this reads back the
+     * real post-cancel state rather than trusting the cancel call. Requires API 23+ (minSdk is 26).
+     * Fail-closed: an unreadable NotificationManager reports that notifications remain.
+     */
+    fun noneActive(context: Context): Boolean = runCatching {
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.activeNotifications.none { it.packageName == context.packageName }
+    }.getOrDefault(false)
+
     fun cancelAll(context: Context) {
         NotificationManagerCompat.from(context).cancelAll()
     }

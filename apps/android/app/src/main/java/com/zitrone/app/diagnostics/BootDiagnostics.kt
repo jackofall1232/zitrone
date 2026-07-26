@@ -140,6 +140,19 @@ class BootDiagnostics(context: Context) {
     }
 
     /**
+     * POSTCONDITION for the burn plan's `boot-diagnostics` step (0.9.2 W-B round 4). Boot calls this
+     * on every cold start to detect a burn interrupted after the image was destroyed, so it must be
+     * cheap and must never throw.
+     *
+     * BOTH halves, because round 3's defect was that only one was handled: the file must be absent
+     * AND the in-memory buffer empty. A populated buffer is not merely a stale UI — [record] writes
+     * MEMORY to disk, so a non-empty buffer will recreate the log on the next line recorded.
+     */
+    fun isErased(): Boolean = synchronized(lock) {
+        _entries.value.isEmpty() && runCatching { java.nio.file.Files.notExists(file.toPath()) }.getOrDefault(false)
+    }
+
+    /**
      * Wipe the log — the user action from the Diagnostics screen (call off-main). Fail-OPEN by
      * design: a diagnostics IO error must not crash a settings screen. The burn calls [erase]
      * directly and consumes its result.

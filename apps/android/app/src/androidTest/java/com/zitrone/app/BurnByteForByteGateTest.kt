@@ -11,6 +11,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.zitrone.app.crypto.KeyStoreManager
 import com.zitrone.app.crypto.vault.BiometricVaultKeyCipher
 import com.zitrone.app.crypto.vault.KeystoreDeviceKeyCipher
+import com.zitrone.app.notifications.MessagingNotifications
 import java.io.File
 import java.security.KeyStore
 import javax.crypto.KeyGenerator
@@ -95,6 +96,14 @@ class BurnByteForByteGateTest {
         val keystoreAliases: Map<String, String>,
         val databases: Map<String, String>,
         val caches: Map<String, String>,
+        /**
+         * ACTIVE SYSTEM NOTIFICATIONS (round 4, Codex). Not a filesystem domain at all — this state
+         * lives in system_server — which is exactly why every file-based check missed it while
+         * `MessagingNotifications.cancelAll` sat in the tree with zero call sites. A posted
+         * notification outlives both the burn and the process death that follows it, and a fresh
+         * install has none.
+         */
+        val activeNotifications: Map<String, String>,
     )
 
     /**
@@ -163,6 +172,12 @@ class BurnByteForByteGateTest {
             keystoreAliases = ks.aliases().toList().associateWith { "" },
             databases = treeHashes(File(dataDir, "databases")),
             caches = treeHashes(ctx.cacheDir),
+            activeNotifications = runCatching {
+                val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                nm.activeNotifications
+                    .filter { it.packageName == ctx.packageName }
+                    .associate { "id=${it.id}:tag=${it.tag}" to it.notification.channelId }
+            }.getOrDefault(emptyMap()),
         )
     }
 
@@ -258,6 +273,21 @@ class BurnByteForByteGateTest {
             },
         )
         assertTrue("baseline: databases must be empty", s.databases.isEmpty())
+        // SETTINGS CONTENT, not just the lazy FILES (round 4, both lenses). The previous version
+        // checked which prefs files existed and never what was inside the one that always exists —
+        // so a leaked `onboarding_done` passed the baseline, and the claim that deriving this from
+        // the snapshotter made it complete was an overclaim: using the snapshot's OUTPUT is not the
+        // same as validating every domain in it.
+        assertTrue(
+            "baseline: the settings store still holds app keys from a previous test",
+            container.vaultUsePreferencesAreFresh(),
+        )
+        // ACTIVE NOTIFICATIONS — the round-4 domain. A notification posted by an earlier test would
+        // otherwise sit on the lock screen and be invisible to every file-based check here.
+        assertTrue(
+            "baseline: an active notification survived a previous test",
+            MessagingNotifications.noneActive(ctx),
+        )
     }
 
     /** Plant a REAL alias carrying production's biometric prefix — residue of exactly the reaped class. */
@@ -394,6 +424,12 @@ class BurnByteForByteGateTest {
             "NO Keystore alias may survive a burn — an orphaned alias is 'something was here'",
             fresh.keystoreAliases,
             burned.keystoreAliases,
+        )
+        assertEquals(
+            "no active notification may survive a burn — it sits on the LOCK SCREEN, which is the " +
+                "one surface a coercer is already looking at, and a fresh install has none",
+            fresh.activeNotifications,
+            burned.activeNotifications,
         )
     }
 

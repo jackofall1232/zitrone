@@ -127,6 +127,16 @@ class KeystoreDeviceKeyCipher(
         false
     }
 
+    /**
+     * POSTCONDITION PROBE for the burn plan's `device-key` step (0.9.2 W-B round 4) — is the lazily
+     * created device-key alias still present? Boot calls this on every cold start to detect a burn
+     * that removed the image and then failed before reaching this step, so it must be cheap and must
+     * never throw. An indeterminate Keystore read reports PRESENT (fail-closed): the cost of a
+     * needless retry of an idempotent delete is nothing, and the cost of missing real residue is the
+     * feature's purpose.
+     */
+    fun keyMaterialExists(): Boolean = runCatching { existingKey() != null }.getOrDefault(true)
+
     private fun existingKey(): SecretKey? = try {
         (keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.secretKey
     } catch (e: Exception) {

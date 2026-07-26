@@ -582,13 +582,38 @@ buffer rewriting a deleted log) was found in review. The preference wipe's safet
 on an ordering argument about Android's `SharedPreferences` internals that three independent reviewers
 read three different ways and none could confirm. When a correctness claim rests on a platform
 implementation detail nobody can independently confirm, the answer is to stop needing the claim.
-Process death is a deterministic drain: pending writes die with the process. No hidden API, no
-reflection, no reliance on a particular OEM's fork.
+Process death drains the **userspace** write queue: a pending `apply()` can never start its write,
+and no lazily initialised component can recreate a file after the wipe. It is **not** a drain of the
+kernel block layer — a thread already inside a write syscall completes regardless — so process death
+is defence in depth here, not the proof.
 
-It is safe at every interruption point because it composes with the durability hold: killed *before*
-the hold is lowered, the next boot re-derives the doubt from disk and presents a lock screen; killed
-*after*, the wipe proved itself and onboarding is correct. There is no point at which process death
-produces a fresh-install presentation over an unproven wipe.
+**The proof is the ordering plus a boot-time completion.** Non-cryptographic cleanups (caches,
+diagnostics, preferences) run BEFORE the vault image is destroyed, so an interruption in that phase
+leaves an intact, unlockable vault whose caches were cleared — indistinguishable from routine OS
+cache eviction. Key material is removed AFTER the image, because deleting it while an image remained
+would leave a vault nobody can open, which is a worse tell than the residue it would replace. And if
+a burn is interrupted after the image is gone, the next boot recognises the leftover state **from the
+residue itself** — a device with no vault image but a diagnostics log, a plaintext cache, or
+vault-use preference files is in a state a fresh install cannot be in — finishes the cleanup, and
+withholds the fresh-install presentation until it proves. No durable "burn in progress" marker is
+written, deliberately: such a marker would survive a crash on a device whose vault is still intact
+and would itself prove the duress passphrase had been entered.
+
+**An earlier version of this section claimed process death was safe at every interruption point
+because boot re-derived the doubt. That was false when written** — the boot reconcilers all keyed on
+vault-image state, so once the image was destroyed they were blind to a later cleanup failure. The
+mechanism described above is what makes the claim true; it is recorded here because the wrong version
+shipped first.
+
+**A visible consequence of the ordering, stated so it is not mistaken for a bug.** Because
+preferences are cleared *before* the vault image is destroyed, a burn that FAILS partway can leave an
+intact, unlockable vault whose device settings have been reset to defaults. That is deliberate: the
+ordering is chosen so that an interruption leaves an *innocuous* state rather than a distinguishing
+one, and reset settings on a working vault is the innocuous option. The vault itself is never
+damaged, and the passphrase still opens it.
+
+**Active notifications are cancelled by the burn.** A posted message notification would otherwise
+outlive the wipe — on the lock screen, where it is most visible — and a fresh install has none.
 
 **The tradeoff, both directions.** A closed app is arguably more duress-appropriate than an animation
 playing out. It is also a visible event that a coerced user cannot explain away as a typo — whereas

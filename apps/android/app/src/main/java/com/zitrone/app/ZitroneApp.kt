@@ -27,6 +27,12 @@ import com.zitrone.app.crypto.vault.VaultSession
 import com.zitrone.app.crypto.vault.VaultSodiumOps
 import com.zitrone.app.crypto.vault.VaultState
 import com.zitrone.app.crypto.vault.VaultStateCodec
+import com.zitrone.app.burn.BurnPhase
+import com.zitrone.app.burn.BurnStep
+import com.zitrone.app.burn.CleanupCompletion
+import com.zitrone.app.burn.Durability
+import com.zitrone.app.burn.completeInterruptedCleanup
+import com.zitrone.app.burn.runBurnPlan
 import com.zitrone.app.crypto.vault.DirSyncResult
 import com.zitrone.app.crypto.vault.defaultFsyncDir
 import com.zitrone.app.crypto.vault.wipe
@@ -389,12 +395,23 @@ class AppContainer(private val app: Application) {
      *
      * When a correctness claim rests on a platform implementation detail that cannot be
      * independently confirmed, the answer is to stop needing the claim rather than to win the
-     * argument. Process death is the only deterministic drain of `QueuedWork`: the queue dies with
-     * the process. No hidden API, no reflection, no OEM-fork exposure, no ordering claim. It also
-     * closes a race no assertion could ever catch — a component that touches a store AFTER the gate
-     * asserted absence, recreating a prefs file a fresh install has not written yet.
+     * argument.
      *
-     * Safe at every interruption point because it composes with the hold; see [runBurnWipe] property 4.
+     * **WHAT PROCESS DEATH ACTUALLY BUYS — narrowed after round 4 found the first version of this
+     * paragraph overclaimed.** It is a deterministic drain of the USERSPACE QUEUE: `QueuedWork` dies
+     * with the process, so a pending `apply()` can never initiate its write, and no lazily
+     * initialised component can recreate a file after the wipe. That is a real class of race, closed.
+     * It is **NOT** a drain of the kernel block layer: a thread already inside `write()`/`fsync()`
+     * lands regardless, so the window between the final absence proof and SIGKILL is not closed by
+     * killing the process. The original wording here — "the only deterministic drain", full stop —
+     * was false in that second sense on the day it was written.
+     *
+     * **This is why process death is DEFENCE IN DEPTH and not the proof.** The proof is
+     * [burnPlan]'s ordering (a crash before the image leaves an innocuous state) plus boot's
+     * marker-free completion of any outstanding step
+     * ([com.zitrone.app.burn.completeInterruptedCleanup]). Round 4 established that the earlier claim
+     * — that boot re-derives the doubt at every interruption point — was ALSO false: every
+     * reconciler keyed on image-bearing state, so once the image was gone they were blind.
      *
      * **BEHAVIOUR CHANGE, documented rather than discovered:** the app CLOSES on a successful burn
      * instead of returning to an onboarding screen. Stated in `SECURITY_MODEL.md` and the changelog.
@@ -413,58 +430,106 @@ class AppContainer(private val app: Application) {
      */
     fun burnVault(terminate: () -> Unit) = runBurnWipe(
         raiseHold = { raiseDurabilityHold() },
-        obliterate = {
-            imageStore.burnObliterate()
-            // Keystore/prefs teardown is INSIDE the guarded region, not after it: an orphaned alias
-            // is a surviving artifact, and a wipe with a surviving artifact is not a wipe. It runs
-            // AFTER the image so a failure here cannot strand a recoverable vault — the image is
-            // already proven gone by the time this can fail.
-            if (!wipeBiometricMaterial()) throw VaultImageException.DestroyFailed()
-            // THE DEVICE KEY IS AN ORACLE (gate finding, first execution). It is created LAZILY by
-            // the first `wrapDek`, so a device that never made a vault does not have the alias —
-            // leaving it behind proves one existed. Enumerated rather than fixed one-off: the app
-            // creates three alias families, and this is the only other one that is
-            // "exists only if the feature was used". `_androidx_security_master_key_` is created at
-            // STARTUP by EncryptedSharedPreferences, so a fresh install has it too and wiping it
-            // would break prefs — deliberately NOT touched.
-            if (!deviceKeyCipher.deleteKeyMaterial()) throw VaultImageException.DestroyFailed()
-            // THE "EXISTS ONLY IF THE FEATURE WAS USED" CLASS, ENUMERATED (round-1 review, Codex).
-            // Fixing only the artifact a reviewer happened to name is the instance-fix this unit has
-            // produced repeatedly; the class-fix is the default posture now. Every app-local writer
-            // whose output a never-used device does NOT have:
-            //   - BootDiagnostics: writes into filesDir on the FIRST record(), i.e. on first boot
-            //     reconciliation of a real vault. A fresh install has no such file.
-            //   - plaintext caches: populated only by a live session's attachment/QR paths.
-            // The vault image, DEK, temps and markers are already covered by obliterateLocked().
-            // NOT wiped and deliberately so: `_androidx_security_master_key_` and the prefs file
-            // EncryptedSharedPreferences creates at STARTUP — a fresh install has both, so removing
-            // them would CREATE a difference rather than erase one.
-            // PROVEN, not best-effort (round-2 review, BLOCKING): `clear()` swallowed its own
-            // failures and returned nothing, so the hold was lowered over a surviving log.
-            // MEMORY as well as disk, and the unlink made durable — see [BootDiagnostics.erase].
-            // Round 2 gated this call and round 3 found the callee incomplete: gating a cleanup whose
-            // own proof is partial buys nothing.
-            if (!bootDiagnostics.erase()) throw VaultImageException.DestroyFailed()
-            // Throws on any survivor, unreadable directory, or non-durable unlink. No Boolean.
-            if (!runCatching { deleteTreeDurably(app.cacheDir); true }.getOrDefault(false)) {
-                throw VaultImageException.DestroyFailed()
-            }
-            //   - PREFERENCES: the round-2 HIGH, both lenses. The reasoning above was right that a
-            //     fresh install has the settings FILE, and wrong that this made the store fresh —
-            //     `onboarding_done` and every device setting are keys INSIDE it that only a used
-            //     vault writes, and the signal/auth/contacts stores are three further FILES a
-            //     never-used device does not have at all. All four are enumerated in
-            //     `wipeVaultUsePreferences`, which states per store whether it is reset or
-            //     deliberately left. LAST, and after `wipeBiometricMaterial()` specifically: the
-            //     biometric wrap lives in the settings store, so clearing it earlier would empty the
-            //     store out from under that wipe's proof.
-            if (!runCatching { wipeVaultUsePreferences() }.getOrDefault(false)) {
-                throw VaultImageException.DestroyFailed()
-            }
-        },
+        obliterate = { runBurnPlan(burnPlan) },
         lowerHold = { durabilityHold.value = false },
         terminate = terminate,
     )
+
+    /**
+     * THE BURN, AS AN ENUMERABLE TABLE. See [com.zitrone.app.burn.BurnPlan] for why it is data
+     * rather than statements, and why the PHASE ORDER is a safety property.
+     *
+     * Ordering is chosen by WHICH INTERRUPTION IS INNOCUOUS, not by convenience:
+     *  - `BEFORE_IMAGE` — a crash here leaves an intact, unlockable vault whose caches and
+     *    preferences were cleared, which is indistinguishable from routine OS cache eviction.
+     *  - `AFTER_IMAGE` — Keystore material MUST follow the image. Deleting the device key while a
+     *    live image remained would make that image permanently unopenable: a vault nobody can open is
+     *    a worse oracle than the residue it replaces.
+     *
+     * Every step carries a `verify()` postcondition, and BOOT re-checks the same postconditions to
+     * finish an interrupted burn ([com.zitrone.app.burn.completeInterruptedCleanup]) — one
+     * enumeration, three consumers (burn, boot, gate).
+     *
+     * NOT wiped, deliberately, and therefore absent from this table: `_androidx_security_master_key_`
+     * and the `zitrone_settings` prefs FILE itself. `EncryptedSharedPreferences` creates both at
+     * STARTUP on every install, so a fresh device has them — removing them would CREATE a difference
+     * rather than erase one. (The KEYS inside that file are reset; see `wipeVaultUsePreferences`.)
+     */
+    internal val burnPlan: List<BurnStep> by lazy {
+        listOf(
+            // ── BEFORE_IMAGE — innocuous if interrupted ───────────────────────────────────────
+            BurnStep(
+                name = "boot-diagnostics",
+                phase = BurnPhase.BEFORE_IMAGE,
+                durability = Durability.FsyncedDir(app.filesDir),
+                // Memory AND disk: round 3 found `clearProven()` leaving the in-memory buffer intact,
+                // so a later record() rewrote pre-burn lines to a file the burn had proved absent.
+                verify = { bootDiagnostics.isErased() },
+                action = { if (!bootDiagnostics.erase()) throw VaultImageException.DestroyFailed() },
+            ),
+            BurnStep(
+                name = "plaintext-cache",
+                phase = BurnPhase.BEFORE_IMAGE,
+                durability = Durability.FsyncedDir(app.cacheDir),
+                // The one place in this burn where the residue IS vault content (decrypted
+                // attachments, QR artifacts) rather than metadata about use.
+                verify = { app.cacheDir?.let { it.listFiles()?.isEmpty() ?: false } ?: true },
+                action = { deleteTreeDurably(app.cacheDir) },
+            ),
+            BurnStep(
+                name = "vault-use-preferences",
+                phase = BurnPhase.BEFORE_IMAGE,
+                durability = Durability.PrefsStores(LAZY_PREFS_STORES),
+                verify = { vaultUsePreferencesAreFresh() },
+                action = {
+                    if (!wipeVaultUsePreferences()) throw VaultImageException.DestroyFailed()
+                },
+            ),
+            BurnStep(
+                name = "active-notifications",
+                phase = BurnPhase.BEFORE_IMAGE,
+                // No filesystem entry: the notification lives in system_server, and cancelling it is
+                // a synchronous binder call, not a write this process must make durable.
+                durability = Durability.KeystoreTransactional,
+                // ROUND 4, Codex: `MessagingNotifications.cancelAll` existed with ZERO call sites
+                // while `showNewMessage` posted real notifications — so a message notification could
+                // outlive the burn AND the process death. A fresh install has none, and it sits on
+                // the lock screen where a coercer is already looking. Found in the same file whose
+                // CHANNEL claim was corrected the round before: auditing what the gate CLAIMED about
+                // notifications, and never asking what the file DID.
+                verify = { MessagingNotifications.noneActive(app) },
+                action = { MessagingNotifications.cancelAll(app) },
+            ),
+            // ── IMAGE — the point of no return ────────────────────────────────────────────────
+            BurnStep(
+                name = "vault-image",
+                phase = BurnPhase.IMAGE,
+                durability = Durability.FsyncedDir(app.filesDir),
+                verify = { imageStore.imageBearingProvenAbsent() },
+                action = { imageStore.burnObliterate() },
+            ),
+            // ── AFTER_IMAGE — would brick a live image if run earlier ─────────────────────────
+            BurnStep(
+                name = "biometric-material",
+                phase = BurnPhase.AFTER_IMAGE,
+                durability = Durability.KeystoreTransactional,
+                verify = { biometricCipher.noAliasesRemain() },
+                action = { if (!wipeBiometricMaterial()) throw VaultImageException.DestroyFailed() },
+            ),
+            BurnStep(
+                name = "device-key",
+                phase = BurnPhase.AFTER_IMAGE,
+                durability = Durability.KeystoreTransactional,
+                // Created LAZILY by the first `wrapDek`, so a device that never made a vault does not
+                // have this alias — leaving it behind proves one existed. The gate's first execution
+                // found exactly this.
+                verify = { !deviceKeyCipher.keyMaterialExists() },
+                action = {
+                    if (!deviceKeyCipher.deleteKeyMaterial()) throw VaultImageException.DestroyFailed()
+                },
+            ),
+        )
+    }
 
     private val bootReconcileStarted = java.util.concurrent.atomic.AtomicBoolean(false)
 
@@ -499,7 +564,32 @@ class AppContainer(private val app: Application) {
                 val reconcileUnproven =
                     burnCompleted == ReconcileResult.MUTATED_NOT_DURABLE ||
                         markersCleared == ReconcileResult.MUTATED_NOT_DURABLE
-                if (reconcileUnproven) ResidueSweepResult.SWEPT_NOT_DURABLE else sweepResult
+                // FOURTH BOOT MUTATOR (0.9.2 W-B round 4, BLOCKING — Codex, severity upheld by an
+                // independent third lens). The three reconcilers above ALL key on image-bearing state,
+                // so once `burnObliterate()` had succeeded they were structurally blind to a burn that
+                // then failed a LATER cleanup: every trigger reported "nothing to do", the RAM hold
+                // died with the process, and boot presented ONBOARDING over surviving residue —
+                // plaintext cache, diagnostics, preference keys, orphaned Keystore aliases.
+                //
+                // NO DURABLE MARKER, and that is deliberate: a "burn in progress" marker written
+                // before the first mutation survives a crash on a device whose vault is still FULLY
+                // INTACT, which is a discoverable artifact proving the duress passphrase was entered.
+                // Two independent lenses rejected it. THE RESIDUE IS ITS OWN SIGNATURE instead —
+                // `{image proven absent AND some step's postcondition false}` is a shape a fresh
+                // install cannot produce, which is the same structural move that retired the pre-burn
+                // intent marker in W-A.
+                //
+                // Gated on a PROVEN absence, never `File.exists()`: this DELETES, so an indeterminate
+                // stat read as "absent" would run cleanups against a live vault.
+                val cleanup = completeInterruptedCleanup(
+                    steps = burnPlan,
+                    imageProvenAbsent = imageStore.imageBearingProvenAbsent(),
+                )
+                if (reconcileUnproven || cleanup == CleanupCompletion.INCOMPLETE) {
+                    ResidueSweepResult.SWEPT_NOT_DURABLE
+                } else {
+                    sweepResult
+                }
             },
             publish = { hold ->
                 durabilityHold.value = hold
@@ -1035,6 +1125,30 @@ class AppContainer(private val app: Application) {
             names = LAZY_PREFS_STORES,
             dirSync = { defaultFsyncDir(it) == DirSyncResult.DURABLE },
         )
+    }
+
+    /**
+     * POSTCONDITION for the burn plan's `vault-use-preferences` step (0.9.2 W-B round 4).
+     *
+     * Mirrors the table in [wipeVaultUsePreferences] exactly: the three LAZILY created stores must
+     * have no file at all (a never-used device has none), and the STARTUP settings store must have no
+     * app keys (a never-used device has the file, holding only the androidx keysets — which is why
+     * `prefs.all`, whose implementation skips reserved keys, is the right probe and file presence is
+     * not).
+     *
+     * Boot calls this on every cold start, so it must be cheap and must never throw. Fail-closed: an
+     * unreadable store reports NOT fresh, costing at most one idempotent retry.
+     */
+    internal fun vaultUsePreferencesAreFresh(): Boolean {
+        val sharedPrefsDir = java.io.File(app.filesDir.parentFile, "shared_prefs")
+        val lazyStoresAbsent = LAZY_PREFS_STORES.all { name ->
+            java.nio.file.Files.notExists(java.io.File(sharedPrefsDir, "$name.xml").toPath()) &&
+                java.nio.file.Files.notExists(java.io.File(sharedPrefsDir, "$name.xml.bak").toPath())
+        }
+        val settingsHasNoAppKeys = runCatching {
+            keyStoreManager.prefs(KeyStoreManager.PREFS_SETTINGS).all.isEmpty()
+        }.getOrDefault(false)
+        return lazyStoresAbsent && settingsHasNoAppKeys
     }
 
     /**

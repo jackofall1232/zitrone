@@ -76,11 +76,21 @@ class BurnReconcilerTriggersTest {
     private fun intent(dir: File) = File(dir, "vault.delete-intent")
     private fun confirmed(dir: File) = File(dir, "vault.delete-confirmed")
 
-    /** One enumerated on-disk state. Five independent presence bits. */
+    /**
+     * One enumerated on-disk state. SIX independent presence bits — 64 states.
+     *
+     * `dekTmp` was added in round 4 after being flagged as an incomplete proof in rounds 2 AND 3 and
+     * carried as DEFERRABLE both times. It is a free variable, not a derived one:
+     * `imageBearingFilesProvenAbsent()` inspects `vault.dek.tmp` alongside `vault.bin.tmp`, so a
+     * five-bit enumeration claiming to cover "all on-disk states" was short by half its space. No
+     * dual-fire was ever demonstrated through it — the point is that the PROOF did not cover what it
+     * claimed to, and a future predicate change touching `dek.tmp` would have gone unnoticed.
+     */
     private data class State(
         val bin: Boolean,
         val dek: Boolean,
         val binTmp: Boolean,
+        val dekTmp: Boolean,
         val intent: Boolean,
         val confirmed: Boolean,
     )
@@ -89,6 +99,7 @@ class BurnReconcilerTriggersTest {
         if (s.bin) bin(dir).writeBytes(ByteArray(64) { 1 })
         if (s.dek) dek(dir).writeBytes(ByteArray(WRAPPED_KEY_BYTES) { 2 })
         if (s.binTmp) binTmp(dir).writeBytes(ByteArray(64) { 3 })
+        if (s.dekTmp) dekTmp(dir).writeBytes(ByteArray(WRAPPED_KEY_BYTES) { 4 })
         if (s.intent) intent(dir).writeBytes(ByteArray(1))
         if (s.confirmed) confirmed(dir).writeBytes(ByteArray(1))
     }
@@ -97,8 +108,10 @@ class BurnReconcilerTriggersTest {
         for (b in listOf(true, false)) {
             for (d in listOf(true, false)) {
                 for (bt in listOf(true, false)) {
-                    for (i in listOf(true, false)) {
-                        for (c in listOf(true, false)) add(State(b, d, bt, i, c))
+                    for (dt in listOf(true, false)) {
+                        for (i in listOf(true, false)) {
+                            for (c in listOf(true, false)) add(State(b, d, bt, dt, i, c))
+                        }
                     }
                 }
             }
@@ -116,7 +129,7 @@ class BurnReconcilerTriggersTest {
     @Test
     fun `at most one boot mutator fires in any state`() {
         val states = allStates()
-        assertEquals("the enumeration must cover all 32 states", 32, states.size)
+        assertEquals("the enumeration must cover all 64 states", 64, states.size)
 
         val fired = mutableMapOf<State, List<String>>()
         for (s in states) {

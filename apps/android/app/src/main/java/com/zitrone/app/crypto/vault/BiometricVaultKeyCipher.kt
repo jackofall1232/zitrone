@@ -133,6 +133,16 @@ class BiometricVaultKeyCipher {
      * that already reflects the enable's saved wrap, or the enable aborts because its alias was reaped.
      * Leftover aliases it fails to reap are harmless: unlock uses the wrap's own alias, not an enumeration.
      */
+    /**
+     * POSTCONDITION PROBE for the burn plan's `biometric-material` step (0.9.2 W-B round 4) — does
+     * ANY alias in this family survive? Fail-closed on an unreadable Keystore (reports that aliases
+     * remain), for the same reason as [KeystoreDeviceKeyCipher.keyMaterialExists].
+     */
+    fun noAliasesRemain(): Boolean = runCatching {
+        val ks = java.security.KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+        ks.aliases().toList().none { it.startsWith(PREFIX) }
+    }.getOrDefault(false)
+
     fun deleteAllAliasesExcept(keepAliasId: String?) {
         val keep = keepAliasId?.let { aliasFor(it) }
         val toDelete = try {
