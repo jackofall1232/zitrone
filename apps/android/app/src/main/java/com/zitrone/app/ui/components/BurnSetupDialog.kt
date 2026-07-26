@@ -57,6 +57,15 @@ import com.zitrone.app.ui.theme.TextSecondary
  *     password at all, so it must be set again. Users otherwise assume protection persists.
  *  4. **Setting it again silently replaces it.** There is no confirmation that an old one existed,
  *     because the app genuinely cannot tell.
+ *  5. **The burn is DEVICE-LOCAL — it does not delete the relay account.** Added 0.9.4, carrying
+ *     into the UI the scope correction that 0.9.3's docs shipped (SECURITY_MODEL.md "Pucker Burn —
+ *     SCOPE"). "Everything Zitrone holds on this device" was always literally accurate, but this is
+ *     a duress feature, and the specific misreading it invites — that a burn removes the account
+ *     from the relay too — is the one that matters: the account's identity key and prekey bundle
+ *     stay registered and servable, and the burn deliberately makes no network call at all. A user
+ *     who over-reads the guarantee makes a worse decision under coercion than one who knows the
+ *     bound. Disclosed HERE, at arming time, because that is the calm moment — the burn itself has
+ *     no confirmation step by design, so there is nowhere later to say it.
  *
  * **Actively acknowledged**, not merely displayed: the confirm button stays disabled until the box is
  * ticked. A dialog that can be dismissed with a reflexive tap has not obtained understanding, and
@@ -95,6 +104,7 @@ fun BurnSetupDialog(
                     fontSize = 14.sp,
                 )
                 Spacer(Modifier.height(12.dp))
+                WarningPoint("It erases this device only. Your account on the relay is not deleted.")
                 WarningPoint("It can never be recovered or checked. The app cannot tell you whether one is set.")
                 WarningPoint("Anyone who learns it can erase everything Zitrone holds here, forever.")
                 WarningPoint("Using it consumes it — after a burn you must set a new one.")
