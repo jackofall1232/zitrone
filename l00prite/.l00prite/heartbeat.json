@@ -1,11 +1,11 @@
 {
   "schema_version": 2,
-  "max_iterations": 7,
-  "current_iteration": 7,
+  "max_iterations": 6,
+  "current_iteration": 0,
   "stop_conditions": [
     "definition_of_done_met",
     "blocked",
-    "review_round_cap_reached_7_HARD_CAP_extended_once_by_human_no_self_reset",
+    "review_round_cap_reached_6_HARD_CAP_no_self_reset",
     "merge_confirmation_required",
     "max_iterations_reached"
   ],
@@ -19,8 +19,8 @@
     "before declaring completion"
   ],
   "last_run_time": "2026-07-25",
-  "completion_status": "merged",
-  "should_continue": false,
+  "completion_status": "in_progress",
+  "should_continue": true,
   "pause_reason": null,
   "execution": {
     "enabled": false,
@@ -45,6 +45,6 @@
       "stop_signal"
     ]
   },
-  "active_unit": "0.9.2 Unit W-B \u2014 MERGED (PR #62, d97e584e). Next: W-A merge, the W-A follow-up delta, docs-honesty delta, then the 0.9.2 flip. No version bump authorized.",
-  "loop": "Unit W-B closed and merged at round 7 of 7. Loop complete."
+  "active_unit": "0.9.2 Unit S \u2014 Pucker Burn SETUP/arming (the last DoD item before an honest 0.9.2-beta cut)",
+  "loop": "Unit S opened. WRITER/READER invariant table written FIRST (hard rule) and source-verified. Implementation next, then paired-blind review, then version bump + cut on explicit authorization."
 }
