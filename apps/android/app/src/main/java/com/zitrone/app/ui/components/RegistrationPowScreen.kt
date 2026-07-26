@@ -135,9 +135,11 @@ object RegistrationPowCopy {
     const val KEEP_WAITING = "keep waiting"
     const val TRY_LATER = "try later"
 
-    /** Contract §6.5 marks this one as NOT locked; reworded from the placeholder. */
+    /** Contract §6.5 marks this one as NOT locked; reworded from the placeholder. Claims only
+     * what the contract guarantees — do NOT promise the notification shows a count unless the
+     * foreground service actually renders progress (unbuilt as of 2026-07-26). */
     const val BACKGROUNDED_NOTE =
-        "still working — it's safe to leave. the notification keeps count while you're away."
+        "still working — it's safe to leave. we'll finish in the background."
 
     /** Shown past 1.0. The required work is random; some draws are longer. Not in §3 — raised for sign-off. */
     const val OVERFULL_NOTE = "some lemons are juicier than others"
