@@ -1203,3 +1203,130 @@ has not started.
 **Precondition set before the run, so the result could not be rationalised afterwards:** if the gate
 is red, or the negative test does NOT discriminate, that is a BLOCKING finding to fix BEFORE the loop
 — reviewers must never be handed a known-broken gate.
+
+---
+
+## 2026-07-26 — UNIT W-B REVIEW LOOP, rounds 1–3 — LEDGER WRITTEN LATE (process failure, recorded as one)
+
+**This entry is retroactive, and that is itself the first finding.** Rounds 1, 2 and 3 each closed —
+findings adjudicated, fixes committed, gate executed — with NO ledger entry. The standing rule is now
+that the ledger is written at the END of every round and every fix commit, never batched. A running
+ledger written afterwards is a reconstruction, and this unit has spent three rounds proving what
+reconstructed claims are worth.
+
+**Sourcing discipline for this entry, stated because the entry is late:** every round's findings below
+are quoted from the reviewer reports on disk in `reviews/vault-0.9.x/`, not from session memory. Items
+I could NOT source to a file are marked `[UNSOURCED]` and left as claims rather than dressed as record.
+
+### Round 1 — three HIGHs on a unit believed complete
+Sources: `unit-wb-r1-codex.md`, `unit-wb-r1-grok.md`. Both NOT READY.
+1. **Boot reconciler failures do not raise `durabilityHold`** (Codex HIGH; Grok F1 "`reconcileUnproven`
+   is dead / inverted"). The fold inspected only reconcilers returning TRUE, so it structurally could
+   not see the ambiguous FALSE it existed to resolve.
+2. **A realistic burn leaves app-local diagnostics and cache artifacts** (Codex HIGH; Grok F2
+   "`boot-diagnostics.log` survives every burn (lazy residual oracle)").
+3. **The "byte-for-byte" gate compares neither bytes nor preference/database state** (Codex HIGH;
+   Grok F4 "gate coverage is narrower than SECURITY_MODEL / DoD claims").
+Also Grok F3 (`wipeBiometricMaterial()` does not prove aliases gone), F5 (burn failure not UI-uniform),
+F6 (stale honesty claims), F7 (WB-7 omits `vault.dek.tmp` — still open at round 3).
+
+### Round 2 — three more, two of them INSIDE round 1's own fixes
+Sources: `unit-wb-r2-codex.md`, `unit-wb-r2-grok.md`. Both NOT READY.
+1. **Production burn leaves vault-use PREFERENCES behind.** The round-1 reasoning "a fresh install has
+   that file too" was right about the FILE and wrong about the KEYS inside it (`onboarding_done` plus
+   every device setting) and about three lazily-created prefs FILES a fresh install lacks entirely.
+2. **`BootDiagnostics.clear()` ungated** — swallowed truncation and deletion failures and returned
+   nothing, so the burn lowered the hold over a surviving log.
+3. **The gate is MATERIALLY NON-DISCRIMINATING** — it provisioned via `imageStore.create()`, so it
+   never created the residue it claimed to check, and `cacheDir` was not in the snapshot at all.
+   Codex: "Content hashing fixed REPRESENTATION, not COVERAGE or DISCRIMINATION."
+
+### Round 3 — one convergent HIGH, three Codex-only, one disagreement resolved
+Sources: `unit-wb-r3-codex.md`, `unit-wb-r3-grok.md`. Both NOT READY. All verified against source
+before acceptance.
+- **CONVERGENT — `clearProven()` is not a proven wipe.** Both lenses independently: it left `_entries`
+  and `loaded` untouched while its neighbour `clear()` (four lines below) reset both, so the
+  Diagnostics screen still rendered the pre-burn log AND any later `record()` wrote memory back to
+  disk, resurrecting the log after the burn proved absence. No `dirSync` either.
+- **Codex — `clearCacheDir` has no durability barrier.** cacheDir holds decrypted attachment
+  plaintext: the one place where the residue IS the payload rather than metadata about use.
+- **Codex — gate `@After` ran `if (hasVault())`.** A burn removes the image FIRST and can fail later;
+  teardown then did nothing and the next test snapshotted that residue as "fresh", putting it on both
+  sides of its own comparison.
+- **Codex — the gate's exclusion list falsely claimed notification channels "ARE compared, via prefs".**
+  There is no NotificationManager domain in the snapshot.
+- **DISAGREEMENT RESOLVED — `vaultExists` (focus item H).** Grok: "HOLDS". Codex: "Rejected as
+  stated… Consumers do observe the initial value." Adjudicated: **Codex right on the narrow point**
+  (consumers at `MainActivity.kt:1026` and `1349` read it directly), both agree it is not a routing
+  break. Prose overclaim, DEFERRABLE.
+
+### The gate's RED→GREEN pair — both executions, and what each proved
+- **Run 30178703899 (2bd7af0) — RED.** Two failures, BOTH in assertions the round-2 rebuild had just
+  added: the seeded-artifact precondition and the prefs negative control. Cause: production writes
+  prefs with `apply()` (async), so the snapshot read stale bytes and the prefs domain reported "no
+  difference" over residue that genuinely existed. **What it proved: the gate can fail, and the
+  per-domain control earned its place on its first execution by naming a domain that was not being
+  compared for a reason nobody had proposed.**
+- **Run 30179007260 (62bb0fd) — GREEN**, 4 tests started, 4 finished, BUILD SUCCESSFUL in 5m13s.
+  **What it proved: the burn removes what that scenario produces — and nothing about coverage
+  completeness**, which remains a source-enumeration obligation because the gate structurally cannot
+  see an artifact created and then correctly wiped.
+- **The pair is the evidence, not the green run.** A gate that has only ever been green says nothing
+  about whether it can fail.
+
+### The device-key alias, and the negative test it nearly hollowed out
+The gate's FIRST EXECUTION found the vault device-key Keystore alias surviving every burn — created
+lazily on first `wrapDek`, absent on a device that never made a vault, therefore an on-device oracle.
+The subtle part is recorded in `failures.md` (non-discriminating assertion, occurrence 2): the gate's
+negative test asserted only `fresh != burnedWithResidue`, which **held anyway because of that
+unrelated defect**. Fixing the alias would have left the inequality true on the narrower condition and
+nobody would have noticed the guard had stopped guarding — **the anti-vacuity guard going vacuous as a
+SIDE EFFECT of an unrelated fix.** The test now names its artifact.
+
+## WHAT WORKED — recorded because this is the half that keeps getting skipped
+
+- **The push exception produced a real deniability defect on its first execution.** The scoped
+  exception (entry above) existed solely to get the gate RUN; commit `7478b22` is
+  "fix the deniability defect the gate found on its first run". Structural confirmation is not
+  execution — the third time that distinction paid in this unit.
+- **The freshness check refuted a stale constraint.** The harness had been locked to Robolectric on
+  the premise that CI emulator availability was unconfirmed; re-derived, that premise was
+  "~2 years stale" (`BurnByteForByteGateTest.kt:35`), and Robolectric provides no AndroidKeyStore —
+  so the locked choice would have EXCLUDED exactly the Keystore/EncryptedSharedPreferences half a
+  duress wipe must not leave behind. A documented constraint is a claim with a date on it.
+- **Kimi k3's "stop needing the claim" replaced an unconfirmable ordering argument.** The prefs wipe
+  rested on `commit()` vs queued `apply()` ordering; two reviewers could neither refute nor confirm
+  it, and a third read the platform differently again (generation guard, not FIFO drain). Three
+  readings, no confirmation → process death, a deterministic drain. The general rule: when a
+  correctness claim rests on a platform implementation detail nobody can independently confirm, stop
+  needing the claim rather than win the argument.
+- **Both directions observed on the gate rather than argued** — see the RED→GREEN pair above.
+- **Structural fixes did not regenerate where instance-fixes did.** `[PARTIALLY UNSOURCED —
+  characterisation from this session's commits, not from a reviewer report]` The tri-state
+  `ReconcileResult`, the no-defaults rule on `bootRoute`, folding disk reads into the derivation, and
+  `deleteTreeDurably` returning `Unit`-and-throwing all closed their defect once. The instance-fixes
+  (fix the artifact a reviewer named) came back in rounds 2 and 3.
+
+## WHAT DIDN'T
+
+- **The one-axis enumeration.** The round-2 commit enumerated all six burn cleanups on "is its failure
+  gated?" — correctly and completely — and declared the class closed. Two axes went unnamed:
+  durability (fsync) and in-memory reset. Round 3 returned one blocking defect on each. **A complete
+  enumeration along one axis reads exactly like a closed class.** Rule strengthened in
+  `constraints.md` 2026-07-26: state the axis enumerated, which others were considered, and why each
+  was inapplicable.
+- **Instance-vs-class, six occurrences.** `[COUNT IS MINE — this session's tally; failures.md tracks
+  the related non-discriminating-assertion class at five, which is a different class.]`
+- **Non-discriminating assertions, five occurrences** (`failures.md`), the last two found INSIDE the
+  fix for the class and INSIDE the gate written to enforce it.
+- **Suite numbers uncorroborated by either lens.** 536/533/0/3 is MY number. Round 3: Codex "I could
+  not run it… I report no test numbers and do not adopt the claimed 534/531/0/3" (read-only Gradle
+  wrapper path); Grok got 177 failures from `NoClassDefFoundError: com.sun.jna.Native`, environmental,
+  and explicitly "I do not adopt 534/531/0/3". Grok DID run the pure-JVM W-B suites green, including
+  `VaultUsePrefsWipeTest` (7) and `SettingsFreshInstallResetTest` (3). Partial corroboration only.
+
+**`[UNSOURCED]` — "decision_defect fired twice, both times on an untested premise."** No file under
+`.l00prite/` records a `decision_defect` event; `grep` returns nothing across `ledger.md`,
+`failures.md` and `events/`. I am not writing it up as record from memory. If it is real it belongs in
+`events/` with its two instances named, and that should be reconstructed from whichever session
+raised it — not from me.

@@ -13,6 +13,13 @@ Hard rules, user preferences, security boundaries, and architecture constraints 
 - Fixes to security-sensitive code get an **independent** review before merge (never a
   self-re-read). Hardest surfaces get two blind reviewers.
 - Deliver-then-claim: report real command/exit-code evidence; never claim an unrun/failed check.
+- **THE LEDGER IS WRITTEN AT THE END OF EVERY ROUND AND EVERY FIX COMMIT — never batched at session
+  end.** Binding 2026-07-26, after rounds 1, 2 and 3 of Unit W-B all closed with no ledger entry and
+  had to be reconstructed afterwards from the reviewer reports. A running ledger written retroactively
+  is a reconstruction, and this project has spent an entire unit establishing what reconstructed
+  claims are worth. **A round that closes without a ledger entry is itself a process failure and gets
+  recorded as one.** When a late entry is unavoidable, source every claim to a file on disk and mark
+  anything that cannot be sourced `[UNSOURCED]` rather than letting memory pass as record.
 - **ENUMERATION IS A PRECONDITION OF COMMITTING A CLASS-FIX, not a discipline to remember.** Before
   committing a fix framed as covering a class, list EVERY call site / member of that class in the
   COMMIT MESSAGE and mark each `APPLIED` or `DELIBERATELY SKIPPED` with its reason. Binding as of
