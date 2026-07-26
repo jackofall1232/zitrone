@@ -1415,3 +1415,52 @@ proposal; that is the same opinion with more confidence, not a third one.
 - **Corrections were made IN PLACE WITH THE CORRECTION STATED**, not silently swapped. A quietly
   replaced claim is indistinguishable from a claim that was always right, which destroys the
   information that it was wrong once — and in this unit that information is the asset.
+
+### 2026-07-26 — W-B ROUND 5 — the verifiers were not verifying, and the cap was extended
+
+**Both lenses NOT READY. Eight findings, four blocking, and the pattern is mine: three were VERIFIERS
+that did not check what they claimed, and three were claims of mine that were FALSE AT AUTHORSHIP.**
+
+**Weighted highest — `runBurnPlan` never called `verify()`.** The registry's whole justification was
+"one enumeration, THREE consumers." The burn path — the *primary* consumer — never read the
+postconditions; boot did. The runner called `action()` and stopped. **"Enumeration as comfort" is the
+exact phrase**: the table half-landed while reading as complete, which is the same shape as a gate
+that passes without discriminating. It also would have caught BOTH Keystore verifier defects on its
+own, regardless of the probe bugs, because a false postcondition fails the burn.
+
+The other verifier defects: `noAliasesRemain()` checked `startsWith(PREFIX)` while the wiper also
+deleted `LEGACY_ALIAS` (no trailing underscore), so a surviving pre-0.9.2 alias passed verification
+and boot then treated the step as clean; `keyMaterialExists()` tested USABILITY not EXISTENCE via a
+callee that swallows its own exception, defeating the `getOrDefault(true)` I had labelled fail-closed;
+`wipeBiometricMaterial()` returned "nothing threw" over a deleter that swallows per-alias failures.
+
+**The phase order was wrong for exactly the step I flagged to reviewers as the weakest link.**
+"Non-cryptographic" is a claim about what a step TOUCHES; "innocuous" is a claim about what its
+interruption LOOKS LIKE. Resetting preferences (Tor, I2P, read receipts, TTL, burn-on-read,
+auto-lock) on a surviving vault is a durable user-visible tell that the duress credential was
+entered — the phase ordering introduced the very oracle it exists to prevent. Right instinct to flag
+it, wrong decision to ship it.
+
+**"Pinned by `BootReconcileOwnerTest`" was false**, written in the commit whose subject was fixing a
+false invariant. Zero references to the symbol in that file. **The born-wrong class recursed one
+level** — the corollary was applied to the invariant and not to the claim made while fixing it. Now
+mechanical (`constraints.md`): a claim that a test pins a behaviour is CHECKABLE by grep. Repaired by
+making the claim true — `foldBootMutators` takes the image-absence gate as a lambda so a test can
+observe WHEN it is evaluated.
+
+### CAP EXTENDED TO SEVEN — a non-routine decision, and the boundary is the point
+
+**Authorized by the maintainer with reasoning recorded here because the extension is precedent.**
+The cap exists to detect a unit that is NOT CONVERGING and force a design decision. That is not this
+case: the design decision already happened (the round-4 tie-break produced the
+ordering-plus-boot-completion shape, and it is built). Round 5's blockers are IMPLEMENTATION defects,
+three of them verifier defects specifically — **the checks were not checking**.
+
+Stopping at 6 with the fixes unreviewed would produce the worst available artifact: a structural
+change whose verifiers were just found broken, with the repairs to those verifiers unexamined. Both
+lenses independently called for another pass — corroborated judgment from two blind reviewers, which
+is precisely the input the cap exists to surface.
+
+**BOUNDARY: round 7 is TERMINAL.** If it does not converge it stops and goes to the human regardless
+of state, and the decision then is re-scope or hand over. No further extension. The third lens fires
+at 7 on genuine divergence.

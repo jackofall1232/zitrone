@@ -1,11 +1,11 @@
 {
   "schema_version": 2,
-  "max_iterations": 6,
-  "current_iteration": 5,
+  "max_iterations": 7,
+  "current_iteration": 6,
   "stop_conditions": [
     "definition_of_done_met",
     "blocked",
-    "review_round_cap_reached_6_HARD_CAP_no_self_reset",
+    "review_round_cap_reached_7_HARD_CAP_extended_once_by_human_no_self_reset",
     "merge_confirmation_required",
     "max_iterations_reached"
   ],
@@ -46,5 +46,5 @@
     ]
   },
   "active_unit": "0.9.2 Unit W-B \u2014 Pucker Burn wipe mechanism (feat/0.9.2-unit-wb-burn-wipe)",
-  "loop": "security-review-loop paired-blind; round 5 of 6 DISPATCHED on the round-4 fix delta (09cda91..9bf1f1e). Round-4 BLOCKING closed via ordering + marker-free boot completion (the residue is its own signature); the burn is now an enumerable BurnPlan table and boot gained a FOURTH mutator, so WB-7 was revised (three order-independent over 64 states; the fourth deliberately ordered LAST). Gate GREEN on CI run 30182160142. FINAL round before the hard cap at 6 \u2014 a structural change lands in this delta with only one round of review. Tie-breaker on genuine divergence is Gemini 3.1 Pro (gemini-3.1-pro-preview, --approval-mode plan). Merge + version bump remain human-gated regardless of convergence."
+  "loop": "security-review-loop paired-blind; round 6 of 7 (CAP EXTENDED ONCE BY HUMAN, round 7 TERMINAL, no further extension). Round-5 fixes landed: runBurnPlan now verifies every step (the registry had half-landed - burn path never read the postconditions), both Keystore verifiers corrected, preferences moved to AFTER_IMAGE (the innocuous claim was false for that step), gate notification domain seeded + negative control, and the false test-pin claim made TRUE via foldBootMutators. Third lens = Gemini 3.1 Pro on genuine divergence. Merge + version bump remain human-gated."
 }

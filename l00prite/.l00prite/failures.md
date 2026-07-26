@@ -211,12 +211,12 @@ doc records something as impossible, the cost of re-checking is one derivation a
 a capability the project already paid for and then forgot it had. Do NOT treat the residuals section
 of a design doc as settled just because the defects section has been reviewed.
 
-### THE NON-DISCRIMINATING ASSERTION — satisfied by BOTH the correct and the broken behaviour (5 occurrences)
+### THE NON-DISCRIMINATING ASSERTION — satisfied by BOTH the correct and the broken behaviour (6 occurrences)
 Distinct from a vacuous test (asserts nothing) and from a stand-in test (asserts against a copy of the
 logic). This one asserts something REAL about something REAL — it just cannot tell the two apart, so
 it passes against the very defect it exists to catch.
 
-**Five occurrences in one unit** — and note where the last two were found: inside the FIX for this
+**Six occurrences in one unit** — and note where the last two were found: inside the FIX for this
 class, and inside the gate written to enforce it. Naming a class does not close it.
 1. `assertFalse(store.reconcileOrphanedBurnMarkers())` on a non-durable reconcile. `false` was exactly
    what the BROKEN code returned — the Boolean conflated "did not fire" with "mutated, not durable".
@@ -241,6 +241,14 @@ class, and inside the gate written to enforce it. Naming a class does not close 
    consumes `wipeBiometricMaterial()`'s boolean, for one that ignores it, and for a wipe that is a
    successful no-op. **The test named the defect in its own title and could not discriminate against
    it.** Fixed by planting a real alias with production's prefix and asserting it present first.
+
+6. **The gate's notification domain** (round 5, both lenses) — added to the snapshot, the baseline
+   AND the post-burn comparison, and never SEEDED. `fresh.activeNotifications` and
+   `burned.activeNotifications` were both empty on every run, so the comparison passed and a burn
+   with the cancel step deleted would have passed identically. **Committed inside the fix for the
+   notification finding itself** — the domain was added because a reviewer found active
+   notifications surviving a burn, and the fix for that finding shipped without the seed that would
+   prove it. Scenario-level form of the class, third time.
 
 **THE DETECTION RULE, mechanical: for every assertion, ask what WRONG implementation would also
 satisfy it. If the answer includes the one this test exists to catch, the assertion is too weak.**

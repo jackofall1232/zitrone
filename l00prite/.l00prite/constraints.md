@@ -43,6 +43,16 @@ Hard rules, user preferences, security boundaries, and architecture constraints 
   commit whose message declared class-fixes the default posture. Every one of the five was caught
   mechanically by a reviewer, never by the intent that wrote the rule; an unwritten enumeration is
   therefore evidence of nothing, and the written list is the only artifact that has ever worked.
+- **A CLAIM THAT A TEST PINS A BEHAVIOUR IS CHECKABLE — GREP THE NAMED TEST FOR THE NAMED SYMBOL.**
+  If the symbol is not there, the claim is false. No judgment required, which is the point. Added
+  2026-07-26 after "pinned by `BootReconcileOwnerTest`" was written into the commit whose SUBJECT was
+  fixing a different false claim — that file contains zero references to the symbol, and the ordering
+  test exercised a pure function with a hand-passed flag, so the production ordering could be
+  inverted with every test still green. The born-wrong class recursed one level: the corollary was
+  applied to the invariant and not to the claim made while fixing it. Remembering did not work twice;
+  this one is mechanical. Repair such a claim by making it TRUE (restructure so a test can observe the
+  property), not by softening the wording.
+
 - **AN ENUMERATION MUST NAME ITS AXIS, AND THE AXES IT REJECTED.** Strengthened 2026-07-26, because
   the rule above was followed and STILL missed two blocking defects. The preference-wipe commit
   enumerated all six burn cleanups on the axis *"is its failure gated?"* — correctly, completely —
