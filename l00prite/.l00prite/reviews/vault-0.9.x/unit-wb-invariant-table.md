@@ -103,10 +103,34 @@ re-derive discipline.
 
 ---
 
-## WB-7 — BOOT MUTATOR ORDERING IS IRRELEVANT BY PROOF
+## WB-7 — THREE BOOT MUTATORS ARE ORDER-INDEPENDENT BY PROOF; A FOURTH IS DELIBERATELY ORDERED LAST
 
-Three boot-time durable mutators run inside `runBootReconcile` (the single boot-time mutation owner).
-Their trigger predicates are pairwise exclusive over all 32 enumerated on-disk states, asserted in
-`BurnReconcilerTriggersTest` with a non-vacuity guard that all three fire somewhere. Ordering is
-therefore irrelevant BY PROOF rather than by reasoning; widening any trigger fails the test loudly
-instead of the ordering silently beginning to matter.
+**Revised in round 4, and the revision is the point.** The previous wording — "three mutators,
+ordering irrelevant by proof" — became FALSE the moment round 4 added a fourth. Recorded as a
+revision rather than silently rewritten, because a claim that is quietly corrected is
+indistinguishable from one that was always right.
+
+**The three IMAGE-BEARING mutators** (`completeInterruptedBurn`, `reconcileOrphanedBurnMarkers`,
+`sweepOrphanedResidue`) run inside `runBootReconcile`, the single boot-time mutation owner. Their
+trigger predicates are pairwise exclusive over all **64** enumerated on-disk states (six presence
+bits; `vault.dek.tmp` was added in round 4 after being deferred in rounds 2 and 3), asserted in
+`BurnReconcilerTriggersTest` with a non-vacuity guard that all three fire somewhere. Among these
+three, ordering is irrelevant BY PROOF rather than by reasoning.
+
+**The fourth mutator is `completeInterruptedCleanup`, and it is ORDER-DEPENDENT ON PURPOSE.** It
+finishes a burn interrupted after the image was destroyed, recognising that state from the residue
+itself rather than from any durable marker. Two properties, both load-bearing:
+
+1. **It MUST run LAST**, after all three image-bearing mutators. Its gate is
+   `imageStore.imageBearingProvenAbsent()`, and `sweepOrphanedResidue` is precisely what can turn that
+   from false to true in the same boot (by removing an orphaned DEK or temp). Running it first would
+   read a stale "image still present" and silently skip the cleanup it exists to perform. **This is
+   not exclusivity, it is a dependency**, and it is why the fourth cannot be folded into the
+   pairwise-exclusivity proof.
+2. **It is NOT exclusive with the sweep, and must not be.** Both can fire in one boot — the sweep
+   removing image-bearing residue, this one removing diagnostics/cache/preferences/aliases. They
+   mutate DISJOINT artifacts, so co-firing is correct rather than a conflict. The "at most one fires"
+   property applies to the three, never to all four.
+
+Widening any of the three triggers still fails `BurnReconcilerTriggersTest` loudly. The fourth's
+ordering is pinned separately — a change that moves it earlier must fail a test, not a review.

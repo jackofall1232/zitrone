@@ -185,3 +185,54 @@ class BurnPlanTest {
         assertTrue("boot must not re-run the obliterate", !obliterated)
     }
 }
+
+/**
+ * THE FOURTH BOOT MUTATOR'S ORDERING (0.9.2 W-B round 4, WB-7 revised).
+ *
+ * `completeInterruptedCleanup` must run AFTER the three image-bearing mutators, because its gate
+ * (`imageBearingProvenAbsent()`) is exactly what `sweepOrphanedResidue` can flip from false to true
+ * in the same boot. Run first, it reads a stale "image still present" and skips the cleanup it exists
+ * to perform — silently, which is the worst kind.
+ *
+ * WB-7's "ordering is irrelevant by proof" covers the THREE. This fourth is a dependency on them, and
+ * the distinction is pinned here so that moving the call fails a test rather than a review.
+ */
+class BurnCleanupOrderingTest {
+
+    private fun step(verify: () -> Boolean, action: () -> Unit) = BurnStep(
+        name = "cache",
+        phase = BurnPhase.BEFORE_IMAGE,
+        durability = Durability.KeystoreTransactional,
+        verify = verify,
+        action = action,
+    )
+
+    /**
+     * The sweep has NOT yet removed the orphaned DEK, so the image is not provably absent and the
+     * cleanup correctly does nothing. This is the state that exists BEFORE the sweep runs.
+     *
+     * MUTATION UNIQUELY CAUGHT: hoisting the cleanup above `sweepOrphanedResidue`.
+     */
+    @Test
+    fun `before the sweep runs the cleanup is a no-op because the image is not yet provably absent`() {
+        var cleaned = false
+        val steps = listOf(step(verify = { false }) { cleaned = true })
+
+        val result = completeInterruptedCleanup(steps, imageProvenAbsent = false)
+
+        assertEquals(CleanupCompletion.NOTHING_TO_DO, result)
+        assertTrue("running before the sweep must not mutate anything", !cleaned)
+    }
+
+    /** After the sweep has proven the image absent, the same residue IS now actionable. */
+    @Test
+    fun `after the sweep proves the image absent the same residue is cleaned`() {
+        var cleaned = false
+        val steps = listOf(step(verify = { cleaned }) { cleaned = true })
+
+        val result = completeInterruptedCleanup(steps, imageProvenAbsent = true)
+
+        assertEquals(CleanupCompletion.COMPLETED, result)
+        assertTrue("the cleanup must run once the sweep has made the image provably absent", cleaned)
+    }
+}

@@ -581,6 +581,17 @@ class AppContainer(private val app: Application) {
                 //
                 // Gated on a PROVEN absence, never `File.exists()`: this DELETES, so an indeterminate
                 // stat read as "absent" would run cleanups against a live vault.
+                //
+                // ORDERED LAST, AND THE ORDER IS LOAD-BEARING (WB-7, revised in round 4). This is
+                // the FOURTH boot mutator, and unlike the three above it is NOT part of their
+                // pairwise-exclusivity proof — it is a DEPENDENCY on them. Its gate is
+                // `imageBearingProvenAbsent()`, and `sweepOrphanedResidue` is exactly what can flip
+                // that from false to true in this same boot by removing an orphaned DEK or temp.
+                // Running it before the sweep would read a stale "image still present" and silently
+                // skip the cleanup it exists to perform. It also CO-FIRES with the sweep by design:
+                // they mutate disjoint artifacts (image-bearing residue vs diagnostics / cache /
+                // preferences / aliases), so "at most one fires" applies to the three, never to all
+                // four. Pinned by `BootReconcileOwnerTest`; moving this call must fail a test.
                 val cleanup = completeInterruptedCleanup(
                     steps = burnPlan,
                     imageProvenAbsent = imageStore.imageBearingProvenAbsent(),
