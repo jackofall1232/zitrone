@@ -216,6 +216,17 @@ class BurnByteForByteGateTest {
     fun setUp() {
         ctx = InstrumentationRegistry.getInstrumentation().targetContext
         container = (ctx.applicationContext as ZitroneApp).container
+        // POST_NOTIFICATIONS must be GRANTED or the notification seed silently does not post:
+        // `MessagingNotifications.canPost()` returns false on API 33+ without it and
+        // `showNewMessage` returns early. The gate's own negative control caught this on its first
+        // run — "planting produced NO observable difference" — which is the control working
+        // correctly over a plant that was failing. Granted via UiAutomation rather than a new
+        // GrantPermissionRule dependency; the permission is declared in the manifest.
+        runCatching {
+            InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(
+                "pm grant ${ctx.packageName} android.permission.POST_NOTIFICATIONS",
+            ).close()
+        }
         // Called here rather than as a second @Before: JUnit4 does not guarantee the ORDER of two
         // @Before methods in one class, and this one needs `container` already assigned. An ordering
         // the harness does not guarantee is exactly the kind of assumption this unit keeps being
@@ -392,7 +403,9 @@ class BurnByteForByteGateTest {
         )
         assertTrue(
             "notifications: a posted notification must be visible to the snapshot before the burn, " +
-                "or the post-burn comparison is empty-equals-empty",
+                "or the post-burn comparison is empty-equals-empty. If this fires, check that " +
+                "POST_NOTIFICATIONS was granted — without it showNewMessage() silently no-ops and " +
+                "the seed never lands.",
             provisioned.activeNotifications.isNotEmpty(),
         )
     }
