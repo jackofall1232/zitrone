@@ -81,6 +81,16 @@ Hard rules, user preferences, security boundaries, and architecture constraints 
   linkage. Deleting a ciphertext row is the shred. Do not add a feature that weakens this.
 - **Box roles:** CX23 = production relay only (human deploys there). CX33 = dev/build only.
   Never deploy/restart the prod relay from CX33.
+- **CX33 CANNOT SSH TO CX23 — verified again 2026-07-26** (`root@178.104.19.240` →
+  `Permission denied (publickey,password)`; CX23 is not on the tailnet either). This is a
+  long-standing blocker, not a transient failure. **Any statement that CX33 has temporary or
+  granted SSH access to CX23 is incorrect — no such access exists, and no exception granting it
+  has ever been recorded in this file.** CX23 work (firewall/port changes, Caddyfile reads, relay
+  redeploys, onion-mirror APK swaps, log inspection) currently **requires direct access by
+  HoboJoe**. An agent that needs CX23 stops at a human review gate and says so — it does not
+  probe for a way in. What CX33 *can* do unaided: unauthenticated network reads against the public
+  relay (DNS, TLS handshake/SPKI, `GET /healthz`) — never `/api/v1/register`, which consumes a
+  rate-limit bucket shared by all clearnet users (see todos.md "RELAY (CX23)" P2).
 - **Android signing:** release cert `6c7f92a7…892753`; `keystore.properties` (4 fields, mode
   600). Never commit the keystore or its properties; verify release APKs against this cert.
 - **Fail-closed on auth/absence proofs:** protection reads use proven-absent tristate

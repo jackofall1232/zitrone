@@ -57,3 +57,7 @@ coverage/
 # Reviewer sandboxes: Codex/Grok retry Gradle with a repo-local home when the shared
 # cache is read-only. 1.5GB of jars, never ours to commit.
 .gradle-home/
+
+# Local test builds handed to the maintainer for on-device testing. Signed APKs are large
+# and are distributed via GitHub releases, never committed.
+build-artifacts/

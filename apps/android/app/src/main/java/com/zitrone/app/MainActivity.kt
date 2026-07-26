@@ -50,6 +50,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.lifecycleScope
+import com.zitrone.app.crypto.vault.ArmBurn
 import com.zitrone.app.crypto.vault.BiometricVaultKeyCipher
 import com.zitrone.app.data.Conversation
 import com.zitrone.app.data.LemonDropRedeemer
@@ -62,6 +63,7 @@ import com.zitrone.app.data.parseQrDropLink
 import com.zitrone.app.i2p.I2pIntegration
 import com.zitrone.app.security.RootDetection
 import com.zitrone.app.tor.TorIntegration
+import com.zitrone.app.ui.components.BurnSetupDialog
 import com.zitrone.app.ui.components.buildContactExchangePayload
 import com.zitrone.app.ui.screens.AddContactScreen
 import com.zitrone.app.ui.screens.ChatListScreen
@@ -903,11 +905,12 @@ private fun ZitroneRoot(
     // Passphrase unlock (§2): ALWAYS available. Enforce the RAM backoff BEFORE the off-main
     // attempt, then surface only a uniform generic failure (no per-slot / per-factor branch) —
     // EXCEPT a damaged image, which escalates distinctly (it is not a passphrase guess).
-    // Pucker Burn (slot 0) match handler. The WIPE HAS LANDED (0.9.2 Unit W-B) — the stub text that
-    // stood here described `onBurn` below as an inert no-op while it was already calling burnVault(),
-    // which is the "confident prose outliving the code it describes" failure this unit keeps
-    // producing. What remains true: slot 0 is UNARMED until burn-setup ships, so no real user can
-    // reach this path yet — the credential is not settable. Unreachable-by-credential, not inert.
+    // Pucker Burn (slot 0) match handler. The WIPE landed in 0.9.2 (Unit W-B) and ARMING landed in
+    // 0.9.3 (Unit S), so this path is now LIVE for real users: a burn password is settable from
+    // Settings, and entering it here wipes. The prose that stood here said the opposite — "slot 0 is
+    // UNARMED until burn-setup ships" — which was true when written and false the moment Unit S
+    // merged. That is this unit's signature failure (confident prose outliving the code it describes)
+    // and it is why the claim is stated as of a VERSION, not as a standing fact.
     /**
      * THE DURESS WIPE (0.9.2 Unit W-B) — replaces the inert stub that showed a uniform failure and
      * destroyed nothing.
@@ -1165,6 +1168,53 @@ private fun ZitroneRoot(
     // resealed image survives — do NOT rely on signalStore.wipe()/reseal (which keeps the crypto
     // on disk). hasVault() is then false, so route to Onboarding (fresh-install state), never
     // Splash→Locked.
+    // ── Pucker Burn password setup (0.9.3 Unit S) ───────────────────────────────────────────────
+    // PROCESS-scoped, NOT composition-local (review round 1, both reviewers): the arm outlives a
+    // rotation, and because success is signalled only by the dialog closing, a recreation that reset
+    // remembered flags was INDISTINGUISHABLE from success while the real outcome went to a dead
+    // composition. See AppContainer.burnArm. Still no armed flag anywhere — this is RAM-only attempt
+    // state, never a readback of whether a credential exists.
+    val burnArm by container.burnArm.collectAsState()
+
+    val onConfirmBurnPassword: (String) -> Unit = { candidate ->
+        if (container.tryBeginBurnArm()) {
+            // container.scope, not the composition's: the arming Argon2id sweep outlives a rotation,
+            // and the REPORT must survive with it — which is why the outcome lands in container.burnArm
+            // rather than in remembered state a recreation would discard.
+            container.scope.launch {
+                val outcome = runCatching { container.armBurnCredential(candidate) }
+                // burnArmOutcome, NOT an inline copy of it (review round 2, BOTH reviewers): the
+                // first cut of this fix duplicated the mapping here, so the suite pinned the helper
+                // while the SHIPPED path went untested and a mutation proof passed against code the
+                // app never runs. One mapping, one place, and the tests cover the thing that runs.
+                // Includes NotDurable: the write may not survive a crash, so the user must NOT be
+                // told the credential is set.
+                container.finishBurnArm(burnArmOutcome(outcome))
+            }
+        }
+    }
+
+    if (burnArm != BurnArmUi.Closed) {
+        BurnSetupDialog(
+            onDismiss = { container.closeBurnSetup() },
+            onConfirm = onConfirmBurnPassword,
+            busy = burnArm is BurnArmUi.Arming,
+            error = (burnArm as? BurnArmUi.Rejected)?.let { rejected ->
+                when (rejected.reason) {
+                    // Safe to say plainly: setup runs inside an unlocked session, so this is not a
+                    // lock-screen oracle. Saying nothing would leave the user with a credential that
+                    // wipes on their next ordinary unlock.
+                    BurnArmUi.Reason.CollidesWithVault ->
+                        "That's already one of your vault passwords. Pick a different " +
+                            "one — otherwise unlocking would erase everything instead."
+                    BurnArmUi.Reason.DeletePending ->
+                        "Can't set this right now. Please try again in a moment."
+                    BurnArmUi.Reason.NotDurable -> "Couldn't save that. Please try again."
+                }
+            },
+        )
+    }
+
     val onDeleteAccount: () -> Unit = onDeleteAccount@{
         val live = session ?: return@onDeleteAccount
         container.unlockController.beginTerminalWipe()
@@ -1478,6 +1528,7 @@ private fun ZitroneRoot(
                     onDismissRootWarning = { rootWarningVisible = false },
                     onNavigate = { route = it },
                     onDeleteAccount = onDeleteAccount,
+                    onSetBurnPassword = { container.openBurnSetup() },
                     biometricEnabled = biometricEnabled,
                     biometricAvailable = canAuthenticateStrong,
                     onToggleBiometric = onToggleBiometric,
@@ -1551,6 +1602,7 @@ private fun SessionUi(
     onDismissRootWarning: () -> Unit,
     onNavigate: (Route) -> Unit,
     onDeleteAccount: () -> Unit,
+    onSetBurnPassword: () -> Unit,
     biometricEnabled: Boolean,
     biometricAvailable: Boolean,
     onToggleBiometric: (Boolean) -> Unit,
@@ -1713,6 +1765,7 @@ private fun SessionUi(
                 onToggleBiometric = onToggleBiometric,
                 onBack = { onNavigate(Route.ChatList) },
                 onDeleteAccount = onDeleteAccount,
+                onSetBurnPassword = onSetBurnPassword,
                 onOpenDiagnostics = { onNavigate(Route.Diagnostics) },
             )
         }

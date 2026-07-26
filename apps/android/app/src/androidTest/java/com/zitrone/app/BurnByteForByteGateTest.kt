@@ -9,8 +9,11 @@ import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.zitrone.app.crypto.KeyStoreManager
+import com.zitrone.app.crypto.vault.ArmBurn
 import com.zitrone.app.crypto.vault.BiometricVaultKeyCipher
 import com.zitrone.app.crypto.vault.KeystoreDeviceKeyCipher
+import com.zitrone.app.crypto.vault.PAYLOAD_PLAINTEXT_BYTES
+import com.zitrone.app.crypto.vault.UnlockOrAdd
 import com.zitrone.app.notifications.MessagingNotifications
 import java.io.File
 import java.security.KeyStore
@@ -166,7 +169,11 @@ class BurnByteForByteGateTest {
         val dataDir = ctx.filesDir.parentFile!!
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         return StateSnapshot(
-            files = treeHashes(ctx.filesDir),
+            // Minus the library-managed markers — see LIBRARY_MANAGED_FILES for the one entry and
+            // its reason. Applied to the SNAPSHOT so baseline, provisioned and burned views are all
+            // built by the same rule; filtering only at the comparison would let a domain be judged
+            // by a weaker rule than its neighbours without that being visible.
+            files = treeHashes(ctx.filesDir) - LIBRARY_MANAGED_FILES,
             prefs = treeHashes(File(dataDir, "shared_prefs")),
             // Aliases carry no comparable content; the map shape exists so every domain runs through
             // the SAME diff, and so a domain can never be compared by a weaker rule than its
@@ -212,7 +219,11 @@ class BurnByteForByteGateTest {
      *    tracked as follow-up rather than claimed here — an exclusion stated honestly is worth more
      *    than a coverage claim that is not true;
      *  - MediaStore exports — user-initiated exports leave the app sandbox by design;
-     *  - NAND-level residue — crypto-erase is the guarantee, not physical sanitisation.
+     *  - NAND-level residue — crypto-erase is the guarantee, not physical sanitisation;
+     *  - **androidx ProfileInstaller's `profileInstalled` marker** — library-written, never written
+     *    by this app, and never in the burn's named delete list. Not a vault-use oracle: a launched
+     *    fresh install has it too. Full reasoning at [LIBRARY_MANAGED_FILES], including why it only
+     *    surfaced once a composition change moved the library's async write past the baseline.
      */
     @Before
     fun setUp() {
@@ -618,6 +629,74 @@ class BurnByteForByteGateTest {
     }
 
     /**
+     * **THE 0.9.3 USER PATH, END TO END ON A REAL DEVICE** — arm the credential the way Settings
+     * does, enter it the way the lock screen does, and assert the device is byte-for-byte a fresh
+     * install afterwards.
+     *
+     * Until 0.9.3 the burn was reachable only by calling `burnVault()` directly, because slot 0 held
+     * filler no passphrase could match. Every prior gate run therefore proved the WIPE and nothing
+     * about the TRIGGER. This test is the difference between "the engine works" and "the feature
+     * works", and it is the evidence behind handing a human a device test.
+     *
+     * It runs against the REAL AndroidKeyStore-backed store and the REAL Argon2id — the unit tests
+     * for arming use a fast SHA-256 deriver and a fake device-key cipher, so this is the first
+     * execution of arming under production crypto.
+     */
+    @Test
+    fun the_armed_credential_burns_and_leaves_a_fresh_install() = runBlocking {
+        val fresh = snapshot()
+        provisionThroughProduction()
+
+        // ARM through the container entry point Settings calls — not the store directly.
+        assertEquals(
+            "arming must succeed on a provisioned device",
+            ArmBurn.Armed,
+            container.armBurnCredential(BURN_CREDENTIAL),
+        )
+
+        // ENTER IT the way the lock screen does. This is the step that did not exist before 0.9.3.
+        val outcome = container.imageStore.attemptUnlockOrAdd(
+            BURN_CREDENTIAL,
+            ByteArray(PAYLOAD_PLAINTEXT_BYTES),
+            create = false,
+        )
+        assertTrue(
+            "the armed credential must reach the BURN path through the ordinary passphrase entry — " +
+                "if this fails the feature is unreachable and the wipe below proves nothing",
+            outcome is UnlockOrAdd.Burn,
+        )
+
+        // And the wipe it triggers must still land the device on a fresh install.
+        var terminated = 0
+        container.runTerminalBurn(terminate = { terminated++ })
+        assertEquals("a successful burn must request process death exactly once", 1, terminated)
+
+        val burned = snapshot()
+        assertEquals("files must match a fresh install", fresh.files, burned.files)
+        assertEquals("shared_prefs must match a fresh install", fresh.prefs, burned.prefs)
+        assertEquals("the plaintext cache must match a fresh install", fresh.caches, burned.caches)
+        assertEquals("no Keystore alias may survive", fresh.keystoreAliases, burned.keystoreAliases)
+        assertEquals("no notification may survive", fresh.activeNotifications, burned.activeNotifications)
+    }
+
+    /**
+     * THE COLLISION REFUSAL, under production crypto. A burn credential that also opens a vault slot
+     * must be REFUSED: `tryPassphrase` takes the FIRST match by ascending index and slot 0 is index
+     * 0, so arming it would mean the user's next ordinary unlock WIPES the device instead of opening
+     * that vault. The unit test covers this against a stand-in deriver; this is the real one.
+     */
+    @Test
+    fun arming_refuses_a_credential_that_also_opens_a_vault() = runBlocking {
+        provisionThroughProduction()
+
+        assertEquals(
+            "the vault's own passphrase must never be accepted as the burn credential",
+            ArmBurn.CollidesWithVault,
+            container.armBurnCredential(PASSPHRASE),
+        )
+    }
+
+    /**
      * CANARY — not a proof, and the name says so.
      *
      * Stages the race that round 3 could not settle by argument: a preference write left IN FLIGHT
@@ -691,6 +770,7 @@ class BurnByteForByteGateTest {
 
     private companion object {
         const val PASSPHRASE = "correct horse battery staple"
+        const val BURN_CREDENTIAL = "duress credential for the gate"
         const val VAULT_IMAGE = "vault.bin"
         const val DIAGNOSTICS_LOG = "boot-diagnostics.log"
         const val SETTINGS_PREFS = "zitrone_settings.xml"
@@ -702,6 +782,31 @@ class BurnByteForByteGateTest {
             "zitrone_auth.xml",
             "zitrone_contacts.xml",
         )
+
+        /**
+         * LIBRARY-MANAGED FILES, excluded from the [StateSnapshot.files] comparison. Read the
+         * exclusion-list warning above before adding to this — one entry, one reason, both here.
+         *
+         * `profileInstalled` — androidx **ProfileInstaller**'s marker, written by the library's
+         * `androidx.startup` initializer after launch. **This app never writes it and the burn never
+         * claimed to remove it:** `obliterateLocked` deletes a NAMED list (the wrapped DEK, the
+         * ciphertext image, and their temps), not `filesDir` wholesale, so the marker surviving a
+         * burn was always the specified behaviour.
+         *
+         * **It is not a vault-use oracle**, which is the only bar that matters here. It records that
+         * the app was launched — equally true of a fresh install the moment onboarding is drawn — and
+         * its content is a profile hash carrying no vault state (it differed between two runs of this
+         * very failure: `63704a86…` vs `5c7282c6…`). Armed, unarmed, burned and freshly-installed
+         * devices are indistinguishable by it.
+         *
+         * **Why it only surfaced now, stated plainly because the honest reading matters:** the gate
+         * had been passing only because the marker happened to land in BOTH snapshots. A composition
+         * change shifted the library's async write past the baseline snapshot, so the "fresh"
+         * baseline began recording an empty `filesDir` that no launched install ever has. The
+         * comparison was fragile, not the wipe — this exclusion fixes the gate's model of a fresh
+         * install rather than excusing a residue.
+         */
+        val LIBRARY_MANAGED_FILES = setOf("profileInstalled")
 
         /** Every store [KeyStoreManager] can open — the flush barrier must cover all of them. */
         val ALL_PREFS_STORES = listOf(

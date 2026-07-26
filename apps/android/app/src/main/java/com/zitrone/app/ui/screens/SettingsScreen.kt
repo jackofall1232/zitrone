@@ -75,6 +75,7 @@ fun SettingsScreen(
     onToggleBiometric: (Boolean) -> Unit,
     onBack: () -> Unit,
     onDeleteAccount: () -> Unit,
+    onSetBurnPassword: () -> Unit,
     onOpenDiagnostics: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -259,6 +260,18 @@ fun SettingsScreen(
             },
             subtitleMono = accountId != null,
             onClick = {},
+        )
+        // PERMANENT AND IDENTICAL WHETHER OR NOT A CREDENTIAL IS SET (spec P1). This row must never
+        // gain a checkmark, a "configured" subtitle, or disappear once armed — any of those would be
+        // an on-device oracle proving a duress credential exists, which is the one thing this feature
+        // must not disclose. The subtitle describes what the FEATURE is, never its state, and the app
+        // genuinely cannot query that state (there is no readback, by design).
+        ClickableRow(
+            title = "Pucker Burn password",
+            subtitle = "A separate password that erases everything Zitrone holds on this device " +
+                "when entered at the lock screen.",
+            titleColor = ErrorRed,
+            onClick = onSetBurnPassword,
         )
         ClickableRow(
             title = "Delete account",
