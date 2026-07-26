@@ -123,13 +123,19 @@ class BurnByteForByteGateTest {
      * first run failed on exactly that: the per-domain control for "a KEY inside the store a fresh
      * install also has" planted `onboarding_done` and saw nothing change.
      *
-     * **That failure is the control doing its job, and it is worth being precise about what it did
-     * and did not find.** The defect is in the GATE, not the burn: the burn's own writes use
-     * `commit()`, and a `commit()` is ordered FIFO behind any in-flight `apply()` on the same store,
-     * so the cleared map is what reaches disk last — and each lazy store is cleared-and-committed
-     * before it is unlinked, so a queued write cannot resurrect a file after the burn proved it
-     * absent. What the control caught is a gate that compared a racing disk, which is the kind of
-     * gate that reports green over residue.
+     * **That failure is the control doing its job.** What it caught is a gate comparing a racing
+     * disk — the kind of gate that reports green over residue.
+     *
+     * **A CORRECTION, kept here because the wrong version was committed and reviewed.** This kdoc
+     * used to argue that production was safe because "a `commit()` is ordered FIFO behind any
+     * in-flight `apply()` on the same store". Two independent reviewers could neither refute nor
+     * confirm that; a third read the platform differently again, holding that `commit()` does not
+     * drain `QueuedWork` at all and that what actually discards a late write is
+     * `SharedPreferencesImpl`'s disk-GENERATION guard. Three readings, no confirmation — so the
+     * honest status of the original claim is "unproven", not "true". **Production no longer depends
+     * on any of it:** a successful burn now ends in process death, and the queue dies with the
+     * process (see `AppContainer.burnVault`). The barrier below remains necessary for the GATE
+     * alone, which must read settled bytes in a process it deliberately keeps alive.
      *
      * An empty `commit()` is the barrier: it awaits its own write, and any earlier `apply()` to that
      * store is queued ahead of it. Only stores whose file ALREADY exists are opened — opening one
@@ -171,7 +177,18 @@ class BurnByteForByteGateTest {
      * `SECURITY_MODEL.md` as limitations rather than silently dropped:
      *  - package install/update time — recorded by the package manager, not the app;
      *  - UsageStats / battery attribution — system-journaled;
-     *  - notification HISTORY — system-journaled (channels the app created ARE compared, via prefs);
+     *  - notification HISTORY — system-journaled;
+     *  - **NOTIFICATION CHANNEL STATE — genuinely NOT compared, and the previous wording here was
+     *    FALSE.** It claimed channels the app created "ARE compared, via prefs". They are not:
+     *    channels live in `NotificationManager`, and [snapshot] covers files, `shared_prefs`,
+     *    Keystore aliases, databases and `cacheDir` — no channel domain exists. Round 3 caught the
+     *    claim, which is this unit's signature defect (confident prose the code never supported)
+     *    appearing in the exclusion list of the test that exists to prevent it. What is TRUE:
+     *    `MessagingNotifications.ensureChannel` runs in `Application.onCreate` on EVERY launch
+     *    including a fresh install, so a channel's EXISTENCE is not a vault-use oracle. What remains
+     *    uncovered: a user's own modifications to importance/sound/vibration survive a burn. Reset is
+     *    tracked as follow-up rather than claimed here — an exclusion stated honestly is worth more
+     *    than a coverage claim that is not true;
      *  - MediaStore exports — user-initiated exports leave the app sandbox by design;
      *  - NAND-level residue — crypto-erase is the guarantee, not physical sanitisation.
      */
@@ -179,6 +196,11 @@ class BurnByteForByteGateTest {
     fun setUp() {
         ctx = InstrumentationRegistry.getInstrumentation().targetContext
         container = (ctx.applicationContext as ZitroneApp).container
+        // Called here rather than as a second @Before: JUnit4 does not guarantee the ORDER of two
+        // @Before methods in one class, and this one needs `container` already assigned. An ordering
+        // the harness does not guarantee is exactly the kind of assumption this unit keeps being
+        // wrong about.
+        assertFreshBaseline()
     }
 
     /**
@@ -196,7 +218,46 @@ class BurnByteForByteGateTest {
     @After
     fun tearDown() {
         runCatching { container.unlockController.lock() }
-        if (container.hasVault()) runCatching { container.burnVault() }
+        // UNCONDITIONAL, and that is the round-3 fix. This used to read
+        // `if (container.hasVault()) …`, which is precisely wrong: the burn removes the IMAGE FIRST
+        // and can then fail while clearing biometrics, diagnostics, caches or preferences. In that
+        // state `hasVault()` is false, so teardown did nothing and left exactly the later-stage
+        // residue — which the next test then snapshotted as "fresh", putting the residue on BOTH
+        // sides of its comparison and making the load-bearing gate pass for the wrong reason.
+        // The burn is idempotent, so running it over an already-clean device is free.
+        runCatching { container.burnVault(terminate = {}) }
+    }
+
+    /**
+     * THE BASELINE IS ASSERTED, NOT ASSUMED — and it is derived from the SAME snapshotter the gate
+     * compares with, never a parallel checklist.
+     *
+     * Each test takes its own "fresh" reading at its start, so a test that leaks residue does not
+     * fail itself: it corrupts whichever test runs next. A hand-maintained list of things to check
+     * would drift from the snapshot surface within a quarter — that is a guarantee, not a risk — so
+     * this walks [snapshot]'s own domains. One snapshotter, two consumers: the fresh-vs-burned
+     * equivalence comparison, and this. Add a domain to the snapshot and it is covered here on the
+     * next compile.
+     *
+     * Failing HERE rather than in the comparison is the point: a corrupted baseline is a harness
+     * fault, and reporting it as a burn defect would send the next reader hunting in the wrong place.
+     */
+    private fun assertFreshBaseline() {
+        val s = snapshot()
+        assertFalse("baseline: a vault image survived a previous test", container.hasVault())
+        assertFalse("baseline: a durability hold survived a previous test", container.durabilityHold.value)
+        LAZY_PREFS.forEach {
+            assertFalse("baseline: lazily-created prefs store $it survived a previous test", s.prefs.containsKey(it))
+        }
+        assertTrue("baseline: the plaintext cache is not empty", s.caches.isEmpty())
+        assertFalse("baseline: a diagnostics log survived a previous test", s.files.containsKey(DIAGNOSTICS_LOG))
+        assertTrue(
+            "baseline: a vault-related Keystore alias survived a previous test",
+            s.keystoreAliases.keys.none {
+                it.startsWith(BiometricVaultKeyCipher.PREFIX) || it == KeystoreDeviceKeyCipher.DEFAULT_ALIAS
+            },
+        )
+        assertTrue("baseline: databases must be empty", s.databases.isEmpty())
     }
 
     /** Plant a REAL alias carrying production's biometric prefix — residue of exactly the reaped class. */
@@ -311,11 +372,18 @@ class BurnByteForByteGateTest {
         // Through production's own terminal exclusion, as MainActivity's `onBurn` does — a live
         // session must not be writing while the image is obliterated underneath it.
         container.unlockController.beginTerminalWipe()
+        var terminated = 0
         try {
-            container.burnVault()
+            container.burnVault(terminate = { terminated++ })
         } finally {
             container.unlockController.endTerminalWipe()
         }
+        // PRODUCTION KILLS THE PROCESS HERE. The gate records the request instead — a test that
+        // killed its own process could assert nothing about the state the burn left behind, which is
+        // the whole point of this test. Stated as a LIMIT, not glossed: what follows verifies the
+        // state at the moment of termination, and NOT that the process actually dies or that nothing
+        // rewrites state afterwards. A next-launch assertion is tracked as follow-up.
+        assertEquals("a successful burn must request process death exactly once", 1, terminated)
 
         val burned = snapshot()
         assertEquals("files must match a fresh install", fresh.files, burned.files)
@@ -340,7 +408,7 @@ class BurnByteForByteGateTest {
         val freshDecision = container.deriveBootDecisionFromDisk()
 
         provisionThroughProduction()
-        container.burnVault()
+        container.burnVault(terminate = {})
 
         assertEquals(
             "a completed burn must leave NO durability doubt — a raised hold is not a fresh install",
@@ -377,7 +445,7 @@ class BurnByteForByteGateTest {
                 .aliases().toList().any { it.startsWith(BiometricVaultKeyCipher.PREFIX) },
         )
 
-        container.burnVault()
+        container.burnVault(terminate = {})
 
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         assertTrue(
@@ -463,6 +531,51 @@ class BurnByteForByteGateTest {
             plant = { File(ctx.cacheDir, "gate-negative-cache.bin").writeText("residue") },
             cleanup = { File(ctx.cacheDir, "gate-negative-cache.bin").delete() },
         )
+    }
+
+    /**
+     * CANARY — not a proof, and the name says so.
+     *
+     * Stages the race that round 3 could not settle by argument: a preference write left IN FLIGHT
+     * when the burn runs. The question was whether it can land AFTER the burn unlinked the store and
+     * proved it gone, which would make post-burn state distinguishable from a fresh install.
+     *
+     * **What this test is NOT.** A bounded observation can only ever prove the PRESENCE of the bug,
+     * never its absence — a scheduler that delayed the queued write past the window would pass this
+     * and still be a defect. It is a tripwire that fires loudly if platform behaviour regresses (an
+     * OEM build, an API bump), not the reason the production path is safe.
+     *
+     * **Why the production path is safe is elsewhere:** a real burn ends in process death, and the
+     * `QueuedWork` queue dies with the process. This test deliberately passes a no-op `terminate` so
+     * it can observe the window at all, which means it exercises the strictly WEAKER in-process
+     * arrangement. Reading it as evidence about production would be reading it backwards.
+     *
+     * Tracked follow-up: a next-launch assertion (burn, relaunch, assert at boot) would test the
+     * contract actually shipped. That needs multi-process orchestration this harness does not have.
+     */
+    @Test
+    fun canary_a_queued_preference_write_does_not_resurrect_a_proven_absent_store() {
+        val target = File(ctx.filesDir.parentFile!!, "shared_prefs/zitrone_auth.xml")
+        provisionThroughProduction()
+        assertTrue("precondition: the store must exist, or there is nothing to resurrect", target.exists())
+
+        // Left deliberately in flight — the same shape as wipeLegacyPrefs()'s own writes.
+        container.keyStoreManager.prefs(KeyStoreManager.PREFS_AUTH)
+            .edit().putString("in_flight_at_burn", "queued before the wipe").apply()
+
+        container.burnVault(terminate = {})
+        assertFalse("the burn must prove the store absent", target.exists())
+
+        val deadline = System.nanoTime() + 2_000_000_000L
+        while (System.nanoTime() < deadline) {
+            assertFalse(
+                "a write queued BEFORE the burn recreated a store the burn had proved absent — " +
+                    "post-burn state is distinguishable from a fresh install, and the proof of " +
+                    "absence was only momentarily true",
+                target.exists(),
+            )
+            Thread.sleep(25)
+        }
     }
 
     private fun assertDiscriminates(

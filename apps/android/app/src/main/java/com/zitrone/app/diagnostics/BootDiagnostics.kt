@@ -88,31 +88,64 @@ class BootDiagnostics(context: Context) {
         }
     }
 
-    /** Wipe the log — a user action from the Diagnostics screen (call off-main). */
     /**
-     * Clear the diagnostics log and PROVE it (0.9.2 W-B round-2 review, BLOCKING).
+     * ERASE THE LOG COMPLETELY — memory, disk, and the durability of the unlink. ONE function
+     * (0.9.2 W-B round-3 review, BLOCKING, both lenses).
      *
-     * The previous `clear()` swallowed both truncation and deletion failures and returned nothing, so
-     * `burnVault()` lowered the durability hold even when `boot-diagnostics.log` survived — a burn
-     * reporting success over an artifact a never-used device does not have. Returns true ONLY on a
-     * PROVEN absence; present or indeterminate both fail closed.
+     * **Why there is no longer a second, weaker cleanup.** This class used to carry `clear()` (the
+     * Diagnostics-screen action) and `clearProven()` (the one the BURN consumes) four lines apart,
+     * and the burn's one was the weaker: it deleted the file and stat'd it, and did NOT reset
+     * `_entries`/`loaded` the way its neighbour did. Two cleanup functions of divergent strength in
+     * one class is not a factoring, it is a defect generator — this unit has the empirical proof. The
+     * differing CALLER needs (a UI action must not throw; the burn must fail closed) are a wrapper
+     * concern, not a semantics concern, so there is one body and [clear] is a thin wrapper over it.
+     *
+     * **MEMORY IS CLEARED FIRST, AND THE ORDER IS THE FIX.** [record] writes MEMORY to disk, so a
+     * `record()` interleaved between "delete the file" and "reset the buffer" rewrites the pre-burn
+     * buffer straight back to disk — resurrecting the log after the burn proved absence and lowered
+     * the durability hold. Clearing memory first, under the SAME lock `record()` takes, makes a
+     * racing `record()` harmless by construction: it can only append to an empty list, so it writes
+     * post-burn data, and a fresh install writes boot diagnostics on its first boot too — that line
+     * is not a distinguisher. Reset before proof, always.
+     *
+     * Truncate-before-delete is kept for the UI path only, where a failed delete then leaves an EMPTY
+     * file rather than stale content. On the burn path it is irrelevant (a failed delete throws and
+     * the hold stays raised), but one shared body serves both and the extra write is one syscall.
+     * **It is NOT a remanence claim:** on flash, overwriting a path does not erase the old blocks.
+     *
+     * @return true only if the file is PROVEN absent AND that absence is durable ([Files.notExists]
+     *   plus an fsync of the containing directory — an unlink that is not journal-durable can come
+     *   back on a replay, which is the same doubt the vault image's own `dirSync` settles).
      */
-    fun clearProven(): Boolean = synchronized(lock) {
-        runCatching { file.delete() }
-        java.nio.file.Files.notExists(file.toPath())
+    fun erase(): Boolean = synchronized(lock) {
+        // 1. MEMORY FIRST — see above. This is the resurrection kill.
+        _entries.value = emptyList()
+        loaded = true
+        // 2. Truncate (UI path only; harmless here).
+        runCatching { file.writeText("") }
+        // 3. Delete, then make the DIRECTORY ENTRY durable. Not `runCatching { delete() }`: on the
+        //    fail-closed path a throw is INFORMATION, so deleteIfExists's exception fails the erase
+        //    rather than being swallowed into an absence check that cannot tell "removed it" from
+        //    "never existed" from "delete failed but it vanished anyway".
+        val durable = runCatching {
+            java.nio.file.Files.deleteIfExists(file.toPath())
+            java.nio.channels.FileChannel.open(
+                file.parentFile!!.toPath(),
+                java.nio.file.StandardOpenOption.READ,
+            ).use { it.force(true) }
+            true
+        }.getOrDefault(false)
+        // 4. PROVE.
+        durable && java.nio.file.Files.notExists(file.toPath())
     }
 
+    /**
+     * Wipe the log — the user action from the Diagnostics screen (call off-main). Fail-OPEN by
+     * design: a diagnostics IO error must not crash a settings screen. The burn calls [erase]
+     * directly and consumes its result.
+     */
     fun clear() {
-        synchronized(lock) {
-            // Truncate FIRST so a delete that fails or throws can't leave stale
-            // entries to reappear on the next process start (an emptied file
-            // reads back as no entries); then best-effort remove the file.
-            runCatching { file.writeText("") }
-            runCatching { file.delete() }
-            _entries.value = emptyList()
-            // Memory is now the authoritative (empty) state; don't re-read disk.
-            loaded = true
-        }
+        if (!erase()) android.util.Log.w("ZitroneBoot", "diagnostics erase did not prove absence")
     }
 
     private fun readFile(): List<String> = runCatching {

@@ -376,8 +376,42 @@ class AppContainer(private val app: Application) {
      *
      * Rethrows whatever [VaultImageStore.burnObliterate] throws: the caller decides presentation, but
      * the hold it leaves behind is what makes a failed burn safe regardless of what the caller does.
+     *
+     * ─── A SUCCESSFUL BURN ENDS BY KILLING THE PROCESS (0.9.2 W-B round 3, authorized) ───────────
+     *
+     * **The reason is not tidiness; it is that no in-process wipe can be durable against a live
+     * writer.** While this process runs, `SharedPreferencesImpl` singletons, `StateFlow`s and any
+     * lazily-initialised component can rewrite state AFTER the burn proved it absent. Round 3 found
+     * exactly that defect in memory form (the diagnostics buffer rewriting a deleted log), and the
+     * preference wipe's safety rested on an ORDERING ARGUMENT about `commit()` versus queued
+     * `apply()` writes — an argument two independent reviewers could neither refute nor confirm,
+     * and which a third lens read as resting on a DIFFERENT platform mechanism again.
+     *
+     * When a correctness claim rests on a platform implementation detail that cannot be
+     * independently confirmed, the answer is to stop needing the claim rather than to win the
+     * argument. Process death is the only deterministic drain of `QueuedWork`: the queue dies with
+     * the process. No hidden API, no reflection, no OEM-fork exposure, no ordering claim. It also
+     * closes a race no assertion could ever catch — a component that touches a store AFTER the gate
+     * asserted absence, recreating a prefs file a fresh install has not written yet.
+     *
+     * Safe at every interruption point because it composes with the hold; see [runBurnWipe] property 4.
+     *
+     * **BEHAVIOUR CHANGE, documented rather than discovered:** the app CLOSES on a successful burn
+     * instead of returning to an onboarding screen. Stated in `SECURITY_MODEL.md` and the changelog.
+     * The guarantee this feature makes — post-burn state is indistinguishable from a fresh install —
+     * is a property of state evaluated at the NEXT LAUNCH, and that is unchanged: reopening presents
+     * onboarding exactly as before. What changed is the in-the-moment presentation, and it is a real
+     * tradeoff in both directions: a closed app is arguably more duress-shaped than an animation,
+     * but it is also a visible event a coerced user cannot explain as a mistyped passphrase, whereas
+     * the failure path (WB-1) still silently shows the uniform error. Reviewers should weigh that.
      */
-    fun burnVault() = runBurnWipe(
+    /**
+     * @param terminate what a SUCCESSFUL burn does last. Production passes process death; the
+     *   byte-for-byte gate passes a recorder, because a test that killed its own process could
+     *   assert nothing about the state the burn left behind. NO DEFAULT — a call site that does not
+     *   name its terminal behaviour must not compile.
+     */
+    fun burnVault(terminate: () -> Unit) = runBurnWipe(
         raiseHold = { raiseDurabilityHold() },
         obliterate = {
             imageStore.burnObliterate()
@@ -407,8 +441,12 @@ class AppContainer(private val app: Application) {
             // them would CREATE a difference rather than erase one.
             // PROVEN, not best-effort (round-2 review, BLOCKING): `clear()` swallowed its own
             // failures and returned nothing, so the hold was lowered over a surviving log.
-            if (!bootDiagnostics.clearProven()) throw VaultImageException.DestroyFailed()
-            if (!runCatching { clearCacheDir(app.cacheDir) }.getOrDefault(false)) {
+            // MEMORY as well as disk, and the unlink made durable — see [BootDiagnostics.erase].
+            // Round 2 gated this call and round 3 found the callee incomplete: gating a cleanup whose
+            // own proof is partial buys nothing.
+            if (!bootDiagnostics.erase()) throw VaultImageException.DestroyFailed()
+            // Throws on any survivor, unreadable directory, or non-durable unlink. No Boolean.
+            if (!runCatching { deleteTreeDurably(app.cacheDir); true }.getOrDefault(false)) {
                 throw VaultImageException.DestroyFailed()
             }
             //   - PREFERENCES: the round-2 HIGH, both lenses. The reasoning above was right that a
@@ -425,6 +463,7 @@ class AppContainer(private val app: Application) {
             }
         },
         lowerHold = { durabilityHold.value = false },
+        terminate = terminate,
     )
 
     private val bootReconcileStarted = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -1595,15 +1634,31 @@ internal class BurnCompletionCoordinator {
  *
  * This closes the round-6 HIGH structurally: the durability hold gains a third producer rather than a
  * second field. See [AppContainer.durabilityHold].
+ *
+ *  4. **[terminate] runs LAST, and ONLY on the success path** (0.9.2 W-B round-3, authorized
+ *     architecture change). A successful burn ends by KILLING THE PROCESS. See [AppContainer.burnVault]
+ *     for why; the ordering is the safety argument, so it lives here:
+ *       - killed BEFORE [lowerHold] (a crash mid-wipe) → no hold survives in RAM, but the disk
+ *         reconcilers re-derive the doubt at next boot → lock screen. Fail-closed.
+ *       - killed AFTER [lowerHold] → the wipe proved itself → next boot presents onboarding.
+ *     There is no interruption point at which process death produces a fresh-install presentation
+ *     over an unproven wipe, which is the property that makes killing the process safe rather than
+ *     merely convenient.
+ *
+ * No parameter carries a default: omitting one must be a COMPILE ERROR, not a silently weaker call.
+ * [terminate] is injected rather than calling `Process.killProcess` inline so the wiring is testable —
+ * a test that actually killed its own process could assert nothing.
  */
 internal fun runBurnWipe(
     raiseHold: () -> Unit,
     obliterate: () -> Unit,
     lowerHold: () -> Unit,
+    terminate: () -> Unit,
 ) {
     raiseHold()
     obliterate()
     lowerHold()
+    terminate()
 }
 
 /**
@@ -1694,12 +1749,65 @@ internal fun bootRoute(
  * and `listFiles()` returning null on an I/O or permission fault is exactly when plaintext is most
  * likely still present — a directory we cannot read is a directory we cannot claim to have emptied.
  */
-internal fun clearCacheDir(cacheDir: java.io.File?): Boolean {
-    if (cacheDir == null) return true
-    if (java.nio.file.Files.notExists(cacheDir.toPath())) return true
-    val entries = cacheDir.listFiles() ?: return false
-    entries.forEach { runCatching { it.deleteRecursively() } }
-    // Re-list to PROVE the clear rather than trusting deleteRecursively's bool (false on I/O error).
-    val remaining = cacheDir.listFiles() ?: return false
-    return remaining.isEmpty()
+internal fun clearCacheDir(cacheDir: java.io.File?): Boolean =
+    runCatching { deleteTreeDurably(cacheDir); true }.getOrDefault(false)
+
+/**
+ * Empty a directory tree and make every unlink DURABLE (0.9.2 W-B round-3 review, BLOCKING).
+ *
+ * **RETURNS `Unit` AND THROWS — deliberately, and this is the point of the shape.** The previous
+ * version returned a Boolean that meant "the directory currently lists empty", which is a statement
+ * about the namespace RIGHT NOW and not about durability: a crash could replay the journal and
+ * restore the files. The obvious repair was a tri-state (`ProvenDurable | NotDurable | Failed`), and
+ * it was rejected on advice: at the burn boundary `NotDurable` and `Failed` do the same thing
+ * (throw, hold stays raised), so the middle value has no legitimate consumer — it is a trap with a
+ * name, and the predictable accident is a future call site writing `if (outcome != Failed)` and
+ * shipping this defect again with type safety making it look checked. **There is no overload that
+ * skips the fsync and no Boolean to misread.** Make the wrong thing impossible, not discouraged.
+ *
+ * **WHY THIS MATTERS MORE HERE THAN ANYWHERE ELSE IN THE BURN.** `cacheDir` holds DECRYPTED
+ * attachment plaintext and QR artifacts. Everywhere else in this wipe the residue is metadata that
+ * a vault EXISTED; here the residue IS vault content. The "the OS may evict caches anyway" argument
+ * is a category error: eviction is the OS's prerogative BEFORE the burn, and after it a
+ * replay-restored plaintext file is the payload itself. This is not a place to narrow the claim.
+ *
+ * **FSYNC IS PER-DIRECTORY AND POST-ORDER.** An unlink of `cache/a/b` is recorded in `a`'s metadata;
+ * the removal of `a` is recorded in `cacheDir`. Fsyncing only `cacheDir` would make "a is gone"
+ * durable while saying nothing about "b was gone from a". A directory that is itself being deleted
+ * needs no fsync of its own — once its parent's rmdir is durable there is no `a` left to contain a
+ * replayed `b` — so each directory is fsynced exactly once, after its children are gone. It is
+ * O(directories), not O(files): a handful of syscalls.
+ *
+ * There is a tempting shortcut — on ext4 with ordered journaling, fsyncing the last-touched
+ * directory commits the preceding transactions, so one fsync "works". It does, on ext4, today. f2fs
+ * has its own checkpoint and roll-forward semantics. That is the same species of claim as the
+ * SharedPreferences ordering argument this unit already had to abandon: correct on current AOSP,
+ * resting on platform internals, one filesystem migration away from being a silent lie. Pay the
+ * syscalls.
+ *
+ * FAIL-CLOSED: an unreadable directory (`listFiles()` null on an I/O or permission fault) is exactly
+ * when plaintext is most likely still there, so it throws rather than reporting an empty tree.
+ *
+ * @throws java.io.IOException if any entry survives, any directory cannot be read, or any fsync fails.
+ */
+internal fun deleteTreeDurably(dir: java.io.File?) {
+    if (dir == null) return
+    if (java.nio.file.Files.notExists(dir.toPath())) return
+    // POST-ORDER: empty the children (recursing into subdirectories first), then remove them, then
+    // fsync THIS directory once — at which point every removal it records is durable.
+    val entries = dir.listFiles()
+        ?: throw java.io.IOException("cannot list ${dir.name} — a directory we cannot read is one we cannot claim to have emptied")
+    entries.forEach { entry ->
+        if (entry.isDirectory) deleteTreeDurably(entry)
+        if (!entry.delete() && java.nio.file.Files.exists(entry.toPath())) {
+            throw java.io.IOException("could not remove ${entry.name}")
+        }
+    }
+    if (defaultFsyncDir(dir) != DirSyncResult.DURABLE) {
+        throw java.io.IOException("unlinks in ${dir.name} are not durable")
+    }
+    // PROVE, rather than trusting delete()'s boolean.
+    val remaining = dir.listFiles()
+        ?: throw java.io.IOException("cannot re-list ${dir.name} to prove it empty")
+    if (remaining.isNotEmpty()) throw java.io.IOException("${remaining.size} entries survived in ${dir.name}")
 }

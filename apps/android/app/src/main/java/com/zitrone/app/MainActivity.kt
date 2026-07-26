@@ -940,7 +940,13 @@ private fun ZitroneRoot(
         // started it may not be the one alive when it finishes.
         container.scope.launch {
             val wiped = withContext(NonCancellable + Dispatchers.IO) {
-                runCatching { container.burnVault() }.isSuccess
+                // A SUCCESSFUL burn does not return: `terminate` kills the process as its last act,
+                // so nothing below this line runs on the success path (see AppContainer.burnVault for
+                // why an in-process wipe cannot be durable against a live writer). The FAILURE path
+                // returns normally and must still present WB-1's uniform error — killing the process
+                // there would both lose the durability hold's RAM state and make a failed burn
+                // visibly different from a wrong passphrase.
+                runCatching { container.burnVault(terminate = ::killThisProcess) }.isSuccess
             }
             container.unlockController.endTerminalWipe()
             container.burnCompletion.signal(
@@ -1784,3 +1790,16 @@ private fun SessionUi(
         Route.Splash, Route.Onboarding, Route.Locked, Route.DeleteIncomplete -> Unit
     }
 }
+
+/**
+ * End this process — the last act of a SUCCESSFUL duress burn (0.9.2 Unit W-B).
+ *
+ * `killProcess(myPid())` and NOT `exitProcess`/`finishAffinity`: this must not run shutdown hooks or
+ * give any component a chance to flush state back to disk, which is the entire reason the burn ends
+ * here (see `AppContainer.burnVault`). It is an immediate SIGKILL of our own process, so every queued
+ * `SharedPreferences` write dies with it rather than landing after the burn proved absence.
+ *
+ * Extracted as a named top-level function so the burn's call site reads as a decision rather than an
+ * incantation, and so the ONE place that terminates the app is greppable.
+ */
+internal fun killThisProcess(): Unit = android.os.Process.killProcess(android.os.Process.myPid())

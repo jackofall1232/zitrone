@@ -337,3 +337,56 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       route to ONBOARDING"), so migrating this call site — and `hasVault()`'s other consumers — is
       MECHANICAL rather than a second act of judgment. Do it next, as its own scoped unit with its
       own round; do NOT fold it into a release cut.
+
+- [ ] **UNIT: BURNPLAN REGISTRY — make the burn's cleanup axes STRUCTURAL** (opened 2026-07-26,
+      from Kimi k3's advisory in round 3; explicitly NOT folded into W-B, and the reason matters:
+      restructuring the burn's cleanup path mid-loop would have made the delta under review a
+      REFACTOR instead of four verified fixes, and round 4 would have reviewed the wrong thing.
+      Same call as the `onRetryDestroy` scoping decision.)
+
+      **Problem it solves.** Three rounds of this unit produced the same failure in three costumes:
+      a cleanup that was gated but not durable, durable but not memory-clearing, enumerated on one
+      axis while another went unexamined. Enumerating harder has now failed twice — the round-2
+      commit enumerated all six cleanups correctly on the gating axis and still shipped two blocking
+      defects on axes it never named. You will never enumerate all axes; make the axes checkable
+      consequences instead of remembered properties.
+
+      **Shape to preserve (Kimi's, adjudicated sound):**
+      - A CLOSED SET OF PRIMITIVES that own delete+prove+fsync in one body. `deleteTreeDurably`
+        (landed in W-B) is the first: it returns `Unit` and throws, so "deleted but didn't fsync" is
+        unrepresentable rather than discouraged. NO tri-state result type — `NotDurable` has no
+        legitimate consumer at the burn boundary (it throws, same as `Failed`), so it is a trap with
+        a name: the predictable accident is `if (outcome != Failed)` shipping the defect again with
+        type safety making it look checked.
+      - `BurnPlan.steps: List<BurnStep>` as DATA, each step carrying a DECLARED durability mechanism
+        (`FsyncedDir(dir)` / `KeystoreTransactional` / `PrefsStore(name)`) and a `verify()`
+        postcondition. Per-mechanism names, NOT a generic `NotApplicable` — a step touching a file
+        cannot plausibly select `KeystoreTransactional`, whereas everything can select "n/a".
+      - ONE enumeration, THREE consumers: the burn executes the steps, the gate asserts every step
+        declares a mechanism (and asserts the step COUNT, so a cleanup added outside the registry
+        fails CI), and the gate's fresh-baseline assertion iterates the same `verify()` lambdas
+        instead of maintaining a parallel checklist that goes stale.
+      - Honest limit to write into the kdoc rather than overclaim: Kotlin cannot stop a call site
+        inside the burn from calling `file.delete()` directly. That is a LINT boundary, not a type
+        boundary — close it with an arch rule (a ~15-line source-tree test failing if
+        `deleteRecursively|Files.delete|SharedPreferences.edit` appears outside `wipe/` and the gate).
+      - The payoff to state in the spec: when the NEXT axis appears, add a field to `BurnStep` and
+        every existing step fails to compile until it is addressed.
+
+      Needs its own spec, its own invariant table, and its own paired-blind round. Do NOT fold into
+      a release cut.
+
+- [ ] **Notification channel state is NOT reset by the burn** (round 3, Codex; claim corrected in
+      W-B). `ensureChannel` runs in `Application.onCreate` on every launch including a fresh install,
+      so a channel's EXISTENCE is not a vault-use oracle — but a user's own importance/sound/vibration
+      changes survive a burn and differ from fresh. The FALSE gate claim ("channels ARE compared, via
+      prefs") is already fixed; the reset itself is deferred. If taken: delete+recreate channels in
+      the burn and add a `NotificationManager` domain to the snapshot. Note the one exclusion that
+      must remain and be documented — an app-level notification block (`areNotificationsEnabled()`
+      false) cannot be programmatically undone by any API.
+
+- [ ] **Gate follow-up: assert post-burn state at NEXT LAUNCH, not in-process** (round 3). Now that a
+      successful burn ends in process death, the gate's `terminate = {}` seam exercises a strictly
+      WEAKER in-process arrangement than production ships. A burn → relaunch → assert-at-boot test
+      would cover the contract actually shipped. Needs multi-process orchestration the current
+      harness lacks.

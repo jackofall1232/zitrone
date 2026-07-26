@@ -112,8 +112,55 @@ class BurnDurabilityHoldTest {
             raiseHold = { order += "raise" },
             obliterate = { order += "obliterate" },
             lowerHold = { order += "lower" },
+            terminate = { order += "terminate" },
         )
-        assertEquals(listOf("raise", "obliterate", "lower"), order)
+        assertEquals(listOf("raise", "obliterate", "lower", "terminate"), order)
+    }
+
+    /**
+     * PROCESS DEATH IS LAST, AND ONLY AFTER THE HOLD IS LOWERED (0.9.2 W-B round 3).
+     *
+     * The ordering IS the safety argument, so it is pinned rather than described. Killed before the
+     * hold is lowered, the disk reconcilers re-derive the doubt at next boot and route to a lock
+     * screen; killed after, the wipe proved itself and onboarding is correct. Terminating BEFORE
+     * `lowerHold` would strand the hold's RAM state at the exact moment the wipe had in fact
+     * succeeded — safe, but it would present a lock screen over a completed burn forever.
+     *
+     * MUTATION UNIQUELY CAUGHT: moving `terminate()` above `lowerHold()`.
+     */
+    @Test
+    fun `the process is killed only after the hold is lowered`() {
+        var lowered = false
+        var killedWhileHeld: Boolean? = null
+        runBurnWipe(
+            raiseHold = {},
+            obliterate = {},
+            lowerHold = { lowered = true },
+            terminate = { killedWhileHeld = !lowered },
+        )
+        assertEquals(false, killedWhileHeld)
+    }
+
+    /**
+     * A FAILED BURN MUST NOT KILL THE PROCESS. Two reasons, both load-bearing: the durability hold
+     * lives in RAM and dying would discard it, and WB-1 requires a failed burn to present exactly
+     * like a wrong passphrase — an app that vanishes on the duress passphrase and shows an error on a
+     * mistyped one is a distinguisher a coercer can read.
+     *
+     * MUTATION UNIQUELY CAUGHT: calling `terminate()` in a `finally`.
+     */
+    @Test
+    fun `a failed wipe does not terminate the process`() {
+        var terminated = false
+        runCatching {
+            runBurnWipe(
+                raiseHold = {},
+                obliterate = { throw VaultImageException.DestroyFailed() },
+                lowerHold = {},
+                terminate = { terminated = true },
+            )
+        }
+        assertFalse("a burn that could not prove itself must leave the app alive and silent", terminated)
     }
 
     /**
@@ -132,6 +179,7 @@ class BurnDurabilityHoldTest {
                 raiseHold = { held = true },
                 obliterate = { throw VaultImageException.DestroyFailed() },
                 lowerHold = { held = false },
+                terminate = {},
             )
         } catch (e: VaultImageException.DestroyFailed) {
             threw = true
@@ -145,7 +193,12 @@ class BurnDurabilityHoldTest {
     @Test
     fun `a proven-durable wipe lowers the hold`() {
         var held = false
-        runBurnWipe(raiseHold = { held = true }, obliterate = {}, lowerHold = { held = false })
+        runBurnWipe(
+            raiseHold = { held = true },
+            obliterate = {},
+            lowerHold = { held = false },
+            terminate = {},
+        )
         assertFalse(held)
     }
 

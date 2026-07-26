@@ -567,6 +567,33 @@ real user even though the wipe behind it is wired and gated — see the section 
 [`docs/VAULT_ARCHITECTURE.md`](VAULT_ARCHITECTURE.md) §3.4, landing as their own adversarially-
 reviewed PRs. **Do not describe per-vault destruction or a working Pucker Burn as shipped.**
 
+### Pucker Burn — a successful burn CLOSES THE APP (0.9.2 Unit W-B)
+
+**Behaviour, stated plainly because it is visible to the user:** when the duress passphrase triggers
+a completed wipe, the app does not return to a screen — it **terminates its own process**. Reopening
+it presents onboarding, exactly as a fresh install does. A burn that FAILS does not terminate: it
+shows the same uniform error as a mistyped passphrase and stays open, because a failed burn must be
+indistinguishable from a wrong password.
+
+**Why.** No in-process wipe can be durable against a live writer. While the process runs, cached
+`SharedPreferences` instances, in-memory buffers and lazily-initialised components can rewrite state
+*after* the wipe proved it absent — a real defect of exactly this shape (an in-memory diagnostics
+buffer rewriting a deleted log) was found in review. The preference wipe's safety additionally rested
+on an ordering argument about Android's `SharedPreferences` internals that three independent reviewers
+read three different ways and none could confirm. When a correctness claim rests on a platform
+implementation detail nobody can independently confirm, the answer is to stop needing the claim.
+Process death is a deterministic drain: pending writes die with the process. No hidden API, no
+reflection, no reliance on a particular OEM's fork.
+
+It is safe at every interruption point because it composes with the durability hold: killed *before*
+the hold is lowered, the next boot re-derives the doubt from disk and presents a lock screen; killed
+*after*, the wipe proved itself and onboarding is correct. There is no point at which process death
+produces a fresh-install presentation over an unproven wipe.
+
+**The tradeoff, both directions.** A closed app is arguably more duress-appropriate than an animation
+playing out. It is also a visible event that a coerced user cannot explain away as a typo — whereas
+the failure path stays silent. This is a deliberate choice, not an oversight.
+
 ### Pucker Burn — what the byte-for-byte gate proves, and what it does NOT (0.9.2 Unit W-B)
 
 The duress wipe's guarantee is **post-burn indistinguishability**: after a completed burn, app-local

@@ -7,6 +7,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Android: a successful Pucker Burn now CLOSES THE APP.** When the duress passphrase triggers a
+  completed wipe, the app terminates its own process instead of returning to a screen; reopening it
+  presents onboarding, exactly as a fresh install does. A burn that **fails** does not terminate — it
+  shows the same uniform error as a mistyped passphrase and stays open, because a failed burn must
+  stay indistinguishable from a wrong password. **Why:** no in-process wipe can be durable against a
+  live writer — cached preference instances, in-memory buffers and lazily-initialised components can
+  rewrite state after the wipe proved it absent (a defect of exactly this shape was found in review),
+  and the remaining safety argument rested on Android `SharedPreferences` internals that three
+  independent reviewers read three different ways and none could confirm. Ending the process is a
+  deterministic drain: pending writes die with it. It is safe at every interruption point because it
+  composes with the existing durability hold — killed before the hold is lowered, the next boot
+  presents a lock screen; killed after, onboarding. See `docs/SECURITY_MODEL.md` for the full
+  rationale and the deniability tradeoff in both directions.
+
 ### Added
 
 - **Android: second (decoy) vault is now creatable — plausible deniability becomes usable.**

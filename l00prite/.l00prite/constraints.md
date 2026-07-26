@@ -21,6 +21,17 @@ Hard rules, user preferences, security boundaries, and architecture constraints 
   commit whose message declared class-fixes the default posture. Every one of the five was caught
   mechanically by a reviewer, never by the intent that wrote the rule; an unwritten enumeration is
   therefore evidence of nothing, and the written list is the only artifact that has ever worked.
+- **AN ENUMERATION MUST NAME ITS AXIS, AND THE AXES IT REJECTED.** Strengthened 2026-07-26, because
+  the rule above was followed and STILL missed two blocking defects. The preference-wipe commit
+  enumerated all six burn cleanups on the axis *"is its failure gated?"* — correctly, completely —
+  and declared the class closed. Two other axes went unexamined: *"does it prove DURABILITY?"* (fsync)
+  and *"does it reset IN-MEMORY state?"*. Round 3 found one blocking defect on each. A complete
+  enumeration along one axis reads exactly like a closed class, which is what makes this the more
+  dangerous failure. So a class-fix must now state: **the axis enumerated, which OTHER axes were
+  considered, and why each was found inapplicable.** "Closed" alone is insufficient and the previous
+  formulation would not have caught this. Corollary from the same round: prefer making the axis
+  structural over enumerating it — the wrong thing should be unrepresentable (a primitive that
+  returns `Unit` and throws), not merely listed as done. You will never enumerate all axes.
 
 ## User Preferences
 - Use review agents (Codex/Grok on this box) **in moderation** — weekly credit limits. Cap any
