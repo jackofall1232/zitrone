@@ -201,6 +201,25 @@ internal fun beginBurnArm(state: MutableStateFlow<BurnArmUi>): Boolean {
     }
 }
 
+/**
+ * Dismisses the dialog on [state] — but NEVER while an arm is in flight, which would discard a
+ * terminal outcome before the user has seen it.
+ *
+ * Unreachable belt today: the dialog refuses both Cancel and system dismissal while busy, and
+ * neither round-2 reviewer found a live path through it. It exists because that guarantee should
+ * hold at the state machine rather than rest on one composable's `!busy` flag — a future non-UI
+ * caller is exactly how the round-1 defect comes back. Top-level for the same reason as
+ * [burnArmOutcome]: a rule enforced only inside `AppContainer` cannot be tested without an
+ * Application, and an untestable rule is how this fix went out wrong the first time.
+ */
+internal fun closeBurnSetupState(state: MutableStateFlow<BurnArmUi>) {
+    while (true) {
+        val current = state.value
+        if (current is BurnArmUi.Arming) return
+        if (state.compareAndSet(current, BurnArmUi.Closed)) return
+    }
+}
+
 class AppContainer(private val app: Application) {
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -323,9 +342,16 @@ class AppContainer(private val app: Application) {
         burnArm.value = BurnArmUi.Open
     }
 
-    fun closeBurnSetup() {
-        burnArm.value = BurnArmUi.Closed
-    }
+    /**
+     * Dismisses the dialog — but NEVER while an arm is in flight.
+     *
+     * The dialog already refuses both Cancel and system dismissal while busy, so today this fence is
+     * unreachable belt (review round 2: neither reviewer found a live path through it). It is here
+     * because the guarantee "a terminal outcome cannot be discarded before the user sees it" should
+     * hold at the state machine, not rest on a `!busy` flag in one composable — a future non-UI
+     * caller is exactly how the round-1 defect would come back.
+     */
+    fun closeBurnSetup() = closeBurnSetupState(burnArm)
 
     /**
      * Claims the arming single-flight, returning false iff one is already running. CAS-looped rather

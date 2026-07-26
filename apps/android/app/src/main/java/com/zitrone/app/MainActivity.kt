@@ -1183,22 +1183,13 @@ private fun ZitroneRoot(
             // rather than in remembered state a recreation would discard.
             container.scope.launch {
                 val outcome = runCatching { container.armBurnCredential(candidate) }
-                container.finishBurnArm(
-                    outcome.fold(
-                        onSuccess = { result ->
-                            when (result) {
-                                is ArmBurn.Armed -> BurnArmUi.Closed
-                                is ArmBurn.CollidesWithVault ->
-                                    BurnArmUi.Rejected(BurnArmUi.Reason.CollidesWithVault)
-                                is ArmBurn.DeletePending ->
-                                    BurnArmUi.Rejected(BurnArmUi.Reason.DeletePending)
-                            }
-                        },
-                        // Includes NotDurable: the write may not survive a crash, so the user must
-                        // NOT be told the credential is set.
-                        onFailure = { BurnArmUi.Rejected(BurnArmUi.Reason.NotDurable) },
-                    ),
-                )
+                // burnArmOutcome, NOT an inline copy of it (review round 2, BOTH reviewers): the
+                // first cut of this fix duplicated the mapping here, so the suite pinned the helper
+                // while the SHIPPED path went untested and a mutation proof passed against code the
+                // app never runs. One mapping, one place, and the tests cover the thing that runs.
+                // Includes NotDurable: the write may not survive a crash, so the user must NOT be
+                // told the credential is set.
+                container.finishBurnArm(burnArmOutcome(outcome))
             }
         }
     }

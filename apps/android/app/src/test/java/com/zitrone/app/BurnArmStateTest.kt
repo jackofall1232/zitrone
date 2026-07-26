@@ -143,6 +143,28 @@ class BurnArmStateTest {
         assertEquals(BurnArmUi.Arming, state.value)
     }
 
+    /**
+     * A dismissal must never discard an IN-FLIGHT arm's outcome (review round 2, B1).
+     *
+     * Unreachable through today's UI — the dialog disables Cancel and system dismissal while busy —
+     * but the guarantee belongs at the state machine rather than resting on one composable's `!busy`
+     * flag. A future non-UI caller is exactly how the round-1 defect comes back.
+     */
+    @Test
+    fun `a dismissal cannot discard an arm in flight`() {
+        val state = MutableStateFlow<BurnArmUi>(BurnArmUi.Open)
+        beginBurnArm(state)
+
+        closeBurnSetupState(state)
+
+        assertEquals("closing while Arming would strand the outcome", BurnArmUi.Arming, state.value)
+
+        // And once the outcome has landed, the user CAN dismiss it.
+        state.value = burnArmOutcome(Result.success(ArmBurn.DeletePending))
+        closeBurnSetupState(state)
+        assertEquals(BurnArmUi.Closed, state.value)
+    }
+
     /** Opening the dialog fresh must not inherit a previous attempt's error. */
     @Test
     fun `a reopened dialog starts clean`() {
