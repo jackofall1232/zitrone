@@ -638,7 +638,16 @@ private fun ZitroneRoot(
     // the route stays `Route.Splash` until BOTH the animation ends and `bootReconciled` is set, and
     // the derivation assigns this field before leaving Splash. A composition that read this during
     // Splash would be reading pre-reconciliation state, which the sweep's whole design forbids.
-    // NAMED REVIEW ITEM: verify no consumer observes this before the Splash effect assigns it.
+    // CORRECTED (round 3, Codex — adjudicated against source, Grok read it the other way). The
+    // previous line here asked a reviewer to "verify no consumer observes this before the Splash
+    // effect assigns it", and the answer is that consumers DO observe it: `biometricUnlockAvailable`
+    // (~line 1026) and the lemon-drop veil derivation (~line 1349) read it immediately. The claim
+    // that survives is narrower and is the one that matters: no consumer ROUTES on it, and both
+    // readers are safe when false (hide the biometric affordance; treat as pre-vault). What is NOT
+    // yet handled, tracked rather than papered over: on an Activity recreation with a LIVE session,
+    // the Splash effect never runs and the boot effect skips derivation, so this stays false until
+    // some later transition re-derives — a UI-state misclassification, not a fresh-install-over-
+    // residue path.
     var vaultExists by remember { mutableStateOf(false) }
 
     // ── COLD-START BOOT ROUTING (0.9.2 Unit W-A) ────────────────────────────────────────────────

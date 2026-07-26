@@ -1330,3 +1330,39 @@ SIDE EFFECT of an unrelated fix.** The test now names its artifact.
 `failures.md` and `events/`. I am not writing it up as record from memory. If it is real it belongs in
 `events/` with its two instances named, and that should be reconstructed from whichever session
 raised it — not from me.
+
+### 2026-07-26 — W-B round-3 FIXES landed + gate GREEN (written at round close, per the new cadence rule)
+
+Commit `2146cee`. Four verified blockers closed plus one authorized architecture change.
+
+- **`clearProven()` → `erase()`, one function, MEMORY FIRST.** The two-function split (a fail-open UI
+  `clear()` and a weaker fail-closed `clearProven()`, four lines apart) is gone. Memory is cleared
+  under the same lock `record()` takes, so a racing `record()` can only append to an empty list —
+  the resurrection is closed by construction rather than by ordering luck.
+- **`clearCacheDir` → `deleteTreeDurably`, post-order, one fsync per directory.** Returns `Unit` and
+  throws. A tri-state was considered and REJECTED on Kimi's argument: at the burn boundary
+  `NotDurable` and `Failed` do the same thing, so the middle value has no legitimate consumer and the
+  predictable accident is `if (outcome != Failed)` shipping the defect again with type safety making
+  it look checked. The "one fsync works on ext4" shortcut was declined for the same reason the
+  SharedPreferences ordering claim was abandoned — correct on today's AOSP, one filesystem away from
+  being a silent lie.
+- **Gate teardown unconditional + a fresh-baseline assertion driven by the SAME snapshotter** the
+  comparison uses, so it cannot drift into a stale parallel checklist.
+- **The false notification-channel coverage claim removed** and replaced with an honest exclusion;
+  the channel RESET is tracked in todos, not claimed.
+- **AUTHORIZED: a successful burn ends in `Process.killProcess()`.** Rationale recorded in
+  SECURITY_MODEL.md and CHANGELOG.md as a BEHAVIOUR CHANGE (the app closes rather than returning to
+  a screen), with the deniability tradeoff stated in both directions.
+- **`vaultExists` prose corrected** (deferrable finding, fixed anyway because confident-wrong prose is
+  this unit's signature defect): the old comment asked a reviewer to verify no consumer observes the
+  initial value; consumers DO. The surviving claim is the narrower one — no consumer ROUTES on it.
+
+**GATE: GREEN on a real emulator — run 30180579742, 5 tests started, 5 finished, BUILD SUCCESSFUL in
+5m23s.** This green is worth more than the previous one: it passed WITH the new fresh-baseline
+assertion in `setUp` (which fails loudly on contamination rather than silently comparing polluted
+state), the `terminate` recorder asserted exactly one process-death request on the success path, and
+`erase()` + `deleteTreeDurably` executed against a real device and Keystore rather than a JVM stub.
+
+**Standing limit, restated so the green is not overread:** the gate passes `terminate = {}`, so it
+exercises a strictly WEAKER in-process arrangement than production ships. A next-launch assertion is
+tracked in todos.md. Unit suite 536/533/0/3 — MY number; neither round-3 lens could corroborate it.
