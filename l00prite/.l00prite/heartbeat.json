@@ -19,9 +19,9 @@
     "before declaring completion"
   ],
   "last_run_time": "2026-07-25",
-  "completion_status": "in_progress",
-  "should_continue": true,
-  "pause_reason": null,
+  "completion_status": "ready_to_merge_awaiting_explicit_human_merge",
+  "should_continue": false,
+  "pause_reason": "Round-7 finding RESOLVED via shared runTerminalBurn (one definition for production and the gate, with a fail-closed session-quiesce proof so deleting lock() turns the gate red). MERGE + version bump require explicit per-action human authorization; undrafting PR #62 may dispatch the PR-attached bot lens, so that is asked too.",
   "execution": {
     "enabled": false,
     "preflight_confirmed": false,
@@ -46,5 +46,5 @@
     ]
   },
   "active_unit": "0.9.2 Unit W-B \u2014 Pucker Burn wipe mechanism (feat/0.9.2-unit-wb-burn-wipe)",
-  "loop": "security-review-loop paired-blind; ROUND 7 of 7 DISPATCHED \u2014 TERMINAL, no further extension. Round 6 returned NO functional defect in round-5 repairs (first time): all findings were claims, tests or defence-in-depth. All six fixed. Gate GREEN on af60d50 (run 30184456372) FIRST TRY. Exit test = round 6s own stop condition: if this round still leaves a false pin or a non-discriminating gate control, the process is not converging -> stop and rescope. Third lens = Gemini 3.1 Pro on genuine divergence (Kimi disqualified downstream of process death). Converge = READY TO MERGE, and merge itself still requires explicit human authorization."
+  "loop": "Unit W-B complete pending human merge. Loop closed at round 7 of 7."
 }

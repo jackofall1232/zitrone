@@ -1464,3 +1464,45 @@ is precisely the input the cap exists to surface.
 **BOUNDARY: round 7 is TERMINAL.** If it does not converge it stops and goes to the human regardless
 of state, and the decision then is re-scope or hand over. No further extension. The third lens fires
 at 7 on genuine divergence.
+
+### 2026-07-26 — W-B ROUND 7 (TERMINAL) — production converged; the process failed its own exit test
+
+**Three-way split on ONE finding. All four lenses agree production is correct.**
+
+| Lens | Verdict | Standard applied |
+|---|---|---|
+| Grok (blind) | READY TO MERGE — INFO/DEFERRABLE | functional boundary |
+| Codex (blind) | NOT READY — BLOCKING | the round's exit test |
+| **Gemini 3.1 Pro (tie-breaker)** | **BLOCKING** | exit test governs; recommends **(c) RE-SCOPE** |
+| Kimi k3 (advisory, conflicted — disclosed) | **BLOCKING** | exit test governs; recommends **(a) fix and merge** |
+
+**THE FINDING.** Production now runs `beginTerminalWipe() → lock() → burnVault()`; the gate runs
+`beginTerminalWipe() → burnVault()` while provisioning a real published session. **Deleting
+`lock()` from production leaves the gate green.** The load-bearing gate cannot discriminate removal
+of the repair it exists to validate.
+
+**WHAT GEMINI SAW THAT DECIDES THE SEVERITY:** *"If you fall back to the general baseline to bypass
+an explicit exit test, the exit test was a bluff."* The functional boundary and the exit test give
+different answers, and the exit test governs a merge decision — it was instituted precisely because
+earlier rounds were not converging.
+
+**WHAT KIMI SAW THAT NOBODY ELSE DID — and it changes the FIX, not the severity:** mirroring
+`lock()` into the gate fixes FIDELITY but **not DISCRIMINATION**, because the gate then holds its own
+copy of the call and deleting production's still leaves it green. Only extracting the terminal burn
+orchestration into ONE callable shared by `MainActivity` and the gate makes the discrimination
+automatic. Codex offered the two options as equivalent; they are not. Gemini independently rated the
+shared-callable extraction trivial and production-risk-free.
+
+**THE CLASS, THIRD CONSECUTIVE OCCURRENCE.** Round 5: verifiers that did not verify. Round 6: repairs
+not mirrored into their verifiers. Round 7: a repair not mirrored into its verifier — the round-6
+fix. Gemini's read is that this proves non-convergence. The counter-argument, which is real: the two
+previous fixes patched INSTANCES, while the shared-orchestration fix eliminates the CLASS, so it is
+not the same move a third time.
+
+**STOPPED AT THE TERMINAL ROUND. Not merged, no version bump, no round 8.** The standing boundary was
+"if round 7 does not converge it stops and comes to the human, and the decision then is re-scope or
+hand over." It did not converge. The decision is the maintainer's, and the two coherent options are
+recorded above with their advocates.
+
+**Gate GREEN on af60d50 (run 30184456372, first try). Suite 552/549/0/3.** Both are evidence about
+the scenario run, which is the finding.
