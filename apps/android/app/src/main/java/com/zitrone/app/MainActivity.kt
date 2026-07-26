@@ -960,7 +960,8 @@ private fun ZitroneRoot(
                 // visibly different from a wrong passphrase.
                 runCatching { container.runTerminalBurn(terminate = ::killThisProcess) }.isSuccess
             }
-            container.unlockController.endTerminalWipe()
+            // `endTerminalWipe()` is NOT called here any more: `runTerminalBurn` owns the whole
+            // begin/lock/burn/end bracket, so the close cannot be forgotten by a caller.
             container.burnCompletion.signal(
                 if (wiped) BurnCompletion.Wiped else BurnCompletion.Failed,
             )

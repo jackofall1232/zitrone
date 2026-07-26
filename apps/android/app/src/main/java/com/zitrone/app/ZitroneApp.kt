@@ -448,6 +448,27 @@ class AppContainer(private val app: Application) {
      */
     internal fun runTerminalBurn(terminate: () -> Unit) {
         unlockController.beginTerminalWipe()
+        try {
+            runTerminalBurnLocked(terminate)
+        } finally {
+            // THE BRACKET IS WHOLE, and this is the half the first version left out. Terminal
+            // exclusion gates successor unlocks; opening it without a guaranteed close leaks the flag
+            // to whoever runs next. In production the success path never reaches here — `terminate`
+            // kills the process — and the failure path must reopen unlock so the user can retry,
+            // which is exactly what `onBurn` used to do explicitly. Moving it inside the shared
+            // callable is the point of having one: begin/lock/burn/end is ONE sequence, not a
+            // sequence plus a cleanup the caller has to remember.
+            //
+            // The gate found this immediately: its teardown burns with `terminate = {}`, so the
+            // process survives, and a leaked flag made every later `createVaultAndPublish` refuse
+            // with "the production create/publish path must succeed". Three tests failed on that
+            // precondition — the gate discriminating a change to the terminal sequence, which is the
+            // property this refactor existed to establish.
+            unlockController.endTerminalWipe()
+        }
+    }
+
+    private fun runTerminalBurnLocked(terminate: () -> Unit) {
         unlockController.lock()
         // PROVE THE QUIESCE RATHER THAN ASSUMING IT — and this assertion is what makes the gate
         // DISCRIMINATING rather than merely faithful. `lock()` tears the session down synchronously
