@@ -7,6 +7,81 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.3-beta] - 2026-07-26
+
+**The Pucker Burn duress credential is now settable — the feature 0.9.2 shipped deliberately
+unreachable is finished.** 0.9.2 landed the wipe mechanism with no way to trigger it: slot 0 held
+uniformly-random filler, there was no settings entry, and no code path wrote a credential. This
+release adds the arming half, so a burn password can be set and entering it at the lock screen wipes.
+Confirmed working on a real device before this cut, not only in CI.
+
+**What a burn actually does.** It erases everything Zitrone holds on the device — every slot in the
+shared vault image, preferences, keystore material, caches — and terminates the process. Reopening
+presents onboarding, exactly as a fresh install does. It is **device-local**: it does **not** delete
+your account on the relay, and it does not reach any other device.
+
+**Read this before setting one.**
+
+- It **cannot be recovered or checked.** There is no "is a burn password set?" readback anywhere, by
+  design — that readback would itself prove a duress credential exists. Forgetting it is
+  unrecoverable, and the app genuinely cannot tell you whether one is set.
+- **Anyone who learns it can erase everything, forever.** It is not a second password to the same
+  data; it is a destruction trigger, with no confirmation step and no undo.
+- **A burn consumes it.** Afterwards the device is a fresh install with no burn password at all, so
+  it must be set again.
+- **Setting one again silently replaces it**, with no indication that an old one existed.
+- A password that already opens one of your vaults is **refused**. It has to be: slot 0 outranks every
+  vault slot, so arming a colliding credential would mean your next ordinary unlock wiped the device
+  instead of unlocking it.
+
+**No fresh install required.** Unlike 0.9.2, the vault image format is unchanged (v3), so a 0.9.2
+install upgrades in place and keeps its identity, contacts and history. The storage-format stance is
+otherwise unchanged: the on-disk format is not frozen, and a future breaking change still means a
+fresh install.
+
+### Added
+
+- **Pucker Burn password setup.** Settings → "Pucker Burn password", directly above "Delete account".
+  The entry is **permanent and identical whether or not a credential is set** — a row that appeared,
+  gained a checkmark, or disappeared once armed would be exactly the on-device oracle the feature
+  exists to avoid. Confirmation requires the password typed twice identically **and** an actively
+  ticked acknowledgement.
+- **Collision refusal**, with an explanation rather than a silent rejection.
+- **Crash-atomic, durability-gated arming.** The whole image is written through a temp file plus
+  atomic rename and directory fsync, so a crash leaves either the old image or the new one, never a
+  half-armed slot. Success is reported **only** after the write is confirmed durable — a write that
+  may not survive a crash reports failure, because a user must never be told a credential is set when
+  it is not.
+
+### Security
+
+- **No armed-state artifact anywhere.** Armed and unarmed installs stay byte-indistinguishable: same
+  image size, slot count and payload sizes — only slot 0's salt and wrapped bytes differ, and both are
+  uniformly random either way.
+- **The burn password is no longer offered to the keyboard for learning.** The setup fields masked
+  their input but did not declare a password keyboard type, so an IME could have cached a *duress*
+  credential in its personal dictionary — recoverable by exactly the adversary this feature assumes,
+  and itself evidence that a duress credential existed. Every other passphrase field in the app
+  already declared it.
+
+### Fixed
+
+- **An arm interrupted by an Activity recreation could report success it had not achieved.** The
+  setup dialog's state was composition-local, so rotating the phone (or toggling dark mode, changing
+  font size, entering split-screen) mid-arm dismissed the dialog while the arming coroutine kept
+  running. Because a successful arm is signalled *only* by the dialog closing, that dismissal was
+  indistinguishable from success — a refused or non-durable arm could leave the user believing they
+  held a duress credential they did not have. State is now process-scoped, so a recreated screen
+  restores the in-progress dialog and still receives the real outcome.
+
+### Disclosed
+
+- **One addition to the burn gate's exclusion list**: androidx ProfileInstaller's `profileInstalled`
+  marker. It is library-written, never written by this app, and was never in the burn's delete set —
+  the burn unlinks a named list, it does not clear `filesDir` wholesale. A launched fresh install
+  carries the same file, so it is not a vault-use oracle. Reasoning is recorded in the test and in
+  `SECURITY_MODEL.md` rather than dropped silently.
+
 ## [0.9.2-beta] - 2026-07-26
 
 **The second (decoy) vault ships — plausible deniability becomes usable on Android.** 0.9.1-beta

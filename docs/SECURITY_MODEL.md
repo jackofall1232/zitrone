@@ -412,8 +412,10 @@ the others.
 > creates an empty vault); fail-closed while a delete is pending; **a successful create carries an
 > accepted disk-persistence timing residual** (it is not wall-clock identical to an unlock); and
 > biometric binds to **one vault at a time on a first-enable-wins basis** (never repointed while it
-> exists — not a fixed "everyday-vault-only" property). **Not yet shipped:** per-vault destruction (whole-image account delete only) and the
-> Pucker Burn setup/wipe UX — do not rely on those. See the "Implementation status" note at the
+> exists — not a fixed "everyday-vault-only" property). **Pucker Burn is settable and working as of
+> 0.9.3-beta**, with its own consequences: it cannot be recovered or verified, a burn consumes it, and
+> anyone who learns it can erase everything on the device. **Not yet shipped:** per-vault destruction
+> (whole-image account delete only) — do not rely on that. See the "Implementation status" note at the
 > end of this section and [`docs/VAULT_ARCHITECTURE.md`](VAULT_ARCHITECTURE.md).
 
 Two or more completely separate encrypted vaults sit behind different passphrases — up to **three
@@ -548,7 +550,7 @@ and unless they implement the same key-slot scheme independently — a device
 without the feature simply has one vault, which is itself indistinguishable from
 a device that has more.
 
-**Implementation status, stated honestly (0.9.2-beta).** The key-slot crypto primitive above is
+**Implementation status, stated honestly (0.9.3-beta).** The key-slot crypto primitive above is
 built and tested in `packages/crypto` (web/desktop storage layer) and byte-mirrored on Android.
 On Android, the **everyday (single) vault runtime shipped in 0.9.1-beta** (app over the vault
 image, dual-wrap biometric unlock, slot-agnostic PIN/passphrase unlock router with no-early-exit
@@ -559,17 +561,35 @@ two-marker no-remanence account-delete state machine, configurable idle auto-loc
 while a delete is pending, self-verifying seal), the silent **triple-entry** router
 (`VaultUnlockRouter` + `attemptPassphrase`, no setup wizard), and the biometric **A-only** guard
 (the single wrap is never repointed). An Android user can therefore create and reveal a second
-vault, and plausible deniability is a **usable** guarantee here, within the limits above. **What
-is NOT built yet:** per-vault destruction (whole-image account delete only — there is no
-single-slot destroy primitive) and the **Pucker Burn** setup UX. **As of 0.9.2-beta the duress wipe is
-UNREACHABLE, not merely unpolished:** slot 0 holds uniformly-random filler that no passphrase derives
-to, there is no settings entry for a burn password, and no code path writes a credential into slot 0 —
-so no input at the lock screen can trigger a burn. The wipe mechanism behind it is wired, reviewed and
-CI-gated (see the sections below), and arming lands in **0.9.3-beta**. Until then, treat Pucker Burn as
-absent: a user who believes they have a duress credential would be relying on something that does not
-exist. Those, plus the full dual-slot destruction design, remain a **locked design** in
-[`docs/VAULT_ARCHITECTURE.md`](VAULT_ARCHITECTURE.md) §3.4, landing as their own adversarially-
-reviewed PRs. **Do not describe per-vault destruction or a working Pucker Burn as shipped.**
+vault, and plausible deniability is a **usable** guarantee here, within the limits above.
+
+**As of 0.9.3-beta the Pucker Burn duress credential is SETTABLE, and the feature works end to end.**
+In 0.9.2 the wipe mechanism shipped deliberately unreachable — slot 0 held uniformly-random filler no
+passphrase derived to, there was no settings entry, and no code path wrote a credential into slot 0.
+0.9.3 adds the arming half: Settings → "Pucker Burn password" seals slot 0 in place, and entering that
+password at the lock screen triggers the wipe. Verified on a physical device, not only in CI.
+
+**What that does and does not mean for you.** A burn is **device-local**: it erases everything Zitrone
+holds on this device and terminates the process, so the next launch presents onboarding as a fresh
+install. It does **not** delete your account on the relay and does not reach any other device. It
+**cannot be recovered or checked** — there is no "is a burn password set?" readback anywhere, because
+that readback would itself prove a duress credential exists, so forgetting it is unrecoverable.
+**Anyone who learns it can erase everything**, with no confirmation step and no undo. A burn
+**consumes** the credential: afterwards the device holds no burn password at all and one must be set
+again. Setting one again **silently replaces** it, with no indication an old one existed. A password
+that already opens one of your vaults is **refused** — it has to be, because slot 0 outranks every
+vault slot, so arming a colliding credential would mean your next ordinary unlock wiped the device
+instead of unlocking it.
+
+**Armed and unarmed installs remain byte-indistinguishable**: same image size, slot count and payload
+sizes, with only slot 0's salt and wrapped bytes differing — and both are uniformly random either way.
+The settings entry is permanent and identical whether or not a credential is set. No preference,
+marker, log line or API reports armed state.
+
+**What is STILL NOT built:** per-vault destruction (whole-image account delete only — there is no
+single-slot destroy primitive). That, plus the full dual-slot destruction design, remains a **locked
+design** in [`docs/VAULT_ARCHITECTURE.md`](VAULT_ARCHITECTURE.md) §3.4, landing as its own
+adversarially-reviewed PR. **Do not describe per-vault destruction as shipped.**
 
 ### Pucker Burn — a successful burn CLOSES THE APP (0.9.2 Unit W-B)
 

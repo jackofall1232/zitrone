@@ -52,11 +52,11 @@ other clients, in that trust order. Full detail: `.l00prite/blueprint.md` and `.
 - [x] Account-delete correctness: two-marker state machine; a plain lock is never a delete.
 - [x] D3 idle auto-lock: device-level configurable timeout, honest no-push tradeoff copy.
 - [x] 0.9.1-beta cut + clearnet flip (vc17); honest plausible-deniability status shipped.
-- [x] 0.9.2-beta: **second vault (slot B)** — RESCOPED 2026-07-26 (human): Pucker Burn COMPLETION
-      moves to 0.9.3. The burn WIPE mechanism shipped in 0.9.2 but is deliberately unreachable (slot 0
-      unarmed, no setup UI), so 0.9.2 claims vaults only. Prior detail: PR-1 (`attemptUnlockOrAdd`) MERGED; PR-2
-      (router + triple-entry gate) spec delivered, awaiting review; PR-3 (UI wiring) after PR-2;
-      Pucker Burn setup/wipe sibling PRs. No version bump until the phase completes.
+- [x] 0.9.2-beta: **second vault (slot B)** shipped; Pucker Burn COMPLETION was rescoped to 0.9.3
+      because the burn WIPE mechanism shipped deliberately unreachable (slot 0 unarmed, no setup UI),
+      so 0.9.2 claimed vaults only.
+- [x] 0.9.3-beta: **Pucker Burn complete (vc19)** — arming shipped, device-confirmed, so the duress
+      credential is settable and the wipe is reachable.
 - [ ] Standing hygiene before external testers: fix CI SAST + release-apk.yml shell-injection;
       storage-format-stability decision; website web-overclaim.
 
@@ -101,9 +101,15 @@ APK verified against cert `6c7f92a7…892753` at a release cut.
 
 - [x] 0.9.2-beta phase complete (RESCOPED): second vault (PR-1✅ + PR-2 + PR-3) + the Pucker Burn
       WIPE mechanism, each independently reviewed to clean convergence, CI green, docs honest.
-- [ ] **0.9.3-beta: Pucker Burn FINISHED** — Unit S (setup/arming) makes the duress credential
-      settable and the feature reachable. Until it ships, no doc or release note may describe Pucker
-      Burn as working. Invariant table already written
-      (`reviews/vault-0.9.x/unit-s-invariant-table.md`); spec §5 of `pucker-burn-spec.md` governs.
+- [x] **0.9.3-beta: Pucker Burn FINISHED — SHIPPED 2026-07-26 (vc19), PR #63 → `a961e2d7`.** Unit S
+      (setup/arming) makes the duress credential settable and the feature reachable; **confirmed
+      working on a physical device by the maintainer** before the cut. Docs and release notes may now
+      describe Pucker Burn as working — that permission begins here and did not before.
+      Merged on explicit maintainer instruction with two commits (`25e93756` keyboard fix,
+      `578b4967` gate exclusion + disclosure) NOT independently reviewed, and with the device
+      confirmation predating both. Recorded so the record shows what was accepted.
+      **Carried forward:** review scope. Rounds 1–2 were scoped to the fix diff, so a real security
+      defect in the ORIGINAL unit (duress password learnable by the IME) was found by the PR bot
+      rather than by either reviewer. Future units: review the whole unit, not only your delta.
 - [ ] Standing hygiene cleared before external testers (SAST, workflow injection, storage-format
       decision, website honesty).
