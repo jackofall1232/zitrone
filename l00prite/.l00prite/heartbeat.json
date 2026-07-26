@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "max_iterations": 6,
-  "current_iteration": 4,
+  "current_iteration": 5,
   "stop_conditions": [
     "definition_of_done_met",
     "blocked",
@@ -46,5 +46,5 @@
     ]
   },
   "active_unit": "0.9.2 Unit W-B \u2014 Pucker Burn wipe mechanism (feat/0.9.2-unit-wb-burn-wipe)",
-  "loop": "security-review-loop paired-blind; round 4 of 6 DISPATCHED on the round-3 fix delta (2146cee). Four round-3 blockers fixed + AUTHORIZED architecture change: a successful burn now ends in Process.killProcess(). Gate GREEN on CI run 30180579742 (5 tests) with the new fresh-baseline assertion active. TIE-BREAKER on divergence is GEMINI (gemini-3.1-pro-preview, --approval-mode plan), NOT Kimi: Kimi k3 authored the process-death design in round 3 and cannot independently adjudicate its own proposal. Kimi remains available for ADVISORY work only. Merge + version bump remain human-gated regardless of convergence; hard cap at round 6."
+  "loop": "security-review-loop paired-blind; round 5 of 6 DISPATCHED on the round-4 fix delta (09cda91..9bf1f1e). Round-4 BLOCKING closed via ordering + marker-free boot completion (the residue is its own signature); the burn is now an enumerable BurnPlan table and boot gained a FOURTH mutator, so WB-7 was revised (three order-independent over 64 states; the fourth deliberately ordered LAST). Gate GREEN on CI run 30182160142. FINAL round before the hard cap at 6 \u2014 a structural change lands in this delta with only one round of review. Tie-breaker on genuine divergence is Gemini 3.1 Pro (gemini-3.1-pro-preview, --approval-mode plan). Merge + version bump remain human-gated regardless of convergence."
 }
