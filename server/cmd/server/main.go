@@ -88,6 +88,11 @@ func main() {
 
 	v1 := app.Group("/api/v1")
 	v1.Post("/register", handlers.Register)
+	// 0.9.4-beta registration proof-of-work. Served unconditionally (issuing a
+	// challenge is harmless with enforcement off — Register only checks a
+	// proof when RegistrationPoWEnabled is true), but see that flag's doc:
+	// stays off in production until 0.9.4 clients replace 0.9.3.
+	v1.Post("/register/challenge", handlers.RegistrationChallenge)
 	v1.Post("/session", handlers.CreateSession)
 	v1.Post("/session/refresh", handlers.RefreshSession)
 	v1.Delete("/session", handlers.RequireAuth, handlers.DeleteSession)

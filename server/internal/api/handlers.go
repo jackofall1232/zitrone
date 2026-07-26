@@ -20,18 +20,20 @@ import (
 	"github.com/zitrone/server/internal/config"
 	"github.com/zitrone/server/internal/db"
 	"github.com/zitrone/server/internal/ratelimit"
+	"github.com/zitrone/server/internal/regpow"
 	"github.com/zitrone/server/internal/relay"
 )
 
 type Handlers struct {
-	store         *db.Store
-	issuer        *auth.Issuer
-	cfg           *config.Config
-	registerLimit *ratelimit.Limiter
-	prekeyLimit   *ratelimit.Limiter
-	dropLimit     *ratelimit.Limiter
-	blobLimit     *ratelimit.Limiter
-	qrDropLimit   *ratelimit.Limiter
+	store          *db.Store
+	issuer         *auth.Issuer
+	cfg            *config.Config
+	registerLimit  *ratelimit.Limiter
+	challengeLimit *ratelimit.Limiter
+	prekeyLimit    *ratelimit.Limiter
+	dropLimit      *ratelimit.Limiter
+	blobLimit      *ratelimit.Limiter
+	qrDropLimit    *ratelimit.Limiter
 	// relayKey is non-nil only when this deployment is configured as a relay node.
 	relayKey  *relay.KeyPair
 	forwarder Forwarder
@@ -46,7 +48,11 @@ func New(store *db.Store, issuer *auth.Issuer, cfg *config.Config) *Handlers {
 		issuer:        issuer,
 		cfg:           cfg,
 		registerLimit: ratelimit.New(5, time.Hour, cfg.RateLimitEnabled),
-		prekeyLimit:   ratelimit.New(50, time.Minute, cfg.RateLimitEnabled),
+		// Challenge issuance is regpow's second DoS layer (settled decision 3):
+		// stage-1 verification is cheap, but nothing stops a client requesting
+		// unlimited challenges, so issuance itself is capped independently.
+		challengeLimit: ratelimit.New(300, time.Hour, cfg.RateLimitEnabled),
+		prekeyLimit:    ratelimit.New(50, time.Minute, cfg.RateLimitEnabled),
 		// Dead drops are unauthenticated — proof-of-work is the main cost, but a
 		// per-IP cap blunts abuse from a single source too.
 		dropLimit: ratelimit.New(60, time.Minute, cfg.RateLimitEnabled),
@@ -151,6 +157,69 @@ type registerRequest struct {
 	IdentityKey    string       `json:"identity_key"`
 	SignedPrekey   prekeyJSON   `json:"signed_prekey"`
 	OneTimePrekeys []prekeyJSON `json:"one_time_prekeys"`
+	// PoWProof is populated only when Config.RegistrationPoWEnabled is true.
+	// Absent/zero-value on every 0.9.3-and-earlier client — Register ignores
+	// this field entirely while the flag is off, so old clients are unaffected.
+	PoWProof *powProofJSON `json:"pow_proof,omitempty"`
+}
+
+type powProofJSON struct {
+	ChallengeToken string `json:"challenge_token"`
+	HashcashNonce  string `json:"hashcash_nonce"` // base64, pow.NonceBytes bytes
+	ArgonNonce     string `json:"argon_nonce"`    // base64, regpow.ArgonNonceBytes bytes
+}
+
+// RegistrationChallenge issues a stateless, HMAC-signed proof-of-work
+// challenge for 0.9.4-beta registration. Served unconditionally — issuing a
+// challenge is harmless even when RegistrationPoWEnabled is false, since
+// Register never requires one until the flag is on — but rate-limited
+// (challengeLimit) as regpow's second DoS layer.
+//
+// NOT WIRED TO ENFORCE: see Config.RegistrationPoWEnabled doc. This handler
+// exists so it can be reviewed and load-tested ahead of the flag flip, not
+// because 0.9.4 is shipping this session.
+func (h *Handlers) RegistrationChallenge(c *fiber.Ctx) error {
+	if !h.challengeLimit.Allow(c.IP()) {
+		return errJSON(c, fiber.StatusTooManyRequests, "rate_limited")
+	}
+	if len(h.cfg.RegistrationChallengeSecret) == 0 {
+		// Misconfiguration (flag on, secret unset) is caught at startup in
+		// config.Load — reaching here with an empty secret would mean that
+		// guard was bypassed, so fail closed rather than sign under no key.
+		return errJSON(c, fiber.StatusServiceUnavailable, "pow_unavailable")
+	}
+	token, err := regpow.IssueChallenge(h.cfg.RegistrationChallengeSecret)
+	if err != nil {
+		return errJSON(c, fiber.StatusInternalServerError, "challenge_failed")
+	}
+	return c.JSON(fiber.Map{"challenge_token": token})
+}
+
+// verifyRegistrationProof reports whether req carries a valid PoW proof for
+// identityKey, using the configured regpow.Params. Only called when
+// h.cfg.RegistrationPoWEnabled is true.
+func (h *Handlers) verifyRegistrationProof(req registerRequest, identityKey []byte) bool {
+	if req.PoWProof == nil {
+		return false
+	}
+	hashcashNonce, err1 := base64.StdEncoding.DecodeString(req.PoWProof.HashcashNonce)
+	argonNonce, err2 := base64.StdEncoding.DecodeString(req.PoWProof.ArgonNonce)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	params := regpow.Params{
+		Secret:               h.cfg.RegistrationChallengeSecret,
+		ChallengeMaxAge:      time.Duration(h.cfg.RegistrationChallengeMaxAgeSec) * time.Second,
+		HashcashDifficulty:   h.cfg.RegistrationHashcashDifficulty,
+		Argon2TimeCost:       h.cfg.RegistrationArgon2TimeCost,
+		Argon2MemoryKiB:      h.cfg.RegistrationArgon2MemoryKiB,
+		Argon2DifficultyBits: h.cfg.RegistrationArgon2DifficultyBits,
+	}
+	return regpow.Verify(params, identityKey, regpow.Proof{
+		ChallengeToken: req.PoWProof.ChallengeToken,
+		HashcashNonce:  hashcashNonce,
+		ArgonNonce:     argonNonce,
+	})
 }
 
 // Register accepts PUBLIC key material only — there is nothing secret in this
@@ -167,6 +236,13 @@ func (h *Handlers) Register(c *fiber.Ctx) error {
 	identityKey, err := base64.StdEncoding.DecodeString(req.IdentityKey)
 	if err != nil || len(identityKey) != ed25519.PublicKeySize {
 		return errJSON(c, fiber.StatusBadRequest, "bad_identity_key")
+	}
+	// OFF BY DEFAULT (Config.RegistrationPoWEnabled) — see that field's doc and
+	// the regpow package doc. Every 0.9.3-and-earlier client omits pow_proof
+	// entirely, so flipping this on in production before 0.9.4 ships would
+	// reject 100% of registrations, not just abuse.
+	if h.cfg.RegistrationPoWEnabled && !h.verifyRegistrationProof(req, identityKey) {
+		return errJSON(c, fiber.StatusForbidden, "pow_required")
 	}
 	spkPub, err1 := base64.StdEncoding.DecodeString(req.SignedPrekey.PublicKey)
 	spkSig, err2 := base64.StdEncoding.DecodeString(req.SignedPrekey.Signature)

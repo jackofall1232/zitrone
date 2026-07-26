@@ -6,10 +6,13 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/zitrone/server/internal/regpow"
 )
 
 type Config struct {
@@ -51,6 +54,32 @@ type Config struct {
 	RelayPrivateKey string   // base64 Curve25519 private key; enables /relay/forward when set
 	RelayPublicKey  string   // base64 Curve25519 public key advertised in the relay registry
 	RelayPeers      []string // allowlist of next-hop forward URLs; forwarding fails closed otherwise
+
+	// 0.9.4-beta registration proof-of-work (see internal/regpow). Enforcing
+	// this rejects every client that doesn't send a proof, including the
+	// shipped 0.9.3 build — a breaking change. MUST stay false in production
+	// until the 0.9.4 client has replaced 0.9.3 in the field. NOT deployed
+	// this session regardless of this flag's value; written for review only.
+	RegistrationPoWEnabled bool
+	// RegistrationChallengeSecret is the raw HMAC key regpow signs challenge
+	// tokens with. Required (and validated at startup) only when
+	// RegistrationPoWEnabled is true — fails closed rather than issuing
+	// challenges under an empty key.
+	RegistrationChallengeSecret    []byte
+	RegistrationChallengeMaxAgeSec int
+	// Hashcash pre-stage difficulty (leading zero bits, fed to pow.Verify).
+	// DROP_POW_DIFFICULTY's shipped default (20, ~1M hashes) is a real
+	// calibration point for what this codebase's clients tolerate — the spec
+	// brief says start measurement from there, not from zero.
+	RegistrationHashcashDifficulty int
+	// TODO(pow-calibration, unmeasured): the three fields below need
+	// Revvl-6x-in-battery-saver client cost measurement and relay-side
+	// verification-cost-at-volume measurement before this ships. Defaulted
+	// from regpow's own TODO'd constants — see that package doc, do not treat
+	// either set of defaults as decided.
+	RegistrationArgon2DifficultyBits int
+	RegistrationArgon2TimeCost       uint32
+	RegistrationArgon2MemoryKiB      uint32
 }
 
 func Load() (*Config, error) {
@@ -81,6 +110,27 @@ func Load() (*Config, error) {
 		RelayPrivateKey: os.Getenv("RELAY_PRIVATE_KEY"),
 		RelayPublicKey:  os.Getenv("RELAY_PUBLIC_KEY"),
 		RelayPeers:      splitCSV(os.Getenv("RELAY_PEERS")),
+
+		RegistrationPoWEnabled:           envBool("REGISTRATION_POW_ENABLED", false),
+		RegistrationChallengeMaxAgeSec:   envInt("REGISTRATION_CHALLENGE_MAX_AGE_SEC", 300),
+		RegistrationHashcashDifficulty:   envInt("REGISTRATION_HASHCASH_DIFFICULTY", 20),
+		RegistrationArgon2DifficultyBits: envInt("REGISTRATION_ARGON2_DIFFICULTY_BITS", 8),
+		RegistrationArgon2TimeCost:       uint32(envInt("REGISTRATION_ARGON2_TIME_COST", regpow.Argon2TimeCostDefault)),
+		RegistrationArgon2MemoryKiB:      uint32(envInt("REGISTRATION_ARGON2_MEMORY_KIB", regpow.Argon2MemoryKiBDefault)),
+	}
+	if secret := os.Getenv("REGISTRATION_CHALLENGE_SECRET"); secret != "" {
+		decoded, err := base64.StdEncoding.DecodeString(secret)
+		if err != nil {
+			return nil, fmt.Errorf("REGISTRATION_CHALLENGE_SECRET: invalid base64: %w", err)
+		}
+		cfg.RegistrationChallengeSecret = decoded
+	}
+	// Fail closed: enforcement without a real HMAC key would either crash on
+	// first use or (worse, if guarded loosely elsewhere) sign every challenge
+	// under an empty key. Never silently downgrade to enforcement-off here —
+	// that would mask a misconfiguration as a policy decision.
+	if cfg.RegistrationPoWEnabled && len(cfg.RegistrationChallengeSecret) < 32 {
+		return nil, fmt.Errorf("REGISTRATION_CHALLENGE_SECRET must be a base64 key of at least 32 bytes when REGISTRATION_POW_ENABLED is true")
 	}
 	// Backward compatibility: a pre-v1.5 deployment set only ONION_ADDRESS. Treat
 	// it as the public mirror address so single-onion deployments keep serving the
