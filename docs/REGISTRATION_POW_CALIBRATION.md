@@ -4,6 +4,15 @@ Status as of 2026-07-26: **relay side MEASURED. Client side NOT MEASURED — blo
 The difficulty constants are therefore still `TODO(pow-calibration, unmeasured)` and
 `REGISTRATION_POW_ENABLED` must stay `false`.
 
+Update 2026-07-27: the 0.9.4 client ships **D=4** (`RegistrationPow.DEFAULT_PARAMS`) as a
+**first real-world calibration attempt, NOT a measured value** — the low end of the D=4–5
+landing zone below, chosen so the first cut cannot hang for minutes on the floor device. Every
+solve now runs through an instrumented recorder (`diagnostics/RegistrationPowSolveRecorder`)
+that writes per-stage durations, work counts, the parameters used, battery-saver state, and
+foreground/backgrounded state to the on-device Diagnostics screen, on success and on abort —
+so one registration attempt on the Revvl 6x returns the real number this doc is waiting for,
+without `adb` and without the gradle harness. The TODO stands until that number is read back.
+
 ## What the scheme actually costs, structurally
 
 Read `server/internal/regpow/regpow.go` first. The load-bearing fact for calibration:

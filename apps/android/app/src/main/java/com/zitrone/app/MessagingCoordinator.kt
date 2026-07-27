@@ -6,14 +6,22 @@
 package com.zitrone.app
 
 import android.content.Context
+import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
+import com.goterl.lazysodium.SodiumAndroid
 import com.zitrone.app.crypto.AttachmentCrypto
+import com.zitrone.app.crypto.LibsodiumRegistrationPowDeriver
 import com.zitrone.app.crypto.MessagePadding
+import com.zitrone.app.crypto.RegistrationPow
 import com.zitrone.app.crypto.SignalProtocolManager
 import com.zitrone.app.crypto.vault.VaultCapacityException
 import com.zitrone.app.crypto.vault.VaultImageException
 import com.zitrone.app.diagnostics.BootDiagnostics
+import com.zitrone.app.diagnostics.RegistrationPowSolveRecorder
 import com.zitrone.app.data.AttachmentControlPayload
 import com.zitrone.app.data.AttachmentLoadState
 import com.zitrone.app.data.ControlPayload
@@ -43,6 +51,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.signal.libsignal.protocol.DuplicateMessageException
@@ -374,7 +383,7 @@ class MessagingCoordinator(
         // register. Identity generation is idempotent and stays inside the loop,
         // so a transient keystore hiccup retries instead of dead-ending the loop
         // with nothing scheduled to recover it.
-        var registration: (suspend () -> Unit)? = null
+        var registration: (suspend (powProof: Map<String, String>?) -> Unit)? = null
         var attempt = 0
         while (coroutineContext.isActive && _linking.value) {
             // Boot-stage marker for the diagnostic log in onFailure below.
@@ -396,18 +405,43 @@ class MessagingCoordinator(
                         // it per-account.
                         val signedPreKey = signal.pendingSignedPreKeyUpload() ?: signal.generateSignedPreKey()
                         val oneTimePreKeys = signal.generateOneTimePreKeys(discardAttempted = true)
-                        registration = suspend {
+                        registration = { powProof ->
                             api.register(
                                 identityKeyBase64 = signal.localIdentityPublicKeyBase64(),
                                 registrationId = signal.localRegistrationId(),
                                 signedPreKey = signedPreKey,
                                 oneTimePreKeys = oneTimePreKeys,
+                                powProof = powProof,
                             )
                             // register() returns the new account id; the loop
                             // only needs its Unit side effect (accountId stored).
                             Unit
                         }
                     }
+                    // 0.9.4 registration PoW: fetch a challenge and solve BEFORE the prekey
+                    // durability barriers below — an aborted or failed solve then leaves no
+                    // durable state behind (the challenge is stateless server-side) and never
+                    // burns the batch's ATTEMPTED marker for an attempt that produced no
+                    // register request. The proof is per-attempt, never cached like the prekey
+                    // closure: challenges expire, and a retry only reaches here when the relay
+                    // was reachable moments ago, so a fresh fetch is cheap. The solve itself
+                    // always runs through the instrumented recorder (Diagnostics screen).
+                    stage = "pow-challenge"
+                    val challengeToken = try {
+                        api.registrationChallenge()
+                    } catch (e: ApiClient.ApiException) {
+                        if (e.code == 404) {
+                            // Relay predates the PoW deploy entirely. Registering proofless is
+                            // the designed behaviour, not a fallback an attacker can reach:
+                            // an ENFORCING relay serves this endpoint by construction.
+                            diag("boot[$attempt]: no PoW challenge endpoint (404) — registering without proof")
+                            null
+                        } else {
+                            throw e
+                        }
+                    }
+                    stage = "pow-solve"
+                    val powProof = challengeToken?.let { solveRegistrationPow(attempt, it) }
                     // NOTE: if the register POST reaches the server but the
                     // response is lost (process death mid-flight), accountId is
                     // never stored and a retry mints a second, orphaned account
@@ -442,7 +476,7 @@ class MessagingCoordinator(
                     }
                     diag("boot[$attempt]: firing POST /api/v1/register")
                     try {
-                        registration?.invoke()
+                        registration?.invoke(powProof?.toJsonMap())
                     } catch (t: Throwable) {
                         // The request MAY have reached the relay (response lost / any ambiguous
                         // failure): drop the cached closure so the retry regenerates its batch
@@ -571,6 +605,51 @@ class MessagingCoordinator(
         Log.w(TAG, line)
         diagnostics.record(line)
     }
+
+    /** Lazily constructed: libsodium is only touched if a solve actually runs. */
+    private val powDeriver: RegistrationPow.Argon2idDeriver by lazy {
+        LibsodiumRegistrationPowDeriver(SodiumAndroid())
+    }
+
+    /**
+     * Solve the registration PoW through the instrumented recorder so every real solve
+     * writes its calibration numbers to the Diagnostics screen (see the recorder's kdoc —
+     * the Argon2id difficulty is TODO(pow-calibration) and a device solve is the only
+     * measurement available).
+     *
+     * Runs on [Dispatchers.Default]: the solve is pure CPU for seconds and must not occupy
+     * the confined boot worker. [runInterruptible] maps coroutine cancellation (stop(),
+     * logout, teardown) onto the solver's thread-interrupt contract, so an abandoned boot
+     * aborts the solve promptly — and the recorder logs that abort as a data point.
+     */
+    private suspend fun solveRegistrationPow(attempt: Int, challengeToken: String): RegistrationPow.Proof =
+        runInterruptible(Dispatchers.Default) {
+            RegistrationPowSolveRecorder(
+                diag = { line -> diag("boot[$attempt]: $line") },
+                batterySaver = {
+                    runCatching {
+                        (appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager)
+                            ?.isPowerSaveMode
+                    }.getOrNull()
+                },
+                // A plain field read (LifecycleRegistry keeps state in a field; only
+                // mutation is main-thread-enforced), so it is cheap enough for the
+                // recorder's per-emission sampling. Worst case it reads slightly stale —
+                // fine for a diagnostic flag.
+                inForeground = {
+                    runCatching {
+                        ProcessLifecycleOwner.get().lifecycle.currentState
+                            .isAtLeast(Lifecycle.State.STARTED)
+                    }.getOrNull()
+                },
+                clock = SystemClock::elapsedRealtime,
+            ).solve(
+                challengeToken = challengeToken,
+                identityKey = signal.localIdentityPublicKeyBytes(),
+                params = RegistrationPow.DEFAULT_PARAMS,
+                deriver = powDeriver,
+            )
+        }
 
     /**
      * Durable-ack barrier for the inbound path: reseal the ratchet advance ([flushBeforeAck])

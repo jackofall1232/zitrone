@@ -73,7 +73,22 @@ docker compose -p sublemonable \
 
 ## Step 5 preconditions, all of them
 
-- [ ] Argon2id constants measured on a Revvl 6x in battery saver and updated (not placeholders)
+- [ ] Argon2id constants measured on a Revvl 6x in battery saver and updated (not placeholders).
+      **The measurement channel exists as of the 0.9.4 client:** every solve runs through an
+      instrumented recorder that writes per-stage timings, work counts, the parameters used,
+      battery-saver state, and foreground/backgrounded state to Settings → Diagnostics (`pow:`
+      lines) — on success AND on abort. One registration attempt on the device yields the
+      number; read it off the Diagnostics screen.
+- [ ] **The relay env pins all four PoW parameters to the values the 0.9.4 client ships**
+      (`RegistrationPow.DEFAULT_PARAMS`): the challenge token carries no parameters, so client
+      and relay agree by configuration only, and a mismatch on any of the four silently
+      rejects every proof once the flag is on. The client currently ships
+      `REGISTRATION_HASHCASH_DIFFICULTY=20`, `REGISTRATION_ARGON2_TIME_COST=1`,
+      `REGISTRATION_ARGON2_MEMORY_KIB=19456`, `REGISTRATION_ARGON2_DIFFICULTY_BITS=4`.
+      **D=4 is a first calibration attempt, not a measured value** — but note the relay
+      config's *default* for the difficulty is still the D=8 placeholder, so the env var must
+      be set explicitly; do not rely on the default. If the device measurement moves D, client
+      and env move in lockstep.
 - [ ] `REGISTRATION_CHALLENGE_SECRET` set to a base64 key ≥32 bytes — config fails closed at
       startup without it when the flag is on, which is the desired behaviour, but find that out
       before the flip rather than during it

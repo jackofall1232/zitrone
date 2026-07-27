@@ -75,6 +75,39 @@ object RegistrationPow {
         val argon2DifficultyBits: Int,
     )
 
+    /**
+     * The parameters this client solves with in production.
+     *
+     * **The challenge token carries no parameters** (it is timestamp||nonce||HMAC only), so
+     * client and relay agree by CONFIGURATION, not by protocol: these must mirror the relay's
+     * `REGISTRATION_HASHCASH_DIFFICULTY` / `REGISTRATION_ARGON2_TIME_COST` /
+     * `REGISTRATION_ARGON2_MEMORY_KIB` / `REGISTRATION_ARGON2_DIFFICULTY_BITS` env at flip
+     * time. A mismatch on any of the four silently rejects every proof (the client just sees
+     * 403) — see docs/DEPLOY_0.9.4_POW.md step-5 preconditions.
+     *
+     * TODO(pow-calibration): `argon2DifficultyBits = 4` is a FIRST REAL-WORLD CALIBRATION
+     * ATTEMPT, NOT a measured value. The relay-side placeholder default (D=8, 256 expected
+     * evaluations) is established as far too high — ~5.9 s on a 4-core server, so tens of
+     * seconds on a throttled phone (docs/REGISTRATION_POW_CALIBRATION.md). D=4 is the low end
+     * of that doc's projected D=4–5 landing zone: 16 expected evaluations ≈ 0.4 s on a CX33
+     * core, plausibly 1–3 s expected on budget hardware with the geometric 3× tail still
+     * under ~10 s — numbers a first device run can CORRECT rather than merely survive. This
+     * marker is not resolved until a measured Revvl 6x figure (battery saver, foreground)
+     * comes back through the Diagnostics screen's `pow:` lines and replaces it.
+     *
+     * Hashcash 20 and 19 MiB/t=1 are deliberate: difficulty 20 is the production-proven
+     * dead-drop constant already shipped on phones ([LemonDropCreate.POW_DIFFICULTY]), and
+     * the Argon2id cost parameters match the relay's verification defaults — raising m/t
+     * slows relay verification one-for-one, so D is the only calibration knob (see the
+     * calibration doc).
+     */
+    val DEFAULT_PARAMS = Params(
+        hashcashDifficulty = 20,
+        argon2TimeCost = 1,
+        argon2MemoryKiB = 19 * 1024,
+        argon2DifficultyBits = 4,
+    )
+
     /** Which stage the solver is in. Ordinal order is execution order. */
     enum class Stage { HASHCASH, ARGON2ID }
 
