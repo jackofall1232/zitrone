@@ -17,6 +17,16 @@
 > `feat/0.9.4-registration-pow-client` (4 commits, NOTHING PUSHED, no version bump).
 > Suite 585/0 failures, assembleDebug exit 0.
 >
+> **UPDATE 2026-07-27 (`d6b12587`):** the solve is now WIRED into registration through an
+> instrumented recorder — `pow:` lines (per-stage timings, work counts, params used, battery
+> saver, foreground/backgrounded) land in the Diagnostics screen on success AND abort, so one
+> registration attempt on the Revvl 6x returns the real number without adb or the gradle
+> harness. Client ships `DEFAULT_PARAMS` D=4 — a FIRST CALIBRATION ATTEMPT, not a measured
+> value; `TODO(pow-calibration)` stands. Relay env must pin all four params at flip time
+> (runbook step-5 precondition; relay config default is still the D=8 placeholder). Still
+> pending on this track: solve-layer UI wiring (pitcher screen + foreground service are built
+> but unwired), independent review of the whole client branch, then the cut.
+>
 > **THE ONE BLOCKER: the Argon2id constants are still unmeasured, and step 5 of the deploy
 > cannot happen until they are.** No Android device is attached to CX33 (`adb devices` empty,
 > no emulator images) and the Revvl 6x is with the maintainer, so the floor measurement could

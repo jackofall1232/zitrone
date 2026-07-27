@@ -1593,3 +1593,37 @@ copy claiming behavior the app doesn't back. Softened to "we'll finish in the ba
 (`4a...` follow-up commit on the client branch). When the foreground service IS built, contract
 §6.5 calls the notification "the progress indicator" — build it with a real count, then the
 richer copy can return.
+
+## 2026-07-27 — 0.9.4 PoW: instrumented solve path wired into registration + first-attempt D=4 (session: pow-instrumentation)
+
+Maintainer-directed unit before the 0.9.4 cut, on `feat/0.9.4-registration-pow-client`
+(`d6b12587`, local, not pushed). The calibration harness cannot run here (no device attaches),
+so the Diagnostics screen becomes the measurement channel: one registration attempt on the
+Revvl 6x now returns the real per-stage numbers instead of "worked"/"hung".
+
+- **`diagnostics/RegistrationPowSolveRecorder`** — the app's ONLY front door to
+  `RegistrationPow.solve`. Privacy-safe `pow:` lines into the existing BootDiagnostics file:
+  sha256 pre-stage duration/hash count/difficulty; argon2id duration/evaluations WITH the
+  parameters that produced them (t, m, p, D); total challenge→proof wall time; battery-saver;
+  foreground/backgrounded-mid-solve. Logged on success AND abort/failure (an abort at 60s is a
+  data point; how far it got is the useful part). 6 host tests pin the line contract.
+- **Wiring (this closes "nothing invokes the solve"):** `bootstrapLoop` gained `pow-challenge`/
+  `pow-solve` stages BEFORE the prekey durability barriers — an aborted solve burns no
+  ATTEMPTED marker. Challenge 404 → registers proofless (relay predates the PoW deploy);
+  otherwise the proof rides `api.register`. Solve on `Dispatchers.Default` under
+  `runInterruptible`, so teardown maps to the solver's interrupt contract.
+- **`RegistrationPow.DEFAULT_PARAMS`: D=4** (hashcash 20 = the shipped drop constant;
+  19 MiB/t=1). **A first real-world calibration attempt, NOT a measured value** — replaces
+  reliance on the relay's D=8 placeholder (established far too high). Low end of the D=4–5
+  landing zone so the first cut cannot hang minutes on the floor device.
+  `TODO(pow-calibration)` STANDS until the device number is read back.
+- **Runbook precondition added:** relay env must pin all four PoW params to the client's
+  shipped values — the token carries no parameters, agreement is by configuration, and the
+  relay config default is still D=8; a mismatch silently 403s every proof at flip time.
+
+Evidence: `:app:testDebugUnitTest` 591/0 failures/3 skipped; `:app:assembleDebug` exit 0.
+Constraints held: nothing merged/pushed, no version bump, `REGISTRATION_POW_ENABLED` stays
+false until all test devices are on 0.9.4. Independent review still owed on this branch
+before merge (now includes this unit). NOTE: the lemon UI + foreground service remain
+UNWIRED — a solve during boot shows the normal linking state, not the pitcher; the solve-layer
+UI unit is still pending and is NOT blocked by this one.
