@@ -15,6 +15,7 @@ import com.zitrone.app.crypto.vault.VaultSession
 import com.zitrone.app.crypto.vault.VaultState
 import com.zitrone.app.crypto.vault.VaultStateCodec
 import com.zitrone.app.crypto.vault.openPayload
+import com.zitrone.app.data.DecoyAuthStore
 import com.zitrone.app.decoy.DecoyAccountProvisioner
 import com.zitrone.app.decoy.DecoyCounterReservation
 import com.zitrone.app.decoy.DecoyIdentity
@@ -176,7 +177,7 @@ class DecoyAccountProvisionerTest {
         relay: DecoyRelayApi,
         now: () -> Long = { FIXED_NOW },
         random: Random = Random(7L),
-    ) = DecoyAccountProvisioner(
+    ) = DecoyAccountProvisioner.forRuntime(
         runtime = runtime,
         relay = relay,
         powSolver = FakeSolver(),
@@ -298,13 +299,17 @@ class DecoyAccountProvisionerTest {
 
     @Test
     fun `an already-provisioned vault does no network at all`() {
-        val runtime = runtimeOf()
+        val vault = Vault()
         val relay = FakeRelay()
-        assertTrue(runBlocking { provisioner(runtime, relay).provisionIfNeeded() })
+        assertTrue(runBlocking { provisioner(vault.runtime, relay).provisionIfNeeded() })
 
-        // A later session over the same vault.
+        // A later session, built from the image on disk — a genuinely fresh runtime, so its
+        // one-attempt latch is unburned and the durable account is the ONLY thing standing between
+        // this session and the shared global bucket. (Reusing the same runtime would let the
+        // runtime-scoped latch answer instead, and the test would pass without the predicate.)
+        val next = Vault(requireNotNull(vault.durableState()))
         val second = FakeRelay()
-        assertTrue(runBlocking { provisioner(runtime, second).provisionIfNeeded() })
+        assertTrue(runBlocking { provisioner(next.runtime, second).provisionIfNeeded() })
         assertEquals("no second registration", 0, second.registerCalls.get())
         assertEquals("no challenge fetched either", 0, second.challengeCalls.get())
     }
@@ -315,37 +320,64 @@ class DecoyAccountProvisionerTest {
     fun `crash BETWEEN register and commit leaves an orphaned relay account, never a reference`() {
         // The named case from the invariant table: the relay accepted the registration and then
         // the session mint died. The account exists on the relay and nothing points at it.
-        val runtime = runtimeOf()
+        val vault = Vault()
         val relay = FakeRelay(failAt = FakeRelay.Stage.SESSION)
 
-        assertFalse(runBlocking { provisioner(runtime, relay).provisionIfNeeded() })
+        assertFalse(runBlocking { provisioner(vault.runtime, relay).provisionIfNeeded() })
 
         assertEquals("the relay DID register an account", 1, relay.registerCalls.get())
         assertNotNull("…which is now an orphan", relay.issuedAccountId)
-        assertNull("the vault references no account", runtime.read { it.decoy?.accountId })
-        assertNull("and holds no identity key", runtime.read { it.decoy?.identityKeyPair })
+        assertNull("the vault references no account", vault.runtime.read { it.decoy?.accountId })
+        assertNull("and holds no identity key", vault.runtime.read { it.decoy?.identityKeyPair })
+        // The OTHER half of the R3 rule, and the discriminator against retiring the deferral
+        // unconditionally: a registration was spent here, so the back-off must survive — on DISK,
+        // because "not repeated next unlock" is a durability claim.
         assertNotNull(
             "the write-ahead back-off stands, so the orphan is not repeated next unlock",
-            runtime.read { it.decoy?.provisionNotBeforeMs },
+            requireNotNull(vault.durableDecoy()) { "the deferral must be on disk" }.provisionNotBeforeMs,
         )
-        assertNoDanglingReference(runtime)
+        assertNoDanglingReference(vault.runtime)
     }
 
     @Test
-    fun `a failure BEFORE register leaves no credentials — only the write-ahead back-off`() {
-        val runtime = runtimeOf()
+    fun `a failure BEFORE register RETIRES the deferral - nothing was spent, nothing is deferred`() {
+        // [R3] Round 2 made the write-ahead deferral unconditional AND permanent. The first half is
+        // right: a registration that may have been spent must cost a back-off window. The second
+        // half was not — an offline challenge fetch, a DNS failure or a failed proof-of-work
+        // reaches the relay's registration endpoint never, protects nothing, and used to disable
+        // cover traffic for 60–90 minutes anyway.
+        //
+        // And it cost more than that. The deferral is the WHOLE content of TAG_DECOY on this path,
+        // so a vault whose first cover-traffic attempt failed offline was left carrying a section
+        // that a 0.9.x build rejects as corruption — it lost its downgrade path for an attempt that
+        // did nothing. Retiring the deferral empties the holder, and an empty holder is omitted by
+        // the codec, which gives both back.
+        val vault = Vault()
         val relay = FakeRelay(failAt = FakeRelay.Stage.CHALLENGE)
 
-        assertFalse(runBlocking { provisioner(runtime, relay).provisionIfNeeded() })
+        assertFalse(runBlocking { provisioner(vault.runtime, relay).provisionIfNeeded() })
 
         assertEquals("nothing was registered", 0, relay.registerCalls.get())
-        val decoy = requireNotNull(runtime.read { it.decoy }) {
-            "the attempt was recorded BEFORE the relay was contacted"
-        }
-        assertNull("no account id", decoy.accountId)
-        assertNull("no identity key", decoy.identityKeyPair)
-        assertNotNull("and the back-off stands, because only a success retires it", decoy.provisionNotBeforeMs)
-        assertNoDanglingReference(runtime)
+        assertNull("no account id", vault.runtime.read { it.decoy?.accountId })
+        assertNull("no identity key", vault.runtime.read { it.decoy?.identityKeyPair })
+        assertNull(
+            "the deferral was retired, because the attempt spent nothing",
+            vault.runtime.read { it.decoy?.provisionNotBeforeMs },
+        )
+        // THE disclosure property, asserted through the real codec: decode yields a null holder
+        // only when the section tag is ABSENT from the image, which is precisely the condition
+        // under which a 0.9.x build still opens this vault (§4.1).
+        val persisted = requireNotNull(vault.durableState()) { "the attempt did write, then retired it" }
+        assertNull(
+            "no TAG_DECOY survives an attempt that spent nothing — the vault still opens on 0.9.x",
+            persisted.decoy,
+        )
+        // …and cover traffic is not stalled: the next session gets its attempt immediately.
+        val recovered = Vault(persisted)
+        val online = FakeRelay()
+        assertTrue(runBlocking { provisioner(recovered.runtime, online).provisionIfNeeded() })
+        assertEquals("the next attempt was allowed to proceed at once", 1, online.registerCalls.get())
+        assertNoDanglingReference(vault.runtime)
     }
 
     @Test
@@ -384,9 +416,12 @@ class DecoyAccountProvisionerTest {
         assertNoDanglingReference(vault.runtime)
 
         // The next unlock over the SAME image spends nothing either — the property round-1 F4 was
-        // meant to give and did not, on this edge.
+        // meant to give and did not, on this edge. The image is the one this run actually left on
+        // disk, not a freshly rebuilt near-full fixture: a rebuilt fixture is blocked by absolute
+        // capacity independently of anything the first run did, so the assertion would hold even if
+        // the first run had left a durable state a true reopen would treat differently.
         val next = FakeRelay()
-        val reopened = Vault(VaultCapacityFixture(ops).stateFilledToCap())
+        val reopened = Vault(requireNotNull(vault.durableState()) { "the reverted state was flushed above" })
         assertFalse(runBlocking { provisioner(reopened.runtime, next).provisionIfNeeded() })
         assertEquals("nor does the next session", 0, next.registerCalls.get())
     }
@@ -417,12 +452,14 @@ class DecoyAccountProvisionerTest {
         // provisioned" — take the latch, and register a SECOND account against a rate-limit bucket
         // shared by every client worldwide. Refusing to send is right; refusing to acknowledge an
         // account that already exists is not.
-        val vault = Vault()
-        assertTrue(runBlocking { provisioner(vault.runtime, FakeRelay()).provisionIfNeeded() })
-        val accountId = requireNotNull(vault.runtime.read { it.decoy?.accountId })
+        val first = Vault()
+        assertTrue(runBlocking { provisioner(first.runtime, FakeRelay()).provisionIfNeeded() })
+        val accountId = requireNotNull(first.runtime.read { it.decoy?.accountId })
 
-        // A LATER session over the same vault — a fresh instance, so its one-attempt latch is
-        // unburned and nothing but the predicate stands between it and the relay.
+        // A LATER session, built from the image on disk. It has to be a genuinely new runtime: the
+        // one-attempt latch is runtime-scoped [R3], so re-using the first session's runtime would
+        // let a BURNED latch do this test's work and it would pass with the predicate broken.
+        val vault = Vault(requireNotNull(first.durableState()))
         val relay = FakeRelay()
         val provisioner = provisioner(vault.runtime, relay)
         assertTrue("the account is durable and sendable", provisioner.canSend())
@@ -450,7 +487,8 @@ class DecoyAccountProvisionerTest {
         assertTrue("the live state fits again", VaultStateCodec.encode(stillSet).isNotEmpty())
         assertTrue("but no mutate has cleared the flag yet", vault.runtime.capacityExceeded)
 
-        // Yet another session, so the one-attempt latch is not what is doing the work here.
+        // Every call above returned at the hasAccount() short-circuit, so this session's latch is
+        // still unburned — the predicate, and only the predicate, is what keeps the relay untouched.
         val later = FakeRelay()
         assertFalse(runBlocking { provisioner(vault.runtime, later).provisionIfNeeded() })
         assertEquals(
@@ -601,6 +639,80 @@ class DecoyAccountProvisionerTest {
     }
 
     @Test
+    fun `two provisioners over ONE runtime spend one registration between them, not two`() {
+        // [R3] The one-attempt latch used to be an instance field, so two provisioners over one
+        // runtime each held their own: both passed the deferral check, both registered, and the
+        // last commit won — one orphaned relay account and TWO spends of a rate-limit bucket shared
+        // by every client worldwide, for a single vault. Round 1 had already ruled that kdoc-only
+        // uniqueness is not a defence and given DecoyCounterReservation a private constructor for
+        // exactly that reason; the provisioner kept a public one.
+        //
+        // The interleaving is made exact the same way the single-instance latch test makes its own:
+        // an EXPIRED deferral is the one state in which isDeferred() consults the clock, which
+        // gives a pause point AFTER B has read the section and BEFORE anything of A's is written.
+        // That placement is the whole test — pause B any later and A's own write-ahead deferral
+        // refuses it, so the scenario would stay green with no latch at all.
+        val vault = Vault(
+            VaultState.empty().also { it.decoy = DecoyState(provisionNotBeforeMs = FIXED_NOW - 1) },
+        )
+        val bThread = java.util.concurrent.atomic.AtomicReference<Thread?>(null)
+        val armed = java.util.concurrent.atomic.AtomicBoolean(true)
+        val bAtTheCheck = CountDownLatch(1)
+        val aDone = CountDownLatch(1)
+
+        val relayA = FakeRelay(accountIdToIssue = "aaaaaaaa-3333-4444-5555-666666666666")
+        val relayB = FakeRelay(accountIdToIssue = "bbbbbbbb-3333-4444-5555-666666666666")
+        val a = provisioner(vault.runtime, relayA)
+        val b = provisioner(vault.runtime, relayB, now = {
+            if (Thread.currentThread() === bThread.get() && armed.compareAndSet(true, false)) {
+                bAtTheCheck.countDown()
+                check(aDone.await(30, TimeUnit.SECONDS)) { "the first provisioner never finished" }
+            }
+            FIXED_NOW
+        })
+
+        var bResult: Boolean? = null
+        val bRunner = Thread { bResult = runBlocking { b.provisionIfNeeded() } }
+        bThread.set(bRunner)
+        bRunner.start()
+        assertTrue("B reached its deferral check", bAtTheCheck.await(30, TimeUnit.SECONDS))
+
+        assertTrue("A provisions", runBlocking { a.provisionIfNeeded() })
+        aDone.countDown()
+        bRunner.join(30_000)
+        assertFalse("B finished", bRunner.isAlive)
+
+        assertEquals("A spent the one registration", 1, relayA.registerCalls.get())
+        assertEquals("B spent NOTHING from the shared global bucket", 0, relayB.registerCalls.get())
+        assertEquals("not even a challenge", 0, relayB.challengeCalls.get())
+        assertEquals(
+            "the durable account is the one A registered — no orphan, no replacement",
+            relayA.issuedAccountId,
+            vault.durableDecoy()?.accountId,
+        )
+        assertEquals("and B reports the vault as sendable, because it is", true, bResult)
+        assertNoDanglingReferenceOnDisk(vault)
+    }
+
+    @Test
+    fun `a flush that THROWS is remembered by every provisioner over that runtime`() {
+        // [R3] The unconfirmed-commit memory was an instance field too, so it closed the readiness
+        // lie only for the instance that watched its own flush throw. A second provisioner over the
+        // same live runtime defaulted the flag to false and answered canSend() TRUE on credentials
+        // that no reader will ever find on disk — the same defect, one instance over.
+        var persists = 0
+        val vault = Vault(onPersist = { if (++persists >= 2) throw IOException("disk full") })
+        val witness = provisioner(vault.runtime, FakeRelay())
+        assertFalse("the call that saw the throw reports failure", runBlocking { witness.provisionIfNeeded() })
+
+        val other = provisioner(vault.runtime, FakeRelay())
+        assertTrue("the account exists — a second registration must NOT be spent", other.hasAccount())
+        assertFalse("but this runtime's commit was never confirmed durable", other.canSend())
+        assertFalse("and asking again must not flip it to ready", runBlocking { other.provisionIfNeeded() })
+        assertNull("nothing durable carries the account, which is the point", vault.durableDecoy()?.accountId)
+    }
+
+    @Test
     fun `provisioning never throws, whatever the relay does`() {
         for (thrown in listOf(IOException("offline"), IllegalStateException("weird"), RuntimeException("x"))) {
             val runtime = runtimeOf()
@@ -673,12 +785,17 @@ class DecoyAccountProvisionerTest {
         val vault = Vault()
         val limited = FakeRelay(failAt = FakeRelay.Stage.REGISTER, failure = ApiClient.ApiException(429, "rate_limited"))
         assertFalse(runBlocking { provisioner(vault.runtime, limited).provisionIfNeeded() })
-        val notBefore = requireNotNull(vault.durableDecoy()?.provisionNotBeforeMs)
+        val persisted = requireNotNull(vault.durableState())
+        val notBefore = requireNotNull(persisted.decoy?.provisionNotBeforeMs)
 
-        // ONE provisioner instance — one session — whose clock crosses the window boundary.
+        // ONE session — a NEW runtime over the deferral the previous one left on disk, which is
+        // what "a session that outlives the window" actually is — whose clock crosses the boundary.
+        // The latch is runtime-scoped [R3], so re-using the rate-limited session's runtime here
+        // would test a burned latch instead of the deferral check.
+        val reopened = Vault(persisted)
         var now = notBefore - 1
         val relay = FakeRelay()
-        val sameSession = provisioner(vault.runtime, relay, now = { now })
+        val sameSession = provisioner(reopened.runtime, relay, now = { now })
 
         assertFalse("inside the window: refused, and no relay contact", runBlocking { sameSession.provisionIfNeeded() })
         assertEquals(0, relay.registerCalls.get())
@@ -703,14 +820,17 @@ class DecoyAccountProvisionerTest {
 
     @Test
     fun `a deferral further out than this code can write is treated as a moved clock, not honoured forever`() {
-        val runtime = runtimeOf()
+        val vault = Vault()
         val relay = FakeRelay(failAt = FakeRelay.Stage.REGISTER, failure = ApiClient.ApiException(429, "rate_limited"))
-        runBlocking { provisioner(runtime, relay).provisionIfNeeded() }
+        runBlocking { provisioner(vault.runtime, relay).provisionIfNeeded() }
 
-        // Device clock jumps a decade backwards: the stored deferral is now absurdly far ahead.
+        // Device clock jumps a decade backwards: the stored deferral is now absurdly far ahead. The
+        // session that reads it is a new one over the persisted image — the runtime-scoped latch
+        // [R3] would otherwise refuse before the deferral was ever consulted.
+        val reopened = Vault(requireNotNull(vault.durableState()))
         val longAgo = FIXED_NOW - 10L * 365 * 24 * 60 * 60 * 1000
         val recovered = FakeRelay()
-        assertTrue(runBlocking { provisioner(runtime, recovered, now = { longAgo }).provisionIfNeeded() })
+        assertTrue(runBlocking { provisioner(reopened.runtime, recovered, now = { longAgo }).provisionIfNeeded() })
         assertEquals(1, recovered.registerCalls.get())
     }
 
@@ -729,7 +849,7 @@ class DecoyAccountProvisionerTest {
         val runtime = runtimeOf()
         val relay = FakeRelay()
         val solver = FakeSolver()
-        val provisioner = DecoyAccountProvisioner(
+        val provisioner = DecoyAccountProvisioner.forRuntime(
             runtime = runtime,
             relay = relay,
             powSolver = solver,
@@ -785,6 +905,36 @@ class DecoyAccountProvisionerTest {
     }
 
     @Test
+    fun `a refresh whose round-trip overlaps clearAccount does NOT resurrect the account`() {
+        // [R3] refreshTokens reads the account, blocks on the relay for as long as a login takes,
+        // and writes when the answer arrives. A clearAccount() landing in that window used to be
+        // UNDONE by the response: storeTokens materialised a token-only section, restoring a live
+        // access JWT and a refresh token — which mints whole new sessions — for an account the
+        // vault had just retired. A retired account whose bearer credentials come back is not
+        // retired. The section lock cannot cover this window (holding it across a network
+        // round-trip would stall the send path), so the WRITE has to be conditional instead.
+        val vault = Vault()
+        val relay = FakeRelay()
+        val provisioner = provisioner(vault.runtime, relay)
+        assertTrue(runBlocking { provisioner.provisionIfNeeded() })
+        assertEquals("the fixture really holds live tokens", "access-1", vault.runtime.read { it.decoy?.accessToken })
+
+        // Driven from inside the relay call — precisely the window the provisioner holds no lock in.
+        relay.duringRefresh = { DecoyAuthStore(vault.runtime).clearAccount() }
+
+        assertFalse(
+            "tokens for an account this vault no longer holds were not stored",
+            runBlocking { provisioner.refreshTokens() },
+        )
+        vault.runtime.read {
+            assertNull("the account stayed cleared", it.decoy?.accountId)
+            assertNull("no identity key came back", it.decoy?.identityKeyPair)
+            assertNull("no live access token was restored", it.decoy?.accessToken)
+            assertNull("nor a refresh token, which would mint whole new sessions", it.decoy?.refreshToken)
+        }
+    }
+
+    @Test
     fun `refreshTokens on an unprovisioned vault is a silent no-op`() {
         val runtime = runtimeOf()
         val relay = FakeRelay()
@@ -834,6 +984,11 @@ class DecoyAccountProvisionerTest {
          * every other test asserts on.
          */
         private val tokenPadBytes: Int = 0,
+        /**
+         * The id this relay hands back. Distinguishable per instance so a test can tell WHICH
+         * relay's account the vault ended up committing.
+         */
+        private val accountIdToIssue: String = "22222222-3333-4444-5555-666666666666",
     ) : DecoyRelayApi {
 
         private val tokenPadding = Random(11L)
@@ -858,6 +1013,9 @@ class DecoyAccountProvisionerTest {
         var signature: String? = null
         var refreshFails = false
 
+        /** Runs INSIDE the refresh call — the window a token refresh holds no lock in. */
+        var duringRefresh: (() -> Unit)? = null
+
         override suspend fun registrationChallenge(): String? {
             challengeCalls.incrementAndGet()
             if (failAt == Stage.CHALLENGE) throw failure
@@ -870,9 +1028,8 @@ class DecoyAccountProvisionerTest {
             duringRegister?.invoke()
             if (failAt == Stage.REGISTER) throw failure
             submittedProof = powProof
-            val id = "22222222-3333-4444-5555-666666666666"
-            issuedAccountId = id
-            return id
+            issuedAccountId = accountIdToIssue
+            return accountIdToIssue
         }
 
         override suspend fun createSession(
@@ -889,6 +1046,7 @@ class DecoyAccountProvisionerTest {
         }
 
         override suspend fun refreshSession(refreshToken: String): ApiClient.SessionTokens {
+            duringRefresh?.invoke()
             if (refreshFails) throw ApiClient.ApiException(401, "unauthorized")
             return ApiClient.SessionTokens("access-2", "refresh-2")
         }

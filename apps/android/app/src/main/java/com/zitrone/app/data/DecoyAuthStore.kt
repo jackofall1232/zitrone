@@ -40,6 +40,11 @@ import com.zitrone.app.crypto.vault.VaultRuntime
  * RAM-only [StagingAuthStore]; this store is for an ALREADY-provisioned account. A setter call
  * that would change the id is refused, which converts the dangerous wiring into the accepted
  * orphan outcome instead of letting it persist silently.
+ *
+ * ⚠️ **TOKEN WRITES ARE FAIL-CLOSED THE SAME WAY [R3].** Tokens belong to an account: [storeTokens]
+ * refuses to materialise a token-only section, and [storeTokensForAccount] refuses to write tokens
+ * for an account the vault no longer holds. Without that, a token refresh whose relay round-trip
+ * overlapped a [clearAccount] restored live bearer credentials for the retired account.
  */
 class DecoyAuthStore(
     private val runtime: VaultRuntime,
@@ -68,9 +73,44 @@ class DecoyAuthStore(
 
     override fun storeTokens(access: String, refresh: String) {
         DecoySectionLock.withSection(runtime) {
-            runtime.mutate {
-                it.decoy = (it.decoy ?: DecoyState()).copy(accessToken = access, refreshToken = refresh)
-            }
+            // Tokens belong TO an account. Writing them onto a vault that holds none would
+            // materialise a token-only section — bearer credentials for an account this vault does
+            // not claim, and (before U3 wires anything) a `TAG_DECOY` on a vault that never
+            // provisioned. Same fail-closed direction as the [accountId] setter above.
+            val current = runtime.read { it.decoy?.accountId } ?: return@withSection
+            writeTokensLocked(current, access, refresh)
+        }
+    }
+
+    /**
+     * Store tokens **only while the account is still [accountId]**, and report whether they were.
+     * **[R3]**
+     *
+     * The one caller — `DecoyAccountProvisioner.refreshTokens` — reads the account, blocks on the
+     * relay for as long as a login takes, and writes when the answer arrives. The section lock
+     * cannot be held across that (it would stall the send path behind a network round-trip), so the
+     * write must instead be conditional on what is true when it runs: a [clearAccount] that landed
+     * in the window means those tokens are for a retired account, and writing them would restore
+     * live bearer credentials the vault has just given up. A retired account whose credentials come
+     * back is not retired.
+     *
+     * The read and the write are one sequence under the section monitor, so no other writer of the
+     * section can land between them — the same rule the provisioner's commit-and-revert follows.
+     */
+    fun storeTokensForAccount(accountId: String, access: String, refresh: String): Boolean =
+        DecoySectionLock.withSection(runtime) {
+            if (runtime.read { it.decoy?.accountId } != accountId) return@withSection false
+            writeTokensLocked(accountId, access, refresh)
+            true
+        }
+
+    /** The token write itself. Called only with the section lock held and the account verified. */
+    private fun writeTokensLocked(accountId: String, access: String, refresh: String) {
+        runtime.mutate {
+            // `?: DecoyState()` is unreachable — the caller verified an account id under this same
+            // lock — and is kept only so the copy-with has a receiver.
+            it.decoy = (it.decoy ?: DecoyState(accountId = accountId))
+                .copy(accessToken = access, refreshToken = refresh)
         }
     }
 

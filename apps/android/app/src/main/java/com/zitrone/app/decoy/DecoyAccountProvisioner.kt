@@ -16,7 +16,10 @@ import com.zitrone.app.crypto.vault.wipe
 import com.zitrone.app.data.DecoyAuthStore
 import kotlinx.coroutines.CancellationException
 import java.security.SecureRandom
+import java.util.WeakHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
  * Provisions — lazily, once, per vault — the synthetic relay account that vault addresses its
@@ -81,28 +84,36 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  *  1. **Lazy.** Nothing is provisioned at vault creation. [provisionIfNeeded] is called from the
  *     first session that actually needs cover traffic; a vault that never sends never registers.
- *  2. **One RELAY attempt per session, ever.** [attempted] is a latch, not a counter — a failure is
- *     not retried inside the session, so no tight loop is expressible. It is taken immediately
- *     before the relay sequence and never by a purely local refusal: a back-off window that expires
- *     mid-session must still allow the one attempt, because the latch is one *attempt*, not one
- *     *check*.
- *  3. **The back-off is WRITTEN BEFORE the registration is spent, and only a success retires it.**
- *     **[R2]** The deferral is a durable *intent to attempt*, recorded and flushed before any relay
- *     contact; a successful commit clears it in the same mutate that stores the credentials. Two
- *     things fall out, and both were defects when the back-off was written afterwards:
+ *  2. **One RELAY attempt per RUNTIME, ever.** [Gate.attempted] is a latch, not a counter — a
+ *     failure is not retried inside the session, so no tight loop is expressible. It is taken
+ *     immediately before the relay sequence and never by a purely local refusal: a back-off window
+ *     that expires mid-session must still allow the one attempt, because the latch is one
+ *     *attempt*, not one *check*. **[R3]** The latch lives in the per-runtime [Gate], not in the
+ *     instance — see "the gate is scoped to the RUNTIME" below.
+ *  3. **The back-off is WRITTEN BEFORE the registration is spent, and retired by a success or by a
+ *     failure that spent nothing.** **[R2/R3]** The deferral is a durable *intent to attempt*,
+ *     recorded and flushed before any relay contact; a successful commit clears it in the same
+ *     mutate that stores the credentials. Two things fall out, and both were defects when the
+ *     back-off was written afterwards:
  *      - **A vault that cannot store a deferral never registers at all.** Round 1 wrote the
  *        back-off in the capacity handler, so a vault at ABSOLUTE capacity — where even
  *        `previous + deferral` will not encode — bare-reverted with no back-off on disk and
  *        registered again on the *next unlock*, forever. Writing first inverts that: if the
  *        smallest possible decoy write does not fit, the registration is never spent. There is no
  *        edge left where nothing can be encoded, because nothing has been spent by then.
- *      - **Every failure defers, not just a 429.** A crash between register and commit, an offline
- *        challenge fetch, a dead session mint — all of them leave the deferral standing. That is
- *        deliberate: the bucket is shared by every client worldwide, so the conservative direction
- *        is to make an attempt *cost* a back-off window and let success be the only thing that
- *        clears it. The price is that a vault which failed for a purely local reason waits
- *        [MIN_BACKOFF_MS]–[MIN_BACKOFF_MS] + [BACKOFF_JITTER_MS] before trying again, which for a
- *        background nicety is not a price worth optimising against a global resource.
+ *      - **Any failure from the registration onwards defers**, not just a 429: a crash between
+ *        register and commit, a dead session mint, a capacity failure at commit. Once the shared
+ *        worldwide bucket has been touched — and a `register` that throws may still have created
+ *        the account — the conservative direction is to make that attempt *cost* a back-off window
+ *        and let only a success clear it.
+ *     **[R3] But a failure BEFORE the registration is retired, not kept.** Round 2 made the write
+ *     unconditional *and permanent*, so an offline challenge fetch, a DNS failure or a failed
+ *     proof-of-work — none of which spend anything — disabled cover traffic for
+ *     [MIN_BACKOFF_MS]–[MIN_BACKOFF_MS] + [BACKOFF_JITTER_MS] while protecting nothing, and left a
+ *     deferral-only `TAG_DECOY` on disk that costs the vault its 0.9.x readability for no gain.
+ *     [clearBackoff] retires the deferral on exactly those paths. A crash between the write and
+ *     the clear leaves a spurious ≤90 minute deferral, which is the accepted direction: it costs a
+ *     background nicety, and the alternative costs a global registration.
  *     The window is randomized because the bucket is global — every rate-limited client is limited
  *     at the same instant, and a fixed delay rebuilds the same stampede an hour later.
  *
@@ -115,42 +126,48 @@ import java.util.concurrent.atomic.AtomicBoolean
  * device-level diagnostics sink.** This class takes no logger and no diagnostics handle, so that
  * is structural rather than a matter of discipline.
  *
+ * ## The gate is scoped to the RUNTIME, not to the instance **[R3]**
+ *
+ * Both pieces of guard state here — the one-attempt latch and the "this commit was never confirmed
+ * durable" memory — guard a resource that belongs to the **runtime**: the vault's one synthetic
+ * account, and the worldwide registration bucket one vault may spend from once. Round 2 kept both
+ * in instance fields, which is the scope mismatch `failures.md` records from 0.9.2 PR-3, and review
+ * round 3 produced both consequences:
+ *
+ *  - two provisioners over one runtime each held their own latch, so both passed the deferral check,
+ *    both registered, and the last commit won — **one orphan and two spends of a scarce global
+ *    bucket for one vault**;
+ *  - a second provisioner over a runtime whose credential flush had thrown defaulted its own flag
+ *    to false and answered [canSend] `true` on credentials no reader will ever find on disk.
+ *
+ * So the state lives in [Gate], one per live [VaultRuntime], and the constructor is **private**:
+ * a provisioner with a private latch is unrepresentable rather than merely discouraged, exactly as
+ * [com.zitrone.app.decoy.DecoyCounterReservation]'s private constructor made a second cursor
+ * unrepresentable. [forRuntime] is the only way to build one.
+ *
+ * It returns a NEW instance sharing the runtime's gate rather than a cached instance, which is the
+ * one place this deliberately differs from the allocator's registry. The allocator caches because
+ * its *cursor* is the thing that must be unique; here the collaborators ([relay], [powSolver],
+ * [clock]) are per-attempt — a decoy relay is built over a per-attempt [com.zitrone.app.data.
+ * StagingAuthStore] — so handing back a cached instance would silently bind a later caller to an
+ * earlier attempt's staging store and clock. Caching the *guard state* and not the collaborators
+ * gives the same structural guarantee without that trap.
+ *
  * ## Lifetime
  *
- * One instance per live session, constructed from that session's [VaultRuntime] — never a
- * device-global singleton. It owns no timers and no background job: it is `suspend` throughout, so
- * cancelling the session scope is the whole teardown.
+ * One instance per attempt, built from that session's [VaultRuntime] — never a device-global
+ * singleton. It owns no timers and no background job: it is `suspend` throughout, so cancelling the
+ * session scope is the whole teardown.
  */
-class DecoyAccountProvisioner(
+class DecoyAccountProvisioner private constructor(
     private val runtime: VaultRuntime,
     private val relay: DecoyRelayApi,
     private val powSolver: DecoyPowSolver,
-    private val clock: () -> Long = System::currentTimeMillis,
-    private val random: java.util.Random = SecureRandom(),
+    private val clock: () -> Long,
+    private val random: java.util.Random,
+    /** The per-runtime guard state — see "the gate is scoped to the RUNTIME" in the class kdoc. */
+    private val gate: Gate,
 ) {
-
-    /** One RELAY attempt per session — see rule 2 in the class kdoc. */
-    private val attempted = AtomicBoolean(false)
-
-    /**
-     * True while THIS session's credential commit is live in the state but was never confirmed
-     * durable — the window between the commit's `mutate` and its `flushBeforeAck` returning, and
-     * permanently afterwards if that flush threw.
-     *
-     * A flush throw means "it never happened", and round 1 honoured that for the call that saw it
-     * (it returns false) but not for the next one: the credentials sit live with `capacityExceeded`
-     * clear, so a second readiness check answered "ready" on bytes that no reader will ever find on
-     * disk. This is the memory of that failure, and it is exactly session-scoped, which is the
-     * right scope: anything decoded from disk at construction is durable by definition, and after
-     * a process death the credentials either landed (a later reseal or `close` got them — the next
-     * session finds them and does not re-register) or they did not (the next session finds nothing
-     * and registers once). Only the session that watched its own flush throw needs to remember.
-     *
-     * It gates [canSend] and NOT [hasAccount]: an unconfirmed commit is a reason to withhold cover
-     * traffic, never a reason to spend a second registration.
-     */
-    @Volatile
-    private var credentialsUnconfirmed: Boolean = false
 
     /**
      * Whether a synthetic account exists in this vault at all — the REGISTER predicate.
@@ -168,16 +185,18 @@ class DecoyAccountProvisioner(
      * failure:
      *
      *  - **[hasAccount]** — there is an account to send as.
-     *  - **not [credentialsUnconfirmed]** — this session's own commit was confirmed durable. A
-     *    commit whose flush threw is live-but-not-durable; sending on it risks a crash erasing the
-     *    credentials while the relay holds an account we can no longer authenticate to.
+     *  - **not [Gate.credentialsUnconfirmed]** — the commit made over this runtime was confirmed
+     *    durable. A commit whose flush threw is live-but-not-durable; sending on it risks a crash
+     *    erasing the credentials while the relay holds an account we can no longer authenticate to.
+     *    The flag is runtime-scoped, so every holder answers the same way as the one that watched
+     *    the throw.
      *  - **not [VaultRuntime.capacityExceeded]** — the runtime holds an unscheduled mutation, so
      *    `flushBeforeAck` fail-closes for the WHOLE vault. Nothing decoy-related can be made durable
      *    while that is true (the counter reservation's flush would refuse), so the honest answer for
      *    the moment is "no cover traffic". It becomes true again on the next successful mutate, and
      *    it is checked AFTER the state read so a concurrent capacity failure is still seen.
      */
-    fun canSend(): Boolean = hasAccount() && !credentialsUnconfirmed && !runtime.capacityExceeded
+    fun canSend(): Boolean = hasAccount() && !gate.credentialsUnconfirmed && !runtime.capacityExceeded
 
     /**
      * Ensure this vault has a synthetic account, registering one if it does not.
@@ -189,8 +208,9 @@ class DecoyAccountProvisioner(
      *
      * Idempotent and cheap when an account already exists: registration is gated on [hasAccount],
      * so a runtime-wide capacity overflow suppresses sending without ever re-entering the register
-     * path. When there is no account, at most one RELAY attempt is made per instance, i.e. once per
-     * unlocked session. A purely local refusal (a back-off window still in force) does not consume
+     * path. When there is no account, at most one RELAY attempt is made per RUNTIME, i.e. once per
+     * unlocked session however many provisioners are built over it. A purely local refusal (a
+     * back-off window still in force) does not consume
      * that attempt: the latch is one *attempt*, not one *check*, and a window that expires
      * mid-session must not force the vault to wait for the next unlock.
      */
@@ -204,7 +224,7 @@ class DecoyAccountProvisioner(
         // still racy in the sense that the winner may not have finished yet (there is no waiting
         // here, deliberately — a cover-traffic entry point must not block on a multi-second
         // registration), but it can no longer be a FALSE NEGATIVE once the winner is done.
-        if (!attempted.compareAndSet(false, true)) return canSend()
+        if (!gate.attempted.compareAndSet(false, true)) return canSend()
         return try {
             provision()
         } catch (c: CancellationException) {
@@ -224,6 +244,18 @@ class DecoyAccountProvisioner(
      * with the stored identity key — which always works, because possession of that key IS the
      * account. Returns whether tokens were obtained and stored. Never throws except to propagate
      * cancellation, and never touches anything but the token fields.
+     *
+     * ⚠️ **THE TOKENS ARE STORED ONLY IF THEY STILL BELONG TO THE ACCOUNT THEY WERE MINTED FOR.**
+     * **[R3]** This is a read → network → write sequence: it snapshots the identity and the refresh
+     * token, blocks on the relay for as long as that takes, and writes afterwards. A
+     * [DecoyAuthStore.clearAccount] landing in that window used to be undone by the response —
+     * `storeTokens` materialized a token-only section and **restored live bearer credentials for an
+     * account this vault had just retired**, which is not a retired account at all. The section lock
+     * cannot be held across the network (that would stall the send path behind a login), so the
+     * write is instead conditional on the account still being the one refreshed:
+     * [DecoyAuthStore.storeTokensForAccount] re-reads and compares under the section lock. This is
+     * the same shape the credential commit uses — decide on what is observed under the lock the
+     * write runs under, never on a snapshot taken before the round-trip.
      */
     suspend fun refreshTokens(): Boolean {
         val credentials = readCredentials() ?: return false
@@ -242,8 +274,13 @@ class DecoyAccountProvisioner(
             val tokens = refreshed ?: relay.createSession(credentials.accountId) { challenge ->
                 DecoyIdentity.signLoginChallenge(credentials.identityKeyPair, challenge)
             }
-            DecoyAuthStore(runtime).storeTokens(tokens.accessToken, tokens.refreshToken)
-            true
+            // False when the account was cleared (or replaced) while the relay was answering: the
+            // tokens are dropped rather than written, and "obtained and stored" is honestly false.
+            DecoyAuthStore(runtime).storeTokensForAccount(
+                accountId = credentials.accountId,
+                access = tokens.accessToken,
+                refresh = tokens.refreshToken,
+            )
         } catch (c: CancellationException) {
             throw c
         } catch (t: Throwable) {
@@ -260,15 +297,24 @@ class DecoyAccountProvisioner(
         // ── WRITE-AHEAD BACK-OFF, before a single byte of relay contact [R2] ──
         // Rule 3 in the class kdoc. If the smallest decoy write this class can make does not fit,
         // nothing is spent and there is no edge case left to handle at absolute capacity.
-        if (!reserveBackoff()) return false
+        val deferral = reserveBackoff() ?: return false
 
-        val identity = DecoyIdentity.generateIdentity()
+        // [R3] The discriminator that decides whether the deferral above is kept or retired. It is
+        // set BEFORE the register call rather than after it, because a `register` that throws may
+        // still have created the account (the relay committed and the response died on the way
+        // back) — and "may have spent a global registration" must count as spent. Everything above
+        // it is local or a read-only challenge fetch and provably spends nothing.
+        var registrationSpent = false
         // Set INSIDE the mutate block, so it is true whenever the live state has taken ownership of
         // the key array — including when the encode AFTER the block throws (VaultRuntime retains an
         // over-capacity mutation in memory). Wiping an array the live state holds would leave the
         // vault carrying a zeroed identity key, which is worse than the leak the wipe prevents.
         var handedOff = false
+        var identity: DecoyIdentity.Identity? = null
         try {
+            // Local: no network, no durable write. Inside the try so that a crypto-provider failure
+            // is a spent-nothing failure like any other and retires the deferral.
+            identity = DecoyIdentity.generateIdentity()
             // Same order as an ordinary boot: challenge → solve → register → session. A null
             // challenge means the relay has no PoW endpoint, so register without a proof.
             // ⚠️ NO LOCK IS HELD HERE. This is seconds of proof-of-work and HTTP; holding the
@@ -281,6 +327,7 @@ class DecoyAccountProvisioner(
             // ── the relay commit. Everything above this line is local and free to abandon. ──
             // The prekey bundle is generated HERE, after the (seconds-long) solve, so its
             // un-zeroable private halves are resident for the register call and not before it.
+            registrationSpent = true
             val accountId = relay.register(DecoyIdentity.generateBundle(identity), powProof)
             val tokens = relay.createSession(accountId) { challenge ->
                 DecoyIdentity.signLoginChallenge(identity.identityKeyPair, challenge)
@@ -298,7 +345,7 @@ class DecoyAccountProvisioner(
                 val beforeCommit = runtime.read { it.decoy }
                 // From here the live state may hold credentials that are not yet durable, so no
                 // caller may be told it can send until the flush below returns.
-                credentialsUnconfirmed = true
+                gate.credentialsUnconfirmed = true
                 try {
                     // ── ONE mutate, the whole credential set, never a part of it ──
                     runtime.mutate { state ->
@@ -322,7 +369,7 @@ class DecoyAccountProvisioner(
                     // re-register, and `credentialsUnconfirmed` keeps THIS session from sending on
                     // them.
                     runtime.flushBeforeAck()
-                    credentialsUnconfirmed = false
+                    gate.credentialsUnconfirmed = false
                     canSend()
                 } catch (c: CancellationException) {
                     throw c
@@ -338,19 +385,21 @@ class DecoyAccountProvisioner(
                 }
             }
         } catch (c: CancellationException) {
-            if (!handedOff) wipe(identity.identityKeyPair)
+            if (!handedOff) identity?.let { wipe(it.identityKeyPair) }
+            if (!registrationSpent) clearBackoff(deferral)
             throw c
         } catch (t: Throwable) {
-            if (!handedOff) wipe(identity.identityKeyPair)
+            if (!handedOff) identity?.let { wipe(it.identityKeyPair) }
+            if (!registrationSpent) clearBackoff(deferral)
             return false
         }
     }
 
     /**
-     * Record the cross-session back-off durably **before** any relay contact, and report whether it
-     * is safe to proceed. Rule 3 in the class kdoc.
+     * Record the cross-session back-off durably **before** any relay contact, and report the
+     * deadline written — or null when it could not be. Rule 3 in the class kdoc.
      *
-     * A `false` return means "this vault cannot durably record that it tried", and the correct
+     * A null return means "this vault cannot durably record that it tried", and the correct
      * response is to spend nothing: the alternative is the round-1 behaviour, where a vault too
      * full to hold a deferral registered a fresh account on every unlock and threw it away.
      *
@@ -359,8 +408,11 @@ class DecoyAccountProvisioner(
      * here must be reverted rather than swallowed: an unscheduled mutation leaves
      * [VaultRuntime.capacityExceeded] set, which fail-closes flush-before-ack for the whole vault
      * including the inbound message path, and a cover-traffic write may never degrade the real one.
+     *
+     * The deadline is returned rather than discarded because [clearBackoff] retires **this**
+     * deferral and no other — see there.
      */
-    private fun reserveBackoff(): Boolean = DecoySectionLock.withSection(runtime) {
+    private fun reserveBackoff(): Long? = DecoySectionLock.withSection(runtime) {
         val previous = runtime.read { it.decoy }
         val notBefore = backoffDeadline()
         try {
@@ -368,13 +420,51 @@ class DecoyAccountProvisioner(
                 state.decoy = (state.decoy ?: DecoyState()).copy(provisionNotBeforeMs = notBefore)
             }
             runtime.flushBeforeAck()
-            true
+            notBefore
         } catch (c: CancellationException) {
             throw c
         } catch (t: Throwable) {
             // Silent by requirement.
             if (t is VaultCapacityException) revertSection(previous)
-            false
+            null
+        }
+    }
+
+    /**
+     * Retire the write-ahead deferral after an attempt that spent NOTHING — the offline challenge
+     * fetch, the DNS failure, the failed proof-of-work, the cancelled scope. **[R3]**
+     *
+     * Round 2 made the write-ahead deferral unconditional and permanent, which was right for the
+     * half it protects (a registration may have been spent, so do not walk back into the shared
+     * bucket) and wrong for the other half: a failure that never reached `register` protects
+     * nothing, and paying 60–90 minutes of cover-traffic silence for it is a pure loss. Worse, the
+     * deferral is the *whole* content of `TAG_DECOY` on that path, and a vault carrying that
+     * section can no longer be opened by 0.9.x — so an offline first attempt cost the user their
+     * downgrade path for nothing. Clearing empties the holder, and an empty holder is omitted
+     * entirely by the codec, which puts both back.
+     *
+     * **Only [deferral] is retired.** The value written by *this* attempt is compared under the
+     * section lock before the clear, so a deferral some other writer put there in the meantime is
+     * left alone — a revert may only ever put back state observed under the lock the revert runs
+     * under, and the same rule applies to a retirement.
+     *
+     * Flushed, mirroring the write: a scheduled-only clear is undone by the same crash the write
+     * was made to survive. A throw leaves the deferral standing, which is the safe direction.
+     */
+    private fun clearBackoff(deferral: Long): Unit = DecoySectionLock.withSection(runtime) {
+        val previous = runtime.read { it.decoy }
+        // Not ours to retire — leave it exactly as it stands.
+        if (previous?.provisionNotBeforeMs != deferral) return@withSection
+        try {
+            runtime.mutate { state ->
+                state.decoy?.let { state.decoy = it.copy(provisionNotBeforeMs = null) }
+            }
+            runtime.flushBeforeAck()
+        } catch (c: CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            // Silent by requirement. The deferral simply stands, which costs a background nicety.
+            if (t is VaultCapacityException) revertSection(previous)
         }
     }
 
@@ -437,7 +527,82 @@ class DecoyAccountProvisioner(
         Credentials(accountId, identity.copyOf(), decoy.refreshToken)
     }
 
+    /**
+     * The guard state that belongs to a [VaultRuntime] rather than to a provisioner — see "the gate
+     * is scoped to the RUNTIME" in the class kdoc.
+     *
+     * Holds nothing about any vault: no content, no key material, no timers, nothing durable. Like
+     * [com.zitrone.app.crypto.vault.DecoySectionLock]'s monitor registry it is process-wide and is
+     * NOT a device-global singleton — every entry is weakly keyed on a live runtime and evaporates
+     * with the session, so it can never become a device-level record of how many vaults exist.
+     */
+    private class Gate {
+
+        /** One RELAY attempt per runtime — see rule 2 in the class kdoc. */
+        val attempted = AtomicBoolean(false)
+
+        /**
+         * True while a credential commit made over this runtime is live in the state but was never
+         * confirmed durable — the window between the commit's `mutate` and its `flushBeforeAck`
+         * returning, and permanently afterwards if that flush threw.
+         *
+         * A flush throw means "it never happened", and round 1 honoured that for the call that saw
+         * it (it returns false) but not for the next one: the credentials sit live with
+         * `capacityExceeded` clear, so a second readiness check answered "ready" on bytes that no
+         * reader will ever find on disk. Round 2 kept that memory per instance, so a SECOND
+         * provisioner over the same runtime answered "ready" on the same bytes. This is the memory
+         * of that failure at the scope it actually applies to — the runtime whose state holds the
+         * unconfirmed commit.
+         *
+         * Runtime-scoped is the right lifetime as well as the right breadth: anything decoded from
+         * disk when a runtime is built is durable by definition, and after a process death the
+         * credentials either landed (a later reseal or `close` got them — the next session finds
+         * them and does not re-register) or they did not (the next session finds nothing and
+         * registers once).
+         *
+         * It gates [canSend] and NOT [hasAccount]: an unconfirmed commit is a reason to withhold
+         * cover traffic, never a reason to spend a second registration.
+         */
+        @Volatile
+        var credentialsUnconfirmed: Boolean = false
+
+        companion object {
+            private val gates = WeakHashMap<VaultRuntime, Gate>()
+            private val gatesLock = ReentrantLock()
+
+            /** The one gate for [runtime], created on first use. */
+            fun forRuntime(runtime: VaultRuntime): Gate = gatesLock.withLock {
+                gates.getOrPut(runtime) { Gate() }
+            }
+        }
+    }
+
     companion object {
+
+        /**
+         * THE way to obtain a provisioner. The returned instance shares [runtime]'s one-attempt
+         * latch and its unconfirmed-commit memory with every other provisioner over that runtime,
+         * so two of them cannot each spend a registration from the shared worldwide bucket and
+         * cannot disagree about whether this vault's credentials were ever confirmed durable.
+         *
+         * See "the gate is scoped to the RUNTIME" in the class kdoc for why this returns a fresh
+         * instance over shared guard state rather than a cached instance.
+         */
+        fun forRuntime(
+            runtime: VaultRuntime,
+            relay: DecoyRelayApi,
+            powSolver: DecoyPowSolver,
+            clock: () -> Long = System::currentTimeMillis,
+            random: java.util.Random = SecureRandom(),
+        ): DecoyAccountProvisioner = DecoyAccountProvisioner(
+            runtime = runtime,
+            relay = relay,
+            powSolver = powSolver,
+            clock = clock,
+            random = random,
+            gate = Gate.forRuntime(runtime),
+        )
+
         /**
          * Floor of the back-off. The relay's registration limiter uses a one-hour window, so
          * retrying sooner cannot succeed against a bucket that is genuinely full.

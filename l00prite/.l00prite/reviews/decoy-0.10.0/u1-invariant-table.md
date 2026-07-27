@@ -415,7 +415,7 @@ beats patching.* So round 2 changed three structures rather than patching four i
 | # | Finding | Disposition |
 |---|---|---|
 | G1 (P1) | TOCTOU counter regression: `clearAccount()` resets the mark between the allocator's staleness check and its spend, emitting `1, 0` | **fixed at the root** — one SECTION lock (`DecoySectionLock`) shared by the allocator, `DecoyAuthStore` and the provisioner. The check is now atomic with the spend. Not a new check. |
-| G2 | flush-throw readiness lie: the NEXT call reported ready on never-flushed credentials | **fixed** — an instance-scoped `credentialsUnconfirmed` flag gates `canSend()`. Session-scoped is the right scope: anything decoded from disk is durable by definition, so only the session that watched its own flush throw needs to remember. |
+| G2 | flush-throw readiness lie: the NEXT call reported ready on never-flushed credentials | **fixed** — a `credentialsUnconfirmed` flag gates `canSend()`. ⚠️ **SUPERSEDED BY H3 (round 3):** this row claimed instance scope was right. It was not — a SECOND provisioner over the same runtime defaulted the flag to false. The flag is now runtime-scoped. |
 | G3 | the capacity flag used as a REGISTER predicate | **fixed by splitting the predicate** — `hasAccount()` (registration; reads nothing but the section) / `canSend()` (cover traffic). R4 corrected a third time. **This one was the architect's**, ratified into the spec in round 1 and falsified by review. |
 | G4 | the bare-revert branch wrote no back-off ⇒ one registration per unlock at absolute capacity | **fixed by inverting the order** — the back-off is now **written and flushed BEFORE any relay contact**, and only a success retires it. If the smallest decoy write does not fit, nothing is spent. The bare-revert branch is gone rather than repaired. |
 | G5 | the revert restored a snapshot taken before seconds of network I/O, clobbering concurrent writes | **fixed at the same root as G1** — the value the revert restores is read INSIDE the commit's critical section. A revert may only restore state observed under the lock the revert runs under. |
@@ -427,6 +427,10 @@ beats patching.* So round 2 changed three structures rather than patching four i
 | G11 | spec drift: §4 W1 claimed the first provision writes "counter reservation = 64" | **fixed in the spec** — W1 does not write the mark; it stays 0 until W3 first reserves. |
 
 ### Behaviour changes worth stating plainly
+
+⚠️ **BOTH ITEMS BELOW ARE SUPERSEDED BY ROUND 3 (H1/H5)** — see "fix round 3" at the end of this
+file. They are kept verbatim because item 2's conclusion ("§4.1's narrowed disclosure is still
+accurate") was wrong, and both reviewers found it independently.
 
 1. **Every provisioning attempt now costs a 60–90 minute back-off, not only a 429.** An offline
    challenge fetch defers exactly as a rate-limit does. That is the price of "record the intent
@@ -470,3 +474,80 @@ it is the same class of mistake F9/G9 keep catching:
 
 **Still not claimed:** `interleaved use never regresses` remains non-discriminating between the two
 allocator defences, as recorded in round 1, and the section lock does not change that.
+
+## FIX ROUND 3 (2026-07-27) — the scope of a guard, and a write that was never retired
+
+Paired-blind (Codex + Grok), adjudicated in `u1-r3-adjudication.md`. Fix round 3 of a cap of 6.
+**Zero P1s**, and for the first time the two reviewers landed on the SAME top three defects
+independently. Ten findings, H1–H10.
+
+**The pattern, named:** H2, H3 and H4 are one defect wearing three hats — **the guard's scope does
+not match the resource's scope**, the lesson `failures.md` records from 0.9.2 PR-3. The one-attempt
+latch and the unconfirmed-flush memory guarded resources that belong to the RUNTIME (this vault's
+one synthetic account; the worldwide registration bucket it may spend from once) while living in
+INSTANCE fields; `refreshTokens` guarded its write with a snapshot taken before a network
+round-trip. Round 1 had already fixed this exact shape once, structurally, for the counter
+allocator. Round 3 applied the same fix in the two places round 1 and 2 did not reach.
+
+| # | Finding | Disposition |
+|---|---|---|
+| H1 | §4.1's disclosure ("never generated cover traffic ⇒ unaffected") became false: the write-ahead back-off puts `TAG_DECOY` on disk before any relay contact | **fixed at the root, then re-worded.** Retiring the deferral on a spent-nothing failure empties the holder, and an empty holder is omitted, so the failed-offline case keeps its 0.9.x readability. The residual widening ("set up cover traffic", not "generated") is in §4.1 **flagged for maintainer re-ratification**, because the narrow wording was their ruling. |
+| H2 | two provisioners over one runtime each held their own latch ⇒ two registrations, one orphan | **fixed structurally** — private constructor + `forRuntime`, with the latch in a per-runtime `Gate`. Same treatment `DecoyCounterReservation` got in round 1. |
+| H3 | `credentialsUnconfirmed` was instance-scoped, so a second provisioner answered `canSend() == true` on a commit whose flush threw | **fixed** — the flag moved into the same per-runtime `Gate`. |
+| H4 | `refreshTokens` snapshots, blocks on the relay, then writes: a concurrent `clearAccount` was undone by the response, restoring live bearer credentials for a retired account | **fixed** — `DecoyAuthStore.storeTokensForAccount` re-reads and compares the account id under the section lock and refuses a mismatch. `storeTokens` is fail-closed the same way (it never materialises a token-only section). |
+| H5 | deferring on EVERY failure disabled cover traffic for 60–90 min after failures that spent nothing | **fixed by the architect's rule** — cleared when the attempt fails before `register` is called; kept from `register` onwards, because a `register` that threw may still have created the account. |
+| H6 | `parsePlaintext`'s version check sat outside the `try`, so a header throw skipped `partial.wipe()` | **fixed** — the header read moved inside. |
+| H7 | the encoder emitted a negative `counterHighWater` its own decoder rejects | **fixed** — `require` in `encodeDecoy`; strict v1 refuses to produce what it refuses to read. |
+| H8 | `provisionNotBeforeMs` kdoc still described the removed 429-only behaviour | **fixed** — rewritten to the write-ahead contract and both retirement conditions. |
+| H9 | `clearer.join(30_000).let { true }` asserted nothing (4th non-discriminating assertion in this unit) | **fixed** — `assertFalse(clearer.isAlive)`. |
+| H10 | a test comment claimed "the SAME image" while the code built a fresh fixture | **fixed** — the reopen now uses `vault.durableState()`, the image the first run actually left. |
+
+### Behaviour changes worth stating plainly
+
+1. **A provisioning attempt costs a 60–90 minute back-off only once the registration endpoint has
+   been reached.** Superseding round 2's "every failure defers": an offline challenge fetch, a DNS
+   failure, a failed proof-of-work or a cancelled scope retires the deferral, because none of them
+   can have spent anything. From `register` onwards the deferral stands whatever happens, including
+   when `register` itself throws — the relay may have committed the account before the response
+   died, and "may have spent" counts as spent.
+2. **A vault that fails to provision before reaching the relay carries NO `TAG_DECOY`** — the
+   deferral is retired and the emptied holder is omitted, so that vault still opens on 0.9.x. The
+   break attaches to "set up cover traffic". Superseding round 2's item 2, which said the trigger
+   had moved to "tried to provision" and that §4.1 was still accurate; §4.1 has been adjusted and
+   is flagged for maintainer re-ratification.
+3. **`DecoyAccountProvisioner`'s constructor is private.** `forRuntime` is the only way to build
+   one. It returns a NEW instance sharing the runtime's guard state rather than a cached instance —
+   deliberately unlike the allocator's registry, because the provisioner's collaborators (relay,
+   PoW solver, clock) are per-attempt and caching them would silently bind a later caller to an
+   earlier attempt's staging store.
+
+### The round-3 tests, and the mutation each was checked against
+
+Same discipline. Each mutation was applied to the real source, the test observed to FAIL, and the
+mutation reverted; the full suite was then re-run green (675 tests).
+
+| Test | Mutation it was verified against | Result |
+|---|---|---|
+| `two provisioners over ONE runtime spend one registration between them, not two` | the latch put back in an instance field | FAILED |
+| `a flush that THROWS is remembered by every provisioner over that runtime` | `credentialsUnconfirmed` put back in an instance field | FAILED |
+| `a refresh whose round-trip overlaps clearAccount does NOT resurrect the account` | the account-id comparison dropped from `storeTokensForAccount` | FAILED |
+| `tokens are never written for an account this vault does not hold` | `storeTokens` allowed to materialise a section | FAILED |
+| `a failure BEFORE register RETIRES the deferral` | `clearBackoff` call removed (round-2 behaviour) | FAILED |
+| `crash BETWEEN register and commit …` + 4 others | `clearBackoff` made unconditional (retire even after a spend) | 5 FAILED |
+| `a throw on the very FIRST byte still wipes what the accumulator already held` | the version check moved back outside the `try` | FAILED |
+| `the ENCODER refuses a negative counter mark too` | the `require` removed from `encodeDecoy` | FAILED |
+| `clearAccount cannot land BETWEEN the staleness check and the spend` (H9) | the clearer thread made to outlive the join | FAILED |
+| `an already-provisioned vault does no network at all` (restructured) | the `hasAccount()` short-circuit removed | FAILED |
+| `an unrelated capacity overflow stops SENDING …` (restructured) | `capacityExceeded` folded back into `hasAccount()` | FAILED |
+| `a back-off window that expires mid-session still gets its one attempt` (restructured) | the latch taken BEFORE the deferral check | FAILED |
+
+**Four tests had to be restructured to keep discriminating**, and the reason is worth recording: the
+latch is now runtime-scoped, so "a later session" can no longer be modelled as a fresh provisioner
+over the same live runtime — that shares the burned latch, and the latch would silently do the
+test's work. They now build a genuinely new runtime from the image on disk, which is what a later
+session actually is. The last three rows above are those tests re-verified after restructuring.
+
+**Not claimed:** H10 is a fidelity fix to a test's construction, not a new production property —
+there is no mutation it newly discriminates. The comment now describes what the code does, and the
+reopened image is the one the first run left (`requireNotNull(vault.durableState())` would throw
+otherwise).

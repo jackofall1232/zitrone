@@ -29,7 +29,7 @@ import java.util.zip.Deflater
  * Covers the four things the U1 invariant table says this section must guarantee:
  * round-trip fidelity for every field, **absence as the valid initial state** (the section is
  * omitted entirely when there is nothing to record, which is what keeps a vault that never
- * generates cover traffic readable by an older build), the **wipe obligation** for the identity
+ * sets up cover traffic readable by an older build), the **wipe obligation** for the identity
  * PRIVATE key the section now carries, and a **measured byte budget** — `capacityExceeded`
  * fail-closes `flushBeforeAck`, so overflowing the fixed region is a durability bug.
  *
@@ -284,6 +284,28 @@ class VaultDecoySectionTest {
         VaultStateCodec.PartialDecode().wipe()
     }
 
+    @Test
+    fun `a throw on the very FIRST byte still wipes what the accumulator already held`() {
+        // The version check used to sit OUTSIDE the try, so a payload that failed on its header
+        // skipped partial.wipe() entirely. The seam's whole contract is "a throw from here zeroes
+        // what this accumulator holds", and the header is part of "here": a caller that hands in an
+        // accumulator carrying decoded key material (the shape this seam exists to make possible)
+        // and gets a wrong-version payload back would have that material stranded un-zeroed.
+        val key = ByteArray(68) { (it + 1).toByte() }
+        val record = ByteArray(32) { (it + 9).toByte() }
+        val partial = VaultStateCodec.PartialDecode()
+        partial.decoy = DecoyState(identityKeyPair = key)
+        partial.signal = mutableMapOf("session" to record)
+
+        assertThrows(IllegalArgumentException::class.java) {
+            // Version 0x09 — rejected by the first `require`, before any section is read.
+            VaultStateCodec.parsePlaintext(byteArrayOf(0x09), partial)
+        }
+
+        assertArrayEquals("the identity private key was zeroed", ByteArray(key.size), key)
+        assertArrayEquals("and so was the signal record", ByteArray(record.size), record)
+    }
+
     // ── strict v1 is CANONICAL, not merely parseable ──────────────────────────────
 
     @Test
@@ -330,6 +352,21 @@ class VaultDecoySectionTest {
         val tampered = plain.copyOf()
         tampered[tampered.size - COUNTER_FROM_END] = 0xFF.toByte()
         assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(tampered)) }
+    }
+
+    @Test
+    fun `the ENCODER refuses a negative counter mark too - strict v1 is symmetric`() {
+        // The decoder rejected it and the encoder emitted it happily, so this codec could write an
+        // image its own reader calls corrupt: the vault seals, and the next unlock refuses it as a
+        // damaged state. Strict v1 must refuse to PRODUCE what it refuses to READ — and because no
+        // writer in this codebase can reach a negative mark, the only honest form is an assertion,
+        // not a clamp that would silently rewrite a caller's state.
+        assertThrows(IllegalArgumentException::class.java) {
+            VaultStateCodec.encode(baseState(DecoyState(counterHighWater = -1L)))
+        }
+        // Discriminator: a positive mark still encodes, so this is not a blanket refusal.
+        val ok = VaultStateCodec.decode(VaultStateCodec.encode(baseState(DecoyState(counterHighWater = 7L))))
+        assertEquals("a positive mark still round-trips", 7L, ok.decoy?.counterHighWater)
     }
 
     // ── the measured byte budget ──────────────────────────────────────────────────

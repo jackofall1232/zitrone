@@ -126,8 +126,8 @@ class VaultState(
  * [com.zitrone.app.data.AuthState].
  *
  * ⚠️ **PRESENCE IS NOT READINESS.** A section exists as soon as there is anything at all to
- * record — including a bare 429 deferral with no account. The ONLY test for "this vault has a
- * usable synthetic account" is [isProvisioned] (both [accountId] and [identityKeyPair]
+ * record — including a bare provisioning deferral with no account. The ONLY test for "this vault
+ * has a usable synthetic account" is [isProvisioned] (both [accountId] and [identityKeyPair]
  * non-null). Those two are always committed in the SAME mutate, so a state carrying one
  * without the other is unreachable — an interrupted provision leaves an orphaned relay
  * account and NO section change, never a section referencing an account whose signing key was
@@ -160,10 +160,20 @@ class DecoyState(
     /** Dead-air schedule next-fire (epoch ms), or null when never armed. Written by U5 only. */
     val deadAirNextFireAtMs: Long? = null,
     /**
-     * Earliest epoch-ms at which provisioning may be attempted again, or null for "no
-     * deferral". Set only when the relay answers a registration with 429: registration is a
-     * scarce GLOBAL resource (one rate-limit bucket worldwide), so a 429 is contention with
-     * other users, not a client fault, and the back-off must survive the session that saw it.
+     * Earliest epoch-ms at which provisioning may be attempted again, or null for "no deferral".
+     *
+     * **[R3] Written AHEAD of the attempt, not in response to one.**
+     * `DecoyAccountProvisioner.reserveBackoff` mutates AND flushes it before a single byte of relay
+     * contact, on every attempt that gets past the deferral check — the durable record that this
+     * vault is about to spend from a rate-limit bucket shared by every client worldwide, so that a
+     * crash mid-attempt cannot make the next unlock walk straight back into it. (Round 1 wrote it
+     * only on a 429, which is what this comment used to say; that left a vault at absolute capacity
+     * registering afresh on every unlock, forever.)
+     *
+     * It is retired by exactly two things: a successful commit, which clears it in the same mutate
+     * that stores the credentials, and a failure that provably spent nothing — a challenge fetch
+     * that never reached `register`. **A failure from the registration onwards leaves it standing**,
+     * whatever the cause, because a `register` that threw may still have created the account.
      */
     val provisionNotBeforeMs: Long? = null,
 ) {
@@ -267,8 +277,15 @@ class VaultCapacityException(message: String) : IllegalStateException(message)
  * 0.9.1's fresh-install-only decision was. **Do NOT "fix" this by making the decoder tolerant
  * of unknown high tags** — the strictness is deliberate, the ruling considered and rejected
  * that option (it cannot rescue builds already in the field), and the mitigation that IS in
- * force is that the section is omitted entirely while there is nothing to record, so a vault
- * that never generates cover traffic never carries the tag.
+ * force is that the section is omitted entirely while there is nothing to record.
+ *
+ * **[R3] What that mitigation is worth, stated exactly.** The tag appears the moment a vault has
+ * anything to record — which, since `DecoyAccountProvisioner` writes its back-off before contacting
+ * the relay, is as soon as a vault **sets up cover traffic**, not as late as its first sent decoy.
+ * An attempt that fails before spending a registration retires that deferral, and the holder then
+ * encodes as empty and is omitted again, so a vault whose only brush with cover traffic was a
+ * failed offline attempt keeps its 0.9.x readability. A vault that has never used cover traffic at
+ * all never carries the tag. That is the honest trigger, and it is the one spec §4.1 states.
  *
  * COMPRESSION lives INSIDE the sealed, padded plaintext, so the on-disk region stays a
  * constant [SLOT_PAYLOAD_BYTES] regardless of how compressible the state is — zero
@@ -399,7 +416,9 @@ object VaultStateCodec {
             // when the holder is present but carries nothing worth persisting. Omitting an
             // empty holder is not tidiness: while the section is absent the payload stays
             // readable by a 0.9.x build (see the format-break note in the class kdoc), so a
-            // vault that never generates cover traffic never pays for the break.
+            // vault that never sets up cover traffic never pays for the break — and one whose
+            // only attempt failed before spending anything gets that readability back, because
+            // retiring the deferral empties the holder and lands here again. [R3]
             state.decoy?.takeUnless { it.isEmpty }?.let { writeSection(out, TAG_DECOY, encodeDecoy(it)) }
             return out.toByteArray()
         } finally {
@@ -426,10 +445,6 @@ object VaultStateCodec {
      * calling the cleanup directly and hoping production still calls it too.
      */
     internal fun parsePlaintext(plain: ByteArray, partial: PartialDecode): VaultState {
-        val r = Reader(plain)
-        val version = r.u8()
-        require(version == VERSION) { "unsupported vault state version: $version" }
-
         var rosterJson: String? = null
         var tombstonesJson: String? = null
         var settings: VaultScopedSettings? = null
@@ -441,6 +456,14 @@ object VaultStateCodec {
         // failure-wipe below only covers the FINAL `signal` local).
         val seenTags = HashSet<Int>()
         try {
+            // INSIDE the try, header included: the contract of this seam is that a throw from it
+            // wipes whatever [partial] holds, and a version check outside the try would break that
+            // for the very first bytes it reads — a truncated or wrong-version payload handed an
+            // accumulator that already carried key material would strand it un-zeroed. [R3]
+            val r = Reader(plain)
+            val version = r.u8()
+            require(version == VERSION) { "unsupported vault state version: $version" }
+
             while (r.hasRemaining()) {
                 val tag = r.u8()
                 val len = r.i32()
@@ -647,6 +670,12 @@ object VaultStateCodec {
      * legitimately-zero one stay distinguishable.
      */
     private fun encodeDecoy(d: DecoyState): ByteArray {
+        // Strict v1 refuses to PRODUCE what it refuses to READ. [decodeDecoy] rejects a negative
+        // high-water mark (it would hand out negative message_numbers — see the note there), and an
+        // encoder that happily emits one writes an image its own decoder calls corrupt: the vault
+        // would seal, and the next unlock would fail. Unreachable from any writer in this codebase,
+        // which is exactly why it must be an assertion and not a silent clamp. [R3]
+        require(d.counterHighWater >= 0L) { "negative counter high-water mark in decoy section" }
         val out = WipeableBuffer(128)
         try {
             writeNullableString(out, d.accountId)

@@ -386,13 +386,21 @@ rule on:
 > **⚠️ BLAST RADIUS NARROWED BY U1 — the break is NOT universal.** The hazard above is written as
 > though every 0.10.0 vault becomes unreadable by 0.9.x. **It does not.** U1's codec omits the
 > section entirely when the decoy state is empty — `state.decoy?.takeUnless { it.isEmpty }` — so
-> `TAG_DECOY` appears **only in a vault that has actually generated cover traffic.** A user who never
-> generates any keeps a vault that opens fine on 0.9.x.
+> `TAG_DECOY` appears **only in a vault that has set up cover traffic.** A user whose vault never
+> does keeps one that opens fine on 0.9.x.
 >
 > Option (a) still stands and the ruling is unchanged; only its scope is smaller than priced. **The
 > disclosure in §4.1 is narrowed accordingly** — an overstated disclosure is its own dishonesty, and
 > scaring every user about a break most of them will never hit is not caution, it is inaccuracy in
 > the direction that happens to feel safe.
+>
+> **[U1 round 3] The trigger is "set up", not "generated".** U1 writes a durable back-off *before*
+> contacting the relay, so the section appears the moment provisioning is attempted rather than when
+> the first decoy goes out. The two coincide in practice — U3 provisions lazily, from the first
+> session that actually needs a decoy — but they are not identical: a vault that registers and then
+> never sends still carries the tag. An attempt that fails **before** spending a registration now
+> retires its deferral, which empties the holder and puts the vault back in the omitted case, so a
+> failed offline first attempt does not cost the downgrade path. Wording below adjusted to match.
 
 ### 4.1 Storage-format-stability gate — ANSWERED, not deferred a third time
 
@@ -414,14 +422,27 @@ So, shipping **with** 0.10.0, in release notes and in `SECURITY_MODEL.md`:
 > and everything in them** — contacts, sessions, settings. There is no migration and no export. Do
 > not keep anything in Zitrone that you cannot afford to lose.
 >
-> **What 0.10.0-beta specifically changes:** once a vault has generated cover traffic, it can no
-> longer be opened by 0.9.x — downgrading will present that vault as corrupt. A vault that has never
-> generated cover traffic is unaffected and still opens on 0.9.x.
+> **What 0.10.0-beta specifically changes:** once a vault has **set up cover traffic** — which
+> happens the first time it sends any — it can no longer be opened by 0.9.x; downgrading will present
+> that vault as corrupt. A vault that has never used cover traffic is unaffected and still opens on
+> 0.9.x.
 
 *(Narrowed 2026-07-27 after U1. The first draft said flatly that "vaults created by 0.10.0 cannot be
 opened by 0.9.x", which is false: the tag is written only once cover traffic has actually been
 generated. Corrected rather than left overbroad — the deliver-then-claim rule cuts both ways, and a
 disclosure that overstates harm is as inaccurate as one that understates it.)*
+
+> **⚠️ ADJUSTED 2026-07-27 AFTER U1 REVIEW ROUND 3 — PENDING MAINTAINER RE-RATIFICATION.** The
+> narrowing above was an explicit maintainer ruling, so this change is flagged rather than made
+> quietly. "Generated cover traffic" became **false** in U1: the provisioner records a durable
+> back-off *before* it contacts the relay, so the tag lands when a vault **sets up** cover traffic,
+> which is earlier than its first sent decoy. Round 3 fixed the half of that which was a real defect
+> — an attempt that fails before spending a registration now retires the deferral, and the emptied
+> section is omitted again, so a vault whose only brush with cover traffic was a failed offline
+> attempt keeps its 0.9.x readability. What remains is genuinely broader than the ruled wording: a
+> vault that registers and then never sends still carries the tag. The wording above is the minimal
+> honest widening. **An overstated disclosure is its own dishonesty — which is why the maintainer
+> narrowed it — but an understated one is worse, so this could not simply be left as it stood.**
 
 **And the condition under which the promise flips**, so this is a commitment and not an indefinite
 disclaimer: **stability is committed to when a migration path exists and has been exercised across

@@ -23,6 +23,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -311,7 +312,11 @@ class DecoyCounterReservationTest {
 
         clearer.start()
         val duringOldAccount = reservation.next()
-        assertTrue("the clearer finished", clearer.join(30_000).let { true })
+        clearer.join(30_000)
+        // `join(t).let { true }` was the assertion here, which is unconditionally true — including
+        // when the thread is still running. join() returns Unit, so the only way to ask whether it
+        // finished is to ask the thread.
+        assertFalse("the clearer finished", clearer.isAlive)
 
         assertTrue(
             "clearAccount reset the counter mark while a value was being issued against it",

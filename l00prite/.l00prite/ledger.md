@@ -1998,3 +1998,116 @@ mutation runs above were each verified FAILED and reverted before this final gre
 
 Round 3 of the paired-blind review, whole unit again. Then a maintainer merge decision. Two rounds of
 the cap of six are now used.
+
+---
+
+## 2026-07-27 — 0.10.0 U1: review round 3 fixed (H1–H10). Zero P1s, and the reviewers converged.
+
+Branch `feat/0.10.0-decoy-u1-provisioning` (LOCAL — nothing pushed, nothing merged, no version
+bump). Fix round **3 of a hard cap of 6**. Adjudication: `reviews/decoy-0.10.0/u1-r3-adjudication.md`.
+
+**The convergence signal.** Round 1 the two blind reviewers found fully disjoint sets; round 2, two
+of eleven overlapped; round 3 they independently landed on the **same top three defects** and found
+**zero P1s** (2 in r1, 1 in r2). Round 2's structural work — the section lock and the predicate
+split — was probed by both and broken by neither.
+
+### The pattern behind three of the four P2s
+
+H2, H3 and H4 are one defect wearing three hats: **the guard's scope does not match the resource's
+scope** — the lesson `failures.md` records from 0.9.2 PR-3, and the exact fix round 1 already
+applied once (private constructor + `forRuntime` for `DecoyCounterReservation`, because kdoc-only
+uniqueness is not a defence). It was not applied to the provisioner or to the token-refresh path.
+
+| # | Fix |
+|---|---|
+| H2 | `DecoyAccountProvisioner`'s constructor is **private**; `forRuntime` is the only way to build one. The one-attempt latch moved into a per-runtime `Gate` (weakly keyed, like `DecoySectionLock`'s monitor registry). Two provisioners over one runtime used to each hold their own latch: both passed the deferral check, both registered — one orphan and **two spends of a bucket shared by every client worldwide**, for one vault. |
+| H3 | `credentialsUnconfirmed` moved into the same `Gate`. A second provisioner over a runtime whose credential flush had thrown defaulted the flag to false and answered `canSend() == true` on bytes no reader will ever find on disk. Round 2's ledger claimed instance scope was "the right scope" — it was not; that row is now marked superseded in the invariant table. |
+| H4 | `refreshTokens` snapshots identity + refresh token, blocks on the relay, then writes — the same read→network→write shape round 2 eliminated for the commit path. A concurrent `clearAccount` was **undone by the response**: `storeTokens` materialized a token-only section, restoring a live access JWT and a refresh token (which mints whole new sessions) for a retired account. Fixed with `DecoyAuthStore.storeTokensForAccount`, which re-reads and compares the account id under the section lock; `storeTokens` is fail-closed the same way and never materializes a token-only section. |
+
+`forRuntime` deliberately returns a **new instance sharing the runtime's gate** rather than a cached
+instance — the one place this differs from the allocator's registry. The allocator caches because
+its *cursor* must be unique; the provisioner's collaborators (relay over a per-attempt
+`StagingAuthStore`, PoW solver, clock) are per-attempt, so a cached instance would silently bind a
+later caller to an earlier attempt's staging store. Caching the guard state and not the
+collaborators gives the same structural guarantee without that trap.
+
+### H1 + H5 — one defect: the pre-network write was made permanent, not just unconditional
+
+Round 2 wrote the back-off before any relay contact (which closed G4: a vault too full to record
+that it tried never spends a registration) and let **only a success** retire it. So an offline
+challenge fetch, a DNS failure, a failed PoW — none of which spend anything — disabled cover traffic
+for 60–90 minutes while protecting nothing, **and** left a deferral-only `TAG_DECOY` on disk, which
+a 0.9.x build rejects as corruption. §4.1 promised such a vault would still open.
+
+Per the architect's ruling, the write stays and the **retirement** is what was missing:
+
+- capacity — the deferral cannot be written, so no registration is attempted (unchanged);
+- failure **before** `register` is called — deferral cleared, cover traffic recovers next attempt;
+- failure from `register` onwards — deferral **stays**, G4's protection intact;
+- crash between the write and the clear — a spurious ≤90 min deferral, accepted and documented.
+
+Because an emptied holder is omitted entirely, clearing also restores 0.9.x readability, which
+repairs H1 at the root rather than papering over it. `clearBackoff` compares the deadline it wrote
+under the section lock before clearing, so another writer's deferral is never retired.
+
+**One place the ruling's parenthetical contradicted its own rule, and what was implemented.** The
+brief lists "session-mint" among the transients to clear on. A session mint happens *after* a
+successful `register`, so a registration was definitely spent; clearing there would re-register
+within the hour and orphan the account — exactly G4's failure. The **rule** ("fails BEFORE any
+registration is spent") was implemented, not the example. The discriminator is set immediately
+*before* the `register` call rather than after it, because a `register` that throws may still have
+created the account on the relay: "may have spent" counts as spent.
+
+### The rest
+
+H6 `parsePlaintext`'s version check moved inside the `try`, so a header throw wipes the accumulator.
+H7 `encodeDecoy` now `require`s a non-negative `counterHighWater` — strict v1 refuses to produce
+what it refuses to read. H8 `provisionNotBeforeMs`'s kdoc rewritten (it still described the removed
+429-only behaviour — the stale-contract class `failures.md` records as having recurred twice).
+H9 `clearer.join(30_000).let { true }` → `assertFalse(clearer.isAlive)` (fourth non-discriminating
+assertion in this unit). H10 the "same image" reopen now uses `vault.durableState()` instead of a
+freshly rebuilt fixture.
+
+### Docs
+
+`docs/design/DECOY_TRAFFIC_0.10.0_SPEC.md` §4.1 now says *"once a vault has **set up cover
+traffic** — which happens the first time it sends any — it can no longer be opened by 0.9.x. A vault
+that has never used cover traffic is unaffected."* — **flagged in the document as PENDING MAINTAINER
+RE-RATIFICATION**, because the narrower wording was their explicit ruling and the reason they gave
+(an overstated disclosure is its own dishonesty) is right; an understated one is worse, so it could
+not be left either. The same false claim is fixed in the `VaultState` codec kdoc and the encode-site
+comment, and the invariant table's round-2 conclusion ("§4.1's narrowed disclosure is still
+accurate") is marked superseded rather than deleted.
+
+### Mutation testing — 12 mutations, every one observed to FAIL
+
+Each applied to the real source, the intended test observed FAILING, then reverted: latch back in an
+instance field (H2); `credentialsUnconfirmed` back in an instance field (H3); the account-id compare
+dropped from `storeTokensForAccount` (H4); `storeTokens` allowed to materialize a section (H4b);
+`clearBackoff` removed (H5) and `clearBackoff` made unconditional (H5b — 5 tests failed, which is
+the "spent ⇒ stays" side); the version check back outside the `try` (H6); the encoder `require`
+removed (H7); the clearer thread made to outlive its join (H9); plus three re-verifications of
+restructured tests — `hasAccount()` short-circuit removed, `capacityExceeded` folded back into
+`hasAccount()`, and the latch taken before the deferral check.
+
+**Four tests had to be restructured to keep discriminating, and that is the finding to carry
+forward.** With the latch runtime-scoped, "a later session" can no longer be modelled as a fresh
+provisioner over the same live runtime — that shares the burned latch, and the latch would silently
+do the test's work. They now build a genuinely new runtime from the image on disk, which is what a
+later session actually is. This is the same trap round 2 hit twice (another guard carrying the
+property); it was found here by running the mutations rather than by reasoning about them.
+
+**Not claimed:** H10 is a fidelity fix to a test's construction, not a new production property.
+There is no mutation it newly discriminates, and the invariant table says so.
+
+### Evidence
+
+`ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug` from
+`apps/android` → **`BUILD SUCCESSFUL`, exit code 0** (read from Gradle), **675 tests / 0 failures /
+0 errors** (669 before this round; +6 net after restructuring). The twelve mutation runs above were
+each verified FAILED and reverted before this final green run.
+
+### Still owed
+
+Review round 4 (three of six rounds used), then a maintainer merge decision. And the §4.1 wording
+needs the maintainer's re-ratification — it is a ruling being adjusted, not a typo being fixed.

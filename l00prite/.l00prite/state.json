@@ -1,8 +1,8 @@
 {
  "schema_version": 2,
  "project_name": "Zitrone",
- "current_goal": "0.10.0-beta decoy traffic \u2014 U1 review round 2 FIXED (G1-G11); awaiting review round 3 on the whole unit",
- "current_phase": "0.10.0 U1 on local branch feat/0.10.0-decoy-u1-provisioning: built, paired-blind reviewed twice, fix round 2 of 6 applied. Unwired by design; U2 (envelope builder) not started",
+ "current_goal": "0.10.0-beta decoy traffic — U1 review round 3 FIXED (H1-H10, 0 P1s); awaiting review round 4 on the whole unit",
+ "current_phase": "0.10.0 U1 on local branch feat/0.10.0-decoy-u1-provisioning: built, paired-blind reviewed three times, fix round 3 of 6 applied. Unwired by design; U2 (envelope builder) not started",
  "active_agent": null,
  "last_agent": "claude",
  "last_updated": "2026-07-27",
@@ -13,8 +13,8 @@
  "last_event_processed": null,
  "pending_event_count": 0,
  "review_response_required": false,
- "ci_status": "local only \u2014 :app:testDebugUnitTest 669 tests / 0 failures / 0 errors / 3 skipped; :app:assembleDebug exit 0. Nothing pushed, so no CI run.",
+ "ci_status": "local only — :app:testDebugUnitTest 675 tests / 0 failures / 0 errors; :app:assembleDebug exit 0. Nothing pushed, so no CI run.",
  "execution_active": false,
  "execution_stop_reason": null,
- "next_recommended_action": "Dispatch review ROUND 3 of the WHOLE U1 unit (not the fix delta) per [[zitrone-review-cli-invocation]]; fix cap is 6 rounds, 2 used. Point the reviewers at the three structural changes: the DecoySectionLock (is one monitor over the section actually sufficient, and is the lock order still sound with THREE holders?), the hasAccount()/canSend() split, and the write-ahead back-off (which changes behaviour: every failure now defers 60-90 min, and a TAG_DECOY section appears before any relay contact -- re-read the 4.1 downgrade disclosure against that)."
+ "next_recommended_action": "Dispatch review ROUND 4 of the WHOLE U1 unit (not the fix delta) per [[zitrone-review-cli-invocation]]; fix cap is 6 rounds, 3 used. Round 3 found ZERO P1s and the two blind reviewers converged on the same top three defects, so weigh whether the surface is exhausted. Point round 4 at: the per-runtime Gate (a THIRD process-wide WeakHashMap registry) and whether forRuntime returning a fresh instance over shared guard state is right; the deferral retire/keep boundary (is the register call the correct discriminator, given a register that throws may still have created the account?); and §4.1's re-worded disclosure, which is PENDING MAINTAINER RE-RATIFICATION."
 }

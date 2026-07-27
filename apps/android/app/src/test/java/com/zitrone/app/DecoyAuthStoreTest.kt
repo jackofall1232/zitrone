@@ -118,6 +118,37 @@ class DecoyAuthStoreTest {
     }
 
     @Test
+    fun `tokens are never written for an account this vault does not hold`() {
+        // [R3] Tokens belong TO an account. A token write that materialises its own section hands
+        // the vault live bearer credentials for something it does not claim — and, on a vault that
+        // never provisioned, a TAG_DECOY section that costs it its 0.9.x readability for nothing.
+        val empty = runtimeOf()
+        DecoyAuthStore(empty).storeTokens("a1", "r1")
+        assertNull("no section was materialised", empty.read { it.decoy })
+
+        // And the conditional form, which is what a token refresh racing clearAccount runs into:
+        // the account it minted those tokens for is no longer the account this vault holds.
+        val runtime = runtimeOf(provisioned())
+        val store = DecoyAuthStore(runtime)
+        assertEquals(
+            "a refresh for the CURRENT account still lands",
+            true,
+            store.storeTokensForAccount("synthetic-acct", "a1", "r1"),
+        )
+        assertEquals("a1", runtime.read { it.decoy?.accessToken })
+
+        assertEquals(
+            "…but one for a different account is refused",
+            false,
+            store.storeTokensForAccount("some-other-account", "a2", "r2"),
+        )
+        runtime.read {
+            assertEquals("the live tokens were not replaced", "a1", it.decoy?.accessToken)
+            assertEquals("r1", it.decoy?.refreshToken)
+        }
+    }
+
+    @Test
     fun `clearTokens drops only the tokens, and never creates a section`() {
         val runtime = runtimeOf(provisioned())
         DecoyAuthStore(runtime).clearTokens()

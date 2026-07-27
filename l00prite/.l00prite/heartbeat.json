@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "max_iterations": 6,
-  "current_iteration": 0,
+  "current_iteration": 3,
   "stop_conditions": [
     "definition_of_done_met",
     "blocked",
@@ -10,10 +10,10 @@
     "max_iterations_reached"
   ],
   "human_review_gates": [
-    "MERGE \u2014 always, per-action, never lapses (convergence does NOT authorize it)",
+    "MERGE — always, per-action, never lapses (convergence does NOT authorize it)",
     "version bump / release cut",
     "push beyond the draft-PR exception already recorded",
-    "round-6 cap reached \u2014 stop and hand to the human regardless of outcome",
+    "round-6 cap reached — stop and hand to the human regardless of outcome",
     "before executing destructive operations",
     "before changing architecture or security boundaries",
     "before declaring completion"
@@ -45,6 +45,6 @@
       "stop_signal"
     ]
   },
-  "active_unit": "0.10.0-beta U1 (decoy synthetic-account provisioning + TAG_DECOY): fix round 2 of a hard cap of 6 applied; awaiting paired-blind review round 3. UNWIRED.",
-  "loop": "U1 generate -> review r1 -> fix r1 -> review r2 -> fix r2 (this run). 2 of 6 review rounds used. No merge, no push, no version bump."
+  "active_unit": "0.10.0-beta U1 (decoy synthetic-account provisioning + TAG_DECOY): fix round 3 of a hard cap of 6 applied; awaiting paired-blind review round 4. UNWIRED.",
+  "loop": "U1 generate -> review r1 -> fix r1 -> review r2 -> fix r2 -> review r3 -> fix r3 (this run). 3 of 6 review rounds used. No merge, no push, no version bump."
 }

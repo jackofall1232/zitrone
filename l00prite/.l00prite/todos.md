@@ -872,10 +872,46 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       second attempt to become discriminating, and that is recorded in the invariant table.
       Re-verified: `:app:testDebugUnitTest` **669 tests / 0 failures / 0 errors / 3 skipped** and
       `:app:assembleDebug`, GRADLE_EXIT=0, 2026-07-27.
-      **STILL OWED:** review ROUND 3 against the WHOLE unit, then a maintainer merge decision. Two
-      of six rounds used. Flag to the round-3 reviewers: the section lock's sufficiency and lock
-      order with three holders; the write-ahead back-off's two behaviour changes above; and the
-      process-wide `WeakHashMap` registries (now two — allocators and section monitors).
+      **REVIEW ROUND 3 DONE + FIXED (2026-07-27).** Paired-blind Codex + Grok over the whole unit,
+      adjudicated in `reviews/decoy-0.10.0/u1-r3-adjudication.md`: **0 P1**, 6 P2, 5 P3 → ten
+      confirmed findings H1-H10, all fixed in fix round 3 of a hard cap of 6. First real convergence
+      signal: the two blind reviewers independently found the SAME top three defects (r1 was fully
+      disjoint, r2 overlapped on 2 of 11), and round 2's section lock and predicate split were probed
+      by both and broken by neither.
+      **H2/H3/H4 are one pattern — the guard's scope did not match the resource's scope**, the
+      0.9.2 PR-3 lesson, and the fix round 1 already applied once to the counter allocator:
+      (1) `DecoyAccountProvisioner`'s constructor is now **private** with a `forRuntime` factory, and
+      the one-attempt latch + the unconfirmed-flush memory live in a per-runtime `Gate` — two
+      provisioners over one runtime used to each hold their own latch (two registrations from the
+      shared worldwide bucket, one orphan) and disagree about durability;
+      (2) `refreshTokens`' read→network→write is now conditional on the account still being the one
+      refreshed (`DecoyAuthStore.storeTokensForAccount`), so a concurrent `clearAccount` is no longer
+      undone by the relay's response restoring live bearer credentials for a retired account.
+      **H1/H5: the write-ahead back-off is retired when the attempt failed BEFORE `register`** —
+      round 2 made it permanent, so an offline attempt cost 60-90 min of cover-traffic silence AND a
+      `TAG_DECOY` section that a 0.9.x build rejects, for something that spent nothing. From
+      `register` onwards it stands (a `register` that throws may still have created the account).
+      Twelve mutations applied and each observed to FAIL its intended test, then reverted; **four
+      tests had to be restructured** to keep discriminating, because a runtime-scoped latch means "a
+      later session" must be a new runtime built from the image on disk, not a fresh provisioner over
+      a live one.
+      Re-verified: `:app:testDebugUnitTest` **675 tests / 0 failures / 0 errors** and
+      `:app:assembleDebug`, GRADLE_EXIT=0, 2026-07-27.
+      **STILL OWED:** review ROUND 4 against the WHOLE unit, then a maintainer merge decision. Three
+      of six rounds used. Flag to the round-4 reviewers: the per-runtime `Gate` (a THIRD process-wide
+      `WeakHashMap` registry — allocators, section monitors, now gates) and whether `forRuntime`
+      returning a fresh instance over shared guard state is the right call; the deferral
+      retire/keep boundary (is `register` the correct discriminator?); and §4.1's re-worded
+      disclosure.
+
+- [ ] **§4.1 disclosure wording needs MAINTAINER RE-RATIFICATION.** Round 3 adjusted a maintainer
+      ruling rather than a typo. "Once a vault has GENERATED cover traffic" became false in U1 (the
+      back-off is written before any relay contact), and is now *"once a vault has **set up cover
+      traffic** — which happens the first time it sends any — it can no longer be opened by 0.9.x. A
+      vault that has never used cover traffic is unaffected."* Flagged in the spec itself, not
+      quietly rewritten: the narrowing was the maintainer's explicit ruling and their stated reason
+      (an overstated disclosure is its own dishonesty) still holds — an understated one is just
+      worse, so it could not be left as it stood either.
 
 - [ ] **U1 follow-up — account deletion / burn leaves the synthetic relay account registered.**
       `deleteAccountAndWipe` deletes the REAL relay account and obliterates the image; a provisioned

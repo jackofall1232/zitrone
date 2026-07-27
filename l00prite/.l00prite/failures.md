@@ -398,6 +398,36 @@ not the record — they are invisible to every future reader who starts from `.l
 fail — the follow-through did. A process that is written down but not executed produces *more*
 confident wrong answers than having no process at all, because the next reader trusts the record.
 
+## 2026-07-27 — "match the guard's scope to the resource's scope" recurred THREE more times in one unit
+
+**What happened.** 0.10.0 U1 review round 3 confirmed ten findings. Three of the four P2s were the
+same defect: a guard whose scope was narrower than the resource it guards.
+
+- the one-attempt registration latch was an INSTANCE field guarding a RUNTIME resource (this vault's
+  one synthetic account, and the worldwide rate-limit bucket it may spend from once) — two
+  provisioners over one runtime each held their own and both registered;
+- the "this commit was never confirmed durable" memory was an INSTANCE field guarding the same
+  runtime's state — a second provisioner answered "ready" on credentials whose flush had thrown;
+- `refreshTokens` guarded its write with a snapshot taken BEFORE a multi-second network round-trip,
+  so a `clearAccount` in that window was undone by the response.
+
+**Why it stings.** This rule is already in this file, from 0.9.2 PR-3. Fix round 1 of this very unit
+applied it correctly to `DecoyCounterReservation` — private constructor, `forRuntime` registry — and
+wrote down the reason: *kdoc-only uniqueness is not a defence.* The sibling class with the identical
+problem was left on a public constructor, and the token path with the identical shape was left
+alone. **Applying a rule where a reviewer pointed is not the same as applying it where it holds.**
+
+**BINDING RULE.** When a finding is fixed by changing a guard's SCOPE, the same session must
+enumerate every other guard over the same resource and state, per guard, whether it needs the same
+change. Not "does this look similar" — *what resource does this guard protect, and what is that
+resource's lifetime?* Two answers that disagree is the defect, before any interleaving is imagined.
+
+**Second, smaller lesson from the same round.** Tightening a guard's scope can silently destroy a
+test's discriminating power: once the latch became runtime-scoped, four tests that modelled "a later
+session" as a fresh provisioner over the same live runtime were being carried by the shared burned
+latch rather than by the property they named. That was found by RUNNING the mutations, not by
+reading the tests. A scope change is also a test-fidelity change.
+
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
   round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked
