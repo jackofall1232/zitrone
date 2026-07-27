@@ -17,6 +17,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -34,22 +35,29 @@ import kotlin.math.abs
 import kotlin.math.sqrt
 
 /**
- * THE U3 GATE: **a covered send puts two frames of the same length on the wire, in an order the
- * observer cannot predict, and NOTHING that happens on the cover side can cost the real send.**
+ * THE U3 GATE: **a covered send puts two frames of the same length on the wire, the REAL ONE FIRST,
+ * and nothing that happens on the cover side can cost the real send.**
  *
- * The three properties are tested three different ways on purpose:
+ * The order half of the gate changed on 2026-07-27: spec §4.3 R-U3-2 was amended by maintainer
+ * ruling, random ordering is conceded, and the real frame always goes first. So the statistical
+ * order test that used to live here is gone and its replacement is an absolute one — a single
+ * decoy-first send is now a failure, not a sample. What that ruling buys is tested directly, which
+ * is the point of this file's second half: **four R-U3-1 edges that were arguments in the round-1
+ * review are now assertions** (process death at the suspension point, a `deleteContact` queued on
+ * the confined worker, the `sendLimit` boundary, and a concurrent send's latency).
  *
- *  - **order and gap** are statistical, per spec §4.3 R-U3-2 ("pinned by a statistical test over
- *    many sends, not by reading the code"), so they are measured over thousands of sends. The
- *    generator is a seeded [SecureRandom], which fixes the SAMPLE and not the mechanism: every
- *    defect these tests exist to catch — a constant order, an alternating one, a biased coin, a
- *    fixed gap, a gap drawn differently per branch — is a property of the mechanism and shows up
- *    whatever the seed is. A separate test covers what a seeded generator cannot: that production's
- *    default source is not itself a fixed stream.
+ * The three surviving properties are still tested three different ways on purpose:
+ *
+ *  - **the gap** is statistical, per §4.3 R-U3-2 ("pinned by a statistical test over many sends, not
+ *    by reading the code"), so it is measured over thousands of sends. The generator is a seeded
+ *    [SecureRandom], which fixes the SAMPLE and not the mechanism: every defect these tests exist to
+ *    catch — a fixed gap, a biased draw, a gap drawn once and reused — is a property of the
+ *    mechanism and shows up whatever the seed is. A separate test covers what a seeded generator
+ *    cannot: that production's default source is not itself a fixed stream.
  *  - **R-U3-1** is tested by fault injection at every point that can fail — the builder refusing,
- *    the identity missing, the vault section unreadable, the socket throwing, the scope cancelled
- *    inside the drawn gap — always asking the same question: did the real publish still happen,
- *    exactly once.
+ *    the identity missing, the vault section unreadable, the socket throwing, the socket dead, the
+ *    scope cancelled inside the drawn gap — always asking the same question: did the real publish
+ *    still happen, exactly once, and first.
  *  - **uniformity (R-U3-3)** is tested through the shape of the predicate: no envelope class is
  *    treated differently, and the one condition consulted per send flips once and never back.
  *
@@ -80,15 +88,6 @@ class DecoySendPairingTest {
     /** Deterministic, and still a [SecureRandom] — the type the production seam requires. */
     private fun seeded(seed: Long): SecureRandom =
         SecureRandom.getInstance("SHA1PRNG").apply { setSeed(seed) }
-
-    /**
-     * A [SecureRandom] whose ORDER bit is pinned to decoy-first; the gap is still drawn normally.
-     * Used only where the test is about the decoy-first branch's control flow rather than about the
-     * distribution — the distribution tests must never see a pinned bit.
-     */
-    private fun alwaysDecoyFirst(): SecureRandom = object : SecureRandom() {
-        override fun nextBoolean(): Boolean = true
-    }
 
     private fun b64(bytes: Int): String =
         Base64.getEncoder().encodeToString(ByteArray(bytes).also { SecureRandom().nextBytes(it) })
@@ -173,51 +172,69 @@ class DecoySendPairingTest {
     private fun frameLength(envelope: MessageEnvelope): Int =
         WsClient.messageSendFrame(envelope).toString().toByteArray(Charsets.UTF_8).size
 
-    // ── R-U3-2: the order ───────────────────────────────────────────────────────────────────
+    // ── R-U3-2 (amended): the real frame is FIRST, always ───────────────────────────────────
 
     @Test
-    fun `the frame order is uniformly random and independent across many sends`() = runTest {
-        val n = 4_000
-        val frames = mutableListOf<Any>()
-        val pairing = pairing(frames, random = seeded(20260727))
-        val decoyFirst = BooleanArray(n)
-        repeat(n) { i ->
-            frames.clear()
-            pairing.record(textEnvelope(), frames)
-            assertEquals("a send that was not a pair", 2, frames.size)
-            decoyFirst[i] = frames.first() !== Real
-        }
-
-        val heads = decoyFirst.count { it }
-        val p = heads.toDouble() / n
-        val sigma = sqrt(0.25 / n)
-        // 4σ. A coin at p = 0.55 — a bias an observer could exploit over one conversation — is 6σ
-        // out at this n and fails; the generator is seeded, so this is not itself a coin flip.
-        assertTrue(
-            "decoy-first fraction $p is not 0.5 within 4σ (${4 * sigma})",
-            abs(p - 0.5) < 4 * sigma,
+    fun `the REAL frame always goes first - every send, every envelope class`() = runTest {
+        // The amended R-U3-2. Not a statistic: ONE decoy-first send is a defect, because the whole
+        // of R-U3-1 is now paid for by the real publish being committed to the socket before any
+        // cover code runs. Driven with the PRODUCTION generator rather than a seeded one — the order
+        // must not be a function of any draw, so no seed may be able to make it come out right.
+        val shapes = listOf<Pair<String, () -> MessageEnvelope>>(
+            "text" to { textEnvelope() },
+            "first message" to { firstEnvelope() },
+            "read receipt" to { receiptEnvelope() },
+            "attachment control payload" to { attachmentControlEnvelope() },
         )
+        val frames = mutableListOf<Any>()
+        val pairing = pairing(frames, random = SecureRandom())
+        repeat(1_000) { i ->
+            val (name, shape) = shapes[i % shapes.size]
+            frames.clear()
+            pairing.record(shape(), frames)
+            assertEquals("$name: a send that was not a pair", 2, frames.size)
+            assertTrue("$name: the COVER frame went first on send $i", frames.first() === Real)
+        }
+    }
 
-        // The fraction alone cannot see an ALTERNATING order, which is perfectly predictable and
-        // lands at exactly 0.5. A runs test can: alternating gives n runs, independence gives ~n/2.
-        var runs = 1
-        for (i in 1 until n) if (decoyFirst[i] != decoyFirst[i - 1]) runs++
-        val k = heads.toDouble()
-        val expectedRuns = 1 + 2 * k * (n - k) / n
-        val runsSigma = sqrt(2 * k * (n - k) * (2 * k * (n - k) - n) / (n.toDouble() * n * (n - 1)))
+    @Test
+    fun `no cover-side code runs before the real publish`() = runTest {
+        // The ruling's exact words, asserted rather than assumed: "the real frame is committed to
+        // the socket before any cover code runs." Every cover-side collaborator — the vault read,
+        // the identity read, the socket — records whether the real frame had already gone when it
+        // was called. This is the test that catches the *quiet* regression: hoisting the envelope
+        // BUILD above the publish introduces no suspension, so the confinement test below would not
+        // notice, but it puts cover-side work (and cover-side latency, and a cover-side throw) in
+        // front of a real send again.
+        val frames = mutableListOf<Any>()
+        val realGoneWhenCalled = mutableListOf<Boolean>()
+        val pairing = pairing(
+            frames,
+            recipient = { realGoneWhenCalled.add(frames.contains(Real)); syntheticAccountId },
+            sender = {
+                realGoneWhenCalled.add(frames.contains(Real))
+                this@DecoySendPairingTest.sender()
+            },
+            send = { realGoneWhenCalled.add(frames.contains(Real)); frames.add(it); true },
+        )
+        pairing.record(textEnvelope(), frames)
+
+        assertEquals("a cover-side collaborator was never called", 3, realGoneWhenCalled.size)
         assertTrue(
-            "run count $runs is not independent-looking (expected $expectedRuns ± ${4 * runsSigma})",
-            abs(runs - expectedRuns) < 4 * runsSigma,
+            "cover code ran before the real frame was committed to the socket",
+            realGoneWhenCalled.all { it },
         )
     }
 
     @Test
     fun `the DEFAULT generator is unpredictable, not a fixed stream`() = runTest {
-        // The seeded tests prove the mechanism consumes its draws correctly; they cannot prove
+        // The seeded tests prove the mechanism consumes its draw correctly; they cannot prove
         // production does not ship a constant or a fixed seed. Two default-constructed instances
-        // must disagree — and note WHY it has to be a cryptographic source: the gap is directly
-        // observable on the wire, so a predictable generator would let an observer recover its state
-        // from measured gaps and then predict the ORDER bit, the one value the mechanism hides.
+        // must disagree — and note WHY it has to be a cryptographic source now that the order bit is
+        // gone: the gap is the only drawn quantity and it is DIRECTLY OBSERVABLE on the wire, so a
+        // predictable generator would let an observer recover the whole future stream from a handful
+        // of measured gaps and use it as a stable device fingerprint linking pairs, sessions and —
+        // one instance per live vault session — vaults.
         val samples = (1..2).map {
             val frames = mutableListOf<Any>()
             val gaps = mutableListOf<Long>()
@@ -229,36 +246,21 @@ class DecoySendPairingTest {
                 provision = {},
                 sleep = { gaps.add(it) },
             )
-            val orders = mutableListOf<Boolean>()
-            repeat(64) {
-                frames.clear()
-                pairing.record(textEnvelope(), frames)
-                orders.add(frames.first() !== Real)
-            }
-            orders.toList() to gaps.toList()
+            repeat(64) { pairing.record(textEnvelope(), frames) }
+            gaps.toList()
         }
-        assertNotEquals("two default instances drew the same order sequence", samples[0].first, samples[1].first)
-        assertNotEquals("two default instances drew the same gap sequence", samples[0].second, samples[1].second)
+        assertNotEquals("two default instances drew the same gap sequence", samples[0], samples[1])
     }
 
     // ── R-U3-2: the gap ─────────────────────────────────────────────────────────────────────
 
     @Test
-    fun `the gap is drawn per send, bounded, uniform, and independent of the order`() = runTest {
+    fun `the gap is drawn per send, bounded, and uniform`() = runTest {
         val n = 4_000
         val frames = mutableListOf<Any>()
-        val decoyFirstGaps = mutableListOf<Long>()
-        val realFirstGaps = mutableListOf<Long>()
-        var drawn: Long?
-        val pairing = pairing(frames, random = seeded(4242), sleep = { drawn = it })
-        repeat(n) {
-            frames.clear()
-            drawn = null
-            pairing.record(textEnvelope(), frames)
-            val gap = drawn!!
-            if (frames.first() === Real) realFirstGaps.add(gap) else decoyFirstGaps.add(gap)
-        }
-        val gaps = decoyFirstGaps + realFirstGaps
+        val gaps = mutableListOf<Long>()
+        val pairing = pairing(frames, random = seeded(4242), sleep = { gaps.add(it) })
+        repeat(n) { pairing.record(textEnvelope(), frames) }
 
         assertEquals("exactly one gap is drawn per send", n, gaps.size)
         assertTrue(
@@ -278,12 +280,14 @@ class DecoySendPairingTest {
             abs(gaps.average() - mid) < 4 * sd / sqrt(n.toDouble()),
         )
 
-        // The sharp one: if the branches drew from different distributions the OBSERVABLE gap would
-        // identify the UNOBSERVABLE order, and same-length frames would stop helping.
+        // A gap drawn ONCE and reused would pass the bound and the mean but not this: consecutive
+        // draws must be independent, so the lag-1 autocorrelation sits at zero.
+        val mean = gaps.average()
+        val cov = (0 until n - 1).sumOf { (gaps[it] - mean) * (gaps[it + 1] - mean) } / (n - 1)
+        val variance = gaps.sumOf { (it - mean) * (it - mean) } / n
         assertTrue(
-            "the gap distribution differs by branch: ${decoyFirstGaps.average()} vs ${realFirstGaps.average()}",
-            abs(decoyFirstGaps.average() - realFirstGaps.average()) <
-                4 * sd * sqrt(1.0 / decoyFirstGaps.size + 1.0 / realFirstGaps.size),
+            "consecutive gaps are correlated (r=${cov / variance})",
+            abs(cov / variance) < 4 / sqrt(n.toDouble()),
         )
     }
 
@@ -357,7 +361,8 @@ class DecoySendPairingTest {
     @Test
     fun `an unreadable vault section sends the real frame uncovered`() = runTest {
         // A closed runtime throws out of `runtime.read`. That read is on the cover side, so it may
-        // not become the real send's problem.
+        // not become the real send's problem — and it must not escape into the coordinator's
+        // runCatching either, which would mark an already-delivered message FAILED.
         val frames = mutableListOf<Any>()
         pairing(frames, recipient = { throw IllegalStateException("closed") })
             .record(textEnvelope(), frames)
@@ -384,92 +389,144 @@ class DecoySendPairingTest {
 
     @Test
     fun `cancellation inside the drawn gap still publishes the real frame and still pairs it`() = runTest {
-        // The window cover traffic ADDS: on a decoy-first send the real frame waits out the gap, so
-        // a teardown landing inside it must not be what swallows the message — and on a real-first
-        // send it must not be what strands the real frame unpaired. Both orders are exercised (the
-        // seeds make that deterministic). The drawn ORDER survives cancellation even though the
-        // drawn GAP does not.
-        var sawDecoyFirst = false
-        var sawRealFirst = false
-        repeat(12) { iteration ->
-            val frames = mutableListOf<Any>()
-            val local = pairing(
-                frames,
-                random = seeded(7 + iteration.toLong()),
-                sleep = { delay(it) },
-            )
-            val job = launch { local.record(textEnvelope(), frames) }
-            runCurrent()
-            job.cancelAndJoin()
+        // Teardown lands in the gap on a mobile messenger constantly (vault lock, backgrounding).
+        // It may not swallow the message, and it may not leave the real frame UNPAIRED either —
+        // an unpaired frame is a marked frame (R-U3-3), so the `finally` emits the cover frame with
+        // the drawn gap cut short rather than dropping it.
+        val frames = mutableListOf<Any>()
+        val pairing = pairing(frames, sleep = { delay(it) })
+        val job = launch { pairing.record(textEnvelope(), frames) }
+        runCurrent()
+        job.cancelAndJoin()
 
-            assertEquals("a cancelled pairing lost a frame", 2, frames.size)
-            if (frames.first() === Real) sawRealFirst = true else sawDecoyFirst = true
-        }
-        assertTrue("the decoy-first branch was never exercised", sawDecoyFirst)
-        assertTrue("the real-first branch was never exercised", sawRealFirst)
+        assertEquals("a cancelled pairing lost a frame", 2, frames.size)
+        assertTrue("the real frame did not go first", frames.first() === Real)
     }
 
     @Test
     fun `a CancellationException out of the cover frame cannot skip the real publish`() = runTest {
-        // U3-D. The `finally` in `paired` is the guard that makes "the real send always escapes"
-        // absolute; a helper that rethrows AFTER latching defeats that guard from inside the region
-        // it protects. CancellationException is the one throwable `emit` deliberately does not
-        // swallow, and on the decoy-first `finally` path the decoy emitter runs FIRST — so a CE out
-        // of it used to take the real publish with it.
-        //
-        // The path is reached exactly as the class kdoc advertises it: a second send cancelled while
-        // WAITING for the window, so its `finally` is the first place either emitter runs.
-        val frames = mutableListOf<Any>()
-        var coverThrowsCancellation = false
-        val pairing = pairing(
-            frames,
-            random = alwaysDecoyFirst(),
-            sleep = { delay(it) },
-            send = {
-                if (coverThrowsCancellation) throw CancellationException("cover frame")
-                frames.add(it)
-                true
-            },
-        )
-
-        val holder = launch { pairing.record(textEnvelope(counter = 1), frames) }
-        runCurrent()
-
+        // U3-D, kept as a regression test after the ruling made it impossible. `emit` rethrows
+        // CancellationException — the one throwable it deliberately does not swallow — and under the
+        // old random ordering that rethrow could run BEFORE the real publish and take it with it.
+        // It now cannot: the publish is the first statement of `paired`.
         var published = 0
-        val waiter = launch { pairing.paired(textEnvelope(counter = 2)) { published++ } }
-        runCurrent()
+        val pairing = pairing(mutableListOf(), send = { throw CancellationException("cover frame") })
+        try {
+            pairing.paired(textEnvelope()) { published++ }
+        } catch (_: CancellationException) {
+            // The cover frame's cancellation still propagates; it just arrives too late to matter.
+        }
 
-        coverThrowsCancellation = true
-        waiter.cancelAndJoin()
         assertEquals("cover traffic swallowed a real send", 1, published)
+    }
 
-        coverThrowsCancellation = false
-        advanceUntilIdle()
-        holder.join()
+    // ── R-U3-1 edges the round-1 review left uncovered (U3-I) ───────────────────────────────
+
+    @Test
+    fun `at the only suspension point the real frame is already on the wire`() = runTest {
+        // U3-A, process death. A process cannot be killed mid-statement in a way this suite can
+        // observe, but it CAN only be killed at a suspension point — so the property that makes
+        // process death harmless is "at every suspension point after the durable barrier, the real
+        // frame has already been handed to the socket". There is exactly one suspension point in
+        // this class, the drawn gap, and the sleep seam IS that point: asserting here asserts the
+        // property exhaustively rather than by sampling.
+        val frames = mutableListOf<Any>()
+        var atSuspension: List<Any>? = null
+        val pairing = pairing(frames, sleep = { atSuspension = frames.toList() })
+        pairing.record(textEnvelope(), frames)
+
+        assertEquals(
+            "process death at the gap would lose a real message whose ratchet already advanced",
+            listOf<Any>(Real),
+            atSuspension,
+        )
+        assertEquals("the pair did not complete", 2, frames.size)
     }
 
     @Test
-    fun `a pairing in flight delays a concurrent send but never overtakes it`() = runTest {
-        // Reordering is forbidden categorically by R-U3-1 (delay is only bounded), and without the
-        // window lock the second send's tail would publish while the first pairing sleeps. Two
-        // properties: order preserved, and the two pairs not interleaved — an interleaved pair would
-        // leak the order, since "a foreign frame landed between these two" means real-first.
+    fun `a deleteContact queued on the confined worker cannot interleave before the publish tail`() =
+        runTest {
+            // U3-B. The coordinator runs sends on `Dispatchers.IO.limitedParallelism(1)`, and
+            // deleteContact is queued on that same worker — so any suspension between the durable
+            // flush and the `contactExists → ws.sendMessage` tail lets the delete run in between and
+            // the message is discarded, having already advanced the ratchet. Reproduced exactly:
+            // both coroutines on ONE dispatcher, the delete queued behind a send that is already
+            // running. A pairing that suspends before publishing hands the worker to the delete.
+            val worker = StandardTestDispatcher(testScheduler)
+            val frames = mutableListOf<Any>()
+            var contactDeleted = false
+            var contactWasLiveAtPublish: Boolean? = null
+            val pairing = pairing(frames, sleep = { delay(it) })
+
+            launch(worker) {
+                pairing.paired(textEnvelope()) {
+                    // The coordinator's real tail, in miniature.
+                    contactWasLiveAtPublish = !contactDeleted
+                    frames.add(Real)
+                }
+            }
+            launch(worker) { contactDeleted = true }
+            advanceUntilIdle()
+
+            assertEquals(
+                "cover traffic let a queued deleteContact interleave and discard a real send",
+                true,
+                contactWasLiveAtPublish,
+            )
+            assertEquals("the pair did not complete", 2, frames.size)
+        }
+
+    @Test
+    fun `with one send permit left the REAL frame takes it, never the cover frame`() = runTest {
+        // U3-C's self-preemption half. The relay charges the AUTHENTICATED account, so both frames
+        // draw the same per-account `sendLimit` bucket; a cover frame enqueued first would take the
+        // last permit and the real frame would come back `rate_limited` with no message id to mark
+        // or retry. Real-first makes that impossible within a pair — modelled here as a socket that
+        // accepts exactly one more frame.
+        //
+        // NOT covered here, deliberately: CROSS-send preemption (pair N's cover frame taking the
+        // permit pair N+1's real frame needed) survives every ordering and is a relay-side item.
+        var permits = 1
+        val accepted = mutableListOf<Any>()
+        fun spend(frame: Any): Boolean =
+            if (permits > 0) { permits--; accepted.add(frame); true } else false
+
+        val pairing = pairing(mutableListOf(), send = ::spend)
+        pairing.paired(textEnvelope()) { spend(Real) }
+
+        assertEquals(
+            "the cover frame spent the last permit the real send needed",
+            listOf<Any>(Real),
+            accepted,
+        )
+    }
+
+    @Test
+    fun `an in-flight pairing neither delays nor reorders a concurrent real send`() = runTest {
+        // U3-H. The class used to hold a mutex across the pair and claim "a concurrent send waits at
+        // most GAP_MAX_MS" — false under multiple waiters, where the bound was per-hop, not total.
+        // Real-first needs no lock, so the honest bound is ZERO: no virtual time passes between the
+        // two real frames even though the first pairing is mid-gap. Restoring any lock around the
+        // pair fails this, which is the mutation it exists to catch.
+        val worker = StandardTestDispatcher(testScheduler)
         val frames = mutableListOf<Any>()
-        val pairing = pairing(frames, random = seeded(3), sleep = { delay(it) })
+        val pairing = pairing(frames, sleep = { delay(it) })
         val firstReal = Any()
         val secondReal = Any()
 
-        launch { pairing.paired(textEnvelope(counter = 1)) { frames.add(firstReal) } }
+        launch(worker) { pairing.paired(textEnvelope(counter = 1)) { frames.add(firstReal) } }
+        launch(worker) { pairing.paired(textEnvelope(counter = 2)) { frames.add(secondReal) } }
         runCurrent()
-        launch { pairing.paired(textEnvelope(counter = 2)) { frames.add(secondReal) } }
-        advanceUntilIdle()
 
-        assertEquals("four frames, two pairs", 4, frames.size)
-        assertTrue(
-            "the second send overtook the first",
-            frames.indexOf(firstReal) < frames.indexOf(secondReal),
+        assertEquals(
+            "a real send waited on another pair's gap — cover traffic delayed it",
+            listOf(firstReal, secondReal),
+            frames.toList(),
         )
-        assertTrue("the two pairs interleaved", frames.indexOf(secondReal) >= 2)
+
+        advanceUntilIdle()
+        assertEquals("both pairs did not complete", 4, frames.size)
+        assertTrue("the second send overtook the first", frames.indexOf(firstReal) < frames.indexOf(secondReal))
     }
 
     // ── R-U3-3: uniform failure, and the provisioning trigger ───────────────────────────────

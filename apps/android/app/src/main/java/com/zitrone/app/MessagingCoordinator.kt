@@ -158,14 +158,16 @@ class MessagingCoordinator(
     /**
      * Cover traffic (0.10.0 U3). Wraps the NON-SUSPENDING `contactExists → ws.sendMessage` publish
      * tail of every outbound envelope — text, attachment control payload and read receipt alike —
-     * so a same-length decoy frame rides beside the real one. [CoverTraffic.NONE] (the default, and
+     * so a same-length decoy frame follows the real one. [CoverTraffic.NONE] (the default, and
      * every non-vault construction) runs that tail unchanged.
      *
      * The tail is handed over as a plain `() -> Unit`, which is why this seam cannot weaken the D2c
      * delete-atomicity contract: a non-suspending function type cannot contain a suspension, so "no
      * suspension between the check and the send" is now enforced by the compiler at all three send
-     * sites rather than by a comment at each of them. [CoverTraffic.paired] invokes it exactly once
-     * on every path — a cover-traffic failure can never cost a real send (spec §4.3 R-U3-1).
+     * sites rather than by a comment at each of them. Per the §4.3 R-U3-2 ruling of 2026-07-27 the
+     * REAL frame always goes first: [CoverTraffic.paired] runs this tail as its first statement,
+     * before any cover code and before any suspension point exists, so the sequence this seam
+     * executes is the pre-U3 one and a cover-traffic failure cannot cost a real send (§4.3 R-U3-1).
      */
     private val coverTraffic: CoverTraffic = CoverTraffic.NONE,
 ) : WsClient.Listener {
@@ -978,9 +980,10 @@ class MessagingCoordinator(
                 messages.markFailed(messageId)
                 return@runCatching
             }
-            // Cover traffic (U3): the tail below is handed to [coverTraffic] so a same-length
-            // decoy frame rides beside it in an unpredictable order. It runs exactly once whatever
-            // happens on the decoy side, and it stays NON-SUSPENDING — the function type says so.
+            // Cover traffic (U3): the tail below is handed to [coverTraffic], which runs it FIRST
+            // (§4.3 R-U3-2 ruling: real frame always first) and then emits a same-length decoy frame
+            // after a drawn gap. The tail stays NON-SUSPENDING — the function type says so — and
+            // nothing on the decoy side runs before it, so this is the pre-U3 sequence.
             coverTraffic.paired(envelope) {
                 // NON-SUSPENDING publish tail: on the confinement worker this check→deposit is
                 // atomic against deleteContact (the durable flush already completed above, OUTSIDE

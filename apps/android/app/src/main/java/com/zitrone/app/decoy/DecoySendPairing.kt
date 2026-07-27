@@ -15,8 +15,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.CoroutineContext
@@ -43,9 +41,11 @@ interface CoverTraffic {
      * Run [publish] — the real send's non-suspending publish tail — with whatever cover traffic this
      * implementation provides around it.
      *
-     * **[publish] is invoked EXACTLY ONCE on every path**, including a cover-traffic failure and
-     * including cancellation. An implementation that can swallow a real send is a functional
-     * regression caused by a privacy feature, which spec §4.3 R-U3-1 forbids absolutely.
+     * **[publish] runs FIRST and EXACTLY ONCE, before any cover code**, per the §4.3 R-U3-2 ruling
+     * of 2026-07-27. That is a contract on implementations, not a hope: it is what makes "cover
+     * traffic cannot cost a real send" structural instead of guarded. Note that entering a suspend
+     * function is not itself a suspension point, so an already-cancelled caller still gets its
+     * publish — there is nothing before it that could check for cancellation.
      */
     suspend fun paired(cover: MessageEnvelope, publish: () -> Unit)
 
@@ -65,32 +65,67 @@ interface CoverTraffic {
 }
 
 /**
- * Emits one cover frame beside every real `message.send`, in an order an observer cannot predict and
- * separated by a delay drawn per send.
+ * Emits one cover frame **after** every real `message.send`, separated by a delay drawn per send.
  *
  * [DecoyEnvelopeBuilder] is canonical for what a cover envelope *is*; this class owns only **when
- * the two frames go out and in which order**. It has no vault access, writes nothing durable, keeps
- * no state about any message and holds no timer — the same "fact about the type" discipline the
- * builder documents.
+ * the second frame goes out**. It has no vault access, writes nothing durable, keeps no state about
+ * any message and holds no timer — the same "fact about the type" discipline the builder documents.
  *
- * ## R-U3-1 wins every conflict, and this is where it is paid for
+ * ## REAL-FRAME-FIRST, ALWAYS — and this is why the class is small
  *
- * The real send is published through [CoverTraffic.paired]'s `publish` lambda **exactly once on
- * every path** — success, a cover-traffic failure, a builder refusal, a cancelled scope, even a
- * cancellation while waiting for [window]. That is enforced by the `finally` in [paired] rather than
- * argued: nothing this class can do, and nothing that can go wrong inside it, can cost a real send.
- * `flushSendRatchet` is not touched and neither is its position relative to `ws.sendMessage` — this
- * seam sits strictly between the two, at a point where the path already suspends.
+ * Spec §4.3 R-U3-2 was **amended by maintainer ruling on 2026-07-27**: random ordering is conceded
+ * and the real frame always goes first. The ruling is not a preference but an exhaustion proof —
+ * on a decoy-first send there are exactly three places the drawn gap can sit relative to the
+ * durability barrier and the atomic `contactExists → ws.sendMessage` tail, and all three break
+ * something (widened process-death loss window and `deleteContact` race; the flush's own duration
+ * landing inside the decoy-first interval only; or ciphertext to a contact deleted during the gap).
+ * There is no fourth position, so **decoy-first has no correct implementation, not merely a worse
+ * one.**
  *
- * **What the ruling costs, per §4.3 R-U3-4 and §2.4.** When the builder throws, the real frame goes
- * out **unpaired** — the exact observable this feature exists to remove. It is accepted because the
- * alternative (dropping the send) is a denial-of-service vector: anything that could induce build
- * failures would silence the user. Per R-U3-3 this is a **defect report, not a runtime path** — U2
- * made essentially every real shape mirrorable, so if this branch is ever reached in practice the
- * builder has a bug. Both known causes are about the inputs and neither is per-envelope chance: a
- * recipient account id whose string length differs from the synthetic account's (both are
- * relay-assigned UUIDs, so it cannot happen against this relay), and a local identity the vault
- * cannot produce (impossible on a path that has just encrypted a message with it).
+ * The whole of R-U3-1 is therefore paid for by **one statement**: `publish()` is the first thing
+ * [paired] does, outside every `try`, before a single line of cover code and before any suspension
+ * point exists. Four separate defects are *impossible by construction* rather than prevented by a
+ * check, and each of them had to be argued about while the order was random:
+ *
+ *  - **Process death between the durable barrier and the socket.** The real envelope is handed to
+ *    the socket at the same instant it was before this feature existed. The only suspension in this
+ *    class is the drawn gap, and it is strictly after that handoff, so a process that dies at it
+ *    loses a cover frame and nothing else.
+ *  - **A queued `deleteContact` interleaving on the confined worker.** There is no suspension
+ *    between the flush and the tail to interleave *in*; the pre-U3 `flush · check · write` sequence
+ *    is byte-for-byte the sequence that runs.
+ *  - **A cover frame taking the last `sendLimit` permit from the real frame it covers.** The real
+ *    frame is enqueued first, so within a pair the cover frame can only ever get the permit the
+ *    real one did not need. (**Cross-send** preemption — pair N's cover frame taking the permit
+ *    pair N+1's real frame wanted — survives every ordering, is inherent to doubling the volume on
+ *    a shared per-account budget, and is a **relay-side** item: `sendLimit` is a server constant
+ *    the relay never communicates, so no client-side headroom policy is sound. It is not defended
+ *    against here, deliberately.)
+ *  - **A cover-side throwable suppressing the real publish.** [emit] rethrows
+ *    `CancellationException` and that used to be able to skip the real send from inside the guard
+ *    that existed to protect it. It now runs after the publish, so there is nothing left for it to
+ *    skip.
+ *
+ * **What the ruling cost, recorded rather than quietly dropped:** an observer watching *both* ends
+ * of the network no longer gets 5–50 ms of ambiguity about which of the two frames was real. It
+ * reads `recipient_id` in cleartext on both envelopes regardless, so the loss is close to nil; a
+ * one-sided observer sees two equal-length frames either way. Spec §2.4 carries it as a residual.
+ *
+ * ## What survives, and what it costs
+ *
+ * The remaining requirement is unchanged: the two frames are the **same serialized length**, the
+ * gap is drawn per send, and nothing about the pair says which conversation the real frame belonged
+ * to.
+ *
+ * **When the builder throws, the real frame goes out unpaired** (§4.3 R-U3-4, §2.4) — the exact
+ * observable this feature exists to remove. It is accepted because the alternative (dropping the
+ * send) is a denial-of-service vector: anything that could induce build failures would silence the
+ * user. Per R-U3-3 this is a **defect report, not a runtime path** — U2 made essentially every real
+ * shape mirrorable, so if this branch is ever reached in practice the builder has a bug. Both known
+ * causes are about the inputs and neither is per-envelope chance: a recipient account id whose
+ * string length differs from the synthetic account's (both are relay-assigned UUIDs, so it cannot
+ * happen against this relay), and a local identity the vault cannot produce (impossible on a path
+ * that has just encrypted a message with it).
  *
  * ## Failure is UNIFORM, never per-envelope (R-U3-3)
  *
@@ -134,55 +169,68 @@ interface CoverTraffic {
  *
  * ## OPEN QUESTION — the delay distribution. **ANSWER: uniform over [GAP_MIN_MS]‥[GAP_MAX_MS] ms.**
  *
+ * The ruling changed what the bounds are *for*, so they are re-derived here rather than inherited.
+ * **The gap no longer delays any real send** — it is drawn and slept only after the real frame is
+ * on the socket — so R-U3-1 no longer sets the ceiling. Three other things do:
+ *
  * - **Uniform**, because uniform is the maximum-entropy distribution over a bounded support: given
  *   that a bound exists at all, any other shape hands the observer a better-than-uniform prior on
  *   the gap. An unbounded distribution (an exponential, the shape a Poisson cadence would suggest)
- *   is rejected twice over — its tail violates R-U3-1 on the half of sends where the real frame
- *   goes second, and its mode at zero makes short gaps *more* likely, i.e. more guessable, which is
- *   the opposite of what the requirement asks for.
- * - **The bound is set by R-U3-1, not by taste.** On a decoy-first send the real frame is delayed by
- *   exactly the drawn gap. [GAP_MAX_MS] is well under the ~100 ms at which UI latency becomes
- *   perceptible, and under the median round-trip to the relay on every supported transport (two
- *   orders of magnitude under I2P/Tor). It is also smaller than the variance the send path already
- *   carries: `flushSendRatchet` performs a blocking durable disk commit immediately before this
- *   point, with a retry backoff measured in whole milliseconds.
- * - **The floor is not cosmetic.** Two writes issued back-to-back can be coalesced into one TCP
- *   segment, which would present the pair as a single double-length frame and throw away the
- *   equal-length property the builder exists to provide. [GAP_MIN_MS] keeps them apart.
+ *   is rejected because its mode at zero makes short gaps *more* likely, i.e. more guessable, and
+ *   its tail makes the point below worse without limit.
+ * - **The ceiling is set by R-U3-3, not by latency.** The cover frame is emitted by the sending
+ *   coroutine itself, so a gap the session does not outlive is a cover frame that never goes —
+ *   producing exactly the *marked*, unpaired real frame R-U3-3 forbids. Cancellation (vault lock,
+ *   teardown, backgrounding) is frequent on a mobile messenger, so the wider the gap the more often
+ *   pairing degrades per-send instead of uniformly. [GAP_MAX_MS] keeps that window small; [paired]'s
+ *   `finally` closes what is left of it by emitting the cover frame anyway, gapless, when the drawn
+ *   gap is cut short.
+ * - **The floor is not cosmetic, but it is weaker than it used to claim.** Two writes issued
+ *   back-to-back can be coalesced into one TCP segment or TLS record. [GAP_MIN_MS] separates the two
+ *   *calls*; it cannot separate the two socket writes, because `WsClient.sendMessage` hands the
+ *   frame to OkHttp's asynchronous writer queue and returns — the actual write happens on OkHttp's
+ *   writer thread, which this class does not control and cannot flush. **What a coalesced pair
+ *   actually costs, now that the order is fixed:** the observer sees one record of exactly twice the
+ *   frame length instead of two of the frame length. Both readings say "one covered send happened
+ *   here" and neither says which conversation it belonged to — the equal-length property is about
+ *   the two halves being indistinguishable *from each other*, and a coalesced pair has no halves to
+ *   tell apart. So the floor is a best-effort tidiness measure over a residual that is cosmetic
+ *   rather than a leak, and it is documented as that instead of as a guarantee the mechanism cannot
+ *   give.
  * - **[random] is a [SecureRandom] BY TYPE, and that is a security requirement rather than
- *   hygiene.** The gap is *directly observable* on the wire; the order bit is not. Both are drawn
- *   from the same generator, so a `java.util.Random` here would let an observer recover the 48-bit
- *   LCG state from a handful of measured gaps and then **predict every subsequent order bit** — the
- *   one value this whole mechanism exists to keep secret. The parameter type makes that
- *   unrepresentable rather than relying on every caller passing the right thing.
+ *   hygiene** — with a different argument than before the ruling, because the order bit it used to
+ *   protect no longer exists. The gap is **directly observable on the wire**, and it is now the only
+ *   drawn quantity. A `java.util.Random` here would let an observer recover the 48-bit LCG state
+ *   from a handful of measured gaps and then *predict this generator's whole future stream* — which
+ *   turns the gap into a stable device fingerprint that links pairs to each other, links sessions to
+ *   each other, and (because one instance exists per live vault session on one device) could link
+ *   two vaults' traffic, which is a plausible-deniability break rather than a traffic-analysis
+ *   nuisance. The parameter type makes that unrepresentable rather than relying on every caller
+ *   passing the right thing.
  *
- * ## Why the pair is emitted under a lock, and why the lock cannot strand a send
+ * ## No lock, and why the one this class used to hold is gone
  *
- * [window] makes one pair's two frames exclusive against another pair's. Without it two hazards
- * appear, and the second is a leak rather than a nuisance:
+ * An earlier version emitted the pair under a mutex. It existed for two reasons and the ruling
+ * removed both: a real send queued behind a **decoy-first** pairing would have overtaken it on the
+ * wire (reordering, which R-U3-1 forbids categorically), and holding the lock across both branches
+ * was needed to stop "a foreign frame appeared between the pair" from being readable evidence of
+ * which branch had been taken. Real-first has no branch, and publishes with no suspension in front
+ * of it, so real frames leave in exactly the order the coordinator issues them — the pre-U3 property,
+ * restored rather than reconstructed. Pairs from concurrent sends may now interleave on the wire,
+ * which reveals nothing: the order within each pair is fixed and public, and an observer can already
+ * associate the halves by length.
  *
- *  - a real send queued behind a decoy-first pairing would **overtake** the paired one on the wire
- *    while it sleeps — reordering, which R-U3-1 forbids categorically (unlike delay, which it
- *    merely bounds). The lock is acquired AFTER the durable flush, i.e. at the same point that
- *    already decides today's wire order, so the order is preserved rather than reconstructed;
- *  - only the decoy-first branch would be interleaving-free, so "a foreign frame appeared between
- *    the pair" would be evidence for **real-first** and the observer could read the order off the
- *    interleaving instead of off the frames. Holding the lock across both branches keeps them
- *    symmetric.
- *
- * The lock is held for one drawn gap and never across the flush, the network, or any vault lock, so
- * a concurrent send waits at most [GAP_MAX_MS]. `withLock` releases it on every path including
- * cancellation, and [paired]'s `finally` publishes the real frame even when the lock was never
- * acquired — so no failure mode of this lock can strand a real send.
+ * Deleting it also deletes a bound this class could not honestly state. "A concurrent send waits at
+ * most [GAP_MAX_MS]" was false under multiple waiters — the bound was per-hop, not total. **The
+ * true bound is now zero**: cover traffic introduces no suspension before any real frame and no lock
+ * for any send to queue behind, so the delay it adds to a real send is not small, it is none.
  *
  * ## Lock order
  *
- * [window] is the OUTERMOST lock this path takes. It is acquired holding nothing (the per-contact
- * session lock is released before the flush; the [recipient]/[sender] reads happen before it), and
- * nothing that holds `DecoySectionLock`, `VaultRuntime.stateLock`, a session lock or the storage
- * lock ever waits for it — provisioning runs on its own job and never calls into this class. The
- * documented order (section → stateLock → session → storage) is therefore extended at the top, not
- * violated.
+ * This class takes no lock. It calls [recipient] and [sender] — which take `DecoySectionLock` and
+ * the vault runtime's own locks internally — and it does so holding nothing, from a point where the
+ * per-contact session lock has already been released and the durable flush has already completed.
+ * The documented order (section → stateLock → session → storage) is untouched.
  *
  * ## Teardown (R-U3-5)
  *
@@ -231,71 +279,29 @@ class DecoySendPairing(
     private val provisionContext: CoroutineContext = Dispatchers.IO,
 ) : CoverTraffic {
 
-    private val window = Mutex()
-
     private val provisioningStarted = AtomicBoolean(false)
 
     @Volatile
     private var provisionJob: Job? = null
 
     override suspend fun paired(cover: MessageEnvelope, publish: () -> Unit) {
-        val plan = plan(cover)
-        if (plan == null) {
-            publish()
-            return
-        }
-        // Both emissions latch BEFORE they run, so a throw out of either cannot cause a second
-        // attempt from the `finally`, and the `finally` can never double-publish a real send.
-        var realDone = false
-        var decoyDone = false
-        fun real() {
-            if (realDone) return
-            realDone = true
-            publish()
-        }
-        fun decoy() {
-            if (decoyDone) return
-            decoyDone = true
-            emit(plan.decoy)
-        }
+        // THE REAL FRAME GOES FIRST, AND THIS LINE IS THE WHOLE OF R-U3-1 (§4.3 R-U3-2 ruling).
+        // It is deliberately the first statement, outside every `try`, with no suspension point in
+        // front of it and no condition guarding it. Everything below runs after the real envelope
+        // has been handed to the socket, so no failure, cancellation, delay or rate-limit rejection
+        // on the cover side can reach it. A throw out of it is the real path's own throw and is
+        // propagated unchanged — swallowing it here would be cover traffic altering real behaviour.
+        publish()
+
+        val decoy = coverFor(cover) ?: return
         try {
-            window.withLock {
-                if (plan.decoyFirst) {
-                    decoy()
-                    sleep(plan.gapMs)
-                    real()
-                } else {
-                    real()
-                    sleep(plan.gapMs)
-                    decoy()
-                }
-            }
+            sleep(gapMs())
         } finally {
-            // R-U3-1: cover traffic never costs a real send. R-U3-3: a real frame is never left
-            // unpaired. Both calls are non-suspending, so they complete even under cancellation —
-            // where the drawn gap is the only thing lost and the drawn ORDER is still honoured.
-            //
-            // The guard is UNCONDITIONAL, and that is the point of the nested `finally`. This block
-            // is the mechanism that makes "the real publish always escapes" absolute, so nothing
-            // inside it may be able to defeat it from within: [emit] deliberately rethrows
-            // `CancellationException` (the one throwable it does not swallow), and on the
-            // decoy-first path the cover emitter runs FIRST. A plain sequence would let that rethrow
-            // skip the real publish — a safety mechanism broken from inside the region it protects.
-            // The pairing of the OTHER order is guarded the same way for symmetry: a throw out of
-            // the real publish must not be what leaves its frame unpaired (R-U3-3).
-            if (plan.decoyFirst) {
-                try {
-                    decoy()
-                } finally {
-                    real()
-                }
-            } else {
-                try {
-                    real()
-                } finally {
-                    decoy()
-                }
-            }
+            // R-U3-3: the drawn gap is lost to cancellation, the PAIR is not. An unpaired real frame
+            // is a marked frame, and cancellation (vault lock, teardown, backgrounding) is frequent
+            // enough that letting it drop the cover frame would mark a recognisable class of sends.
+            // Non-suspending, so it still runs while the coroutine is being cancelled.
+            emit(decoy)
         }
     }
 
@@ -304,33 +310,26 @@ class DecoySendPairing(
         provisionJob = null
     }
 
-    // ── planning ────────────────────────────────────────────────────────────────
-
-    private class Plan(val decoy: MessageEnvelope, val decoyFirst: Boolean, val gapMs: Long)
+    // ── the cover frame ─────────────────────────────────────────────────────────────────────
 
     /**
-     * The whole cover-traffic decision for one send, or null for "this send goes uncovered".
+     * The cover envelope for one send, or null for "this send goes uncovered".
      *
-     * **Total by construction** — it catches everything but cancellation, because its caller is the
-     * real send path and a throw here would abort a real send. It also runs entirely BEFORE [window]
-     * is taken: the vault read and the build must not sit inside the window that blocks another
-     * send's tail.
+     * **Total by construction** — it catches everything but cancellation. That containment is still
+     * load-bearing after the ruling, but it now protects a different thing: the real send has
+     * *already happened* when this runs, so a throw escaping here would propagate into
+     * `MessagingCoordinator`'s `runCatching` and mark a delivered message FAILED. Cover traffic
+     * would then have corrupted the state of a send it could not otherwise touch.
      */
-    private fun plan(cover: MessageEnvelope): Plan? = try {
+    private fun coverFor(cover: MessageEnvelope): MessageEnvelope? = try {
         val syntheticAccountId = recipient()
         if (syntheticAccountId == null) {
             ensureProvisioning()
             null
         } else {
-            sender()?.let { from ->
-                // A throw here is R-U3-4: the real send proceeds, uncovered. See the class kdoc —
-                // reaching it is a defect to report, not a case to swallow quietly.
-                Plan(
-                    decoy = builder.build(from, syntheticAccountId, cover),
-                    decoyFirst = random.nextBoolean(),
-                    gapMs = gapMs(),
-                )
-            }
+            // A throw here is R-U3-4: the real send already went, uncovered. See the class kdoc —
+            // reaching it is a defect to report, not a case to swallow quietly.
+            sender()?.let { from -> builder.build(from, syntheticAccountId, cover) }
         }
     } catch (c: CancellationException) {
         throw c
@@ -343,8 +342,8 @@ class DecoySendPairing(
 
     /**
      * Hand one cover frame to the socket. A `false` return is the ordinary dead-socket answer and a
-     * throw is contained: the real frame's fate is decided by [paired]'s caller, and nothing here
-     * may influence it.
+     * throw is contained: the real frame is already gone and nothing here may change what happened
+     * to it.
      */
     private fun emit(decoy: MessageEnvelope) {
         try {
@@ -380,15 +379,16 @@ class DecoySendPairing(
 
     companion object {
         /**
-         * Floor of the drawn gap, in milliseconds. Not cosmetic: two back-to-back writes can share
-         * one TCP segment, which would present the pair as a single double-length frame.
+         * Floor of the drawn gap, in milliseconds. Best effort, not a guarantee: it separates the
+         * two `WsClient.sendMessage` CALLS, and OkHttp's writer thread owns the socket writes. See
+         * the delay-distribution section for what a coalesced pair actually costs.
          */
         const val GAP_MIN_MS: Int = 5
 
         /**
-         * Ceiling of the drawn gap, in milliseconds — the worst-case latency cover traffic adds to a
-         * real send, and it is added only when the decoy goes first. See the class kdoc for why the
-         * bound sits here.
+         * Ceiling of the drawn gap, in milliseconds. It bounds no real send's latency — the real
+         * frame is already on the socket — it bounds the window in which a teardown can cut the gap
+         * short and leave the pair to the `finally`. See the class kdoc.
          */
         const val GAP_MAX_MS: Int = 50
     }
