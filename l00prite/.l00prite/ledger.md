@@ -1900,3 +1900,101 @@ Round 2 of the paired-blind review, against the WHOLE unit rather than this delt
 lesson). Then a maintainer merge decision. U1 remains UNWIRED: nothing in `SessionContainer` or
 `MessagingCoordinator` constructs any of it, so this branch still cannot spend a registration on any
 device.
+
+---
+
+## 2026-07-27 — 0.10.0 U1, FIX ROUND 2 (of a hard cap of 6): eleven findings G1–G11
+
+Paired-blind round 2 (Codex + Grok) over the WHOLE unit, adjudicated in `u1-r2-adjudication.md`:
+1 P1, 7 P2, 6 P3 after dedup. Branch `feat/0.10.0-decoy-u1-provisioning`, head `5e3ee28d`.
+Not merged, not pushed, no version bump. U1 remains UNWIRED.
+
+### The finding that shaped the whole round
+
+**All three guards added in round 1 became round-2 defects.** The stale-block check (F2), the
+capacity revert (F4) and the capacity-aware readiness flag (F3) each produced a new finding, and all
+three share one shape: *each reasons about `TAG_DECOY` state sampled outside the lock that protects
+it, or folds two different questions into one predicate.* `failures.md` records the rule — when a fix
+keeps spawning edge cases the APPROACH is wrong, and patching interleavings one at a time is what
+took three rounds and ended in a revert in 0.9.2 PR-3. So this round changed **three structures**
+instead of patching four interleavings:
+
+1. **One SECTION lock** — `crypto/vault/DecoySectionLock.kt`, a per-runtime monitor shared by
+   `DecoyCounterReservation`, `DecoyAuthStore` and `DecoyAccountProvisioner`. It guards SEQUENCES
+   (read-check-spend; read-commit-revert), which is the granularity `stateLock` cannot give. Closes
+   G1 (P1) and G5 together, because they were one defect seen from two directions.
+2. **The readiness predicate SPLIT** — `hasAccount()` gates registration and reads nothing but the
+   section; `canSend()` gates cover traffic and adds "flush confirmed" and `!capacityExceeded`.
+   Closes G3 and G2. **This was the architect's error**: round 1's single capacity-aware predicate
+   was ratified into the spec, and review falsified it. The implementer's round-1 note calling that
+   direction "conservative" was wrong — it made a vault holding a good durable account re-enter the
+   one path that spends a worldwide rate-limit bucket.
+3. **The back-off is WRITTEN AHEAD of the registration**, not in response to a failure. Closes G4 by
+   removing the absolute-capacity edge rather than repairing it: if the smallest decoy write will
+   not encode, no registration is spent at all, and every revert path inherits a deferral that is
+   already durable. The bare-revert branch is gone.
+
+### Findings
+
+| # | Disposition |
+|---|---|
+| G1 (P1) | Section lock; the staleness check is now atomic with the spend. Not another check. |
+| G2 | Instance-scoped `credentialsUnconfirmed` gates `canSend()` — the right scope, because anything read from disk is durable by definition. |
+| G3 | Predicate split (see above). |
+| G4 | Write-ahead back-off (see above). |
+| G5 | The revert value is read INSIDE the commit's critical section. **A revert may only restore state observed under the lock the revert runs under.** |
+| G6 | `clearAccount()` nulls both tokens in the same mutate as the id and key. A retired account whose bearer credentials survive is not retired. |
+| G7 | Canonical strict-v1: presence byte ∈ {0,1}, absent long must carry zero, negative `counterHighWater` rejected. |
+| G8 | `parsePlaintext` accumulates into a caller-supplied `PartialDecode`, so the decode-failure wipe is observable through the REAL decoder path. Round 1 had explicitly declined to claim this; it is now claimed and pinned. |
+| G9 | Every new/changed test mutation-checked (10 mutations, all observed to fail). |
+| G10 | The one-attempt latch's CAS loser returns `canSend()`, not a flat false. |
+| G11 | Spec §4 W1 corrected: the first provision does NOT write `counterHighWater = 64`. |
+
+### Two behaviour changes stated rather than buried
+
+- **Every failed attempt now defers 60–90 min, not only a 429** (offline, dead session mint, crash
+  between register and commit). That is the cost of recording intent before spending a shared global
+  resource, and it is deliberate.
+- **A `TAG_DECOY` section now appears as soon as `provisionIfNeeded()` is called**, before any relay
+  contact — so the 0.9.x downgrade break attaches to "tried" rather than "generated cover traffic".
+  §4.1's narrowed disclosure still holds for a vault that never asks, but the trigger moved one step
+  earlier and must be re-read when U3 wires the call.
+
+### Mutation testing — the G9 requirement, done and reported
+
+Ten mutations applied to the real implementation, each observed to FAIL the intended test, each
+reverted: private allocator lock (G1); `credentialsUnconfirmed` dropped (G2); registration gated on
+`canSend()` again (G3); `reserveBackoff()`'s return ignored (G4); pre-network revert snapshot (G5);
+tokens retained by `clearAccount` (G6); lenient `readNullableLong` and the negative-mark require
+removed (G7, two runs); `partial.wipe()` removed from the catch (G8); CAS loser returns false (G10).
+
+**Two of them needed a second attempt to become discriminating**, recorded because it is the same
+class G9 exists to catch: the G3 test first passed under its mutation because the one-attempt latch
+was doing the work (fixed by using a fresh provisioner instance — a later session), and passed again
+because the write-ahead back-off independently blocked the registration. It only discriminates in
+the window where `capacityExceeded` is set AND the state would now encode, which the test now
+constructs explicitly.
+
+### Docs corrected
+
+- `docs/design/DECOY_TRAFFIC_0.10.0_SPEC.md`: §4 W1 (G11 — no counter write), W1b rewritten as the
+  write-ahead back-off, **R4 corrected a THIRD time** with the two-predicate table and the round-2
+  falsifier written up as the architect's, §6.2a's capacity back-off bullet struck and superseded by
+  the write-ahead rule, and the signal description generalized from "429 back-off" to "provisioning
+  back-off".
+- `u1-invariant-table.md`: `[R2]` corrections through W1/W1b/W1c/W2c/W6/R4, a new **THE SECTION
+  LOCK** section with the three sequences and what round 1 shipped for each, a rewritten crash
+  matrix (including the new "back-off cannot be encoded → nothing is spent" row), and a REVIEW
+  ROUND 2 section with the mutation table.
+
+### Evidence
+
+`ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug` from
+`apps/android` → **`GRADLE_EXIT=0`, `BUILD SUCCESSFUL`**, **669 tests / 0 failures / 0 errors /
+3 skipped** (659 before this round; +10 net). Exit code read from Gradle, not from `echo`. The ten
+mutation runs above were each verified FAILED and reverted before this final green run.
+
+### Still owed
+
+Round 3 of the paired-blind review, whole unit again. Then a maintainer merge decision. Two rounds of
+the cap of six are now used.

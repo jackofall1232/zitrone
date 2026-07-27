@@ -850,10 +850,32 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       Re-verified: `:app:testDebugUnitTest` **659 tests / 0 failures / 0 errors / 3 skipped** and
       `:app:assembleDebug`, GRADLE_EXIT=0, `--rerun-tasks`, 47/47 executed, 2026-07-27.
       Re-measured budget: worst-case delta **645 B** of 1024; realistic state 929 B of 262 112 B.
-      **STILL OWED:** review ROUND 2 against the WHOLE unit (not this fix delta — the 0.9.3
-      lesson), then a maintainer merge decision. Flag to the round-2 reviewers: the process-wide
-      `WeakHashMap` allocator registry, the deliberate absence of a capacity pre-flight (with its
-      recorded residual), and the one decode-failure wipe step no test can observe.
+      **REVIEW ROUND 2 DONE + FIXED (2026-07-27).** Paired-blind Codex + Grok over the whole unit,
+      adjudicated in `reviews/decoy-0.10.0/u1-r2-adjudication.md`: 1 P1, 7 P2, 6 P3 → eleven
+      confirmed findings G1-G11, all fixed in fix round 2 of a hard cap of 6.
+      **All three guards added in round 1 became round-2 defects**, sharing one shape: state sampled
+      outside the lock that protects it, or two questions folded into one predicate. Fixed at the
+      root, not per interleaving — three structural changes:
+      (1) **one SECTION lock** (`crypto/vault/DecoySectionLock.kt`) shared by the allocator,
+      `DecoyAuthStore` and the provisioner, guarding SEQUENCES rather than single mutates — closes
+      the P1 TOCTOU counter regression and the stale-snapshot revert together;
+      (2) **the readiness predicate SPLIT** into `hasAccount()` (gates registration, reads nothing
+      but the section) and `canSend()` (gates cover traffic) — the round-1 single predicate was the
+      ARCHITECT's error, ratified into the spec and falsified by review;
+      (3) **the back-off is written AHEAD of the registration**, so a vault too full to record that
+      it tried never spends one — the absolute-capacity edge is removed rather than patched.
+      Two deliberate behaviour changes: every failed attempt now defers 60-90 min (not only a 429),
+      and a `TAG_DECOY` section appears before any relay contact, which moves the 0.9.x downgrade
+      trigger from "generated cover traffic" to "tried to provision" — **§4.1's disclosure must be
+      re-read when U3 wires the call.**
+      Ten mutations applied and each observed to FAIL its intended test, then reverted; two needed a
+      second attempt to become discriminating, and that is recorded in the invariant table.
+      Re-verified: `:app:testDebugUnitTest` **669 tests / 0 failures / 0 errors / 3 skipped** and
+      `:app:assembleDebug`, GRADLE_EXIT=0, 2026-07-27.
+      **STILL OWED:** review ROUND 3 against the WHOLE unit, then a maintainer merge decision. Two
+      of six rounds used. Flag to the round-3 reviewers: the section lock's sufficiency and lock
+      order with three holders; the write-ahead back-off's two behaviour changes above; and the
+      process-wide `WeakHashMap` registries (now two — allocators and section monitors).
 
 - [ ] **U1 follow-up — account deletion / burn leaves the synthetic relay account registered.**
       `deleteAccountAndWipe` deletes the REAL relay account and obliterates the image; a provisioned

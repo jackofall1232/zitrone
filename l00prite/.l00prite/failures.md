@@ -211,7 +211,7 @@ doc records something as impossible, the cost of re-checking is one derivation a
 a capability the project already paid for and then forgot it had. Do NOT treat the residuals section
 of a design doc as settled just because the defects section has been reviewed.
 
-### THE NON-DISCRIMINATING ASSERTION — satisfied by BOTH the correct and the broken behaviour (6 occurrences + a 7th cluster, 0.10.0 U1)
+### THE NON-DISCRIMINATING ASSERTION — satisfied by BOTH the correct and the broken behaviour (6 occurrences + a 7th and 8th cluster, 0.10.0 U1)
 Distinct from a vacuous test (asserts nothing) and from a stand-in test (asserts against a copy of the
 logic). This one asserts something REAL about something REAL — it just cannot tell the two apart, so
 it passes against the very defect it exists to catch.
@@ -291,6 +291,30 @@ test, say so in the test rather than leaving an assertion whose name implies cov
 a deliberately broken implementation and observed to FAIL before the fix was restored — the mutation
 list is recorded in `reviews/decoy-0.10.0/u1-invariant-table.md`. Two tests survived their mutation
 and were re-labelled rather than left implying more than they prove.
+
+**8th cluster — 0.10.0 U1 round 2, and the mutation process caught it INSIDE the round that was
+already applying it.** Two of the ten round-2 mutations *passed*, i.e. the new test did not
+discriminate, and both for the same reason: **a second, independent guard was doing the work.**
+
+- The "unrelated capacity overflow must not re-register" test passed under its mutation because the
+  ONE-ATTEMPT LATCH had already been burned by the same provisioner instance. Fixed by using a fresh
+  instance — which is also the real scenario (a later session).
+- It then passed again because the WRITE-AHEAD BACK-OFF independently refused to register while the
+  overflow was outstanding. The predicate defect is only observable in the narrow window where
+  `capacityExceeded` is set *and* the state would now encode. The test now constructs that window.
+
+**THE RULE THIS ADDS: a mutation that does not fail is not proof the property holds — it is a
+question about which guard is load-bearing.** When redundant defences overlap, a test aimed at one of
+them silently measures the other. Do not conclude "already correct"; find the scenario in which only
+the guard under test can save you, or state plainly that the test does not distinguish them (as
+`interleaved use never regresses` does).
+
+**And the round-2 meta-finding, which is a design lesson rather than a test one:** all three guards
+added in U1 fix round 1 became fix round-2 defects, because each reasoned about durable state sampled
+OUTSIDE the lock protecting it, or folded two questions into one predicate. That is the "when a fix
+keeps spawning edge cases, the APPROACH is wrong" rule above, seen one round earlier than 0.9.2 PR-3
+saw it. Round 2 replaced the three guards with three structures (one section lock, a split predicate,
+a write-ahead back-off) instead of adding a fourth guard.
 
 ### GOOD HANDLING — demonstrate why a concern is latent; never assert a property the test cannot prove
 Grok's round-4 INFO-3 said `runCatching { afterPublish() }` swallows `CancellationException` while the
