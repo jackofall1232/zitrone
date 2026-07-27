@@ -40,12 +40,16 @@
 > registered); read back the Revvl 6x `pow:` lines for calibration; independent review of
 > the whole branch; relay params pinned at flip.
 >
-> **THE ONE BLOCKER: the Argon2id constants are still unmeasured, and step 5 of the deploy
-> cannot happen until they are.** No Android device is attached to CX33 (`adb devices` empty,
-> no emulator images) and the Revvl 6x is with the maintainer, so the floor measurement could
-> not be taken. No number was estimated in its place. The instrumented harness is written and
-> COMPILES — `RegistrationPowCalibrationTest`, one gradle command, records
-> model/power-save/charging/thermal so a result proves its own conditions.
+> **BLOCKER CLEARED 2026-07-27 (`2db67d0b`): the Argon2id constants are MEASURED — D=5.**
+> The maintainer ran the test cut on the Revvl 6x (battery saver + foreground) and the
+> `pow:` lines came back: SHA-256 0.63 MH/s, Argon2id 36.7 ms/eval at 19 MiB/t=1. Calibrated
+> on rates, not the lucky 982 ms draw (~0.43× expected work on both stages). The d=20
+> pre-stage is ~1.7 s on-device (over half the solve), so the ~3 s floor target applies to
+> the WHOLE solve → D=5 (~2.8 s expected in saver, ~5% tail ~8 s, attacker ~0.85 s/account).
+> `TODO(pow-calibration)` resolved everywhere; runbook step-5 pin is now
+> `REGISTRATION_ARGON2_DIFFICULTY_BITS=5` (relay default is STILL the D=8 placeholder — set
+> the env explicitly). Finding recorded: phone pays 16× on SHA-256 vs 1.6× on Argon2id
+> relative to the server core; rebalance (d=18 + D+1) is a future candidate, not this cut.
 >
 > Done: relay-side cost MEASURED across the full m×t sweep (`docs/REGISTRATION_POW_CALIBRATION.md`);
 > client solver + challenge fetch + identity-key binding + debug difficulty override;

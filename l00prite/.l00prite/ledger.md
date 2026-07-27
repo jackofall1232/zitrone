@@ -1665,3 +1665,37 @@ Track state after this unit: solve-layer UI wiring DONE. Before the cut: the tes
 smoke pass (fresh install → pitcher shows → registration completes) on the device; read the
 Revvl 6x `pow:` calibration lines back into `TODO(pow-calibration)`/D if not yet done;
 independent review of the whole branch still owed; relay params must be pinned at flip.
+
+## 2026-07-27 — 0.9.4 PoW: calibration RESOLVED at D=5 from the Revvl 6x measurement (session: pow-ui-wiring)
+
+The maintainer ran the `test-pow-d6b12587` cut on the Revvl 6x and shared the Diagnostics
+`pow:` lines (photo): **battery_saver=true, foreground=true** — the exact condition the
+instrumentation was built to capture. `2db67d0b` on the client branch.
+
+- **Calibrated on RATES, not the observed total.** The run completed in 982 ms only because
+  it drew ~0.43× the expected work on BOTH geometric stages (455,763 hashes vs 2^20 expected;
+  7 evaluations vs 16). Rates: SHA-256 **0.63 MH/s**, Argon2id **36.7 ms/eval** at 19 MiB/t=1.
+  The maintainer's "~950 ms average" matches normal-mode expectation, not the floor.
+- **The measurement moved the rule's input:** on-device the d=20 pre-stage expects ~1.7 s —
+  over HALF the solve, vs ~2% on CX33 — so the ~3 s floor target applies to the whole solve.
+  **D=5**: expected ~2.8 s in battery saver, ~5% tail ~8 s (far under the 60 s prompt),
+  attacker ~0.85 s/account on a server core. D=4 undershot (~2.3 s, half the deterrence);
+  argon-only application of the old rule would have said D=6 (~4 s) and overshot.
+- **New structural finding recorded in the calibration doc:** the phone pays **16×** the
+  server's SHA-256 cost but only **1.6×** its Argon2id cost — the memory-hard stage travels
+  across hardware as designed, the compute-bound pre-stage taxes exactly the honest floor
+  device finding 2 warned about. Rebalance candidate (d=18 + D+1) recorded for a future
+  release, deliberately NOT taken in this cut (two knobs at once would re-open a closed
+  calibration; d=20 is the production-proven drop constant).
+- `TODO(pow-calibration)` markers replaced with the measurement (RegistrationPow kdoc,
+  recorder kdoc, coordinator, recorder test). Runbook step-5 measurement precondition
+  CHECKED OFF; env pin now `REGISTRATION_ARGON2_DIFFICULTY_BITS=5` (relay default is still
+  the D=8 placeholder — must be set explicitly). Copy watch re-checked: "squeeze a few
+  lemons" reads true at ~1.3 s normal / ~2.8 s battery-saver expected.
+
+Evidence: `:app:testDebugUnitTest` 598/0 failures/3 skipped; `:app:assembleDebug` exit 0.
+Constraints held: nothing pushed, no version bump, flag stays false.
+
+Remaining before the cut: device smoke of the actual cut build (neither `3b0719ed` UI wiring
+nor `2db67d0b` D=5 is in the tested binary — expect the pitcher visible ~2× longer than the
+test cut); independent review of the whole branch; relay merge/deploy + param pin at flip.
