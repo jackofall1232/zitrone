@@ -850,6 +850,61 @@ and-commit explicitly.
 
 ---
 
+## 4.3 U3 — pairing. Stated as REQUIREMENTS, deliberately, and not as instructions
+
+**Written this way on purpose.** Every P1 in U1 and U2 traced to this spec telling the implementer
+*how to build* something — `mutate` treated as durable, `build(blockCount)`, `0x05 ‖ random(32)`.
+Each was a construction instruction the spec had no business giving, and each was wrong in a way only
+the code could discover. **So this section states what must be observably true and names nothing about
+mechanism.** Where a construction detail matters, the canonical artefact owns it
+(`DecoyEnvelopeBuilder`), and where a choice is genuinely open, it is named as open rather than
+guessed at.
+
+### R-U3-1 — A real send is never harmed by cover traffic. **Absolute.**
+No real send may be blocked, failed, materially delayed, reordered, or made less durable because
+cover traffic was attempted or could not be produced. The `flushSendRatchet` durability barrier and
+its ordering relative to `ws.sendMessage` must be unchanged. **If satisfying any other requirement
+here would violate this one, this one wins and the other is abandoned for that send.**
+
+### R-U3-2 — A covered send is two frames an observer cannot tell apart
+Same serialized length; order not predictable; separated by a small delay drawn per send. Ordering
+must be **uniformly** random — pinned by a statistical test over many sends, not by reading the code.
+Whether a fixed delay distribution is right is **open**: the only stated constraint is that neither
+frame's position nor the gap may be predictable from anything the observer already knows.
+
+### R-U3-3 — Failure is uniform, never intermittent. **This is the subtle one.**
+**Intermittent cover is worse than no cover.** If 100 sends are paired and one is not, that one is
+marked — the gap is more informative than the absence would have been. So a condition that prevents
+cover must produce a *consistent* state for as long as it lasts, not a stutter.
+
+Consequence: a **persistent** cause (no synthetic account provisioned, capacity exhausted) yields
+uniformly-off cover, which is an acceptable degradation. A **per-envelope** cause is different — it
+produces exactly the stutter this requirement forbids, and **U2 made essentially every real shape
+mirrorable**, so a per-envelope failure should be treated as **a defect to fix, not a runtime path to
+handle**. If U3 finds a real envelope the builder cannot mirror, that is a finding to report, not a
+case to swallow.
+
+### R-U3-4 — RULING on `build()` throwing: the real send proceeds, uncovered
+`build()` throws rather than return a mismatched decoy. **The real send still goes.** Blocking it
+would be a functional regression caused by a privacy feature, and — worse — a denial-of-service
+vector: anything that induces build failures would silence the user. Between one unpaired frame and
+a message that does not send, the unpaired frame is strictly less harmful.
+
+**This is a real, accepted cost and it belongs in §2.4 with the others**, not buried here: an
+unpaired real frame is precisely the observable the feature exists to eliminate. It is accepted only
+because the alternative is worse, and only because R-U3-3 makes it rare by construction.
+
+### R-U3-5 — Nothing survives the vault
+No device-level storage, no logging, no diagnostics, no slot or vault-index naming, and every timer,
+job or coroutine torn down with the session — the same teardown hook that cancels notifications.
+A vault that is locked emits nothing.
+
+### Open, and to be decided by evidence rather than by this document
+- The delay distribution and its bounds (R-U3-2).
+- Whether pairing applies to *every* envelope through the choke point, or only to user-visible
+  messages. Receipts and attachment control payloads also traverse it. **Name the choice and its
+  observable consequence; do not assume the answer.**
+
 ## 5. Implementation units — Rule of 6, hard cap at 6
 
 Each unit is independently reviewable, adversarially reviewed to convergence, and merged before the
