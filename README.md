@@ -95,6 +95,9 @@ Platform priority and maturity run **Android → Linux desktop → Web → iOS**
 clients split into two crypto families that **cannot exchange ordinary messages
 across the split** — an Android/iOS identity and a web/desktop identity cannot
 complete an X3DH handshake at all, in either direction. See
+[Platform status and interoperability](docs/SECURITY_MODEL.md#platform-status-and-interoperability)
+for the full matrix.
+
 ## Release maturity and the `-beta` version labels
 
 **Every release so far has been a complete, working build that could have been published as a beta
@@ -123,8 +126,6 @@ UI/UX pass the project has had — and is the **final alpha**. At that point the
 reference client and carries that release; Linux and iOS are deliberately deferred until after V1
 Android testing.
 
-[Platform status and interoperability](docs/SECURITY_MODEL.md#platform-status-and-interoperability)
-for the full matrix.
 
 | Platform                   | Stack                                | Crypto family          | Status                                                                                              | Path                           |
 | -------------------------- | ------------------------------------ | ---------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------ |

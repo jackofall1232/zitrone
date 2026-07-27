@@ -2229,3 +2229,423 @@ Round 5 is available (four of six used) but the surface is converging hard — z
 consecutive rounds, findings halved, and both reviewers landing on the same items with the same
 remedies. **A maintainer merge decision is owed either way, and §4.1's third-pass wording needs
 re-ratification.** U1 remains deliberately UNWIRED; nothing merged, nothing pushed, no version bump.
+
+---
+
+## Session — 0.10.0-beta decoy traffic, **U2: the envelope builder** (2026-07-27)
+
+Branched from `main` @ `2cd82a2b` (U1 merged, including its post-cap docs). Branch
+`feat/0.10.0-decoy-u2-envelope-builder`, **LOCAL — nothing pushed, nothing merged, no version bump.**
+
+### What was built
+
+`apps/android/.../decoy/DecoyEnvelopeBuilder.kt` — given a block count, produce a `MessageEnvelope`
+indistinguishable field-for-field from a real `message.send` of the same block count. Plus
+`DecoyIdentity` gaining `ONE_TIME_PREKEY_IDS` / `FIRST_ONE_TIME_PREKEY_ID` / `SIGNED_PREKEY_ID`, so
+the uploaded prekey batch has ONE declaration that the generator iterates and the builder draws from.
+
+**Deliberately UNWIRED**, the same posture U1 shipped in: nothing constructs the builder, so the
+branch cannot emit cover traffic on any device. U3 supplies the call site.
+
+### The invariant table was NOT built, on purpose
+
+U2 adds **no durable field, no writer, and no changed field meaning**. It reads and spends
+`counterHighWater` through U1's allocator (W3, already tabled) and touches nothing else. The rule has
+a precondition and U2 does not meet it; performing the ritual anyway teaches the next unit that the
+ceremony is the point. The decision, the field-by-field justification, and the one derived assumption
+it does add are recorded in `reviews/decoy-0.10.0/u2-invariant-table-decision.md`.
+
+**The one derived assumption:** the X3DH-shaped first envelope is *the one issued counter `0`*. That
+needs no new durable flag — `counterHighWater` already makes "the value 0 has been issued" durable,
+monotonic and unrepeatable, which is exactly reader R2's stated meaning. The rejected alternative was
+a `firstEnvelopeSent` boolean, which WOULD have been a new durable field written on the send path
+inside a fixed-size region. Residual recorded: an interrupted session can skip counter 0, so such a
+vault's synthetic conversation begins mid-chain with no first envelope. Relay-visible only.
+
+### THREE SPEC ERRORS FOUND — and one of them is R7's own error class, one field over
+
+The R7 block told U2 to *measure, not estimate*. Doing so found that the spec was wrong three times.
+
+1. **§2.3's ciphertext formula would have fingerprinted EVERY decoy.** It specified
+   `random(32) ‖ random(12) ‖ random(N·256 + 16)` = 316 bytes for one block. A real libsignal
+   `SignalMessage` is **323**. And the miss is not merely seven bytes: **316 base64s to 424
+   characters ending `==`, 323 to 432 ending `=`.** That is the *identical* defect R7 caught in
+   `ephemeral_key` — a base64-padding tell — in the field immediately next to it, and it would have
+   marked every decoy rather than only first ones. Worse, no fixed formula can be right: **the
+   counter is a protobuf varint, so `message_number` changes the ciphertext LENGTH** (127 → 1 byte,
+   128 → 2, 16 384 → 3) and `message_number` rides in the CLEARTEXT, so a formula-sized decoy is
+   checkably short from its 128th envelope onward.
+2. **§2.1's frame table was low on every row.** Measured through the production
+   `MessageEnvelope.toJson()` + `WsClient.messageSendFrame`: 821→**829**, 1161→**1169**,
+   860→**976**. The first-message row was low by ~4×: R7 predicted that row was wrong; **+147 B is
+   the number**, because the `PreKeySignalMessage` wrapper alone is 81 bytes on the wire. §3.3's
+   dead-air ping inherits it — an 829 B frame, not 821 B.
+3. **§2.2's "exactly once, null thereafter" is not what libsignal does — and is still right.**
+   libsignal emits `PREKEY_TYPE` until the peer's reply, not for one message. The rule survives for a
+   reason the spec does not give: a decoy stuck in the first-message shape is **+147 B over the real
+   message it mirrors**, which identifies the real frame of its own pair by size. Recorded so a later
+   round does not "correct" it back.
+
+A fourth item is now declared in §2.4 rather than left for U4: **the reservation's monotonic counter
+never resets, and a real client resets `message_number` on every inbound ratchet turn.** Invisible
+while the synthetic side only acks and burns; relay-visible once U4 makes the exchange bidirectional.
+Not a reason to abandon monotonicity — a REGRESSING counter is a tell no real ratchet can produce at
+all — but it must be stated, not discovered.
+
+### The binding `prekey_id` question, answered honestly
+
+The brief said: *verify the id set is reachable from what U1 persisted; if it is not, stop and report
+rather than inventing a source.* **The honest answer is "derivable, but NOT persisted."**
+`generateBundle` uploads ids `1..100` unconditionally, so every synthetic account published exactly
+that set — but nothing in `TAG_DECOY` records it. That is reachable enough to act on and not worth a
+durable field, so the cross-file assumption was made **checked** instead of implicit: one declaration
+both sides read, plus a test asserting the generated bundle's ids ARE that range. The emitted id is
+**1**, not a random member — `Store.ConsumeOneTimePrekey` pops `ORDER BY prekey_id LIMIT 1` and the
+account has consumed none, so 1 is what the relay would actually issue. A random draw would be wrong
+99 times in 100 against the query that decides it.
+
+### Mutation evidence — 16 run, 16 discriminated, but ONE needed a new test first
+
+Full table in `reviews/decoy-0.10.0/u2-invariant-table-decision.md`. Two entries matter here:
+
+**M13 (`previous_counter` written as 1) did NOT discriminate, and no guard was carrying it — it was a
+genuine blind spot.** The field is a one-byte varint whatever its value, so no length test can see
+it, and libsignal's Java API exposes `getCounter()` but not `getPreviousCounter()`, so no parse-back
+assertion could reach it either. All twelve tests at that point were length, shape or parse
+assertions and the field is invisible to all three. The fix was not another assertion about that
+field but a test that makes the CLASS unrepresentable: **`the cover ciphertext is byte-identical to a
+real one everywhere it is not random`**, with the random regions derived from the layout rather than
+hand-counted. M13, M14 (wrong version byte) and M15 (wrong field order) all fail against it.
+
+**A methodology failure in the harness itself, recorded because it nearly became a false finding.**
+The full suite failed once afterwards with a signature that was *exactly* M15 — because the harness
+restores the source but never re-runs Gradle, so the compiled classes left behind were the last
+mutation's. Zero reproductions in isolation, zero in a 400-iteration determinism stress, and a clean
+`--rerun-tasks` run green. The lesson is not "it was flaky": **a mutation harness that leaves mutated
+artifacts behind hands the next run a defect that does not exist**, and chasing it costs more than
+the sweep saved.
+
+### Evidence
+
+`ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug` from
+`apps/android` → **`BUILD SUCCESSFUL`, exit code 0** (read from Gradle), **691 tests / 3 skipped /
+0 failures / 0 errors** (678 before this unit; +13). Re-verified with `--rerun-tasks` after the
+mutation sweep, precisely because of the stale-artifact problem above.
+
+### Still owed
+
+**Independent paired-blind review of U2 has NOT been run** — that is the next step, and per the
+carried-forward 0.9.3 lesson it must be scoped to the WHOLE unit, not to a delta. The three spec
+corrections are **applied but marked pending ratification**; §2.1's numbers and §2.3's ciphertext
+paragraph were the architect's ratified text. U2 stays UNWIRED; nothing merged, nothing pushed.
+
+---
+
+### Run 2026-07-27T18:30Z — claude (CX33) — **0.10.0 U2 FIX ROUND 1 of 6** (paired-blind r1 adjudicated)
+
+Branch `feat/0.10.0-decoy-u2-envelope-builder`, on top of `5e5b242f`. **No merge, no push, no version
+bump.** Adjudication: `reviews/decoy-0.10.0/u2-r1-adjudication.md` (2 P1, 1 P2, 5 P3 after dedup).
+
+#### The two P1s, both real
+
+- **G-A — the interface was the defect.** `build(blockCount)` derived the envelope's SHAPE from the
+  DECOY's own counter, so a real X3DH first message (976 B) could be paired with an ordinary decoy
+  (829 B) and the observer read the answer off the size. **Fixed per Ruling 1:** `build()` now takes
+  **the real `MessageEnvelope` it is covering** and mirrors every size-affecting property of it —
+  shape, ciphertext byte length, counter, `timestamp` width, `ttl_seconds`, `burn_on_read`,
+  `media_type`, `previous_chain_length`, `version` — and then **measures both `message.send` frames
+  and throws rather than return a decoy whose frame is not exactly as long.** The property is a
+  checked postcondition now, not a promise in prose.
+  *Incidental:* this also closes the residual Grok recorded but did not raise (a decoy in the
+  subsequent shape after one unacked first message is not what libsignal does — it stays
+  `PREKEY_TYPE` until the peer replies). Mirroring makes the cover follow the real shape, so the
+  question no longer arises.
+- **G-B — `0x05 ‖ random(32)` is not a valid Curve25519 public key.** Now
+  `Curve.generateKeyPair().publicKey.serialize()` with the private half dropped — canonical by
+  construction rather than by masking the one bit that was measured. The structural byte-diff no
+  longer *skips* the key regions: it asserts each is 33 bytes, DJB-tagged, parses through
+  `Curve.decodePoint`, and has bit 255 clear. A separate test re-measures 200 real libsignal keys
+  (0 with bit 255 set) **and** 200 random draws (must set it often, or the assertion proves nothing).
+
+#### G-C + Ruling 2 — **the ruling is arithmetically impossible, and the finding is recorded as such**
+
+Ruling 2 was to absorb `message_number`'s DECIMAL-width difference in the random ciphertext's length.
+**It cannot be done.** Base64 encodes 3 bytes to 4 characters, so a base64 field's length is always a
+multiple of 4 — on both sides. Whatever byte length the cover blob is given, the two `ciphertext`
+fields differ by a multiple of 4, and a difference of 1, 2 or 3 bytes anywhere else is unreachable.
+The only byte-granular knob in the envelope is the decimal width of a numeric field. A monotonic
+counter cannot be steered to an arbitrary real counter's width — it skips forward, never back, while
+real counters reset on every inbound ratchet turn. **"Monotonic decoy counter" and "the two frames
+are the same size" are mutually exclusive.**
+
+Applying the architect's own priority rule (the observable beats the unobservable), **the paired
+decoy's `message_number` mirrors the covered envelope's.** §2.3's justification for monotonicity was
+already contradicted by §2.4 of the same document, which conceded that a real client resets
+`message_number` on every inbound ratchet turn — resetting is what real traffic does.
+**Consequence:** `DecoyCounterReservation` (U1) has no consumer on the paired path; it moves to U5's
+dead-air ping, the one decoy with no envelope to mirror. Recorded in §2.3, §2.4, §3.3 and the §5 rows.
+
+Ruling 2's *mechanism* is implemented and load-bearing where it does work: the cover blob is built to
+the covered ciphertext's exact byte length and the random AEAD body absorbs the two blob-internal
+fields that cannot be mirrored (`signed_pre_key_id`, `previous_counter`). Residual — the body is then
+not a padded-block multiple — is written into §2.4 as instructed, with two others (repeated counters,
+and a `prekey_id` that may name an unpublished id at four-plus digits). All three relay-visible only.
+
+#### The P3s
+
+- **G-D — stale 821 / 1161 / +39 B, eighth recurrence.** Swept **by claim, not by phrasing**, and
+  swept **structurally**: §2.1's table is now declared the single canonical statement of every frame
+  size in the document, with the same "⭐ CANONICAL … do not restate" device used for the `TAG_DECOY`
+  land-on-disk trigger. §2.2, §2.4, §3.3, §5 and the executive summary now link to it and state no
+  byte count. The four surviving instances of the old numbers are inside correction callouts that
+  quote them as *previously read*, which is what those callouts are for.
+- **G-E** — `DecoyIdentity` kdoc named a non-existent `DecoyIdentityTest`; now names the real test.
+- **G-F** — "14 gate tests" was wrong (13). Now 16, stated with the suite total.
+- **G-G** — `blockCount` is gone with the interface, and with it the `blockCount * 256` overflow. The
+  covered ciphertext length is read from the base64 string (never decoded) and fail-closed at 1 MiB.
+- **G-H** — `registrationId` now `require(... in 1..16380)`, the interval both real generators emit.
+
+#### Evidence
+
+- `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks`
+  → **BUILD SUCCESSFUL, exit 0**, **694 tests / 3 skipped / 0 failures / 0 errors**, APK produced.
+- **18 mutations, 17 discriminated.** The survivor (M18) is a deliberate probe: defeating the final
+  frame-equality `check`. It is defence in depth and every property it guards has its own assertion,
+  so nothing fails when it alone is removed — **but it is not decorative**: M16 (removing the
+  recipient-id width `require`) was caught *by that check firing*, with the test recording
+  `expected IllegalArgumentException but was IllegalStateException`. Reported rather than papered over.
+- **Harness fixed** (`scratchpad/mutate-r1.py`). The round-0 phantom had a specific mechanism: the
+  harness read the JUnit XML after every run, so a mutation that failed to COMPILE produced no new
+  report and the previous mutation's failures were attributed to it. The report is now deleted before
+  every run, every run goes through Gradle (so classes are always recompiled from what is on disk),
+  the restore is verified byte-for-byte, and a clean baseline is required green before the first
+  mutation and again after the last restore. Both baselines were green.
+
+**Still owed:** paired-blind review round 2 (round 1 of a hard cap of 6 used). Maintainer ratification
+of the U2 spec corrections AND of the Ruling-2 deviation above.
+
+---
+
+## 0.10.0-beta decoy traffic — U2 FIX ROUND 2 of 6 (2026-07-27) — **the maintainer's cut, applied**
+
+**Not review-driven.** Round 1 is adjudicated and review round 2 is still undispatched. This round
+implements the maintainer scope decision recorded in `c65d9a3e`: **the idle / dead-air ping is CUT
+from the design** — removed, not deferred, with no unit and no follow-up gate. Round 1's own finding
+is what made it decidable: Ruling 2 was shown arithmetically impossible (a base64 field's length is
+always a multiple of 4, so a 1–3 byte decimal-width difference is unreachable through the
+ciphertext), so the paired decoy mirrors the covered envelope's `message_number`, which left
+`DecoyCounterReservation` with exactly one candidate consumer — the ping. Cutting the ping left it
+with none.
+
+### Removed
+
+- **`DecoyCounterReservation`** (206 lines) and **`DecoyCounterReservationTest`** (390 lines, 14
+  tests). Deleted outright. It had no consumer, and an unreachable writer on a durable vault surface
+  is a liability, not an asset.
+- **`TAG_DECOY.counterHighWater`** — writer W3, deleted with the allocator. Encoder and decoder both,
+  including the negative-mark `require` on each side.
+- **`TAG_DECOY.deadAirNextFireAtMs`** — writer W4, already retired in the spec; the field was
+  vestigial.
+- The section is now `accountId ‖ identityKeyPair ‖ accessToken ‖ refreshToken ‖ provisionNotBefore`.
+  **No migration**: `0x06` has never existed in a shipped build, so this is a field-set change inside
+  an unshipped section. Strict-v1 pairing checks (`requireDecoyCredentialsPaired`, on both sides) and
+  the unknown-tag rejection are untouched.
+
+### Kept, with the argument rather than the conclusion
+
+- **`DecoySectionLock` SURVIVES.** The allocator was the caller that forced it into existence, but it
+  was never its only one. Its remaining callers are genuine read-modify-write sequences spanning more
+  than one runtime call: `DecoyAuthStore.storeTokens` (read account id → write tokens),
+  `storeTokensForAccount` (the R3 fix for a refresh whose round-trip overlaps `clearAccount`),
+  `clearTokens`, `clearAccount`, and the provisioner's `reserveBackoff` / `clearBackoff`
+  compare-and-clear and its read-commit-revert. The U1 P1 TOCTOU is retired **with its field**, not
+  orphaned — the property it protected (a replacement account must not open at `message_number =
+  128`) now holds by construction, because the counter comes from the covered conversation and never
+  from durable state. The U1 P2 stale-snapshot rule is unchanged and still tested (see M5).
+- **Nothing of the allocator was kept "just in case".** The durable-before-spend pattern it embodied
+  is not lost: it is stated as a general rule in spec §2.3's correction callout and is still enforced
+  by W1/W1b/W1d/W6 (`mutate` + `flushBeforeAck`, a throw meaning "it never happened"), each with its
+  own tests. Keeping a dead class as documentation of a live rule is how a vault surface accumulates
+  unreachable writers.
+
+### Coverage — moved, not lost, except where the field went
+
+- **Retargeted (verified still discriminating).** The two nullable-long canonicity tests
+  (`a noncanonical nullable-long presence flag is rejected`, `an ABSENT nullable long carrying a value
+  is rejected`) were testing `readNullableLong`, not the ping; they now tamper `provisionNotBeforeMs`.
+  The U1 stale-snapshot P2 test (`a capacity revert restores what the section held AT COMMIT TIME`)
+  used the allocator as its concurrent writer; it now uses a direct section write under the section
+  lock — a stand-in for the real writers, and **M5 confirms it still fails against the exact round-1
+  defect** (a pre-network snapshot restored on capacity failure).
+- **Replaced.** `a counter-only section round-trips` → `an extreme deferral round-trips at full
+  width`. `clearAccount resets the counter mark` → `clearAccount empties the holder entirely, so the
+  section is omitted again` — a strictly stronger assertion, since with the counter gone a cleared
+  account leaves nothing behind and the vault returns to 0.9.x readability.
+- **Added.** `the byte offset the tampering tests rely on really is the deferral presence flag` — the
+  offset constant is the one thing in that file that rots silently, and M6 shows a wrong offset makes
+  the tampering tests pass for the wrong reason.
+- **Genuinely retired with the field.** `a NEGATIVE counter high-water mark is rejected` and
+  `the ENCODER refuses a negative counter mark too`. The *symmetry principle* they also demonstrated
+  (strict v1 refuses to produce what it refuses to read) still has the encoder/decoder credential
+  half-set pair. Flagged for review round 2 as the one place coverage genuinely narrowed.
+
+### The re-measured capacity budget — and a correction to the brief's expectation
+
+The brief said the budget "should shrink". **It did not, and the reason is worth recording.**
+
+- **Raw section body: 717 B → 700 B**, deterministic, now asserted exactly. This is the number that
+  tracks the field set.
+- **Encoded worst-case delta: NOT a single number.** It is measured after DEFLATE over a *freshly
+  generated* identity keypair, so it varies run to run. Five consecutive runs after the change:
+  **636, 638, 639, 642, 646 B**. The pre-change value measured in this same environment was 639 B —
+  inside that spread. Removing 17 plaintext bytes moved it by less than its own noise, because those
+  bytes (three near-identical fixed-width longs) were the section's most compressible.
+- The first measurement taken this round was 646 B and looked like a 7 B *increase*. It was noise.
+  Recorded because quoting it as a finding would have been wrong, and the earlier ledger entries
+  quoting "640–643 B" and "645 B" as point values were quoting the same noise.
+- `DECOY_SECTION_BUDGET_BYTES` stays **1024 B**, correctly, as a *bound*. Moving it to track a
+  deflate artefact would make it less of a tripwire.
+
+### Evidence
+
+- `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks`
+  from `apps/android` → **BUILD SUCCESSFUL, Gradle exit 0**, **679 tests / 3 skipped / 0 failures /
+  0 errors**, APK produced.
+- Test count 694 → 679 accounts exactly: −14 (allocator suite) −4 (counter/dead-air field tests)
+  +3 (replacements + the offset tripwire).
+- **6 mutations, 6 discriminated**, rebuilt through Gradle between each and restored byte-for-byte:
+  M1 decoder pairing check removed → 1 failure; M2 encoder swaps access/refresh across the gap the
+  removed fields left → round-trip fails; M3 `clearAccount` keeps the access token → 3 failures;
+  M4 `isEmpty` ignores the deferral → 8 failures across two suites; M5 pre-network snapshot restored
+  on capacity failure → the retargeted P2 test fails, as required; M6 wrong tamper offset → 3
+  failures including the new tripwire.
+
+### Docs swept by claim, not phrasing
+
+`VaultState.kt`'s `DecoyState` kdoc (now states the absence of counter state as a *rule*, with a
+"do not re-add" note), the codec's field-order kdoc, `DECOY_SECTION_BUDGET_BYTES`, `DecoySectionLock`,
+`DecoyAuthStore`, `DecoyAccountProvisioner`, `DecoyEnvelopeBuilder`; `VAULT_ARCHITECTURE.md` §8's
+amendment + the "idle-ping sizing" open question; `DECOY_TRAFFIC_0.10.0_SPEC.md` §2, §2.3, §3.0,
+§4's W1/W3/W4/W6 and R2/R3/R5 rows, §5's U1/U2/U5 rows, §6.2a; and
+`reviews/decoy-0.10.0/u2-invariant-table-decision.md` (a second supersession header). The `⭐ CANONICAL`
+tag-write-trigger list in `VaultState.kt` was not touched — no removed field appears in it.
+
+**Still owed:** paired-blind review round 2 (2 of a hard cap of 6 used). Maintainer ratification of
+U2's three original spec corrections and of the round-1 Ruling-2 deviation. **No merge, no push, no
+version bump.**
+
+---
+
+## 2026-07-27 — 0.10.0 decoy U2 **FIX ROUND 3 of 6** (review round 2, paired-blind Codex + Grok)
+
+Branch `feat/0.10.0-decoy-u2-envelope-builder`, on top of `ebfe31f5`. Round 2 returned **0 P1,
+1 P2, 4 P3** — the reviewers were disjoint on the top finding for a **third consecutive round**, and
+the P2 came from the reviewer the adjudicator's own summary would otherwise have compressed away.
+
+### G2-A (P2) — the builder could not represent an ordinary send
+
+**A real X3DH first message may carry `ephemeral_key` set and `prekey_id` NULL.** That is
+signed-prekey-only X3DH, and it happens whenever the peer's one-time prekey batch is exhausted — a
+property of the RECIPIENT, not of chance. Production models it end to end
+(`ApiClient.fetchPreKeyBundle` returns a null `one_time_prekey`; `establishSession` passes
+libsignal's `-1` sentinel with a null key; `EncryptResult.preKeyId` comes back null;
+`packages/crypto/src/x3dh.ts:35-36` says so in as many words).
+
+The builder asserted the **biconditional** — "together or not at all" — and the whole first-shaped
+path was built on it: `requireNotNull(cover.preKeyId)`, protobuf field 1 always written, the wrapper
+sized as `1 + varintLength(preKeyId)`, and `baseKeyOffset` assuming field 1 present. **Consequence
+once U3 wires the pairing: a real send to such a peer gets no cover envelope at all — an unpaired
+real frame, the exact observable this feature exists to remove.**
+
+Fixed in all four places. The rule is an implication: `prekey_id` present ⇒ `ephemeral_key` present.
+Field 1 is now omitted when the covered envelope names no one-time prekey, the wrapper is sized
+without it, and the base-key offset moves with it. **Measured against real libsignal 0.46.0 before
+writing a line:** a no-OPK first ciphertext is `0x34, 0x12, 0x21, 0x05…` at **402 B** where the
+OPK-present one is `0x34, 0x08, id, 0x12, 0x21, 0x05…` at **404 B**.
+
+**The test that "covered" this pinned the wrong property with an internally inconsistent fixture** —
+`real.copy(preKeyId = null)`, cleartext null while the ciphertext still carried field 1, so it could
+not tell "reject garbage" from "reject a production shape". It rejected the shape. Replaced: the
+`RealPath` fixture now builds genuine no-OPK sessions from a real `PreKeyBundle` with no one-time
+key, through the real `SessionCipher`, and **both X3DH variants are in the gate cross-product**, in
+the byte-identical-layout test, and in a dedicated test that asserts the cover blob omits field 1
+too. The fail-closed test now pins the half that really is impossible: `prekey_id` with no
+`ephemeral_key`.
+
+### G2-B (P3) — the gate test asserted its own fixtures
+
+`no cleartext field is a CONSTANT where a real message varies` only ever compared **default**
+values, so hard-coding `mediaType = "text"`, `previousChainLength = 0` or `version = "1"` left every
+test green. Sharpest case: **`"file"` is exactly as wide as `"text"`**, so the frame-equality
+postcondition passes while a relay-visible field differs. The `envelope()` fixture now takes all
+three, and a new test varies them (`file`, `image`, previous-chain 7 and 4096, version `"2"`).
+
+### G2-C (P3 by blast radius) — the invariant table, **corrected in place** per the architect's ruling
+
+The mandated WRITER/READER table still documented **18 references** to state round 2 deleted. It is
+**not a historical document — it is the live contract for U3 and U4, both unwritten**, and an
+implementer following it would have rebuilt the allocator and re-added the fields. Struck in place
+with the reason, the way the spec's own W3/W4 rows are struck: the two field rows, W3, W4, W2c's
+counter reset, W1's counter note, W6's flush list, the lock-order "THREE", the allocator row of the
+section-lock table, the whole "Allocator uniqueness" section, readers R2 and R3, the whole "COUNTER
+INVARIANT" section, the capacity budget's "three fixed-width integers", and deviations 2 and 3.
+
+**Canonical-pointer device applied, as the adjudication asked.** `DecoyState`'s kdoc in
+`VaultState.kt` is now declared the canonical statement of `TAG_DECOY`'s field set, with the table
+and spec §4 marked as derived copies and "on disagreement this file wins". A banner scopes
+everything below the round-1 heading as historical, and warns that the mutation tables list tests
+deleted with the code they covered so a future round does not read their absence as regression.
+
+**Ninth recurrence of the stale-contract class in this feature — and the sharpest.** The rule
+"grep for every restatement, especially the summary ones" was *written inside this very document*,
+in its own `[R5]` block, and this document was then the copy that survived. Recorded there.
+
+Two deviations were **withdrawn with the lesson attached**: a field whose writer lives in a later
+unit is a field nobody is accountable for (`deadAirNextFireAtMs`), and a mechanism whose consumer
+lives in a later unit is a requirement nobody has validated (the allocator).
+
+### G2-D (P3) — the reason, not the conclusion
+
+`DecoyAccountProvisioner`'s unlocked network window was justified by "would stall the counter
+allocator on the send path". The allocator is gone; the conclusion is still right. Rewritten to the
+reasons that survive — token writers, `clearAccount`, other provisioner sequences, and U3's send-path
+reads — with a note saying what it used to claim and why that was wrong.
+
+### Also corrected at the source
+
+`DECOY_TRAFFIC_0.10.0_SPEC.md` §2.2 carried the sentence that **seeded G2-A** ("a real conversation's
+first envelope carries non-null `ephemeral_key` and `prekey_id`"). Struck, with the implication rule,
+the measured two-byte cost, and the fixture requirement. §2.4 gains a fourth declared residual: a
+cover of a no-OPK first message claims a one-time batch that was never exhausted — relay-visible
+only, same family and same bound as residual 3.
+
+**The capacity budget was RE-MEASURED**, three runs: raw section body **700 B** (deterministic,
+test-asserted), encoded delta **635 / 641 / 645 B** against the 1024 B budget. The recorded
+"640–643 B" was a two-run interval read as a point estimate, and three fresh runs already fall
+outside it. Recorded as a **distribution** with the note that removing two integers did not move it
+measurably — the section is dominated by incompressible key and token material.
+
+### Evidence
+
+- `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks`
+  from `apps/android` → **BUILD SUCCESSFUL, Gradle exit 0**, **681 tests / 3 skipped / 0 failures /
+  0 errors**, APK produced. (679 → 681: two new tests.)
+- **7 mutations, 7 discriminated**, each rebuilt through Gradle and the source restored
+  byte-for-byte afterwards (verified by `diff`):
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | the `require` restored to the biconditional | 3 FAILED |
+| M2 | `preKeyWrapperFixedBytes` sizes field 1 even when absent | 3 FAILED |
+| M3 | `preKeySignalMessageBytes` always writes field 1 (as 0) | 3 FAILED |
+| M4 | `baseKeyOffset` ignores the field's absence | 3 FAILED |
+| M5 | `mediaType` hard-coded to `"text"` | 1 FAILED |
+| M6 | `previousChainLength` hard-coded to `0` | 1 FAILED |
+| M7 | `version` hard-coded to `PROTOCOL_VERSION` | 1 FAILED |
+
+**M5/M6/M7 fail ONLY the new test** — which is the direct confirmation of Codex's finding: the
+pre-existing suite was green under all three, so the old coverage proved nothing about mirroring.
+
+**Still owed:** paired-blind review round 3 (3 of a hard cap of 6 used). Maintainer ratification of
+U2's original spec corrections and of the round-1 Ruling-2 deviation. **No merge, no push, no
+version bump.**

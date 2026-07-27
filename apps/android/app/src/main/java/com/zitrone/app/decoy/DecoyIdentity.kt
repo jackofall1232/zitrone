@@ -60,6 +60,50 @@ object DecoyIdentity {
     private const val ONE_TIME_PREKEY_BATCH = SignalProtocolManager.ONE_TIME_PREKEY_BATCH
 
     /**
+     * The one-time prekey ids this account publishes, and the ONLY ids a cover envelope's
+     * `prekey_id` may legitimately name.
+     *
+     * `prekey_id` on a real envelope is the **recipient's** consumed one-time prekey id, not the
+     * sender's: the sender fetches the peer's bundle and libsignal replays the consumed id until the
+     * peer's reply completes the ratchet. For cover traffic the "recipient" is this vault's own
+     * synthetic account, so the legitimate draw is the batch [generateBundle] uploaded for it — a
+     * value outside this range is a fingerprint, and a random id in `[1, 0xFFFFFF]` is one with
+     * near-certainty.
+     *
+     * Declared here rather than inline in [generateBundle] so the generator and the consumer read
+     * one source. **This range is not recorded in the vault** — nothing durable stores which ids
+     * were uploaded, so its authority rests entirely on [generateBundle] being unconditional about
+     * them. `DecoyEnvelopeBuilderTest` pins that (in
+     * `prekey_id is drawn from the synthetic account's OWN uploaded batch and mirrors the covered
+     * width` — there is no separate `DecoyIdentityTest`): it asserts a generated bundle's ids are
+     * exactly this range, so a future change to the allocation cannot silently strand
+     * already-provisioned accounts whose real batch this range would then misdescribe.
+     */
+    val ONE_TIME_PREKEY_IDS: IntRange = 1..ONE_TIME_PREKEY_BATCH
+
+    /**
+     * The id the relay would hand out on the first bundle fetch for this account, and therefore the
+     * id a genuine first message to it would carry.
+     *
+     * Not an arbitrary pick from [ONE_TIME_PREKEY_IDS]: `Store.ConsumeOneTimePrekey` pops
+     * `ORDER BY prekey_id LIMIT 1`, so the lowest unconsumed id is the one issued, and the synthetic
+     * account has consumed none. Drawing a random member of the range instead would be wrong 99
+     * times out of 100 against the very query that decides the answer.
+     *
+     * **Residual, stated because it cannot be closed here:** nothing ever fetches this account's
+     * bundle, so the relay can see that the named id was never actually consumed. Closing that would
+     * mean a real bundle fetch and a real session — which §2.3 rules out — and it is relay-visible
+     * only, which the spec's §1 threat model already concedes in full.
+     */
+    val FIRST_ONE_TIME_PREKEY_ID: Int = ONE_TIME_PREKEY_IDS.first
+
+    /**
+     * The signed prekey id this account publishes — the value a genuine first message to it carries
+     * in `signed_pre_key_id`. Ids start at 1 exactly as a fresh real account's allocator does.
+     */
+    const val SIGNED_PREKEY_ID: Int = 1
+
+    /**
      * The long-term secret alone: everything the proof-of-work binds against, and everything the
      * vault ever stores. Held across the (seconds-long) PoW solve, unlike the prekey bundle.
      */
@@ -119,13 +163,13 @@ object DecoyIdentity {
         val signature = Curve.calculateSignature(keyPair.privateKey, signedPreKeyPair.publicKey.serialize())
         val signedPreKey = SignalProtocolManager.SignedPreKeyDto(
             // Ids start at 1 like a fresh real account's allocator does.
-            id = 1,
+            id = SIGNED_PREKEY_ID,
             publicKeyBase64 = encode(signedPreKeyPair.publicKey.getPublicKeyBytes()),
             signatureBase64 = encode(signature),
             timestampMs = System.currentTimeMillis(),
         )
 
-        val oneTimePreKeys = (1..ONE_TIME_PREKEY_BATCH).map { id ->
+        val oneTimePreKeys = ONE_TIME_PREKEY_IDS.map { id ->
             SignalProtocolManager.OneTimePreKeyDto(
                 id = id,
                 publicKeyBase64 = encode(Curve.generateKeyPair().publicKey.getPublicKeyBytes()),

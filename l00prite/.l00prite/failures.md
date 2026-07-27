@@ -741,8 +741,165 @@ The implementer has now caught bad architect instructions **three times**, each 
    findings rather than as friction.
 3. When a defect is found, **ask which artefact it originated in** before fixing it. Fixing a
    spec-origin defect only in the code leaves the spec to reproduce it in the next unit.
+### A FIELD THAT CANNOT CHANGE THE LENGTH AND IS NOT EXPOSED BY THE PARSER IS INVISIBLE TO BOTH KINDS OF TEST (0.10.0 U2)
+
+U2's gate is byte-level indistinguishability, and it was tested three ways: frame/ciphertext LENGTH
+against real libsignal output, envelope field SHAPE, and PARSE-BACK through libsignal's own
+constructors. Sixteen deliberate mutations were run against that suite. Fifteen failed. **One passed,
+and the usual answer — "another guard was carrying it" — was wrong. Nothing was carrying it.**
+
+The mutation set the protobuf's `previous_counter` to 1 instead of the measured 0. It is a one-byte
+varint at either value, so **no length test can see it**; and libsignal's Java `SignalMessage`
+exposes `getCounter()` but **not** `getPreviousCounter()`, so **no parse-back test can reach it**.
+Length tests and parse tests together felt like belt and braces and had one shared blind spot: a
+field that is neither length-bearing nor accessor-exposed.
+
+**The rule:** when the property under test is "these bytes are indistinguishable from those bytes",
+the test must eventually BE a byte comparison. Reach for a structural diff against real output — with
+the genuinely-random regions derived from the layout rather than hand-listed — instead of adding a
+third assertion of the same two kinds. One such test replaced the entire class of miss: the same
+diff also catches a wrong version byte and a wrong field ORDER, neither of which had been thought of.
+
+**Corollary that fired immediately:** such a diff needs a guard that its "fixed" set is not empty, and
+that guard must be set from the actual structure. A subsequent `SignalMessage` has exactly **eleven**
+structural bytes; a round-number threshold of 40 would have silently passed a vacuous comparison on
+the smaller of the two shapes. The guard fired on the first run, which is the only reason the number
+is right.
+
+### A MUTATION HARNESS THAT LEAVES MUTATED ARTIFACTS BEHIND INVENTS A DEFECT FOR THE NEXT RUN (0.10.0 U2)
+
+The harness patched a source file, ran the suite, and restored the file in a `finally`. It never ran
+the build again after the final revert. So the compiled classes left on disk were the **last
+mutation's**, and the next full-suite invocation's up-to-date check did not rebuild them.
+
+The result was a single full-suite failure whose signature exactly matched that last mutation —
+presenting as a **flaky test in the production code**. It reproduced zero times in isolation and zero
+times in a 400-iteration determinism stress of the component; a clean `--rerun-tasks` run was green.
+
+**The lesson is not "it was flaky", it is that the tooling manufactured the evidence.** The natural
+response to a one-off failure in a concurrency-adjacent unit is to hunt a race, and that hunt would
+have cost more than the whole mutation sweep saved. **Any harness that mutates source must force a
+rebuild after its final revert, or run one throwaway build before the evidence run.** And when a
+failure signature matches a mutation you were just running, suspect the harness before the code.
+
+### ⭐ A CORRECTION NOTE IS ITSELF A RESTATEMENT, AND IT ROTS LIKE ANY OTHER (U2 R3 — 10th recurrence)
+
+**The sharpest form of the parallel-copy class, and the one that explains why nine previous fixes
+did not stop it.**
+
+Round 1 of U2 found that `0x05 ‖ random(32)` is not a valid Curve25519 encoding — a P1 that would
+have marked half of all decoys. The code was fixed to generate a real keypair. **Round 3 found the
+spec still carrying `**U2 must emit 0x05 ‖ random(32)**` as a live binding instruction — inside the
+very correction block written to fix that defect.**
+
+The block was authored to say "here is what was wrong and here is the right rule". It stated the
+wrong rule as the right one, and then survived two more rounds, because a correction note reads as
+*already fixed* and nobody re-attacks it.
+
+**Why this class kept recurring despite nine prior fixes:** every fix targeted a *description of
+behaviour*. A correction note is a description of a description — it quotes the old claim and asserts
+a new one — so it is a parallel copy **by construction**, and it is the copy least likely to be
+re-read, because its heading announces the problem as solved.
+
+**RULES (binding):**
+1. **A correction note is in scope for every subsequent review.** It is not settled ground. Its
+   heading is a claim about its own currency, and that claim rots.
+2. **A correction note must not carry a binding instruction.** State what was wrong and why; point
+   at the canonical artefact for what is right. `U2 must emit X` inside a correction is a second
+   source of truth wearing the clothes of a fix.
+3. **Prefer designating a canonical artefact over restating the rule.** This worked for the
+   `TAG_DECOY` trigger and for `DecoyState`'s field set. Applied here: `DecoyEnvelopeBuilder` is
+   canonical for construction; the spec describes intent and binds nothing.
+
+**And the general lesson, which outranks the specific one:** *a spec that tells the implementer HOW
+to construct something is a second implementation.* Across U1 and U2 **every P1 traced to the spec** —
+`mutate` treated as durable, `build(blockCount)`, and `0x05 ‖ random(32)`. Each was a construction
+instruction the spec had no business giving. Specs should state observable **requirements**
+("indistinguishable from a real envelope of the same shape") and let the implementation own the
+construction, because the implementation is testable against reality and prose is not.
 
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
   round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked
   follow-up (todos.md), not a blocker on Unit 1. Not blockers — gates.
+
+### "ABSORB THE DIFFERENCE IN THE OTHER FIELD" NEEDS THE OTHER FIELD TO HAVE BYTE GRANULARITY (0.10.0 U2 R1)
+
+The architect's ruling on the `message_number` digit-width tell was: absorb it in the random
+ciphertext's length. It is the right *instinct* — a network observer sees the total frame length and
+not the internal split, so the observable beats the unobservable — and it is **arithmetically
+impossible**, for a reason that is one line long once seen:
+
+> **base64 encodes 3 bytes to 4 characters, so a padded base64 field's length is always a multiple
+> of 4 — on BOTH sides. The two `ciphertext` fields can therefore differ only by a multiple of 4,
+> and a 1-, 2- or 3-byte difference anywhere else in the frame is unreachable through them.**
+
+Whatever length the blob is given, the residue mod 4 does not move. So the compensating field has to
+have byte granularity, and in a JSON envelope the only such knobs are the DECIMAL widths of numeric
+fields. That in turn forced the real design change: the decoy's counter mirrors the covered one
+instead of advancing monotonically, because a monotonic counter can be skipped forward but never
+back, and real counters reset on every inbound ratchet turn.
+
+**The rule:** before ruling that field B absorbs a difference in field A, check B's *quantisation*.
+Encodings quantise (base64 by 4, hex by 2, block ciphers by the block, `ISO_INSTANT` to
+{0,3,6,9} fractional digits). A knob that only moves in steps of N can never correct a residue that
+is not 0 mod N, however much slack it has.
+
+**And the meta-lesson, which is the third instance in this feature:** the same document that carried
+the ruling also carried the refutation. §2.3 justified monotonicity with "a `message_number` that
+resets is a tell a real ratchet can never produce"; §2.4, forty lines later, conceded that a real
+client resets `message_number` on **every inbound ratchet turn**. Nobody read the two together.
+**When a design decision rests on a claim about real behaviour, grep the document for the same
+claim — the contradiction is more often already written down than not.**
+
+---
+
+## 2026-07-27 — "the two fields go together" was a claim about the SPEC, not about the protocol
+
+**Class:** a design document asserted a biconditional between two protocol fields; the code turned
+it into a `require`; the `require` refused a shape production emits every day. Three review rounds
+and a dedicated fail-closed test did not catch it, because the test asserted the same wrong belief.
+
+`DECOY_TRAFFIC_0.10.0_SPEC.md` §2.2 said: *"A real conversation's first envelope carries non-null
+`ephemeral_key` and `prekey_id`; every later one has them null."* `DecoyEnvelopeBuilder` encoded it
+as `require((cover.ephemeralKey == null) == (cover.preKeyId == null))`, and the whole first-shaped
+path — wrapper sizing, protobuf serialization, base-key offset — was built on the assumption.
+
+**It is false.** `ephemeral_key` marks an X3DH first message; `prekey_id` names the **one-time**
+prekey it consumed. A peer whose one-time batch is exhausted serves a bundle without one, and the
+sender does signed-prekey-only X3DH: still a first message, still a base key, `pre_key_id` absent.
+**Four places in this repo already implemented that path** — `ApiClient.fetchPreKeyBundle`,
+`SignalProtocolManager.establishSession`, `EncryptResult.preKeyId`, and a comment in
+`packages/crypto/src/x3dh.ts` that says "null if no OPK was available" in so many words.
+
+### Why the test made it worse rather than catching it
+
+The fail-closed test asserted `build(real.copy(preKeyId = null))` **throws** — and passed. The
+fixture was **internally inconsistent**: cleartext `prekey_id` null while the ciphertext still
+carried protobuf field 1, built by `copy()` from an OPK-present encrypt rather than by a real
+no-OPK session. A test built that way **cannot distinguish "reject garbage" from "reject a
+legitimate shape"**, and it was pinning the second while reading as the first. Its name and comment
+both said "half a first message", which is what the author believed rather than what the fixture was.
+
+**The rules:**
+
+1. **A `require` derived from a design document is only as true as the document.** Before encoding a
+   claim about protocol shape as a fail-closed assertion, find the code that PRODUCES that shape and
+   read it. Here the producer was in the same repo, four files, one of them commented with the exact
+   counterexample.
+2. **Test the negative space from a real producer, not from `copy()`.** A fixture mutated into a
+   shape no encoder emits proves the guard rejects that fixture — not that the guard is right. If the
+   shape under test is reachable in production, build it the way production builds it; if it is not
+   reachable, say so and pin the reachable half instead.
+3. **A biconditional between two protocol fields deserves suspicion by default.** Optional fields
+   usually carry an implication, not an equivalence. Ask which direction actually holds, and what
+   emits the other three quadrants.
+
+### And the shape of the consequence, which is the part worth remembering
+
+Failing closed is normally the safe direction. **Here it was not.** A refused cover envelope is an
+**unpaired real frame** — precisely the observable the feature exists to remove — and it would have
+appeared for a whole class of RECIPIENTS (those whose prekeys ran out) rather than at random, which
+is worse than a uniform leak. **When "fail closed" means "emit the thing you were built to hide",
+the guard is not conservative; it is the defect.** Check what the closed state actually looks like
+to the adversary before calling it safe.

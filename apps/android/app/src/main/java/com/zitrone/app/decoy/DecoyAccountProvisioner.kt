@@ -143,17 +143,14 @@ import kotlin.concurrent.withLock
  *    to false and answered [canSend] `true` on credentials no reader will ever find on disk.
  *
  * So the state lives in [Gate], one per live [VaultRuntime], and the constructor is **private**:
- * a provisioner with a private latch is unrepresentable rather than merely discouraged, exactly as
- * [com.zitrone.app.decoy.DecoyCounterReservation]'s private constructor made a second cursor
- * unrepresentable. [forRuntime] is the only way to build one.
+ * a provisioner with a private latch is unrepresentable rather than merely discouraged by kdoc.
+ * [forRuntime] is the only way to build one.
  *
- * It returns a NEW instance sharing the runtime's gate rather than a cached instance, which is the
- * one place this deliberately differs from the allocator's registry. The allocator caches because
- * its *cursor* is the thing that must be unique; here the collaborators ([relay], [powSolver],
- * [clock]) are per-attempt — a decoy relay is built over a per-attempt [com.zitrone.app.data.
- * StagingAuthStore] — so handing back a cached instance would silently bind a later caller to an
- * earlier attempt's staging store and clock. Caching the *guard state* and not the collaborators
- * gives the same structural guarantee without that trap.
+ * It returns a NEW instance sharing the runtime's gate rather than a cached instance. The
+ * collaborators ([relay], [powSolver], [clock]) are per-attempt — a decoy relay is built over a
+ * per-attempt [com.zitrone.app.data.StagingAuthStore] — so handing back a cached instance would
+ * silently bind a later caller to an earlier attempt's staging store and clock. Caching the *guard
+ * state* and not the collaborators gives the structural guarantee without that trap.
  *
  * ## Lifetime
  *
@@ -202,8 +199,8 @@ class DecoyAccountProvisioner private constructor(
      *    the throw.
      *  - **not [VaultRuntime.capacityExceeded]** — the runtime holds an unscheduled mutation, so
      *    `flushBeforeAck` fail-closes for the WHOLE vault. Nothing decoy-related can be made durable
-     *    while that is true (the counter reservation's flush would refuse), so the honest answer for
-     *    the moment is "no cover traffic". It becomes true again on the next successful mutate, and
+     *    while that is true (a token refresh's write, this vault's back-off), so the honest answer
+     *    for the moment is "no cover traffic". It becomes true again on the next successful mutate, and
      *    it is checked AFTER the state read so a concurrent capacity failure is still seen.
      */
     fun canSend(): Boolean = hasAccount() && !gate.credentialsUnconfirmed && !runtime.capacityExceeded
@@ -329,8 +326,18 @@ class DecoyAccountProvisioner private constructor(
             identity = DecoyIdentity.generateIdentity()
             // Same order as an ordinary boot: challenge → solve → register → session. A null
             // challenge means the relay has no PoW endpoint, so register without a proof.
-            // ⚠️ NO LOCK IS HELD HERE. This is seconds of proof-of-work and HTTP; holding the
-            // section monitor across it would stall the counter allocator on the send path.
+            // ⚠️ NO LOCK IS HELD HERE. This is seconds of proof-of-work and HTTP, and the section
+            // monitor serializes every read-modify-write over `TAG_DECOY`: holding it across this
+            // window would block `DecoyAuthStore`'s token writers (a mid-session 401 refresh),
+            // `clearAccount`, and any other provisioner sequence for the whole solve — and, once
+            // U3 wires the send path, that path's own section reads behind it. The commit's
+            // critical section below is where the lock belongs, because that is the sequence whose
+            // check must be atomic with its write.
+            //
+            // ⚠️ The reason above was rewritten in fix round 3. It used to read "would stall the
+            // counter allocator on the send path" — the allocator was DELETED in round 2 with the
+            // idle ping, so the justification named a component that no longer exists while the
+            // conclusion it justified was still right for the reasons now stated.
             val challengeToken = relay.registrationChallenge()
             val powProof = challengeToken?.let {
                 powSolver.solve(it, DecoyIdentity.publicKeyBytes(identity.identityKeyPair))
@@ -363,9 +370,9 @@ class DecoyAccountProvisioner private constructor(
             // lock is still held, so no other writer of the section can interleave between the two.
             // Round 1 snapshotted the section BEFORE the network round-trip above and restored that
             // snapshot seconds later, which clobbered any concurrent decoy write in the window —
-            // including a counter reservation, restoring an OLDER high-water mark and reissuing
-            // values that had already been handed out. A revert may only ever put back state that
-            // was observed under the same lock that the revert itself runs under.
+            // a token write, another writer's back-off — putting back state that was already
+            // superseded. A revert may only ever put back state that was observed under the same
+            // lock that the revert itself runs under.
             return DecoySectionLock.withSection(runtime) {
                 val beforeCommit = runtime.read { it.decoy }
                 // From here the live state may hold credentials that are not yet durable, so no

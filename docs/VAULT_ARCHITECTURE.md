@@ -330,16 +330,56 @@ design (full spec is out of scope for this document):
   decoy send in random order (decoy-then-real or real-then-decoy) separated by a small random
   delay, so decoys inherit real human timing for free rather than modeling a pattern that could
   itself fingerprint.
-- **Daily idle ping (1–2×/day, randomly timed)** covers idle periods so total silence is not a
-  signal. It carries little unlinkability burden; sizing/pattern for the standalone ping (lacking
-  paired real traffic as cover) is an open question.
+- ~~**Daily idle ping (1–2×/day, randomly timed)** covers idle periods so total silence is not a
+  signal.~~ **CUT — maintainer decision 2026-07-27. See the amendment note below.**
 - **Per-vault / per-active-identity**, not global — only the currently-unlocked vault (which is
   the only one with real traffic, per §4) generates decoys, addressed to that vault's synthetic
   dummy pinned account and burned near-instantly (~30 ms) so no real contact needs
   decoy-recognition logic.
+> ### ⚠️ AMENDMENT 2026-07-27 — the idle ping is CUT from the design (maintainer decision)
+>
+> Recorded visibly rather than silently, because this is a change to the locked §8 design and the
+> second such amendment. It is a **deliberate reduction in scope, not a deferral**: there is no unit
+> for it and no follow-up gate.
+>
+> **The reasoning, which is §8's own argument applied to itself.** Pairing was chosen over scheduling
+> precisely because *"decoys inherit real human timing for free rather than modeling a pattern that
+> could itself fingerprint."* A standalone idle ping has **no real traffic to inherit timing from**,
+> so it must invent a schedule — and an invented schedule is exactly the modelled pattern the bullet
+> above rejects. An adversary can recognise it for what it is and filter it out, at which point it
+> contributes nothing while still costing infrastructure. Worse, being recognisable, it is a signal
+> that this client runs cover traffic at all.
+>
+> §8 already conceded the ping *"carries little unlinkability burden"* and left its sizing as an open
+> question. The honest resolution of that open question turned out to be that no sizing is right,
+> because the problem is the schedule, not the size.
+>
+> **What this does NOT change:** paired decoys remain the whole mechanism, and they are strictly
+> better than any algorithm attempting to model real message behaviour — they *are* real message
+> behaviour, borrowed. Dead-air periods are simply not covered, which is an accepted, documented
+> limit rather than a gap to be filled with something ineffective.
+>
+> **Consequences, now APPLIED in code (U2 fix round 2, 2026-07-27):** unit U5 is cut from the 0.10.0
+> plan; `DecoyCounterReservation` (built in U1) lost its only remaining consumer, since paired decoys
+> mirror the covered envelope's `message_number` — the class and its tests are **deleted**, not left
+> dormant. `TAG_DECOY` loses **both** `deadAirNextFireAtMs` (writer W4, already retired) and
+> `counterHighWater` (writer W3, which went with the allocator); the section is now
+> `accountId ‖ identityKeyPair ‖ accessToken ‖ refreshToken ‖ provisionNotBeforeMs` and 17 plaintext
+> bytes smaller. `DecoySectionLock` **survives** — it also serialises the `DecoyAuthStore` token
+> writers and the provisioner's commit/revert and back-off compare-and-clear, which were never the
+> allocator's callers. Because `0x06` has never existed in a shipped build this is a field-set change
+> inside an unshipped section, not a format migration. Tracked in
+> `docs/design/DECOY_TRAFFIC_0.10.0_SPEC.md` §3.0.
+>
+> **A separate, earlier decision this must not be confused with:** the *24/7 background daemon* was
+> already ruled out on different grounds — the app has no background execution and a locked vault
+> holds no keys, so a wall-clock ping was unbuildable without new infrastructure and a fresh
+> deniability analysis. That ruling narrowed the ping to in-session. **This one removes it.**
+
 - **Open questions:** whether the decoy envelope must be size/structure-indistinguishable from a
   real encrypted message (packet-size analysis could otherwise defeat pairing regardless of
-  timing); idle-ping sizing.
+  timing). ~~idle-ping sizing~~ — **moot, the ping is cut** (amendment above); it was resolved by
+  removing the thing that needed sizing, not by choosing a size.
 - **User-facing indicator** (proposed 🍋‍🟩) signals only that the client-side decoy logic *ran* —
   documented, in-app and in docs, as a **mechanism-status indicator, not proof of unlinkability**
   against a real adversary. Security-conscious users verify the send/pairing logic in the

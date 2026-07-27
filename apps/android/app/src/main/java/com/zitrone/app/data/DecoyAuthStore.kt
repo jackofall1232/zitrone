@@ -22,13 +22,15 @@ import com.zitrone.app.crypto.vault.VaultRuntime
  * identity key, so they never need flush-before-ack.
  *
  * ⚠️ EVERY WRITE HERE TAKES [DecoySectionLock] **[R2]**. `stateLock` alone makes each `mutate`
- * atomic, which is the wrong granularity: [clearAccount] resets `counterHighWater`, and
- * `DecoyCounterReservation` checks that mark in one call and spends against it in the next. With
- * only the runtime lock, a clear landing between the check and the spend lets the allocator issue
- * from a block the mark no longer covers — `1, 0` on the wire, a cleartext counter regression.
- * Taking the section monitor makes this write exclusive against the allocator's whole sequence and
- * against the provisioner's read-commit-revert. Reads do NOT take it: `runtime.read` is already
- * atomic, and a caller acting on a stale single value is the caller's own race.
+ * atomic, which is the wrong granularity: every write here is the tail of a *sequence* whose head is
+ * a separate read. [storeTokens] and [storeTokensForAccount] each check an account id in one runtime
+ * call and write tokens in the next, and the provisioner reads the section, commits on top of it and
+ * on a capacity failure restores what it read — three calls. A predicate evaluated in one
+ * `runtime.read` and acted on in a later `runtime.mutate` is not atomic with the thing it guards, so
+ * a [clearAccount] landing between the two is what lets a token refresh resurrect a retired
+ * account's live bearer credentials. The section monitor makes each whole sequence exclusive against
+ * every other writer of the section. Reads do NOT take it: `runtime.read` is already atomic, and a
+ * caller acting on a stale single value is the caller's own race.
  *
  * ⚠️ THE [accountId] SETTER IS FAIL-CLOSED, AND THAT IS THE POINT. `ApiClient.register()` writes
  * the new account id into its store the instant the 201 lands, BEFORE anything else about the
@@ -140,17 +142,12 @@ class DecoyAuthStore(
                 // survive is not retired. They are nulled in the SAME mutate as the id and the key,
                 // so no generation ever carries a token for an account this vault no longer claims.
                 //
-                // counterHighWater goes with them, and that is not tidiness. The mark means "every
-                // value below this may already have been issued" — a statement about ONE synthetic
-                // peer. Carry it across a re-provision and the replacement account's very first
-                // envelope arrives at the relay carrying `message_number = 128`, in the clear, on a
-                // brand-new account whose session was just established. A real Double Ratchet with
-                // a new recipient starts at 0, so a nonzero start is a classifier the relay
-                // operator gets for free. Resetting it is safe against a live
-                // DecoyCounterReservation because this whole mutate runs under the SECTION lock,
-                // so it cannot land between that allocator's staleness check and its spend — the
-                // allocator therefore always observes the reset before deciding, abandons its stale
-                // block, and reserves fresh.
+                // There is NO counter state to reset alongside them (2026-07-27): a paired decoy
+                // mirrors the covered envelope's message_number, so the section carries no counter
+                // for a re-provisioned account to inherit. The property the old reset protected —
+                // a replacement account must not open at `message_number = 128` — now holds by
+                // construction, because the value comes from the real conversation the decoy covers
+                // and never from this vault's durable state.
                 it.decoy?.let { current ->
                     current.wipe()
                     it.decoy = current.copy(
@@ -158,7 +155,6 @@ class DecoyAuthStore(
                         identityKeyPair = null,
                         accessToken = null,
                         refreshToken = null,
-                        counterHighWater = 0L,
                     )
                 }
             }

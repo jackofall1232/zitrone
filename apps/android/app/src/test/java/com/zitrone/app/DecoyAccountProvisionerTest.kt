@@ -6,6 +6,7 @@
 package com.zitrone.app
 
 import com.goterl.lazysodium.SodiumJava
+import com.zitrone.app.crypto.vault.DecoySectionLock
 import com.zitrone.app.crypto.vault.DecoyState
 import com.zitrone.app.crypto.vault.LibsodiumVaultOps
 import com.zitrone.app.crypto.vault.VAULT_KEY_BYTES
@@ -17,7 +18,6 @@ import com.zitrone.app.crypto.vault.VaultStateCodec
 import com.zitrone.app.crypto.vault.openPayload
 import com.zitrone.app.data.DecoyAuthStore
 import com.zitrone.app.decoy.DecoyAccountProvisioner
-import com.zitrone.app.decoy.DecoyCounterReservation
 import com.zitrone.app.decoy.DecoyIdentity
 import com.zitrone.app.decoy.DecoyPowSolver
 import com.zitrone.app.decoy.DecoyRelayApi
@@ -606,35 +606,51 @@ class DecoyAccountProvisionerTest {
     fun `a capacity revert restores what the section held AT COMMIT TIME, not a pre-network snapshot`() {
         // Round 1 snapshotted the section before the relay sequence and restored that snapshot on a
         // capacity failure — seconds of proof-of-work and HTTP later. Anything the section gained in
-        // that window was clobbered wholesale, and the worst case is a counter reservation: the mark
-        // goes BACKWARDS, and the allocator hands out values that were already spent. A cleartext
-        // message_number regression is the exact tell the whole counter discipline exists to deny a
-        // relay operator.
+        // that window was clobbered wholesale. The rule this pins is that a revert may only ever put
+        // back state observed under the SAME lock the revert runs under, which the provisioner now
+        // satisfies by reading `beforeCommit` inside the section lock, after the network.
         //
-        // The concurrent write is driven from inside the relay call, which is precisely the window:
-        // the provisioner holds no lock there, by design, because the alternative is stalling the
-        // send path behind a multi-second registration.
+        // [2026-07-27] The concurrent writer used to be a DecoyCounterReservation, whose mark going
+        // BACKWARDS was the worst case. The allocator and its field are gone with the idle ping, so
+        // the writer here is a direct section write under the section lock — a stand-in for any of
+        // the real ones (a token write, another attempt's back-off), and the same shape they take:
+        // a mutate on the section held while the provisioner is off the lock.
+        //
+        // It is driven from inside the relay call, which is precisely the window: the provisioner
+        // holds no lock there, by design, because the alternative is stalling the send path behind a
+        // multi-second registration.
         val vault = Vault(VaultCapacityFixture(ops).stateWithSlack(200, 400))
-        val issued = mutableListOf<Long>()
+        val concurrentDeferral = FIXED_NOW + 12_345L
+        var wrote = false
         val relay = FakeRelay(
             tokenPadBytes = REALISTIC_TOKEN_BYTES,
             duringRegister = {
-                issued += DecoyCounterReservation.forRuntime(vault.runtime, blockSize = 4).next()
+                DecoySectionLock.withSection(vault.runtime) {
+                    vault.runtime.mutate { state ->
+                        state.decoy = (state.decoy ?: DecoyState())
+                            .copy(provisionNotBeforeMs = concurrentDeferral)
+                    }
+                }
+                wrote = true
             },
         )
 
         assertFalse(runBlocking { provisioner(vault.runtime, relay).provisionIfNeeded() })
 
-        assertEquals("a counter really was issued during the round-trip", listOf(0L), issued)
+        assertTrue("a concurrent section write really happened during the round-trip", wrote)
+        // The provisioner's OWN write-ahead deferral was in the section before the network started,
+        // so a pre-network snapshot would restore that value and lose this one.
         assertEquals(
-            "the reservation the revert had to preserve is still the live mark",
-            4L,
-            vault.runtime.read { it.decoy?.counterHighWater ?: 0L },
+            "the write the revert had to preserve is still the live state",
+            concurrentDeferral,
+            vault.runtime.read { it.decoy?.provisionNotBeforeMs },
         )
-        // And the wire property itself: the next value must never be one already handed out.
-        val next = DecoyCounterReservation.forRuntime(vault.runtime, blockSize = 4).next()
-        assertTrue("counter $next was already issued — a REGRESSION", next !in issued)
-        assertTrue("and it does not go backwards", next > issued.max())
+        // Discriminator: the pre-network value was genuinely different, so the assertion above is
+        // not satisfied by a revert that happens to restore the same thing either way.
+        assertTrue(
+            "the deferral this attempt wrote ahead is not the value asserted above",
+            concurrentDeferral < FIXED_NOW + DecoyAccountProvisioner.MIN_BACKOFF_MS,
+        )
     }
 
     @Test
@@ -681,8 +697,8 @@ class DecoyAccountProvisionerTest {
         // runtime each held their own: both passed the deferral check, both registered, and the
         // last commit won — one orphaned relay account and TWO spends of a rate-limit bucket shared
         // by every client worldwide, for a single vault. Round 1 had already ruled that kdoc-only
-        // uniqueness is not a defence and given DecoyCounterReservation a private constructor for
-        // exactly that reason; the provisioner kept a public one.
+        // uniqueness is not a defence and made the same argument about the counter allocator's
+        // constructor; the provisioner kept a public one.
         //
         // The interleaving is made exact the same way the single-instance latch test makes its own:
         // an EXPIRED deferral is the one state in which isDeferred() consults the clock, which
