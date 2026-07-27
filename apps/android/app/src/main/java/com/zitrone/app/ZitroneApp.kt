@@ -51,7 +51,15 @@ import com.zitrone.app.data.SettingsRepository
 import com.zitrone.app.data.TransportState
 import com.zitrone.app.data.VaultAuthStore
 import com.zitrone.app.data.VaultRosterStore
+import com.zitrone.app.data.DecoyAuthStore
 import com.zitrone.app.data.VaultSettingsStore
+import com.zitrone.app.decoy.ApiClientDecoyRelay
+import com.zitrone.app.decoy.CoverTraffic
+import com.zitrone.app.decoy.DecoyAccountProvisioner
+import com.zitrone.app.decoy.DecoyEnvelopeBuilder
+import com.zitrone.app.decoy.DecoyRelayApi
+import com.zitrone.app.decoy.DecoySendPairing
+import com.zitrone.app.decoy.RegistrationPowSolver
 import com.zitrone.app.diagnostics.BootDiagnostics
 import com.zitrone.app.i2p.I2pIntegration
 import com.zitrone.app.net.ApiClient
@@ -1457,6 +1465,13 @@ class AppContainer(private val app: Application) {
             persistDeleteIntent = imageStore::markDeleteIntent,
             persistServerDeleteConfirmed = imageStore::markServerDeleteConfirmed,
             intentMarkerPresent = imageStore::hasDeleteIntentMarker,
+            // Cover traffic (0.10.0 U3). Resolved at ATTEMPT time, not here: a provisioning attempt
+            // that starts after a transport swap must register over the transport that is live
+            // then — the same reason applyTransportLocked re-points the session's ApiClient/WsClient.
+            decoyRelay = {
+                val (decoyClient, decoyApiBase, _) = transportEndpoints(transportResolver.state.value)
+                ApiClientDecoyRelay(decoyApiBase, decoyClient)
+            },
         )
     }
 
@@ -1574,6 +1589,15 @@ class SessionContainer(
     persistDeleteIntent: () -> Unit = {},
     persistServerDeleteConfirmed: () -> Unit = {},
     intentMarkerPresent: () -> Boolean = { false },
+    /**
+     * Builds the relay client cover-traffic provisioning registers its synthetic account through
+     * (0.10.0 U3). A FACTORY, not an instance, for two reasons: the transport can swap under a live
+     * session (`applyTransportLocked`), so the attempt must dial whatever is current rather than
+     * whatever was current at unlock; and one [com.zitrone.app.decoy.ApiClientDecoyRelay] owns one
+     * attempt's RAM-only staging store (see its kdoc). Null — the default, and every construction
+     * outside the app — means no cover traffic at all.
+     */
+    decoyRelay: (() -> DecoyRelayApi)? = null,
 ) {
     /** Which image slot this session unlocked — needed to persist a biometric re-wrap ([withVaultKey]). */
     val slotIndex: Int = vaultOpen.slotIndex
@@ -1604,6 +1628,12 @@ class SessionContainer(
     val lemonDropRedeemer: LemonDropRedeemer
     val lemonDropCreator: LemonDropCreator
     val notificationScheduler: NotificationScheduler
+
+    /**
+     * Cover traffic for this vault's send path (0.10.0 U3), or [CoverTraffic.NONE]. Held only so it
+     * is constructed before the coordinator that owns its teardown; nothing else reads it.
+     */
+    private val coverTraffic: CoverTraffic
     val coordinator: MessagingCoordinator
 
     init {
@@ -1674,6 +1704,34 @@ class SessionContainer(
                 },
                 clock = { android.os.SystemClock.elapsedRealtime() },
             )
+            // Cover traffic (0.10.0 U3), or CoverTraffic.NONE when this build has no decoy relay.
+            // Every collaborator is a lambda: DecoySendPairing gets no VaultRuntime, no store and no
+            // ApiClient, so "the send-pairing path writes nothing durable" is a fact about its type
+            // — the discipline DecoyEnvelopeBuilder documents. The synthetic account id is read per
+            // send because it APPEARS mid-session, when provisioning lands.
+            coverTraffic = decoyRelay?.let { relayFactory ->
+                DecoySendPairing(
+                    scope = scope,
+                    sender = {
+                        apiClient.accountId?.let { accountId ->
+                            DecoyEnvelopeBuilder.Sender(
+                                accountId = accountId,
+                                registrationId = signalManager.localRegistrationId(),
+                                identityKeySerialized = signalManager.localIdentitySerialized(),
+                            )
+                        }
+                    },
+                    recipient = { DecoyAuthStore(rt).accountId },
+                    send = wsClient::sendMessage,
+                    provision = {
+                        DecoyAccountProvisioner.forRuntime(
+                            runtime = rt,
+                            relay = relayFactory(),
+                            powSolver = RegistrationPowSolver(),
+                        ).provisionIfNeeded()
+                    },
+                )
+            } ?: CoverTraffic.NONE
             coordinator = MessagingCoordinator(
                 appContext = app,
                 scope = scope,
@@ -1694,6 +1752,9 @@ class SessionContainer(
                 persistDeleteIntent = persistDeleteIntent,
                 persistServerDeleteConfirmed = persistServerDeleteConfirmed,
                 intentMarkerPresent = intentMarkerPresent,
+                // U3: wraps the publish tail of every outbound envelope. MessagingCoordinator.stop()
+                // is what tears it down, which is why the coordinator owns the reference.
+                coverTraffic = coverTraffic,
             )
         } catch (t: Throwable) {
             runCatching { rt.close() }

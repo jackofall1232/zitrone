@@ -33,6 +33,7 @@ import com.zitrone.app.data.MessageEnvelope
 import com.zitrone.app.data.MessageRepository
 import com.zitrone.app.data.MessageState
 import com.zitrone.app.data.SettingsRepository
+import com.zitrone.app.decoy.CoverTraffic
 import com.zitrone.app.net.ApiClient
 import com.zitrone.app.net.WsClient
 import com.zitrone.app.notifications.NotificationScheduler
@@ -154,6 +155,19 @@ class MessagingCoordinator(
      * the rare revoke path.
      */
     private val intentMarkerPresent: () -> Boolean = { false },
+    /**
+     * Cover traffic (0.10.0 U3). Wraps the NON-SUSPENDING `contactExists → ws.sendMessage` publish
+     * tail of every outbound envelope — text, attachment control payload and read receipt alike —
+     * so a same-length decoy frame rides beside the real one. [CoverTraffic.NONE] (the default, and
+     * every non-vault construction) runs that tail unchanged.
+     *
+     * The tail is handed over as a plain `() -> Unit`, which is why this seam cannot weaken the D2c
+     * delete-atomicity contract: a non-suspending function type cannot contain a suspension, so "no
+     * suspension between the check and the send" is now enforced by the compiler at all three send
+     * sites rather than by a comment at each of them. [CoverTraffic.paired] invokes it exactly once
+     * on every path — a cover-traffic failure can never cost a real send (spec §4.3 R-U3-1).
+     */
+    private val coverTraffic: CoverTraffic = CoverTraffic.NONE,
 ) : WsClient.Listener {
 
     private val _typingPeers = MutableStateFlow<Set<String>>(emptySet())
@@ -654,6 +668,9 @@ class MessagingCoordinator(
         // Teardown hook: drop all pending re-fire jobs + fire state so nothing
         // carries across an identity switch (see NotificationScheduler).
         notificationScheduler.cancelAll()
+        // The same hook for cover traffic (spec §4.3 R-U3-5): nothing decoy-related survives the
+        // session, and a locked vault emits nothing.
+        coverTraffic.stop()
         // Owed post-ack side effects die with the session: a receipt, notification, or blob
         // redemption must never fire for a locked/logged-out/burned account, and nothing
         // carries across an identity switch (see PendingPostAckLedger).
@@ -961,23 +978,29 @@ class MessagingCoordinator(
                 messages.markFailed(messageId)
                 return@runCatching
             }
-            // NON-SUSPENDING publish tail: on the confinement worker this check→deposit is atomic
-            // against deleteContact (the durable flush already completed above, OUTSIDE this
-            // window), so a contact torn down before this point drops the envelope AND the local
-            // plaintext, and one torn down after this point was still live when we deposited.
-            if (!contactExists(conversation.contactId)) {
-                diag("send: contact deleted mid-send — dropping local copy")
-                messages.discard(messageId)
-            } else if (ws.sendMessage(envelope)) {
-                // Handed to the relay — but honestly still just SENDING. The tick waits for the
-                // relay's message.stored (→SENT) and the recipient's message.delivered (→DELIVERED);
-                // see [MessageState].
-            } else {
-                // The socket was down: the send did not reach the relay. The ratchet advance is
-                // already durable, so a retry advances cleanly. Connection state only — never the
-                // envelope.
-                diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
-                messages.markFailed(messageId)
+            // Cover traffic (U3): the tail below is handed to [coverTraffic] so a same-length
+            // decoy frame rides beside it in an unpredictable order. It runs exactly once whatever
+            // happens on the decoy side, and it stays NON-SUSPENDING — the function type says so.
+            coverTraffic.paired(envelope) {
+                // NON-SUSPENDING publish tail: on the confinement worker this check→deposit is
+                // atomic against deleteContact (the durable flush already completed above, OUTSIDE
+                // this window), so a contact torn down before this point drops the envelope AND the
+                // local plaintext, and one torn down after this point was still live when we
+                // deposited.
+                if (!contactExists(conversation.contactId)) {
+                    diag("send: contact deleted mid-send — dropping local copy")
+                    messages.discard(messageId)
+                } else if (ws.sendMessage(envelope)) {
+                    // Handed to the relay — but honestly still just SENDING. The tick waits for the
+                    // relay's message.stored (→SENT) and the recipient's message.delivered
+                    // (→DELIVERED); see [MessageState].
+                } else {
+                    // The socket was down: the send did not reach the relay. The ratchet advance is
+                    // already durable, so a retry advances cleanly. Connection state only — never
+                    // the envelope.
+                    diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
+                    messages.markFailed(messageId)
+                }
             }
         }.onFailure { e ->
             if (e is CancellationException) throw e
@@ -1182,17 +1205,21 @@ class MessagingCoordinator(
                 messages.markFailed(messageId)
                 return@runCatching
             }
-            // NON-SUSPENDING publish tail (see [confined]): atomic against deleteContact with the
-            // durable flush already done. If the contact was deleted mid-upload, drop the envelope
-            // AND the local copy (incl. the in-memory attachment bytes).
-            if (!contactExists(conversation.contactId)) {
-                diag("send: contact deleted mid-send — dropping local copy")
-                messages.discard(messageId)
-            } else if (ws.sendMessage(envelope)) {
-                // Handed to the relay — honestly still SENDING until the relay/peer acks.
-            } else {
-                diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
-                messages.markFailed(messageId)
+            // Cover traffic (U3) — see [deliverText]. An attachment's control payload is an
+            // ordinary message.send on the wire and is paired exactly like one.
+            coverTraffic.paired(envelope) {
+                // NON-SUSPENDING publish tail (see [confined]): atomic against deleteContact with
+                // the durable flush already done. If the contact was deleted mid-upload, drop the
+                // envelope AND the local copy (incl. the in-memory attachment bytes).
+                if (!contactExists(conversation.contactId)) {
+                    diag("send: contact deleted mid-send — dropping local copy")
+                    messages.discard(messageId)
+                } else if (ws.sendMessage(envelope)) {
+                    // Handed to the relay — honestly still SENDING until the relay/peer acks.
+                } else {
+                    diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
+                    messages.markFailed(messageId)
+                }
             }
         }.onFailure { e ->
             if (e is CancellationException) throw e
@@ -1336,18 +1363,24 @@ class MessagingCoordinator(
                     queueReceipts(contactId, messageIds)
                     return@runCatching
                 }
-                // NON-SUSPENDING publish tail (see [confined]): atomic with deleteContact, the
-                // durable flush already done. A receipt for a just-deleted contact is dropped (no
-                // post-delete ciphertext) and not queued.
-                if (!contactExists(contactId)) {
-                    diag("receipt: contact deleted mid-send — dropped, not queued")
-                } else if (ws.sendMessage(envelope)) {
-                    // Delivered to the socket — nothing more to do.
-                } else {
-                    // Socket down. The messages are already READ locally, so queue the ids for the
-                    // reconnect flush. Connection state only — never the envelope.
-                    diag("receipt: not handed to relay — queued (${ws.connectionState.value})")
-                    queueReceipts(contactId, messageIds)
+                // Cover traffic (U3) — see [deliverText]. A receipt is paired like every other
+                // envelope through this choke point, and deliberately so: a receipt envelope is
+                // built to be indistinguishable from a text message, and pairing only text would
+                // hand an observer the receipt detector that indistinguishability denies it.
+                coverTraffic.paired(envelope) {
+                    // NON-SUSPENDING publish tail (see [confined]): atomic with deleteContact, the
+                    // durable flush already done. A receipt for a just-deleted contact is dropped
+                    // (no post-delete ciphertext) and not queued.
+                    if (!contactExists(contactId)) {
+                        diag("receipt: contact deleted mid-send — dropped, not queued")
+                    } else if (ws.sendMessage(envelope)) {
+                        // Delivered to the socket — nothing more to do.
+                    } else {
+                        // Socket down. The messages are already READ locally, so queue the ids for
+                        // the reconnect flush. Connection state only — never the envelope.
+                        diag("receipt: not handed to relay — queued (${ws.connectionState.value})")
+                        queueReceipts(contactId, messageIds)
+                    }
                 }
             }.onFailure { e ->
                 if (e is CancellationException) throw e
