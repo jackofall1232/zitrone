@@ -140,6 +140,32 @@ class RegistrationPowSolveRecorderTest {
     }
 
     @Test
+    fun uiProgressSinkSeesEveryEmissionThroughTheRecorder() {
+        // The recorder is the app's ONLY front door to the solver, so the pitcher screen's
+        // fraction rides through it: the downstream sink must see the raw emissions — same
+        // count the recorder itself observed, ending on the final (winning) one.
+        val lines = mutableListOf<String>()
+        val fractions = mutableListOf<Float>()
+        var emissions = 0
+        recorder(lines).solve(
+            token(),
+            ByteArray(32) { 8 },
+            params,
+            fakeDeriver,
+            uiProgress = { p ->
+                emissions++
+                fractions.add(p.fraction)
+            },
+        )
+        assertTrue(emissions >= 1)
+        // Every argon evaluation emits, and the argon stage dominates expected work at these
+        // params, so the last fraction (the winning evaluation) must be positive.
+        assertTrue(fractions.last() > 0f)
+        // The recorder's own lines are unaffected by the tap.
+        assertEquals(4, lines.size)
+    }
+
+    @Test
     fun unreadableProbesRenderAsUnknownNotFalse() {
         val lines = mutableListOf<String>()
         val recorder = recorder(lines, batterySaver = { null }, inForeground = { null })

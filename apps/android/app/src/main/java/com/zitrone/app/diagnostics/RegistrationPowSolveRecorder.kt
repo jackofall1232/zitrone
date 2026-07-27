@@ -52,6 +52,11 @@ class RegistrationPowSolveRecorder(
      *  - `pow: argon2id stage done` — duration, evaluation count, t/m/p/D
      *  - `pow: solve COMPLETE` — total wall time + end-of-solve conditions
      *  - `pow: solve ABORTED`/`FAILED` — stage reached, work done so far, elapsed, conditions
+     *
+     * [uiProgress] receives every raw solver emission (same thread, same cadence) so the
+     * progress screen can render the fraction without a second tap into the solver — this
+     * recorder stays the ONLY front door. Keep the sink as cheap as the recorder's own
+     * bookkeeping: it runs on the solving thread, up to ~one call per 8192 hashes.
      */
     @Throws(InterruptedException::class)
     fun solve(
@@ -59,6 +64,7 @@ class RegistrationPowSolveRecorder(
         identityKey: ByteArray,
         params: RegistrationPow.Params,
         deriver: RegistrationPow.Argon2idDeriver,
+        uiProgress: RegistrationPow.ProgressSink? = null,
     ): RegistrationPow.Proof {
         // Log the EFFECTIVE parameters — a debug build with the difficulty override set must
         // not produce lines that read like a real measurement at full difficulty.
@@ -101,6 +107,7 @@ class RegistrationPowSolveRecorder(
                 }
             }
             lastStage = p.stage
+            uiProgress?.onProgress(p)
         }
 
         val proof = try {
