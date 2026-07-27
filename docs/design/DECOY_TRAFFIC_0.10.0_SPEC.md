@@ -127,7 +127,10 @@ Padding is real, correct, and byte-identical across platforms (`packages/crypto/
 Padding does **not** by itself produce uniformity. Three residual size/structure tells exist
 independently of decoys: block count is visible; the attachment control payload is 286 B so it
 *always* lands one block bigger than a short text; and the X3DH first message is larger by the
-first-message row of the table above, with two fields flipping non-null.
+first-message row of the table above, with **`ephemeral_key` flipping non-null**. **[R11]** ~~with two
+fields flipping non-null~~ — `prekey_id` may stay **null** on a real first message
+(signed-prekey-only X3DH, when the peer's one-time prekeys are exhausted), so "two fields" is the
+same false pair model struck in §2.2. The size claim holds; the field count did not.
 
 > **⭐ CANONICAL: every frame size in this document is the table above. No other section states
 > one.** [U2 R1, G-D] Frame sizes were corrected in the table and then left standing in their old
