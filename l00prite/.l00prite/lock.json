@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "lock_id": "lock-20260727T-decoy-u1",
+  "lock_id": "lock-20260727T-decoy-u1b",
   "owner_agent": null,
   "owner_session": null,
   "acquired_at": "2026-07-27T09:00:00Z",
   "expires_at": "2026-07-27T09:30:00Z",
   "ttl_seconds": 1800,
-  "purpose": "0.10.0 decoy U1: invariant table + todos/ledger/state",
+  "purpose": "0.10.0 decoy U1: post-rebase evidence note",
   "protected_paths": [
     "ledger.md",
     "memory.md",

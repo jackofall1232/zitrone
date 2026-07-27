@@ -1808,3 +1808,14 @@ registration from the global bucket on any device.
 
 **Owed:** independent paired-blind review of the WHOLE unit (0.9.3 lesson), then a maintainer
 merge decision. No push, no merge, no version bump was performed.
+
+**Post-rebase re-verification (same session).** `main` advanced to `a4f118df` while U1 was in
+flight (a concurrent session closed the storage-format gate in `todos.md`), so the branch was
+rebased onto it and the duplicate gate entry the U1 append had created was reduced to the part
+still open. The full suite was then RE-RUN at the rebased head `3a3c68c2`:
+`./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks` → `GRADLE_EXIT=0`,
+`BUILD SUCCESSFUL in 1m 6s`, 645 tests / 0 failures / 0 errors / 3 skipped.
+
+Per the by-head-SHA rule: the ONLY commit after that verification is this ledger note itself,
+which touches no code, no test and no build file — so `3a3c68c2`'s result still covers every
+compiled and executed file on this branch. Nothing was pushed or merged.
