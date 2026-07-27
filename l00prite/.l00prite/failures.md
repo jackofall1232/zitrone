@@ -656,6 +656,92 @@ And the meta-lesson, worth more than the rule: **writing a rule down does not co
 to follow it.** The author of the round-5 rule violated it in the act of recording it. Rules need a
 mechanical check, not just a statement.
 
+### ⭐ DESIGN RULE — random bytes match real bytes ONLY where the real distribution is uniform
+
+**Promoted from lesson to design rule: three independent instances in one feature.** Whenever a
+synthetic value stands in for a real one, **name the real field's distribution before assuming
+random matches it.** In a structured protocol envelope almost nothing is uniform:
+
+- **keys have curve constraints** — Curve25519 public encodings have bit 255 clear;
+- **counters have magnitude** — and magnitude changes both varint width and JSON digit width;
+- **lengths have encoding artifacts** — base64 padding leaks the pre-encoding byte count;
+- **any field with a default value is a constant in practice**, so "varying" it is the tell.
+
+The three instances, all in 0.10.0 decoy traffic, all in different fields:
+
+| # | Field | What "random" got wrong |
+|---|---|---|
+| 1 | ciphertext **length** | A 316 B blob base64s to 424 chars ending `==`; the real 323 B gives 432 ending `=`. Every decoy would have carried a padding signature no real message has. |
+| 2 | `previous_chain_length` | Real traffic is **always 0** (Android hardcodes it, iOS never mutates it). Anything else is the tell; matching it is correct, not lazy. |
+| 3 | **key material** | `0x05 ‖ random(32)` is not a valid Curve25519 encoding. **Measured: 0 of 200 real `Curve.generateKeyPair()` publics had bit 255 set; random bytes set it ~50% of the time.** ~50% of subsequent decoys and ≥75% of first envelopes would have carried an impossible encoding. |
+
+**Instance 3 is the sharpest because it is a COUNT, not an argument.** 0/200 versus ~50% is not a
+judgement call, and the fix — generate a real keypair and discard the private half — is canonical by
+construction and costs nothing. Prefer *generating the real thing and throwing away what you don't
+need* over *fabricating something shaped like it*; the former cannot drift out of the real
+distribution because it never left it.
+
+Corollary on where these were caught: **the structural diff excluded the 32 key bytes**, which is why
+no test saw instance 3. A test that excludes a region is asserting nothing about it — excluded
+regions are exactly where this class hides.
+
+### ⭐ PRINCIPLE — when an unobservable property conflicts with an observable one, the observable wins
+
+Derived while ruling on the `message_number` digit-width problem (a JSON number, so `5` vs `128`
+changes frame length by 2 bytes, while the decoy's own counter must stay monotonic and so cannot be
+freely chosen). The resolution was to absorb the difference in the random ciphertext's length, which
+looks wrong until the observability is spelled out:
+
+- A **network observer** — the adversary this feature defends against — sees only the **total TLS
+  frame length**. It cannot see the split between `ciphertext` and the other JSON fields.
+- So *"the ciphertext length is plausible for this counter"* is **unobservable** to that adversary,
+  while *"the total frame length matches its pair"* is **directly observable**.
+
+**Optimise the property the adversary can actually measure.** Preserving an internal consistency
+nobody can check, at the cost of an external one everybody can, is backwards.
+
+**And state who it does not fool.** The *relay* can see the split and could notice a ciphertext
+length implausible for its counter. That is acceptable — §1 already concedes decoys do not defend
+against the relay, for far more fundamental reasons — but it is written into §2.4 next to the
+control-channel gap rather than left implicit. A mitigation that is honest about who it doesn't fool
+is the only kind worth shipping.
+
+### CALIBRATION CORRECTION — a "Holds" is the absence of a finding, not the presence of a proof
+
+Grok has now twice certified sound a property Codex correctly flagged as **P1** (U1 round 1,
+"durable advance before spend"; U2 round 1, "byte-level shape — Holds", missing the invalid-key
+defect entirely).
+
+**Do not conclude "Grok is the weaker reviewer."** In that same U2 round, Grok found the
+`message_number` **digit-width** distinguisher that neither Codex nor the architect saw — a real P2
+that breaks size-mirroring independently of the shape defect. **Different blind spots, not different
+quality.**
+
+The correct and more useful conclusion: **a reviewer's "Holds" is the absence of a finding, not the
+presence of a proof.** It carries no evidentiary weight and must never be recorded as one. Only a
+*positive* claim can be verified against source — and those get verified regardless of which
+reviewer makes them. This is the same rule as "verify bot claims before acting", applied to the
+negative case, which is the easier one to let slide precisely because it asks nothing of you.
+
+### WHERE THE DEFECTS ARE COMING FROM — the spec, two units running
+
+Worth acting on rather than just noting. Across U1 and U2, the most severe findings traced to the
+**specification**, not the implementation:
+
+- U1: `mutate` treated as durable (the spec said "persisted"); R4 readiness conflating a *send*
+  predicate with a *register* predicate.
+- U2: **both P1s** — the `build(blockCount)` interface that cannot express what mirroring requires,
+  and `0x05 ‖ random(32)`, which was a literal architect instruction.
+
+The implementer has now caught bad architect instructions **three times**, each correctly. So:
+
+1. **Review the spec with the same adversarial energy as the code**, and from round 1 — not as
+   context for reviewing the code, but as the artefact most likely to be wrong.
+2. **Keep telling the implementer to report where the spec is wrong**, and treat those reports as
+   findings rather than as friction.
+3. When a defect is found, **ask which artefact it originated in** before fixing it. Fixing a
+   spec-origin defect only in the code leaves the spec to reproduce it in the next unit.
+
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
   round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked
