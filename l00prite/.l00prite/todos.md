@@ -11,7 +11,44 @@
 - [x] Added the `security-review-loop.md` prompt to `l00prite/.l00prite/prompts/` + the prompt index
       (PR #52 `b8eb652` / PR #53, merged). It drove PR-2's paired-blind loop to clean convergence.
 
-## IN PROGRESS — 0.9.4-beta: REGISTRATION PROOF-OF-WORK.
+## 🗺️ RELEASE STRATEGY — recorded 2026-07-27 (maintainer). Read before planning any unit.
+
+**The "-beta" version labels are a deliberate hedge, not a maturity claim.** Everything shipped so
+far is, by the maintainer's own assessment, **alpha**. They were labelled `-beta` from the start so
+the project could **flip to a genuine beta at any moment** if a deadline made that necessary — the
+vault was uncharted work with no reference implementation anywhere, so its schedule was genuinely
+unknowable. The label bought optionality; it was never a statement about readiness.
+
+**The plan, and the explicit anti-scope-creep boundary:**
+
+| Release | Role |
+|---|---|
+| 0.10.0 | decoy traffic (this unit chain) — **first version that will be served to the onion** |
+| 0.11.0 | **the polish round** — UI/UX, and the most detailed such pass the project has had. **THE FINAL ALPHA.** |
+| → then | **flip to a TRUE beta: a V1 stable candidate, distributable for real testing** |
+
+**0.9.4 will never be served to the onion.** The next artefact the onion sees is 0.10.0, possibly
+0.11.0. This *retires* the "onion mirror serves a stale APK" item as a defect — it is not stale, it
+is simply not the artefact being published — but see the note under ONION below for what still needs
+checking when 0.10.0 does go out.
+
+**Platforms: Linux and iOS are on the back burner** until after V1 Android testing. Android is the
+security reference client and carries the release. Do not open work on the other platforms; that is
+the scope creep this boundary exists to prevent.
+
+**⚠️ ONE HONESTY ITEM THIS CREATES, for the maintainer to rule on.** The artefacts are labelled
+`-beta` while the project considers itself alpha. Internally that is understood; **externally a
+reader takes "beta" as a maturity signal**, and this project's standing rule is that a claim
+overstating readiness is a defect regardless of intent. The version strings need not change — but
+`README.md` / `AUDIT.md` / release notes should say plainly that these are pre-beta builds, so the
+label and the prose do not disagree. It resolves itself at the 0.11.0 flip, when the label becomes
+true; the exposure is the window before then. Same class as the four overclaims corrected in
+`96982421`, arriving from a different direction.
+
+## ✅ DONE — 0.9.4-beta: REGISTRATION PROOF-OF-WORK.
+> **REAL-WORLD REVIEW COMPLETE 2026-07-27 — PASS** (maintainer). The independent branch review that
+> 0.9.4 shipped without, recorded at the time as a deliberate call, is now **paid**. 0.9.4 is closed.
+> It will **not** be served to the onion; the next onion artefact is 0.10.0 (see RELEASE STRATEGY).
 
 > **STATUS 2026-07-26 (CX33 session).** Client code landed on LOCAL branch
 > `feat/0.9.4-registration-pow-client` (4 commits, NOTHING PUSHED, no version bump).
