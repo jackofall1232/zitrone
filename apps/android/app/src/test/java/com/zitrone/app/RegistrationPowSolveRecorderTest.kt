@@ -17,11 +17,11 @@ import org.junit.Test
 /**
  * Host tests for the instrumented PoW solve — the calibration measurement path.
  *
- * The lines this recorder writes are the ONLY measurement channel for the
- * TODO(pow-calibration) difficulty (no device attaches to the build box; the number must come
- * back through the Diagnostics screen of a real install). So the tests pin the properties a
- * later reader depends on: every completed solve carries all four lines with the parameters
- * that produced the numbers, and an abort still reports how far it got.
+ * The lines this recorder writes are the ONLY measurement channel for the PoW difficulty
+ * (no device attaches to the build box; numbers come back through the Diagnostics screen of
+ * a real install — this channel produced the 0.9.4 calibration). So the tests pin the
+ * properties a later reader depends on: every completed solve carries all four lines with
+ * the parameters that produced the numbers, and an abort still reports how far it got.
  */
 class RegistrationPowSolveRecorderTest {
 

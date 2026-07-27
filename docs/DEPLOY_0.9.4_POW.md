@@ -23,10 +23,11 @@ flag is on, and the challenge endpoint is served unconditionally (issuing a chal
 uses is harmless). The 0.9.4 client also tolerates a relay that 404s the challenge endpoint,
 so steps 2 and 3 are not order-coupled to each other — only both before step 5.
 
-**Do not do step 5 until the Argon2id constants are measured.** They are still
-`TODO(pow-calibration, unmeasured)`; see `REGISTRATION_POW_CALIBRATION.md`. The shipped
-placeholder `REGISTRATION_ARGON2_DIFFICULTY_BITS=8` is measurably far too high and would make
-every registration on a slow device take tens of seconds.
+**The Argon2id constants are MEASURED (2026-07-27, Revvl 6x, battery saver + foreground) and
+landed at D=5** — see `REGISTRATION_POW_CALIBRATION.md`, "Measured — client side". The relay
+config's *default* difficulty is still the D=8 placeholder (measurably far too high — tens of
+seconds on a slow device), so the env var must be set explicitly at step 5; never rely on the
+default.
 
 ## Decision: merge the CX23 branches normally — do NOT cherry-pick onto the deployed SHA
 
@@ -73,22 +74,20 @@ docker compose -p sublemonable \
 
 ## Step 5 preconditions, all of them
 
-- [ ] Argon2id constants measured on a Revvl 6x in battery saver and updated (not placeholders).
-      **The measurement channel exists as of the 0.9.4 client:** every solve runs through an
-      instrumented recorder that writes per-stage timings, work counts, the parameters used,
-      battery-saver state, and foreground/backgrounded state to Settings → Diagnostics (`pow:`
-      lines) — on success AND on abort. One registration attempt on the device yields the
-      number; read it off the Diagnostics screen.
+- [x] Argon2id constants measured on a Revvl 6x in battery saver and updated (not placeholders).
+      **Done 2026-07-27** via the in-app recorder's `pow:` lines from a real registration on
+      the `test-pow-d6b12587` cut: SHA-256 0.63 MH/s, Argon2id 36.7 ms/eval at 19 MiB/t=1 →
+      landed **D=5** (expected total ~2.8 s at the floor in battery saver; ~5% tail ~8 s).
+      Any future difficulty change re-measures the same way — one registration, read the
+      Diagnostics screen.
 - [ ] **The relay env pins all four PoW parameters to the values the 0.9.4 client ships**
       (`RegistrationPow.DEFAULT_PARAMS`): the challenge token carries no parameters, so client
       and relay agree by configuration only, and a mismatch on any of the four silently
-      rejects every proof once the flag is on. The client currently ships
+      rejects every proof once the flag is on. The 0.9.4 client ships
       `REGISTRATION_HASHCASH_DIFFICULTY=20`, `REGISTRATION_ARGON2_TIME_COST=1`,
-      `REGISTRATION_ARGON2_MEMORY_KIB=19456`, `REGISTRATION_ARGON2_DIFFICULTY_BITS=4`.
-      **D=4 is a first calibration attempt, not a measured value** — but note the relay
-      config's *default* for the difficulty is still the D=8 placeholder, so the env var must
-      be set explicitly; do not rely on the default. If the device measurement moves D, client
-      and env move in lockstep.
+      `REGISTRATION_ARGON2_MEMORY_KIB=19456`, `REGISTRATION_ARGON2_DIFFICULTY_BITS=5`
+      (measured — see above). Note the relay config's *default* for the difficulty is still
+      the D=8 placeholder, so the env var must be set explicitly; do not rely on the default.
 - [ ] `REGISTRATION_CHALLENGE_SECRET` set to a base64 key ≥32 bytes — config fails closed at
       startup without it when the flag is on, which is the desired behaviour, but find that out
       before the flip rather than during it

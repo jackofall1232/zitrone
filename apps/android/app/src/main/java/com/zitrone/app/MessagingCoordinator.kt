@@ -679,8 +679,8 @@ class MessagingCoordinator(
     /**
      * Solve the registration PoW through the instrumented recorder so every real solve
      * writes its calibration numbers to the Diagnostics screen (see the recorder's kdoc —
-     * the Argon2id difficulty is TODO(pow-calibration) and a device solve is the only
-     * measurement available).
+     * that channel produced the 0.9.4 device calibration and is how any future difficulty
+     * change gets re-measured).
      *
      * Runs on [Dispatchers.Default]: the solve is pure CPU for seconds and must not occupy
      * the confined boot worker. [runInterruptible] maps coroutine cancellation (stop(),

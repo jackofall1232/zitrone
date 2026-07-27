@@ -11,13 +11,15 @@ import com.zitrone.app.crypto.RegistrationPow
  * Instrumented front door for the 0.9.4 registration proof-of-work solve — the ONLY way the
  * app should run [RegistrationPow.solve], so every real solve leaves numbers behind.
  *
- * **Why this exists:** the Argon2id difficulty is `TODO(pow-calibration)` — no build box here
- * can attach the floor device (Revvl 6x), so the only measurement available is a real
- * registration on a real install. Without instrumentation a cut answers "worked" or "hung";
- * with it, ONE registration attempt on the device yields the actual per-stage timings and the
- * conditions that produced them, and calibration needs one build instead of blind iteration.
- * That is why an abort is logged as diligently as a success: a user bailing at 60s is itself
- * a calibration data point, and how far the solve got before the bail is the useful part.
+ * **Why this exists:** no build box here can attach the floor device (Revvl 6x), so the only
+ * measurement available is a real registration on a real install. Without instrumentation a
+ * cut answers "worked" or "hung"; with it, ONE registration attempt on the device yields the
+ * actual per-stage timings and the conditions that produced them, and calibration needs one
+ * build instead of blind iteration. That is why an abort is logged as diligently as a
+ * success: a user bailing at 60s is itself a calibration data point, and how far the solve
+ * got before the bail is the useful part. This channel DID the 0.9.4 calibration
+ * (2026-07-27, battery saver + foreground — see [RegistrationPow.DEFAULT_PARAMS]) and stays
+ * for every future difficulty change: recalibration is one registration, not a harness run.
  *
  * **Privacy:** same rule as every other [BootDiagnostics] line — stage names, timings,
  * counts, and the PoW parameters only. Never the challenge token, the identity key, a nonce,

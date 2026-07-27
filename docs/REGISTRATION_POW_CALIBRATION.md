@@ -1,17 +1,17 @@
 # Registration proof-of-work — Argon2id calibration (0.9.4-beta)
 
-Status as of 2026-07-26: **relay side MEASURED. Client side NOT MEASURED — blocked on hardware.**
-The difficulty constants are therefore still `TODO(pow-calibration, unmeasured)` and
-`REGISTRATION_POW_ENABLED` must stay `false`.
+Status as of 2026-07-27: **BOTH SIDES MEASURED — calibration RESOLVED at D=5.** The floor
+device (Revvl 6x, battery saver ON, foreground) was measured through the Diagnostics-screen
+`pow:` lines of a real registration on the `test-pow-d6b12587` cut; see "Measured — client
+side" below. The 0.9.4 client ships `RegistrationPow.DEFAULT_PARAMS` = hashcash d=20,
+19 MiB/t=1, **D=5**, and the relay env must pin the same four values at flip time.
+`REGISTRATION_POW_ENABLED` stays `false` until every test device is on 0.9.4 (deploy
+runbook step 5).
 
-Update 2026-07-27: the 0.9.4 client ships **D=4** (`RegistrationPow.DEFAULT_PARAMS`) as a
-**first real-world calibration attempt, NOT a measured value** — the low end of the D=4–5
-landing zone below, chosen so the first cut cannot hang for minutes on the floor device. Every
-solve now runs through an instrumented recorder (`diagnostics/RegistrationPowSolveRecorder`)
-that writes per-stage durations, work counts, the parameters used, battery-saver state, and
-foreground/backgrounded state to the on-device Diagnostics screen, on success and on abort —
-so one registration attempt on the Revvl 6x returns the real number this doc is waiting for,
-without `adb` and without the gradle harness. The TODO stands until that number is read back.
+History: the first cut shipped D=4 as an unmeasured attempt; the instrumented recorder
+(`diagnostics/RegistrationPowSolveRecorder`) it carried is what produced the measurement —
+one registration on the device, no `adb`, no gradle harness — and D moved 4→5 by the target
+rule below. The recorder stays: any future difficulty change is re-measured the same way.
 
 ## What the scheme actually costs, structurally
 
@@ -103,16 +103,61 @@ abuse, not by legitimate load.
    Do not raise the pre-stage difficulty expecting it to solve this; that taxes honest phones on the
    floor device far more than it taxes the attacker.
 
-## NOT measured — client side. This is the blocker.
+## Measured — client side (Revvl 6x, 2026-07-27). RESOLVED: D=5.
 
-**The Revvl 6x measurement could not be taken in this session: no Android device is attached to
-CX33** (`adb devices` empty, no emulator images installed). The Revvl is with the maintainer.
+Source: Diagnostics-screen `pow:` lines from a real registration on the `test-pow-d6b12587`
+cut (maintainer's device). Conditions recorded by the lines themselves:
+**battery_saver=true, foreground=true, backgrounded_mid_solve=false** — the worst legitimate
+condition, which is the one being calibrated.
 
-No number was estimated in its place. An x86 emulator would not be a valid substitute — different
-ISA, different memory subsystem, and no battery-saver thermal throttling, which is precisely the
-condition being calibrated for.
+| stage | observed | derived rate | expected at full difficulty |
+|---|---|---|---|
+| SHA-256, d=20 | 455,763 hashes in 725 ms | **0.63 MH/s** | 2^20 hashes ≈ **1.67 s** |
+| Argon2id, 19 MiB/t=1 | 7 evaluations in 257 ms | **36.7 ms/eval** | 2^D evals: D=4 ≈ 0.59 s, **D=5 ≈ 1.17 s**, D=6 ≈ 2.35 s |
 
-### The harness is written and compiles — it needs a phone, not more work
+**Calibrate on the rates, not the observed total.** That run completed in 982 ms because it
+drew ~0.43× the expected work on *both* stages — both searches are geometric, and a
+single draw (or a small average of draws) is not the expectation. Casual repeat runs
+averaging ~1 s are consistent with normal-mode (non-battery-saver) expectation, not with
+the floor.
+
+Applying the target rule (expected solve ≈ 3 s at the floor), **now against the measured
+total including the pre-stage**:
+
+| D | expected total (battery saver) | ~5% tail | attacker cost / account (CX33-class core) |
+|---|---|---|---|
+| 4 | ~2.3 s | ~7 s | ~0.48 s |
+| **5** | **~2.8 s** | **~8 s** | **~0.85 s** |
+| 6 | ~4.0 s | ~12 s | ~1.6 s |
+
+**D=5** is the largest D that keeps the battery-saver expectation inside "a few seconds";
+normal-mode expectation is roughly half that. The tail stays far under the 60 s prompt, and
+the pitcher UI renders past-1.0 progress honestly by design.
+
+### Finding from the device numbers: the pre-stage taxes the phone 16×, Argon2id only 1.6×
+
+The Revvl's SHA-256 rate is **16× slower** than the CX33 core (0.63 vs 10.01 MH/s), while its
+Argon2id evaluation is only **1.6× slower** (36.7 vs 23.2 ms). The memory-hard stage travels
+across hardware exactly as intended; the compute-bound pre-stage does not — at d=20 it costs
+the honest floor device ~1.7 s (over half the total) while remaining near-free for the
+GPU-equipped attacker finding 2 already describes. **Future rebalance candidate, deliberately
+NOT taken in the 0.9.4 cut:** lower the pre-stage (e.g. d=18 ≈ 0.4 s on the floor) and raise
+D one more step, shifting honest-user cost into the stage that actually deters. Not now
+because d=20 is the production-proven dead-drop constant, the current split already lands on
+target, and changing two knobs at once would re-open a calibration this measurement just
+closed.
+
+### How the measurement was almost mis-read (kept as a warning)
+
+An x86 emulator would not have been a valid substitute — different ISA, different memory
+subsystem, and no battery-saver thermal throttling, which is precisely the condition
+calibrated. Equally, the observed 982 ms total would have been a wrong calibration input:
+the derived rates above are what carry.
+
+### The gradle harness — written, compiles, ultimately NOT the channel used
+
+The in-app recorder above delivered the calibration without it. It stays for when a full
+`(m, t)` sweep on a device is ever wanted (the recorder only measures the shipped params):
 
 `apps/android/app/src/androidTest/java/com/zitrone/app/RegistrationPowCalibrationTest.kt`
 (verified: `:app:compileDebugAndroidTestKotlin` exit 0, class file emitted).
@@ -134,14 +179,17 @@ adb logcat -d -s PowCalib:I
 
 A run reporting `POWER_SAVE=false` is not the floor — rerun it.
 
-### Completing the calibration is then one substitution
+### The pre-measurement procedure (SUPERSEDED — kept to show what the measurement changed)
 
-With `ms_eval_revvl` at the chosen `(m, t)`, pick the smallest `D` satisfying
-`2^D × ms_eval_revvl ≈ 3000 ms` (target: a few seconds at the floor), then sanity-check the tail:
-`3 × that` should still be tolerable, and only ~5% of users will see it.
+The planned rule: pick the smallest `D` satisfying `2^D × ms_eval_revvl ≈ 3000 ms` (target: a
+few seconds at the floor), then sanity-check the tail. **The measurement changed the rule's
+input:** on the device the SHA-256 pre-stage is NOT negligible (~1.7 s, over half the total),
+so the 3 s target is applied to the *whole solve*, which is how D=5 landed rather than the
+argon-only D=6 this rule would have produced.
 
-Projection table at the placeholder `19 MiB / t=1`, from the CX33 figure of 23.2 ms/eval. **The
-right-hand columns are illustrative phone-slowdown ratios, NOT measurements:**
+Projection table at the placeholder `19 MiB / t=1`, from the CX33 figure of 23.2 ms/eval. The
+right-hand columns were illustrative phone-slowdown guesses; the measured reality split them —
+**1.6× for Argon2id, 16× for SHA-256** — which is itself the rebalance finding above:
 
 | D | expected evals | solve @CX33 | @5× slower | @12× slower |
 |---|---|---|---|---|
@@ -166,3 +214,5 @@ This does not require the Revvl number to conclude: **D=8 is wrong by a wide eno
 plausible phone measurement rescues it.** The likely landing zone is **D=4–5** at 19 MiB/t=1, to be
 confirmed — not decided — by the on-device run. The placeholder was correctly labelled unmeasured;
 this is that label being cashed in, not a defect in the relay code.
+
+*2026-07-27: confirmed. The on-device run landed it at D=5 (see "Measured — client side").*

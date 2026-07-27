@@ -85,27 +85,31 @@ object RegistrationPow {
      * time. A mismatch on any of the four silently rejects every proof (the client just sees
      * 403) — see docs/DEPLOY_0.9.4_POW.md step-5 preconditions.
      *
-     * TODO(pow-calibration): `argon2DifficultyBits = 4` is a FIRST REAL-WORLD CALIBRATION
-     * ATTEMPT, NOT a measured value. The relay-side placeholder default (D=8, 256 expected
-     * evaluations) is established as far too high — ~5.9 s on a 4-core server, so tens of
-     * seconds on a throttled phone (docs/REGISTRATION_POW_CALIBRATION.md). D=4 is the low end
-     * of that doc's projected D=4–5 landing zone: 16 expected evaluations ≈ 0.4 s on a CX33
-     * core, plausibly 1–3 s expected on budget hardware with the geometric 3× tail still
-     * under ~10 s — numbers a first device run can CORRECT rather than merely survive. This
-     * marker is not resolved until a measured Revvl 6x figure (battery saver, foreground)
-     * comes back through the Diagnostics screen's `pow:` lines and replaces it.
+     * CALIBRATED on the floor device (pow-calibration RESOLVED): Revvl 6x, 2026-07-27,
+     * battery saver ON + foreground — the worst legitimate condition, read back through the
+     * Diagnostics `pow:` lines of a real registration. Measured rates: SHA-256 ~0.63 MH/s
+     * (455,763 hashes in 725 ms), Argon2id 19 MiB/t=1 ~36.7 ms/eval (7 evaluations in
+     * 257 ms). Calibrate on the RATES, not any one solve's total — both stages are
+     * geometric, and that particular run drew ~0.43× the expected work on each stage.
+     *
+     * At those rates: the d=20 pre-stage expects ~1.7 s, and `argon2DifficultyBits = 5`
+     * (32 expected evaluations ≈ 1.2 s) lands the expected total at ~2.8 s in battery
+     * saver (~5% of solves past ~8 s; normal mode roughly half that) — the calibration
+     * doc's "a few seconds at the floor" target, and the largest D that stays under it.
+     * D=4 came in under target (~2.3 s expected) at half the attacker cost per account.
      *
      * Hashcash 20 and 19 MiB/t=1 are deliberate: difficulty 20 is the production-proven
      * dead-drop constant already shipped on phones ([LemonDropCreate.POW_DIFFICULTY]), and
      * the Argon2id cost parameters match the relay's verification defaults — raising m/t
      * slows relay verification one-for-one, so D is the only calibration knob (see the
-     * calibration doc).
+     * calibration doc, which also records why the measured 1.7 s pre-stage cost argues for
+     * rebalancing toward Argon2id in a future release, not in this cut).
      */
     val DEFAULT_PARAMS = Params(
         hashcashDifficulty = 20,
         argon2TimeCost = 1,
         argon2MemoryKiB = 19 * 1024,
-        argon2DifficultyBits = 4,
+        argon2DifficultyBits = 5,
     )
 
     /** Which stage the solver is in. Ordinal order is execution order. */
