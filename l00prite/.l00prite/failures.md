@@ -697,6 +697,42 @@ have cost more than the whole mutation sweep saved. **Any harness that mutates s
 rebuild after its final revert, or run one throwaway build before the evidence run.** And when a
 failure signature matches a mutation you were just running, suspect the harness before the code.
 
+### ⭐ A CORRECTION NOTE IS ITSELF A RESTATEMENT, AND IT ROTS LIKE ANY OTHER (U2 R3 — 10th recurrence)
+
+**The sharpest form of the parallel-copy class, and the one that explains why nine previous fixes
+did not stop it.**
+
+Round 1 of U2 found that `0x05 ‖ random(32)` is not a valid Curve25519 encoding — a P1 that would
+have marked half of all decoys. The code was fixed to generate a real keypair. **Round 3 found the
+spec still carrying `**U2 must emit 0x05 ‖ random(32)**` as a live binding instruction — inside the
+very correction block written to fix that defect.**
+
+The block was authored to say "here is what was wrong and here is the right rule". It stated the
+wrong rule as the right one, and then survived two more rounds, because a correction note reads as
+*already fixed* and nobody re-attacks it.
+
+**Why this class kept recurring despite nine prior fixes:** every fix targeted a *description of
+behaviour*. A correction note is a description of a description — it quotes the old claim and asserts
+a new one — so it is a parallel copy **by construction**, and it is the copy least likely to be
+re-read, because its heading announces the problem as solved.
+
+**RULES (binding):**
+1. **A correction note is in scope for every subsequent review.** It is not settled ground. Its
+   heading is a claim about its own currency, and that claim rots.
+2. **A correction note must not carry a binding instruction.** State what was wrong and why; point
+   at the canonical artefact for what is right. `U2 must emit X` inside a correction is a second
+   source of truth wearing the clothes of a fix.
+3. **Prefer designating a canonical artefact over restating the rule.** This worked for the
+   `TAG_DECOY` trigger and for `DecoyState`'s field set. Applied here: `DecoyEnvelopeBuilder` is
+   canonical for construction; the spec describes intent and binds nothing.
+
+**And the general lesson, which outranks the specific one:** *a spec that tells the implementer HOW
+to construct something is a second implementation.* Across U1 and U2 **every P1 traced to the spec** —
+`mutate` treated as durable, `build(blockCount)`, and `0x05 ‖ random(32)`. Each was a construction
+instruction the spec had no business giving. Specs should state observable **requirements**
+("indistinguishable from a real envelope of the same shape") and let the implementation own the
+construction, because the implementation is testable against reality and prose is not.
+
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
   round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked

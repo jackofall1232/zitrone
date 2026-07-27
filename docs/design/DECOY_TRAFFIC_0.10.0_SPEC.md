@@ -155,9 +155,15 @@ value is a constant that a real message's value varies over — which is precise
 existing web generator.
 
 **The X3DH first-message observable, and how to satisfy it.** ~~A real conversation's first envelope
-carries non-null `ephemeral_key` and `prekey_id`; every later one has them null.~~ The synthetic
-conversation must show the same shape: **emit well-formed-looking values exactly once at setup, null
-thereafter.**
+carries non-null `ephemeral_key` and `prekey_id`; every later one has them null.~~ ~~The synthetic
+conversation must show the same shape: emit well-formed-looking values exactly once at setup, null
+thereafter.~~
+
+**[R10] Both sentences above are struck. The rule is: MIRROR THE COVERED ENVELOPE — do not construct
+a shape from a description.** A real first envelope carries `ephemeral_key` non-null and `prekey_id`
+**either set or null** (null is signed-prekey-only X3DH, when the peer's one-time prekeys are
+exhausted). "Emit both, once" was the false model that produced G2-A. **`DecoyEnvelopeBuilder` is
+canonical for construction; this section describes intent only and binds nothing.**
 
 > **⚠️ CORRECTION [U2 R3, 2026-07-27] — A FIRST ENVELOPE MAY CARRY `prekey_id` NULL, AND THE
 > SENTENCE ABOVE IS THE ORIGIN OF A P2.** The two fields are not a pair. `ephemeral_key` marks an
@@ -191,7 +197,12 @@ thereafter.**
 >    **33 bytes base64 to exactly 44 characters with NO padding, while 32 bytes produce 44
 >    characters ending in `=`.** A decoy built to this spec's original wording would have carried a
 >    trailing `=` that no real first message ever has — a perfect one-field discriminator, in the
->    exact field added to defeat discrimination. **U2 must emit `0x05 ‖ random(32)`.**
+>    exact field added to defeat discrimination. ~~**U2 must emit `0x05 ‖ random(32)`.**~~
+>    **[R10] STRUCK — that instruction was itself defective and shipped a P1.** `0x05 ‖ random(32)`
+>    is **not a valid Curve25519 encoding**: genuine public keys have bit 255 clear and random bytes
+>    set it ~50% of the time (measured: 0 of 200 real keys). **The rule is
+>    `Curve.generateKeyPair().publicKey.serialize()`, private half discarded** — canonical by
+>    construction. See `DecoyEnvelopeBuilder.coverPublicKey()`, which is canonical.
 > 2. **`previous_chain_length` is NOT a web-generator tell.** §0 lists it among that generator's
 >    distinguishers. It is not: Android hardcodes the field to `0` on every send
 >    (`MessagingCoordinator.kt:924,1159,1315` — libsignal's Java API does not expose it) and iOS
