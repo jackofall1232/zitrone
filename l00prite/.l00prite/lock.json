@@ -1,22 +1,22 @@
 {
-  "schema_version": 1,
-  "lock_id": "lock-20260727T-decoy-u2-fix-round-1",
-  "owner_agent": null,
-  "owner_session": null,
-  "acquired_at": "2026-07-27T18:40:00Z",
-  "expires_at": "2026-07-27T22:40:00Z",
-  "ttl_seconds": 14400,
-  "purpose": "0.10.0 decoy U2 FIX ROUND 1 of 6 \u2014 G-A..G-H applied \u2014 DONE",
-  "protected_paths": [
-    "ledger.md",
-    "memory.md",
-    "state.json",
-    "heartbeat.json",
-    "failures.md",
-    "todos.md",
-    "events/",
-    "reviews/",
-    "sessions/"
-  ],
-  "status": "released"
+ "schema_version": 1,
+ "lock_id": "lock-20260727T-decoy-u2-fix-round-2",
+ "owner_agent": null,
+ "owner_session": null,
+ "acquired_at": "2026-07-27T19:10:00Z",
+ "expires_at": "2026-07-27T23:10:00Z",
+ "ttl_seconds": 14400,
+ "purpose": "0.10.0 decoy U2 FIX ROUND 2 of 6 — maintainer §3.0 cut applied (ping/allocator/fields removed) — DONE",
+ "protected_paths": [
+  "ledger.md",
+  "memory.md",
+  "state.json",
+  "heartbeat.json",
+  "failures.md",
+  "todos.md",
+  "events/",
+  "reviews/",
+  "sessions/"
+ ],
+ "status": "released"
 }

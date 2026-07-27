@@ -26,9 +26,10 @@ Architect: Fable. Implementation: Opus. Research lanes: Sonnet (3, complete).
 
 **Approved as specified, no changes:** size mirroring rather than randomization, with the honest
 consequence that block class still leaks; random ciphertext rather than a real ratchet, with the
-reseal-rate reasoning intact; counter reservation at 64; the in-session dead-air reframe with
+reseal-rate reasoning intact; ~~counter reservation at 64~~; ~~the in-session dead-air reframe with
 `VAULT_ARCHITECTURE.md` §8 **amended** rather than quietly diverging; a single-block unpaired ping
-(§2.1's first row); the control-channel gap declared as a known residual.
+(§2.1's first row)~~ **— the ping was CUT outright on 2026-07-27 (§3.0), taking the counter
+reservation with it**; the control-channel gap declared as a known residual.
 
 Design is **not re-derived here**. It is locked in `docs/VAULT_ARCHITECTURE.md` §8 (lines 324–346)
 and this spec builds on it verbatim. What this document adds is (1) resolution of the two open
@@ -147,7 +148,9 @@ session that was genuinely established with one X3DH first message", which read 
 **observable**, not on the machinery behind it.)*
 
 It is addressed to a genuinely registered account, and every cleartext field is populated the way
-the real send path populates it, with monotonically advancing counters. There is no field whose
+the real send path populates it, ~~with monotonically advancing counters~~ **(amended twice: the
+counter is MIRRORED from the covered envelope — §2.3's R1 ruling — and the monotonic allocator that
+would have advanced one was deleted at R2, §3.0)**. There is no field whose
 value is a constant that a real message's value varies over — which is precisely the defect in the
 existing web generator.
 
@@ -268,12 +271,13 @@ buys the same observable at none of that cost.
 > bytes satisfy identically. The one field that genuinely must look real on the first envelope is
 > `prekey_id`; see the binding constraint in §2.2.
 
-**What must still be durable is the counter**, because a `message_number` that resets or regresses
+~~**What must still be durable is the counter**~~ **— FULLY RETIRED 2026-07-27, see the two callouts
+below.** ~~because a `message_number` that resets or regresses
 is a tell a real ratchet can never produce. Handled by **reservation**: reserve a block of 64
 counter values, make the new high-water mark durable, then spend the block from RAM and reserve
 again when it is exhausted. A crash therefore *skips* counter values (invisible — a real ratchet
 skips too, on any dropped message) but can never *regress* them. One durable write per 64 decoys
-instead of one per decoy.
+instead of one per decoy.~~
 
 > **⚠️ [U2 R1 — SUPERSEDED FOR THE PAIRED PATH; the mechanism is intact and moves to U5.]** The
 > paragraph above is the reason the allocator exists, and its premise does not survive contact with
@@ -295,8 +299,17 @@ instead of one per decoy.
 >
 > **Ruling applied (U2 R1): the paired decoy's `message_number` MIRRORS the covered envelope's.** The
 > observable wins over the unobservable, which is the same rule §2.4 applies to the ciphertext body.
-> The cost is in §2.4. The allocator itself is unchanged and still correct; its consumer is now U5's
-> dead-air ping, the one decoy with no envelope to mirror (§3.3).
+> The cost is in §2.4. ~~The allocator itself is unchanged and still correct; its consumer is now U5's
+> dead-air ping, the one decoy with no envelope to mirror (§3.3).~~
+>
+> **[U2 R2, 2026-07-27] AND THEN THE ALLOCATOR WENT TOO.** The ping was cut (§3.0), which was its
+> last candidate consumer, so `DecoyCounterReservation` and `TAG_DECOY.counterHighWater` are
+> **deleted**. Nothing in the decoy path allocates a counter: the builder reads one off the envelope
+> it covers, and that is the whole mechanism. The paragraph above the callout — "what must still be
+> durable is the counter" — is therefore **fully retired**, premise and mechanism both. This finding
+> is what made the ping decidable: with the paired path mirroring, the ping was the allocator's only
+> consumer, and a mechanism that exists for one consumer is a fair thing to weigh against that
+> consumer's own merits.
 
 > **CORRECTION (2026-07-27, U1 review round 1 — the architect's error, not the implementer's).**
 > This paragraph originally read "reserve a block of 64 counter values **in `VaultState`** … persist
@@ -312,9 +325,10 @@ instead of one per decoy.
 > means the value was never issued.** The rule generalizes past the counter, and every U1 writer was
 > re-audited against it: **anything whose correctness depends on surviving process death must
 > `mutate` AND `flushBeforeAck`, and must treat a throw from the flush as "it never happened".**
-> That covers the counter reservation (the RAM cursor advances only after the flush returns), the
-> credential commit (which reports readiness, and had spent a scarce global registration), and both
-> back-offs (§6.2a's "back off across sessions" is a durability claim). It does NOT cover the
+> That covered the counter reservation (whose RAM cursor advanced only after the flush returned;
+> **the allocator is deleted as of 2026-07-27, §3.0** — the rule is unchanged, it simply has one
+> fewer subject), the credential commit (which reports readiness, and had spent a scarce global
+> registration), and both back-offs (§6.2a's "back off across sessions" is a durability claim). It does NOT cover the
 > session tokens, which stay coalesced because they are re-mintable from the stored identity key —
 > the same exception `VaultAuthStore` makes.
 >
@@ -467,10 +481,10 @@ beats inventing a spread.
 > was wrong (829 B) and, more importantly, restating it here is what let it rot. U5 takes its size
 > from §2.1's table, and states no byte count of its own.
 >
-> **U5 also inherits the counter allocator.** `DecoyCounterReservation` (U1) has no consumer on the
-> paired path any more — a paired decoy mirrors the covered envelope's `message_number`, per §2.4.
-> The dead-air ping is the one decoy with no envelope to mirror, so it is the one that has to invent
-> a `message_number`, and the monotonic durable reservation is how it does that without regressing.
+> ~~**U5 also inherits the counter allocator.**~~ **[2026-07-27] BOTH ARE CUT.** `DecoyCounterReservation`
+> (U1) had no consumer on the paired path — a paired decoy mirrors the covered envelope's
+> `message_number`, per §2.4 — and the dead-air ping was its only remaining candidate. The ping is
+> cut (§3.0), so the allocator was **deleted** rather than kept for a unit that no longer exists.
 
 ---
 
@@ -487,8 +501,9 @@ Source-verified against `apps/android/app/src/main/java/com/zitrone/app/crypto/v
 ### The signal
 
 A new optional TLV section in the per-vault sealed payload holding: the synthetic account's
-**account id + identity keypair + session tokens**, the **counter reservation high-water mark**, the
-**dead-air schedule next-fire**, and — *added by U1* — a **durable provisioning back-off deadline**
+**account id + identity keypair + session tokens**, ~~the **counter reservation high-water mark**,
+the **dead-air schedule next-fire**,~~ **(both REMOVED 2026-07-27 with the ping — see §3.0)** and —
+*added by U1* — a **durable provisioning back-off deadline**
 (`provisionNotBeforeMs`; originally scoped to 429 only, generalized by U1 R2 to a write-ahead
 deadline covering every attempt), which has no other legal home because cross-session back-off must
 be durable and durable decoy state may not be device-level. It lives inside the vault region
@@ -503,24 +518,24 @@ encrypted image.
 
 | # | Writer | When | What it writes into `TAG_DECOY` | Status |
 |---|---|---|---|---|
-| W1 | `DecoyAccountProvisioner.provision()` | First unlocked session in which decoys are enabled and no synthetic account exists | Account id, identity keypair, initial tokens, and `provisionNotBeforeMs = null` — ~~a success is the only thing that retires the back-off~~ **[U1 R3/R4] success is not the only retirement path; see W1d.** It is the only one that retires the deferral *while writing something*, which is why it rides in this same mutate: there is no window where the credentials are durable and the deferral is not. **The counter reservation is NOT written here** — `counterHighWater` stays 0 until `DecoyCounterReservation.next()` first reserves a block (W3). **Dead-air next-fire is written `null`** — the distribution is U5's to settle (§3.2 re-framed the ping from wall-clock to in-session, so a durable wall-clock next-fire is of questionable meaning). The field exists and round-trips. | **DONE (U1)** |
+| W1 | `DecoyAccountProvisioner.provision()` | First unlocked session in which decoys are enabled and no synthetic account exists | Account id, identity keypair, initial tokens, and `provisionNotBeforeMs = null` — ~~a success is the only thing that retires the back-off~~ **[U1 R3/R4] success is not the only retirement path; see W1d.** It is the only one that retires the deferral *while writing something*, which is why it rides in this same mutate: there is no window where the credentials are durable and the deferral is not. ~~**The counter reservation is NOT written here** — `counterHighWater` stays 0 until `DecoyCounterReservation.next()` first reserves a block (W3). **Dead-air next-fire is written `null`.**~~ **[2026-07-27] Neither field exists any more (§3.0); this writer's field set is account id, identity keypair, tokens, and the deferral retirement.** | **DONE (U1)** |
 | W1b | `DecoyAccountProvisioner.reserveBackoff()` — the **write-ahead back-off** | **Before any relay contact**, on every attempt that gets past the deferral check | `provisionNotBeforeMs` only — the cross-session back-off deadline, `mutate` + `flushBeforeAck`. If it cannot be written, **no registration is spent at all** | **DONE (U1 R2)** |
 | W1d | `DecoyAccountProvisioner.clearBackoff()` — the **retirement of a deferral that protected nothing** | An attempt that fails **before** `register` is entered: offline challenge fetch, DNS failure, failed proof-of-work, a local crypto fault, a cancelled scope | `provisionNotBeforeMs` → null, `mutate` + `flushBeforeAck`, **compare-and-clear**: only the deadline *this* attempt wrote is retired, checked under the section lock, so a deferral another writer put there meanwhile is left alone. Emptying the holder is what removes `TAG_DECOY` entirely and restores 0.9.x readability | **DONE (U1 R3)** — **added to this table U1 R4; it was a real durable writer the inventory omitted** |
 | W2 | `DecoyAccountProvisioner.refreshTokens()` | Synthetic session token refresh (7-day refresh-token TTL, `auth/jwt.go:26`) | Tokens only; all other fields untouched | **this unit (U1)** |
-| W3 | `DecoyCounterReservation` | Counter reservation exhausted (once per 64 decoys) | High-water mark only, monotonically increasing | **allocator DONE (U1)**; the `DecoySender` that spends the values is U2 |
+| ~~W3~~ | ~~`DecoyCounterReservation`~~ | **REMOVED — the ping is cut (§3.0), and paired decoys mirror the covered envelope's `message_number`, so nothing allocates a counter.** `counterHighWater` has no writer and is deleted from `TAG_DECOY`; the class and its test are deleted. **The `DecoySectionLock` this writer forced into existence SURVIVES** — W1/W1b/W1d and W2 are read-modify-write sequences in their own right. | — | ~~DONE (U1)~~ **DELETED (U2 R2, 2026-07-27)** |
 | ~~W4~~ | ~~`DeadAirPinger.rearm()`~~ | **REMOVED — the ping is cut (§3.0).** `deadAirNextFireAtMs` has no writer and is deleted from `TAG_DECOY`. | — | — |
 | W5 | `VaultRuntime.mutate` (existing) | Every write above, without exception | Re-encodes whole `VaultState` under `stateLock` and **SCHEDULES** a reseal — **it is not durable**, see §2.3's correction | existing |
-| W6 | `VaultRuntime.flushBeforeAck` (existing) | W1, W3, and **all three** back-off writes — W1b, W1d, and W1's retirement — every value that must survive process death | Forces the scheduled payload to disk synchronously. **A throw means the value was never issued / never recorded** | existing — **added 2026-07-27 (U1 R1)**; W1d added R4 |
+| W6 | `VaultRuntime.flushBeforeAck` (existing) | W1, ~~W3,~~ and **all three** back-off writes — W1b, W1d, and W1's retirement — every value that must survive process death | Forces the scheduled payload to disk synchronously. **A throw means the value was never issued / never recorded** | existing — **added 2026-07-27 (U1 R1)**; W1d added R4 |
 
 ### READERS, and what each assumes `TAG_DECOY` MEANS
 
 | # | Reader | Assumes `TAG_DECOY` means | Still true after W1–W4? |
 |---|---|---|---|
 | R1 | `VaultStateCodec.decode` | "a section tag I recognize; an unrecognized tag is corruption" | **NO for old builds — see hazard below.** YES for builds carrying the tag. |
-| R2 | `DecoySender.send()` | "a provisioned synthetic account exists and these counters have never been issued before" | YES **only with §2.3's correction** — the mark must be FLUSHED, not merely mutated, before any value in the block is spent |
-| R3 | `DeadAirPinger` | "next-fire is in this vault's own timeline, not the device's" | YES — per-vault, torn down at lock |
+| ~~R2~~ | ~~`DecoySender.send()`~~ | ~~"a provisioned synthetic account exists and these counters have never been issued before"~~ | **RETIRED 2026-07-27.** There is no counter to have issued before: `DecoyEnvelopeBuilder` reads `message_number` off the envelope it covers. What remains of this reader — "a provisioned synthetic account exists" — is R4's `canSend()`. |
+| ~~R3~~ | ~~`DeadAirPinger`~~ | ~~"next-fire is in this vault's own timeline, not the device's"~~ | **RETIRED 2026-07-27 — the ping is cut (§3.0) and `deadAirNextFireAtMs` is deleted.** |
 | R4 | provisioning entry point (`DecoyAccountProvisioner.provisionIfNeeded`) | ~~"absent section = decoys not yet provisioned; present = ready"~~ ~~"ready = credential pair present"~~ ~~"ready = credential pair present **and** `capacityExceeded` clear"~~ **CORRECTED A THIRD TIME (U1 review round 2) — there is no single "ready". TWO predicates:** `hasAccount()` = the credential pair is present, **and nothing else**, which gates REGISTRATION; `canSend()` = `hasAccount()` **and** this session's credential flush confirmed **and** `VaultRuntime.capacityExceeded` clear, which gates COVER TRAFFIC. | **NO as originally written. Three independent falsifiers.** (i) A back-off creates a section that is PRESENT and NOT ready. (ii) An over-capacity `mutate` **RETAINS** a complete credential pair in the LIVE state that was never scheduled and that `flushBeforeAck` refuses. (iii) **The corrected single predicate was itself wrong** — see below. Absence is still the valid initial state; presence never means ready. |
-| R5 | Capacity guard `VaultRuntime.capacityExceeded` | "encoded state fits `MAX_PAYLOAD_CONTENT_BYTES`" | YES — measured by U1: worst-case section delta **645 B** against a 1024 B budget (realistic state 929 B of 262 112 B) |
+| R5 | Capacity guard `VaultRuntime.capacityExceeded` | "encoded state fits `MAX_PAYLOAD_CONTENT_BYTES`" | YES — **re-measured U2 R2 after the two fields were removed:** raw worst-case section body **717 B → 700 B** (deterministic, asserted exactly). The *encoded* delta is **not** a single number — it is measured after DEFLATE over a freshly generated identity keypair and spans **636–646 B** run to run, before and after the change alike, because the removed fields were the section's most compressible bytes. `DECOY_SECTION_BUDGET_BYTES` stays **1024 B** as a bound. |
 | R6 | `VaultState.wipe()` | **NEW (U1):** "every secret in this section is zeroed, not merely dereferenced" | The section carries a **raw private key** — dereferencing leaves it in the heap |
 | R7 | `VaultStateCodec.parsePlaintext` decode-failure catch | **NEW (U1):** "everything decoded so far is wiped on a mid-parse throw" | Previously wiped only the partial signal map; had to extend to the decoy section's keypair |
 
@@ -797,12 +812,12 @@ next begins. No version bump, no push, nothing merged without explicit maintaine
 
 | Unit | Scope | Gate to clear before the next unit |
 |---|---|---|
-| **U1** ✅ | Synthetic account provisioning + `TAG_DECOY` codec section. Lazy registration, credential storage, token refresh, capacity budget, counter-reservation allocator. **Built, deliberately UNWIRED** — nothing constructs it, so the branch cannot spend a registration. | **DONE** on `feat/0.10.0-decoy-u1-provisioning`. **678 tests / 0 failures** after fix round 4, `assembleDebug` exit 0, re-verified independently each round. Capacity measured: 640–643 B worst case against a 1024 B budget. **Paired-blind review of the WHOLE unit: four rounds complete** (findings 10 → 11 → 10 → 6; P1s 2 → 1 → 0 → 0), fixes applied and mutation-verified each round. **Merge still owed an explicit maintainer decision**, plus re-ratification of §4.1's third-pass wording. |
-| **U2** ✅ | Decoy envelope builder. **[R1] `build()` takes the real envelope it covers** and mirrors every size-affecting property of it — shape, ciphertext byte length, counter, timestamp width, TTL, burn, media type — then measures both frames and refuses to return a decoy whose frame is not exactly as long. *(Counter reservation moved to U1, and at R1 out of the paired path entirely — see §2.3/§3.3.)* | **BUILT on `feat/0.10.0-decoy-u2-envelope-builder`, deliberately UNWIRED** — nothing constructs it, so the branch cannot emit cover traffic. `DecoyEnvelopeBuilder` + **16 gate tests** (13 before R1; the count of 14 recorded here previously was wrong — G-F). **694 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0, `--rerun-tasks`. **Fix round 1 of 6 applied: 18 mutations run, 17 discriminated**, the survivor a deliberate probe of a defence-in-depth check (recorded). **No `SessionBuilder.process`, no Signal record written** — now a fact about the type, which has no vault access at all. **Round-1 P1s fixed:** shape followed the decoy's own counter rather than the covered message (G-A); `0x05 ‖ random(32)` is not a valid Curve25519 encoding, keys are now generated and the private half dropped (G-B). **Round-1 ruling deviation, argued in §2.3:** the digit-width difference (G-C) cannot be absorbed in the ciphertext — a base64 field's length is always a multiple of 4 — so the counter is mirrored instead. **Three spec corrections from U2 still PENDING RATIFICATION — §2.1's table, §2.3's ciphertext formula, §2.4's residual list.** Paired-blind review round 1 complete and adjudicated; **round 2 not yet dispatched.** |
+| **U1** ✅ | Synthetic account provisioning + `TAG_DECOY` codec section. Lazy registration, credential storage, token refresh, capacity budget, ~~counter-reservation allocator~~ **(deleted 2026-07-27 with the ping — §3.0)**. **Built, deliberately UNWIRED** — nothing constructs it, so the branch cannot spend a registration. | **DONE** on `feat/0.10.0-decoy-u1-provisioning`. **678 tests / 0 failures** after fix round 4, `assembleDebug` exit 0, re-verified independently each round. Capacity measured: 640–643 B worst case against a 1024 B budget. **[U2 R2] Re-measured after the two field removals: raw section body 717 B → 700 B (deterministic); the encoded delta is run-to-run noise at 636–646 B either side of the change, so the budget stands at 1024 B as a bound.** **Paired-blind review of the WHOLE unit: four rounds complete** (findings 10 → 11 → 10 → 6; P1s 2 → 1 → 0 → 0), fixes applied and mutation-verified each round. **Merge still owed an explicit maintainer decision**, plus re-ratification of §4.1's third-pass wording. |
+| **U2** ✅ | Decoy envelope builder. **[R1] `build()` takes the real envelope it covers** and mirrors every size-affecting property of it — shape, ciphertext byte length, counter, timestamp width, TTL, burn, media type — then measures both frames and refuses to return a decoy whose frame is not exactly as long. *(Counter reservation moved to U1, at R1 out of the paired path entirely, and at R2 **deleted outright** — see §2.3/§3.0.)* | **BUILT on `feat/0.10.0-decoy-u2-envelope-builder`, deliberately UNWIRED** — nothing constructs it, so the branch cannot emit cover traffic. `DecoyEnvelopeBuilder` + **16 gate tests** (13 before R1; the count of 14 recorded here previously was wrong — G-F). **694 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0, `--rerun-tasks`. **Fix round 1 of 6 applied: 18 mutations run, 17 discriminated**, the survivor a deliberate probe of a defence-in-depth check (recorded). **No `SessionBuilder.process`, no Signal record written** — now a fact about the type, which has no vault access at all. **Round-1 P1s fixed:** shape followed the decoy's own counter rather than the covered message (G-A); `0x05 ‖ random(32)` is not a valid Curve25519 encoding, keys are now generated and the private half dropped (G-B). **Round-1 ruling deviation, argued in §2.3:** the digit-width difference (G-C) cannot be absorbed in the ciphertext — a base64 field's length is always a multiple of 4 — so the counter is mirrored instead. **Three spec corrections from U2 still PENDING RATIFICATION — §2.1's table, §2.3's ciphertext formula, §2.4's residual list.** Paired-blind review round 1 complete and adjudicated; **round 2 not yet dispatched.** **Fix round 2 of 6 applied (2026-07-27) — NOT review-driven: it implements the maintainer's §3.0 cut.** `DecoyCounterReservation` + its 14 tests deleted; `TAG_DECOY.counterHighWater` (W3) and `deadAirNextFireAtMs` (W4) removed from the codec on both sides; `DecoySectionLock` **kept**, argued from its surviving callers. Codec-canonicity coverage retargeted onto `provisionNotBeforeMs` rather than dropped, plus a new offset tripwire and a deterministic raw-body-length assertion. |
 | **U3** | Pairing at the send choke point. Random order (decoy-first / real-first), few-ms stagger, and the **real envelope handed to `DecoyEnvelopeBuilder.build` as the thing to mirror** — not a block count (§2.2 R1). Insertion inside `MessagingCoordinator`'s confined worker, above `ws.sendMessage`. | Ordering is uniformly random and stagger is drawn per-send — pinned by a statistical test, not by inspection. Real-send latency and the `flushSendRatchet` durability barrier provably unaffected. **`build()` throws rather than return a mismatched decoy; U3 owns what happens then, and must not let it fail the real send.** |
 | **U4** | Synthetic-side receive: second WS connection for the synthetic account, deliver → ack → burn at ~30 ms, occasional send-back so the exchange is bidirectional. | Decoys never surface in UI, notifications, or unread counts. Notification parity §7 re-verified with decoys active. |
-| ~~**U5**~~ | ~~Dead-air ping within a session~~ **CUT 2026-07-27 by maintainer decision — see §3.0.** No unit, no follow-up gate. `DecoyCounterReservation` (U1) and `TAG_DECOY.deadAirNextFireAtMs` lose their only consumer and are removed with it. | — |
-| **U6** | 🍋‍🟩 indicator + docs. `SECURITY_MODEL.md` honest framing, `VAULT_ARCHITECTURE.md` §8 amendment, the §1 overclaim corrections. | Ships **with** the feature, per deliver-then-claim. Not after. |
+| ~~**U5**~~ | ~~Dead-air ping within a session~~ **CUT 2026-07-27 by maintainer decision — see §3.0.** No unit, no follow-up gate. `DecoyCounterReservation` (U1) and `TAG_DECOY.deadAirNextFireAtMs` lose their only consumer and are removed with it. | **REMOVAL DONE (U2 fix round 2, 2026-07-27)** — allocator, both fields and their tests are out of the tree; `DecoySectionLock` survives on its other callers. |
+| **U6** | 🍋‍🟩 indicator + docs. `SECURITY_MODEL.md` honest framing, `VAULT_ARCHITECTURE.md` §8 amendments (both), the §1 overclaim corrections, **and the dead-air disclosure (§3.0) — see the gate.** | Ships **with** the feature, per deliver-then-claim. Not after. **HARD GATE: the indicator must not imply continuous cover.** Cutting the ping made "dead-air periods are NOT covered" a permanent, user-visible limit. A 🍋‍🟩 that reads as "cover traffic is on" — rather than "cover traffic was generated for your last message" — is a *worse* overclaim than the four corrected in `96982421`, because it would be introduced by this release rather than inherited. U6 must state, in `SECURITY_MODEL.md` and in-app: cover traffic exists **only alongside real sends**; a silent client sends nothing. |
 
 **Third lens blind at the cap.** If any unit reaches the review cap without convergence, a third
 reviewer is dispatched blind per `[[zitrone-review-cli-invocation]]`, and work stops for maintainer
@@ -925,8 +940,9 @@ a dummy light, and the copy earns that by naming what it does not cover.
      still be reverted so a cover-traffic write never leaves the vault unable to flush-before-ack a
      real inbound message — and the revert may only restore state read under the **same lock** the
      revert runs under (see the section-lock note in the U1 invariant table), or it clobbers
-     whatever the section gained during the seconds of network I/O, up to and including a counter
-     high-water mark.
+     whatever the section gained during the seconds of network I/O — ~~up to and including a counter
+     high-water mark~~ **(the counter mark is gone as of 2026-07-27, §3.0; the rule is unchanged and
+     its remaining subjects are the token writes and another attempt's back-off)**.
    - **A failed or deferred provision must degrade silently to "decoys off"** — never block
      onboarding, never surface an error that implies a fault, and never let the 🍋‍🟩 indicator claim
      the mechanism fired when it did not.

@@ -57,8 +57,6 @@ class VaultDecoySectionTest {
         identityKeyPair = IdentityKeyPair.generate().serialize(),
         accessToken = fakeAccessJwt(),
         refreshToken = base64Url(32),
-        counterHighWater = 4_096L,
-        deadAirNextFireAtMs = 1_795_000_000_000L,
         provisionNotBeforeMs = 1_796_000_000_000L,
     )
 
@@ -74,8 +72,6 @@ class VaultDecoySectionTest {
         assertArrayEquals("identityKeyPair", decoy.identityKeyPair, actual.identityKeyPair)
         assertEquals("accessToken", decoy.accessToken, actual.accessToken)
         assertEquals("refreshToken", decoy.refreshToken, actual.refreshToken)
-        assertEquals("counterHighWater", decoy.counterHighWater, actual.counterHighWater)
-        assertEquals("deadAirNextFireAtMs", decoy.deadAirNextFireAtMs, actual.deadAirNextFireAtMs)
         assertEquals("provisionNotBeforeMs", decoy.provisionNotBeforeMs, actual.provisionNotBeforeMs)
         assertEquals("whole-section equality", decoy, actual)
     }
@@ -90,21 +86,29 @@ class VaultDecoySectionTest {
         assertEquals(deferred.provisionNotBeforeMs, actual.provisionNotBeforeMs)
         assertNull("no account id", actual.accountId)
         assertNull("no identity keypair", actual.identityKeyPair)
-        assertEquals("counter mark defaults to zero", 0L, actual.counterHighWater)
+        assertNull("no tokens", actual.accessToken)
         // The row this pins: PRESENCE IS NOT READINESS. A reader keying on "section exists" would
         // conclude this vault has a usable synthetic account. It does not.
         assertFalse("a deferral-only section is not provisioned", actual.isProvisioned)
     }
 
     @Test
-    fun `a counter-only section round-trips - zero and large marks are distinguishable`() {
-        val zero = VaultStateCodec.decode(VaultStateCodec.encode(baseState(DecoyState(counterHighWater = 0L))))
-        // counterHighWater == 0 with nothing else set IS the empty holder, so it is omitted.
-        assertNull("an all-default holder is not persisted at all", zero.decoy)
-
-        val large = DecoyState(counterHighWater = Long.MAX_VALUE - 64L)
+    fun `an extreme deferral round-trips at full width`() {
+        // [2026-07-27] Replaces `a counter-only section round-trips`, retired with counterHighWater.
+        // provisionNotBeforeMs is now the section's only integer, so it is the only field that can
+        // demonstrate a full-width long surviving the fixed-width encoding intact.
+        val large = DecoyState(provisionNotBeforeMs = Long.MAX_VALUE - 64L)
         val decoded = VaultStateCodec.decode(VaultStateCodec.encode(baseState(large)))
-        assertEquals(Long.MAX_VALUE - 64L, requireNotNull(decoded.decoy).counterHighWater)
+        assertEquals(Long.MAX_VALUE - 64L, requireNotNull(decoded.decoy).provisionNotBeforeMs)
+
+        // …and the negative direction, which the codec does NOT refuse for a deferral (unlike the
+        // retired counter mark): a clock behind the epoch is a nonsense deadline, not a corrupt
+        // section, and `isDeferred` treats any past deadline as expired.
+        val negative = DecoyState(provisionNotBeforeMs = -1L)
+        assertEquals(
+            -1L,
+            VaultStateCodec.decode(VaultStateCodec.encode(baseState(negative))).decoy?.provisionNotBeforeMs,
+        )
     }
 
     @Test
@@ -317,7 +321,7 @@ class VaultDecoySectionTest {
         assertTrue("the baseline is genuinely valid", VaultStateCodec.decode(deflate(plain)).decoy != null)
 
         val tampered = plain.copyOf()
-        tampered[tampered.size - DEAD_AIR_PRESENCE_FROM_END] = 0x02
+        tampered[tampered.size - DEFERRAL_PRESENCE_FROM_END] = 0x02
         assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(tampered)) }
     }
 
@@ -327,46 +331,19 @@ class VaultDecoySectionTest {
         // inside a section that round-trips as "absent".
         val plain = realPlaintextWithDecoy()
         val tampered = plain.copyOf()
-        // fullDecoy()'s deadAirNextFireAtMs is a real timestamp, so clearing ONLY the presence flag
+        // fullDecoy()'s provisionNotBeforeMs is a real timestamp, so clearing ONLY the presence flag
         // leaves a nonzero value behind it — the exact noncanonical shape.
-        tampered[tampered.size - DEAD_AIR_PRESENCE_FROM_END] = 0x00
+        tampered[tampered.size - DEFERRAL_PRESENCE_FROM_END] = 0x00
         assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(tampered)) }
 
         // Discriminator: zeroing the value too makes it the CANONICAL absent form, which must decode.
         val canonical = plain.copyOf()
-        canonical[canonical.size - DEAD_AIR_PRESENCE_FROM_END] = 0x00
-        for (i in 1..8) canonical[canonical.size - DEAD_AIR_PRESENCE_FROM_END + i] = 0x00
+        canonical[canonical.size - DEFERRAL_PRESENCE_FROM_END] = 0x00
+        for (i in 1..8) canonical[canonical.size - DEFERRAL_PRESENCE_FROM_END + i] = 0x00
         assertNull(
             "the canonical absent form decodes as absent",
-            VaultStateCodec.decode(deflate(canonical)).decoy?.deadAirNextFireAtMs,
+            VaultStateCodec.decode(deflate(canonical)).decoy?.provisionNotBeforeMs,
         )
-    }
-
-    @Test
-    fun `a NEGATIVE counter high-water mark is rejected`() {
-        // The mark means "every value strictly below this may already have been issued", and the
-        // allocator issues upward from it. A negative mark hands out negative message_numbers —
-        // a value no real ratchet produces, i.e. the free classifier the counter discipline exists
-        // to deny the relay. It is unreachable from the encoder, so it can only be crafted.
-        val plain = realPlaintextWithDecoy()
-        val tampered = plain.copyOf()
-        tampered[tampered.size - COUNTER_FROM_END] = 0xFF.toByte()
-        assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(tampered)) }
-    }
-
-    @Test
-    fun `the ENCODER refuses a negative counter mark too - strict v1 is symmetric`() {
-        // The decoder rejected it and the encoder emitted it happily, so this codec could write an
-        // image its own reader calls corrupt: the vault seals, and the next unlock refuses it as a
-        // damaged state. Strict v1 must refuse to PRODUCE what it refuses to READ — and because no
-        // writer in this codebase can reach a negative mark, the only honest form is an assertion,
-        // not a clamp that would silently rewrite a caller's state.
-        assertThrows(IllegalArgumentException::class.java) {
-            VaultStateCodec.encode(baseState(DecoyState(counterHighWater = -1L)))
-        }
-        // Discriminator: a positive mark still encodes, so this is not a blanket refusal.
-        val ok = VaultStateCodec.decode(VaultStateCodec.encode(baseState(DecoyState(counterHighWater = 7L))))
-        assertEquals("a positive mark still round-trips", 7L, ok.decoy?.counterHighWater)
     }
 
     // ── the register-before-commit invariant, enforced by the FORMAT ──────────────
@@ -445,19 +422,41 @@ class VaultDecoySectionTest {
         // random bytes, so the only field an attacker could stretch is server-issued. What this
         // measures is the largest section the RELAY can produce: a 36-char account UUID, a real
         // serialized libsignal identity keypair, a full-length RS256 access JWT, a 43-char refresh
-        // token, and all three integer fields set to a long that costs full width.
+        // token, and the one remaining integer field set to a long that costs full width.
+        //
+        // [2026-07-27] RE-MEASURED after `counterHighWater` (8 B) and `deadAirNextFireAtMs`
+        // (present flag + 8 B) were removed with the idle ping: the section is 17 plaintext bytes
+        // smaller. See the note on the encoded delta below — it did NOT move by 17 B, and the
+        // reason matters.
         val worstCase = DecoyState(
             accountId = "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
             identityKeyPair = IdentityKeyPair.generate().serialize(),
             accessToken = fakeAccessJwt(),
             refreshToken = base64Url(32),
-            counterHighWater = Long.MAX_VALUE / 2,
-            deadAirNextFireAtMs = Long.MAX_VALUE / 2,
             provisionNotBeforeMs = Long.MAX_VALUE / 2,
         )
         val without = VaultStateCodec.encode(baseState(null)).size
         val with = VaultStateCodec.encode(baseState(worstCase)).size
         val delta = with - without
+
+        // ⚠️ THE ENCODED DELTA IS NOT A STABLE NUMBER, so do not read a change in it as a change in
+        // the section. It is measured after DEFLATE over a FRESHLY GENERATED identity keypair, whose
+        // bytes are random and compress differently every run: five consecutive runs of this test
+        // measured 636, 638, 639, 642 and 646 B. Removing 17 plaintext bytes moved it by less than
+        // that spread — those bytes were the section's most compressible (fixed-width longs sharing
+        // long runs of identical bytes), so DEFLATE was already storing them nearly free.
+        //
+        // The consequence for this test: the encoded delta can only be asserted as a BOUND, which is
+        // what the budget constant is and all it has ever been. The number that actually tracks the
+        // field set is the RAW section body, which is fully deterministic, so that is the tripwire
+        // for a future field addition.
+        val bodyLength = locateDecoySection(inflate(VaultStateCodec.encode(baseState(worstCase)))).second
+        assertEquals(
+            "the raw worst-case section body — 4 length-prefixed blobs + one present-flagged long. " +
+                "It was 717 B while counterHighWater(8) and deadAirNextFireAtMs(9) existed.",
+            700,
+            bodyLength,
+        )
 
         // Discriminator: a codec that silently dropped the section would also satisfy "delta is
         // under budget". It must genuinely cost something.
@@ -476,8 +475,8 @@ class VaultDecoySectionTest {
             remaining >= VaultStateCodec.MAX_PAYLOAD_CONTENT_BYTES / 10 * 9,
         )
         println(
-            "MEASURED decoy section: worst-case encoded delta = $delta B " +
-                "(budget ${VaultStateCodec.DECOY_SECTION_BUDGET_BYTES} B); " +
+            "MEASURED decoy section: raw section body = $bodyLength B; worst-case encoded delta = " +
+                "$delta B (budget ${VaultStateCodec.DECOY_SECTION_BUDGET_BYTES} B); " +
                 "state with section = $with B of ${VaultStateCodec.MAX_PAYLOAD_CONTENT_BYTES} B, " +
                 "$remaining B free",
         )
@@ -506,7 +505,7 @@ class VaultDecoySectionTest {
     /**
      * A hand-built decoy section body in the codec's field order:
      * `accountId ‖ identityKeyPair ‖ accessToken ‖ refreshToken` (nullable, `len(4 BE)` with -1 for
-     * null) `‖ counterHighWater(8 BE) ‖ deadAir(present ‖ 8) ‖ provisionNotBefore(present ‖ 8)`.
+     * null) `‖ provisionNotBefore(present ‖ 8)`.
      *
      * Needed because the shapes the pairing rule forbids can no longer be produced by the encoder,
      * and they are not reachable by flipping bytes in a valid body either — dropping a field changes
@@ -517,7 +516,6 @@ class VaultDecoySectionTest {
         identityKeyPair: ByteArray?,
         accessToken: String? = null,
         refreshToken: String? = null,
-        counterHighWater: Long = 0L,
     ): ByteArray {
         val out = ByteArrayOutputStream()
         fun i32(v: Int) = out.write(byteArrayOf((v ushr 24).toByte(), (v ushr 16).toByte(), (v ushr 8).toByte(), v.toByte()))
@@ -529,8 +527,6 @@ class VaultDecoySectionTest {
         blob(identityKeyPair)
         blob(accessToken?.toByteArray(Charsets.UTF_8))
         blob(refreshToken?.toByteArray(Charsets.UTF_8))
-        i64(counterHighWater)
-        out.write(0); i64(0L) // deadAirNextFireAtMs absent, canonical
         out.write(0); i64(0L) // provisionNotBeforeMs absent, canonical
         return out.toByteArray()
     }
@@ -547,13 +543,30 @@ class VaultDecoySectionTest {
 
     private companion object {
         /**
-         * The decoy section is emitted LAST and ends the plaintext, and its tail is
-         * `counterHighWater(8) ‖ deadAir(present(1) ‖ 8) ‖ provisionNotBefore(present(1) ‖ 8)` —
-         * 26 bytes. These are offsets BACK from the end of the plaintext, so a hand-edit lands on
-         * exactly one field without needing to re-frame the section.
+         * The decoy section is emitted LAST and ends the plaintext, and its tail is now just
+         * `provisionNotBefore(present(1) ‖ 8)` — 9 bytes, since `counterHighWater(8)` and
+         * `deadAir(present(1) ‖ 8)` were removed on 2026-07-27. This is an offset BACK from the end
+         * of the plaintext, so a hand-edit lands on exactly that field without re-framing the
+         * section. `decoySectionTailIsWhereThisSaysItIs` fails loudly if the field order ever moves.
          */
-        const val DEAD_AIR_PRESENCE_FROM_END = 18
-        const val COUNTER_FROM_END = 26
+        const val DEFERRAL_PRESENCE_FROM_END = 9
+    }
+
+    @Test
+    fun `the byte offset the tampering tests rely on really is the deferral presence flag`() {
+        // The offsets above are the one thing in this file that silently rots when a field is added
+        // or removed: a wrong offset makes every tampering test land on some other byte, where it
+        // still throws for the wrong reason and stays green. Pin it directly.
+        val plain = realPlaintextWithDecoy()
+        assertEquals(
+            "the byte at the offset is the PRESENT flag of a live deferral",
+            0x01.toByte(),
+            plain[plain.size - DEFERRAL_PRESENCE_FROM_END],
+        )
+        val value = (1..8).fold(0L) { acc, i ->
+            (acc shl 8) or (plain[plain.size - DEFERRAL_PRESENCE_FROM_END + i].toLong() and 0xff)
+        }
+        assertEquals("and the eight bytes behind it are the deferral", fullDecoy().provisionNotBeforeMs, value)
     }
 
     /**

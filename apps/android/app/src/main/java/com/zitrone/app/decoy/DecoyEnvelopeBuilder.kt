@@ -125,9 +125,12 @@ import java.util.UUID
  * conversation repeats counter values across the covered conversation's ratchet turns, which a
  * relay that tracks the synthetic conversation over time could notice. Relay-visible only.
  *
- * Consequence for U1: `DecoyCounterReservation` has no consumer on the paired path. Its remaining
- * consumer is U5's dead-air ping, which has no real envelope to mirror and therefore must invent a
- * counter that does not regress.
+ * Consequence for U1, **now settled (2026-07-27)**: `DecoyCounterReservation` had no consumer on the
+ * paired path, and its only other candidate was the dead-air ping — the one decoy with no envelope to
+ * mirror, which therefore had to invent a counter. **The ping was cut** (spec §3.0), so the allocator
+ * and `TAG_DECOY.counterHighWater` were deleted rather than left as an unreachable writer on a
+ * durable vault surface. Nothing in the decoy path allocates a counter any more: this class reads one
+ * off the envelope it covers, and that is the whole mechanism.
  *
  * ## Consistency between the cleartext fields and the bytes they describe
  *

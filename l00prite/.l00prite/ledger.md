@@ -2423,3 +2423,113 @@ and a `prekey_id` that may name an unpublished id at four-plus digits). All thre
 
 **Still owed:** paired-blind review round 2 (round 1 of a hard cap of 6 used). Maintainer ratification
 of the U2 spec corrections AND of the Ruling-2 deviation above.
+
+---
+
+## 0.10.0-beta decoy traffic — U2 FIX ROUND 2 of 6 (2026-07-27) — **the maintainer's cut, applied**
+
+**Not review-driven.** Round 1 is adjudicated and review round 2 is still undispatched. This round
+implements the maintainer scope decision recorded in `c65d9a3e`: **the idle / dead-air ping is CUT
+from the design** — removed, not deferred, with no unit and no follow-up gate. Round 1's own finding
+is what made it decidable: Ruling 2 was shown arithmetically impossible (a base64 field's length is
+always a multiple of 4, so a 1–3 byte decimal-width difference is unreachable through the
+ciphertext), so the paired decoy mirrors the covered envelope's `message_number`, which left
+`DecoyCounterReservation` with exactly one candidate consumer — the ping. Cutting the ping left it
+with none.
+
+### Removed
+
+- **`DecoyCounterReservation`** (206 lines) and **`DecoyCounterReservationTest`** (390 lines, 14
+  tests). Deleted outright. It had no consumer, and an unreachable writer on a durable vault surface
+  is a liability, not an asset.
+- **`TAG_DECOY.counterHighWater`** — writer W3, deleted with the allocator. Encoder and decoder both,
+  including the negative-mark `require` on each side.
+- **`TAG_DECOY.deadAirNextFireAtMs`** — writer W4, already retired in the spec; the field was
+  vestigial.
+- The section is now `accountId ‖ identityKeyPair ‖ accessToken ‖ refreshToken ‖ provisionNotBefore`.
+  **No migration**: `0x06` has never existed in a shipped build, so this is a field-set change inside
+  an unshipped section. Strict-v1 pairing checks (`requireDecoyCredentialsPaired`, on both sides) and
+  the unknown-tag rejection are untouched.
+
+### Kept, with the argument rather than the conclusion
+
+- **`DecoySectionLock` SURVIVES.** The allocator was the caller that forced it into existence, but it
+  was never its only one. Its remaining callers are genuine read-modify-write sequences spanning more
+  than one runtime call: `DecoyAuthStore.storeTokens` (read account id → write tokens),
+  `storeTokensForAccount` (the R3 fix for a refresh whose round-trip overlaps `clearAccount`),
+  `clearTokens`, `clearAccount`, and the provisioner's `reserveBackoff` / `clearBackoff`
+  compare-and-clear and its read-commit-revert. The U1 P1 TOCTOU is retired **with its field**, not
+  orphaned — the property it protected (a replacement account must not open at `message_number =
+  128`) now holds by construction, because the counter comes from the covered conversation and never
+  from durable state. The U1 P2 stale-snapshot rule is unchanged and still tested (see M5).
+- **Nothing of the allocator was kept "just in case".** The durable-before-spend pattern it embodied
+  is not lost: it is stated as a general rule in spec §2.3's correction callout and is still enforced
+  by W1/W1b/W1d/W6 (`mutate` + `flushBeforeAck`, a throw meaning "it never happened"), each with its
+  own tests. Keeping a dead class as documentation of a live rule is how a vault surface accumulates
+  unreachable writers.
+
+### Coverage — moved, not lost, except where the field went
+
+- **Retargeted (verified still discriminating).** The two nullable-long canonicity tests
+  (`a noncanonical nullable-long presence flag is rejected`, `an ABSENT nullable long carrying a value
+  is rejected`) were testing `readNullableLong`, not the ping; they now tamper `provisionNotBeforeMs`.
+  The U1 stale-snapshot P2 test (`a capacity revert restores what the section held AT COMMIT TIME`)
+  used the allocator as its concurrent writer; it now uses a direct section write under the section
+  lock — a stand-in for the real writers, and **M5 confirms it still fails against the exact round-1
+  defect** (a pre-network snapshot restored on capacity failure).
+- **Replaced.** `a counter-only section round-trips` → `an extreme deferral round-trips at full
+  width`. `clearAccount resets the counter mark` → `clearAccount empties the holder entirely, so the
+  section is omitted again` — a strictly stronger assertion, since with the counter gone a cleared
+  account leaves nothing behind and the vault returns to 0.9.x readability.
+- **Added.** `the byte offset the tampering tests rely on really is the deferral presence flag` — the
+  offset constant is the one thing in that file that rots silently, and M6 shows a wrong offset makes
+  the tampering tests pass for the wrong reason.
+- **Genuinely retired with the field.** `a NEGATIVE counter high-water mark is rejected` and
+  `the ENCODER refuses a negative counter mark too`. The *symmetry principle* they also demonstrated
+  (strict v1 refuses to produce what it refuses to read) still has the encoder/decoder credential
+  half-set pair. Flagged for review round 2 as the one place coverage genuinely narrowed.
+
+### The re-measured capacity budget — and a correction to the brief's expectation
+
+The brief said the budget "should shrink". **It did not, and the reason is worth recording.**
+
+- **Raw section body: 717 B → 700 B**, deterministic, now asserted exactly. This is the number that
+  tracks the field set.
+- **Encoded worst-case delta: NOT a single number.** It is measured after DEFLATE over a *freshly
+  generated* identity keypair, so it varies run to run. Five consecutive runs after the change:
+  **636, 638, 639, 642, 646 B**. The pre-change value measured in this same environment was 639 B —
+  inside that spread. Removing 17 plaintext bytes moved it by less than its own noise, because those
+  bytes (three near-identical fixed-width longs) were the section's most compressible.
+- The first measurement taken this round was 646 B and looked like a 7 B *increase*. It was noise.
+  Recorded because quoting it as a finding would have been wrong, and the earlier ledger entries
+  quoting "640–643 B" and "645 B" as point values were quoting the same noise.
+- `DECOY_SECTION_BUDGET_BYTES` stays **1024 B**, correctly, as a *bound*. Moving it to track a
+  deflate artefact would make it less of a tripwire.
+
+### Evidence
+
+- `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks`
+  from `apps/android` → **BUILD SUCCESSFUL, Gradle exit 0**, **679 tests / 3 skipped / 0 failures /
+  0 errors**, APK produced.
+- Test count 694 → 679 accounts exactly: −14 (allocator suite) −4 (counter/dead-air field tests)
+  +3 (replacements + the offset tripwire).
+- **6 mutations, 6 discriminated**, rebuilt through Gradle between each and restored byte-for-byte:
+  M1 decoder pairing check removed → 1 failure; M2 encoder swaps access/refresh across the gap the
+  removed fields left → round-trip fails; M3 `clearAccount` keeps the access token → 3 failures;
+  M4 `isEmpty` ignores the deferral → 8 failures across two suites; M5 pre-network snapshot restored
+  on capacity failure → the retargeted P2 test fails, as required; M6 wrong tamper offset → 3
+  failures including the new tripwire.
+
+### Docs swept by claim, not phrasing
+
+`VaultState.kt`'s `DecoyState` kdoc (now states the absence of counter state as a *rule*, with a
+"do not re-add" note), the codec's field-order kdoc, `DECOY_SECTION_BUDGET_BYTES`, `DecoySectionLock`,
+`DecoyAuthStore`, `DecoyAccountProvisioner`, `DecoyEnvelopeBuilder`; `VAULT_ARCHITECTURE.md` §8's
+amendment + the "idle-ping sizing" open question; `DECOY_TRAFFIC_0.10.0_SPEC.md` §2, §2.3, §3.0,
+§4's W1/W3/W4/W6 and R2/R3/R5 rows, §5's U1/U2/U5 rows, §6.2a; and
+`reviews/decoy-0.10.0/u2-invariant-table-decision.md` (a second supersession header). The `⭐ CANONICAL`
+tag-write-trigger list in `VaultState.kt` was not touched — no removed field appears in it.
+
+**Still owed:** paired-blind review round 2 (2 of a hard cap of 6 used). Maintainer ratification of
+U2's three original spec corrections and of the round-1 Ruling-2 deviation. **No merge, no push, no
+version bump.**

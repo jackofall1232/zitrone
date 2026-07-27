@@ -25,6 +25,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -196,17 +197,22 @@ class DecoyAuthStoreTest {
     }
 
     @Test
-    fun `clearAccount resets the counter mark so a replacement account starts at zero`() {
-        // The mark describes ONE synthetic peer. Carried across a re-provision, the replacement
-        // account's first envelope would arrive carrying message_number = 128 in the clear on a
-        // brand-new session — something no real Double Ratchet with a new recipient produces, and
-        // therefore a free classifier for the relay operator.
-        val state = provisioned().also { it.decoy = it.decoy!!.copy(counterHighWater = 128L) }
-        val runtime = runtimeOf(state)
+    fun `clearAccount empties the holder entirely, so the section is omitted again`() {
+        // [2026-07-27] Replaces `clearAccount resets the counter mark`, which was retired with
+        // `counterHighWater`. The property that field's reset protected — a re-provisioned account
+        // must not inherit the retired one's state — is now the stronger one asserted here: with the
+        // counter gone, a cleared account leaves NOTHING behind but a pending deferral, so an
+        // emptied holder encodes as absent and the vault goes back to being 0.9.x-readable.
+        val runtime = runtimeOf(provisioned())
 
         DecoyAuthStore(runtime).clearAccount()
 
-        assertEquals("the counter mark went with the account", 0L, runtime.read { it.decoy?.counterHighWater ?: 0L })
+        val cleared = requireNotNull(runtime.read { it.decoy }) { "the holder is still present in RAM" }
+        assertTrue("nothing survives the clear", cleared.isEmpty)
+        assertNull(
+            "and an empty holder is omitted by the codec entirely",
+            VaultStateCodec.decode(runtime.read { VaultStateCodec.encode(it) }).decoy,
+        )
     }
 
     @Test

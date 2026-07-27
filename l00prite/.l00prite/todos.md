@@ -830,7 +830,9 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       `l00prite/.l00prite/reviews/decoy-0.10.0/u1-invariant-table.md`. Shipped: the codec section
       (optional, omitted when empty), `DecoyState`, `DecoyAuthStore` + `StagingAuthStore`,
       `DecoyIdentity`, `DecoyRelayApi`/`ApiClientDecoyRelay`/`RegistrationPowSolver`,
-      `DecoyAccountProvisioner`, `DecoyCounterReservation`.
+      `DecoyAccountProvisioner`, ~~`DecoyCounterReservation`~~ **(DELETED at U2 fix round 2,
+      2026-07-27 — the idle ping was cut, leaving it with no consumer; `TAG_DECOY.counterHighWater`
+      and `deadAirNextFireAtMs` went with it. `DecoySectionLock` survives on its other callers.)**
       Evidence: `:app:testDebugUnitTest` 645 tests / 0 failures / 3 skipped (was 598; +47 new) and
       `:app:assembleDebug`, both BUILD SUCCESSFUL, GRADLE_EXIT=0, `--rerun-tasks`, 2026-07-27.
       Measured byte budget: worst-case section delta **640–643 B** against a declared
@@ -946,6 +948,14 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       **Paired-blind review round 1 complete, adjudicated and fixed; ROUND 2 NOT YET DISPATCHED —
       that is the next thing U2 owes. Ruling 2 was deviated from with a proof of impossibility and
       needs a MAINTAINER decision, not just a reviewer's.**
+      **FIX ROUND 2 of 6 applied 2026-07-27 — NOT review-driven.** It implements the maintainer's
+      §3.0 cut of the idle ping (`c65d9a3e`), which round 1's Ruling-2 finding made decidable.
+      Removed: `DecoyCounterReservation` + its 14 tests, `TAG_DECOY.counterHighWater` (W3) and
+      `deadAirNextFireAtMs` (W4) from both codec sides. Kept with the argument written down:
+      `DecoySectionLock`. **679 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0,
+      `--rerun-tasks`; **6 mutations, 6 discriminated**. Re-measured section: raw body 717 B → 700 B;
+      the *encoded* delta is run-to-run noise at 636–646 B and did **not** shrink — the removed bytes
+      were the most compressible in the section. Budget stays 1024 B as a bound.
 
 - [ ] **U3 inherits three things from U2, none of them optional.** *(Rewritten at U2 fix round 1 —
       the interface changed, so two of the three old items no longer say the right thing.)*
@@ -963,7 +973,7 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
          means "send the real message uncovered" or "do not send at all", and write the reasoning
          down — it is a threat-model choice, not an error-handling detail.
 
-- [ ] **U4/U5 inherit what U2's fix round 1 changed about counters — the OLD residual is withdrawn
+- [ ] **U4 inherits what U2's fix round 1 changed about counters (U5 is CUT) — the OLD residual is withdrawn
       and three new ones are declared.** The monotonic-counter residual (a decoy counter climbing
       through replies that should have reset it) is **gone**: the paired decoy mirrors the covered
       envelope's `message_number`, because a base64 field's length is always a multiple of 4 and so
@@ -971,10 +981,12 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       only and all in §2.4: the random body is not always a padded-block multiple; the synthetic
       conversation's counters repeat; `prekey_id` may name an id the account never published when the
       covered id has four or more digits. **U6 must not claim coverage past those.**
-      **U5 additionally inherits `DecoyCounterReservation` itself** — the dead-air ping is the only
-      decoy with no envelope to mirror, so it is the only one that must invent a non-regressing
-      `message_number`. And it takes its size from §2.1's table; the spec no longer states a byte
-      count anywhere else, deliberately (G-D, eighth recurrence).
+      ~~**U5 additionally inherits `DecoyCounterReservation` itself**~~ — **U5 IS CUT (2026-07-27,
+      maintainer, spec §3.0). There is no unit and no follow-up gate.** The allocator therefore had
+      no consumer at all and was DELETED at U2 fix round 2, along with `TAG_DECOY.counterHighWater`
+      and `deadAirNextFireAtMs`. **Dead-air periods are not covered, and that is an accepted
+      documented limit — U6 must state it as such and must not imply otherwise.** So this item is now
+      U4's alone; the three §2.4 residuals above still stand.
 
 - [ ] **U6 owes the DELIVERY of the storage-format disclosure.** The gate itself is answered above
       (line ~598, `a4f118df`) — do not re-answer it here. What is still outstanding is shipping the

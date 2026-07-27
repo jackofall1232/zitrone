@@ -23,6 +23,30 @@
 > The frame-size table below (§2, "821 → 829") is the ORIGINAL measurement record and states the old
 > numbers deliberately, as the before-and-after it was written to be. **Spec §2.1's table is the
 > single canonical statement of frame sizes; nothing here overrides it.**
+>
+> # ⚠️ FURTHER SUPERSEDED BY FIX ROUND 2 (2026-07-27) — THE ALLOCATOR NO LONGER EXISTS
+>
+> Round 1 said the allocator's consumer "moves to U5's dead-air ping". **The maintainer then CUT the
+> ping** (`docs/design/DECOY_TRAFFIC_0.10.0_SPEC.md` §3.0, `docs/VAULT_ARCHITECTURE.md` §8 amendment
+> 2026-07-27), which left the allocator with no consumer at all. Round 2 therefore **deleted**
+> `DecoyCounterReservation`, its test class, and **both** `TAG_DECOY.counterHighWater` (writer W3)
+> and `TAG_DECOY.deadAirNextFireAtMs` (writer W4) rather than leaving unreachable writers on a
+> durable vault surface. Consequences for the rows below:
+>
+> - the `TAG_DECOY.counterHighWater` row of §1's table describes a field that no longer exists;
+> - §1's "pure shaper **plus one call into an existing allocator**" is now just "pure shaper" — the
+>   builder has no vault access of any kind;
+> - §2's "Consequence for U5" is moot; U5 is cut;
+> - §3's residual (a monotonic counter that never resets while a real client resets on every inbound
+>   ratchet turn) is **withdrawn at its root**: there is no monotonic counter any more. It was the
+>   round-1 finding that this residual contradicted §2.3's own premise which made the cut decidable;
+> - §4's sentence "The section holds account id, identity keypair, tokens, counter mark, dead-air
+>   fire, deferral" is now "account id, identity keypair, tokens, deferral". Its conclusion — that
+>   prekey ids are a property of the generator's source and not of the vault — is unaffected.
+>
+> `DecoySectionLock` **survives** the deletion: its other callers (the `DecoyAuthStore` token
+> writers, the provisioner's read-commit-revert and its back-off compare-and-clear) are read-modify
+> -write sequences in their own right and were never the allocator's.
 
 The standing rule is: *any change to a durable multi-reader signal gets its writers, its readers, and
 what each reader assumes the signal MEANS at the moment it reads, enumerated first.* The rule has a

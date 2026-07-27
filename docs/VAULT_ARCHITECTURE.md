@@ -359,10 +359,17 @@ design (full spec is out of scope for this document):
 > behaviour, borrowed. Dead-air periods are simply not covered, which is an accepted, documented
 > limit rather than a gap to be filled with something ineffective.
 >
-> **Consequences:** unit U5 is cut from the 0.10.0 plan; `DecoyCounterReservation` (built in U1)
-> loses its only remaining consumer, since paired decoys mirror the covered envelope's
-> `message_number`; and the `deadAirNextFireAtMs` field in `TAG_DECOY` becomes vestigial. Tracked in
-> `docs/design/DECOY_TRAFFIC_0.10.0_SPEC.md`.
+> **Consequences, now APPLIED in code (U2 fix round 2, 2026-07-27):** unit U5 is cut from the 0.10.0
+> plan; `DecoyCounterReservation` (built in U1) lost its only remaining consumer, since paired decoys
+> mirror the covered envelope's `message_number` — the class and its tests are **deleted**, not left
+> dormant. `TAG_DECOY` loses **both** `deadAirNextFireAtMs` (writer W4, already retired) and
+> `counterHighWater` (writer W3, which went with the allocator); the section is now
+> `accountId ‖ identityKeyPair ‖ accessToken ‖ refreshToken ‖ provisionNotBeforeMs` and 17 plaintext
+> bytes smaller. `DecoySectionLock` **survives** — it also serialises the `DecoyAuthStore` token
+> writers and the provisioner's commit/revert and back-off compare-and-clear, which were never the
+> allocator's callers. Because `0x06` has never existed in a shipped build this is a field-set change
+> inside an unshipped section, not a format migration. Tracked in
+> `docs/design/DECOY_TRAFFIC_0.10.0_SPEC.md` §3.0.
 >
 > **A separate, earlier decision this must not be confused with:** the *24/7 background daemon* was
 > already ruled out on different grounds — the app has no background execution and a locked vault
@@ -371,7 +378,8 @@ design (full spec is out of scope for this document):
 
 - **Open questions:** whether the decoy envelope must be size/structure-indistinguishable from a
   real encrypted message (packet-size analysis could otherwise defeat pairing regardless of
-  timing); idle-ping sizing.
+  timing). ~~idle-ping sizing~~ — **moot, the ping is cut** (amendment above); it was resolved by
+  removing the thing that needed sizing, not by choosing a size.
 - **User-facing indicator** (proposed 🍋‍🟩) signals only that the client-side decoy logic *ran* —
   documented, in-app and in docs, as a **mechanism-status indicator, not proof of unlinkability**
   against a real adversary. Security-conscious users verify the send/pairing logic in the

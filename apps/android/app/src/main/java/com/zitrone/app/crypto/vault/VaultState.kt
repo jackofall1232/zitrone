@@ -120,9 +120,8 @@ class VaultState(
  * Cover-traffic state for ONE vault — the whole content of `TAG_DECOY` (0x06).
  *
  * Holds the synthetic relay account this vault addresses its cover traffic to (account id +
- * long-term identity keypair + session tokens), the counter-reservation high-water mark, the
- * dead-air schedule's next fire, and a provisioning deferral. Immutable: it is swapped
- * wholesale inside a [VaultRuntime.mutate] block, never field-mutated, exactly like
+ * long-term identity keypair + session tokens) and a provisioning deferral. Immutable: it is
+ * swapped wholesale inside a [VaultRuntime.mutate] block, never field-mutated, exactly like
  * [com.zitrone.app.data.AuthState].
  *
  * ⚠️ **PRESENCE IS NOT READINESS.** A section exists as soon as there is anything at all to
@@ -139,11 +138,14 @@ class VaultState(
  * decode — so [isProvisioned] answering `false` is a statement about a well-formed state rather
  * than a predicate quietly concealing a malformed one. See `requireDecoyCredentialsPaired`.
  *
- * ⚠️ **[counterHighWater] is a RESERVATION, and its meaning is "every value strictly below
- * this may already have been issued".** It is persisted BEFORE any value in the newly reserved
- * block is spent, so an interruption SKIPS counter values (invisible — a real Double Ratchet
- * skips on any dropped message) and can never REGRESS them (a tell no real ratchet produces).
- * It must only ever increase.
+ * ⚠️ **THERE IS NO COUNTER STATE HERE, AND THAT IS DELIBERATE (2026-07-27).** Earlier drafts
+ * carried a `counterHighWater` reservation mark and a `deadAirNextFireAtMs` schedule. Both were
+ * removed when the idle/dead-air ping was **cut** from the design: paired decoys mirror the
+ * `message_number` of the real envelope they cover (see `DecoyEnvelopeBuilder`), so nothing
+ * allocates a counter, and with the ping gone nothing schedules one either. **Do not re-add a
+ * counter field for a paired decoy** — a decoy that carries a counter of its own is a decoy whose
+ * frame length can differ from the envelope it covers. See `docs/design/DECOY_TRAFFIC_0.10.0_SPEC.md`
+ * §3.0 and `docs/VAULT_ARCHITECTURE.md` §8's 2026-07-27 amendment.
  *
  * VAULT-SCOPED BY REQUIREMENT. None of this may be mirrored into `SettingsRepository`,
  * `DeviceSettings`, any `SharedPreferences`, or any device-level diagnostics file: a
@@ -161,10 +163,6 @@ class DecoyState(
     val accessToken: String? = null,
     /** That account's current (single-use, rotated) refresh token, or null. */
     val refreshToken: String? = null,
-    /** Reservation high-water mark: every counter value below it may already be issued. */
-    val counterHighWater: Long = 0L,
-    /** Dead-air schedule next-fire (epoch ms), or null when never armed. Written by U5 only. */
-    val deadAirNextFireAtMs: Long? = null,
     /**
      * Earliest epoch-ms at which provisioning may be attempted again, or null for "no deferral".
      *
@@ -194,8 +192,7 @@ class DecoyState(
      */
     val isEmpty: Boolean
         get() = accountId == null && identityKeyPair == null && accessToken == null &&
-            refreshToken == null && counterHighWater == 0L && deadAirNextFireAtMs == null &&
-            provisionNotBeforeMs == null
+            refreshToken == null && provisionNotBeforeMs == null
 
     /** Copy-with, mirroring a data class (which a ByteArray field makes unsafe to generate). */
     fun copy(
@@ -203,16 +200,12 @@ class DecoyState(
         identityKeyPair: ByteArray? = this.identityKeyPair,
         accessToken: String? = this.accessToken,
         refreshToken: String? = this.refreshToken,
-        counterHighWater: Long = this.counterHighWater,
-        deadAirNextFireAtMs: Long? = this.deadAirNextFireAtMs,
         provisionNotBeforeMs: Long? = this.provisionNotBeforeMs,
     ): DecoyState = DecoyState(
         accountId = accountId,
         identityKeyPair = identityKeyPair,
         accessToken = accessToken,
         refreshToken = refreshToken,
-        counterHighWater = counterHighWater,
-        deadAirNextFireAtMs = deadAirNextFireAtMs,
         provisionNotBeforeMs = provisionNotBeforeMs,
     )
 
@@ -229,8 +222,6 @@ class DecoyState(
             identityKeyPair.contentEquals(other.identityKeyPair) &&
             accessToken == other.accessToken &&
             refreshToken == other.refreshToken &&
-            counterHighWater == other.counterHighWater &&
-            deadAirNextFireAtMs == other.deadAirNextFireAtMs &&
             provisionNotBeforeMs == other.provisionNotBeforeMs
 
     override fun hashCode(): Int {
@@ -238,8 +229,6 @@ class DecoyState(
         result = 31 * result + identityKeyPair.contentHashCode()
         result = 31 * result + (accessToken?.hashCode() ?: 0)
         result = 31 * result + (refreshToken?.hashCode() ?: 0)
-        result = 31 * result + counterHighWater.hashCode()
-        result = 31 * result + (deadAirNextFireAtMs?.hashCode() ?: 0)
         result = 31 * result + (provisionNotBeforeMs?.hashCode() ?: 0)
         return result
     }
@@ -360,11 +349,19 @@ object VaultStateCodec {
      *
      * Measured, not guessed — `VaultDecoySectionTest` builds a maximum-length section (36-char
      * account UUID, 65-byte `IdentityKeyPair.serialize()`, an RS256 access JWT, a 43-char
-     * refresh token, three fixed-width integers) and asserts the real encode-size delta stays
-     * under this. It exists to catch a FUTURE field addition, not because the section is
+     * refresh token, one present-flagged 8-byte deferral) and asserts the real encode-size delta
+     * stays under this. It exists to catch a FUTURE field addition, not because the section is
      * tight: [MAX_PAYLOAD_CONTENT_BYTES] is ~262 KB and a realistic full state is single-digit
      * KB. It matters because [VaultRuntime.capacityExceeded] fail-closes `flushBeforeAck`, so
      * overflowing the region is a durability failure, not a cosmetic one.
+     *
+     * **[2026-07-27] RE-MEASURED after `counterHighWater` and `deadAirNextFireAtMs` were removed.**
+     * The raw section body fell 717 B → **700 B**. The *encoded* worst-case delta did **not** fall
+     * by 17 B and cannot be quoted as a single number at all: it is measured after DEFLATE over a
+     * freshly generated identity keypair, and five consecutive runs spanned **636–646 B** both
+     * before and after the change — the removed fields were the section's most compressible bytes.
+     * So this constant is a BOUND, and the deterministic field-set tripwire is the raw body length,
+     * which the test now asserts exactly. Unchanged at 1024 B, with ~380 B of headroom.
      */
     const val DECOY_SECTION_BUDGET_BYTES: Int = 1024
 
@@ -694,20 +691,20 @@ object VaultStateCodec {
     /**
      * Fixed field order:
      * `accountId ‖ identityKeyPair ‖ accessToken ‖ refreshToken` (four nullable
-     * length-prefixed blobs, [NULL_LEN] for null) `‖ counterHighWater(8 BE)`
-     * `‖ deadAirNextFire(present(1) ‖ 8 BE) ‖ provisionNotBefore(present(1) ‖ 8 BE)`.
+     * length-prefixed blobs, [NULL_LEN] for null) `‖ provisionNotBefore(present(1) ‖ 8 BE)`.
      *
      * The absent-long form mirrors [encodeSettings]'s nullable-ttl encoding (a present flag
      * plus a fixed-width value) rather than inventing a sentinel, so an absent value and a
      * legitimately-zero one stay distinguishable.
+     *
+     * **Two fields were REMOVED here on 2026-07-27, before 0.10.0 shipped** — `counterHighWater`
+     * (8 BE) and `deadAirNextFireAtMs` (present ‖ 8), which used to sit between `refreshToken` and
+     * `provisionNotBefore`. The idle ping was cut and paired decoys mirror the covered envelope's
+     * `message_number`, so both lost every writer. Because `0x06` has never existed in a released
+     * build this is a field-set change inside an unshipped section, not a format migration: nothing
+     * on any device encodes the old shape, and strict v1 keeps rejecting anything that does.
      */
     private fun encodeDecoy(d: DecoyState): ByteArray {
-        // Strict v1 refuses to PRODUCE what it refuses to READ. [decodeDecoy] rejects a negative
-        // high-water mark (it would hand out negative message_numbers — see the note there), and an
-        // encoder that happily emits one writes an image its own decoder calls corrupt: the vault
-        // would seal, and the next unlock would fail. Unreachable from any writer in this codebase,
-        // which is exactly why it must be an assertion and not a silent clamp. [R3]
-        require(d.counterHighWater >= 0L) { "negative counter high-water mark in decoy section" }
         requireDecoyCredentialsPaired(d)
         val out = WipeableBuffer(128)
         try {
@@ -715,8 +712,6 @@ object VaultStateCodec {
             writeNullableBytes(out, d.identityKeyPair)
             writeNullableString(out, d.accessToken)
             writeNullableString(out, d.refreshToken)
-            writeLong(out, d.counterHighWater)
-            writeNullableLong(out, d.deadAirNextFireAtMs)
             writeNullableLong(out, d.provisionNotBeforeMs)
             return out.toByteArray()
         } finally {
@@ -739,8 +734,8 @@ object VaultStateCodec {
      * ordering rule was built to make impossible. A predicate that hides a malformed state is not
      * the same thing as a format that cannot express it.
      *
-     * Strict v1 refuses to PRODUCE what it refuses to READ, so this runs on both sides — the same
-     * rule the negative high-water mark follows. Three shapes are refused:
+     * Strict v1 refuses to PRODUCE what it refuses to READ, so this runs on both sides. Three
+     * shapes are refused:
      *
      *  - **an account id with no identity key** — unauthenticatable and undeletable; the dangling
      *    reference itself;
@@ -778,19 +773,8 @@ object VaultStateCodec {
                 identityKeyPair = identityKeyPair,
                 accessToken = readNullableString(r),
                 refreshToken = readNullableString(r),
-                counterHighWater = r.i64(),
-                deadAirNextFireAtMs = readNullableLong(r),
                 provisionNotBeforeMs = readNullableLong(r),
             )
-            // A NEGATIVE mark is not a smaller number, it is a different meaning: the invariant is
-            // "every value strictly below this may already have been issued", and the allocator
-            // reserves `mark + blockSize` and issues from `mark` upward. A negative mark therefore
-            // hands out negative `message_number`s — a value no real ratchet produces, i.e. exactly
-            // the classifier the counter discipline exists to avoid — and it is unreachable from
-            // this encoder, so it can only come from a crafted or corrupt payload.
-            require(decoded.counterHighWater >= 0L) {
-                "negative counter high-water mark in decoy section"
-            }
             requireDecoyCredentialsPaired(decoded)
             require(!r.hasRemaining()) { "trailing bytes in decoy section" }
             return decoded

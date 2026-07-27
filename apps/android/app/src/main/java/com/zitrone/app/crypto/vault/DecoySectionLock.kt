@@ -21,19 +21,26 @@ import kotlin.concurrent.withLock
  * `stateLock` makes each individual `mutate` atomic. That is the wrong granularity for this
  * section, because every correctness argument here spans MORE than one runtime call:
  *
- *  - the counter allocator reads the durable mark, decides its block is still current, and only
- *    then spends it — a *check* and a *spend* in two calls;
  *  - the provisioner reads the section as it stands, commits credentials on top of it, and on a
  *    capacity failure puts back what it read — a *read* and a *restore* in two calls;
- *  - `DecoyAuthStore.clearAccount` resets the mark that the allocator just checked.
+ *  - it also writes a back-off ahead of the attempt and later retires **only its own** deferral —
+ *    a compare and a clear in two calls;
+ *  - `DecoyAuthStore.storeTokens` / `storeTokensForAccount` check that the section still holds the
+ *    account the tokens belong to, then write them — a *check* and a *write* in two calls, with
+ *    `clearAccount` as the writer that can invalidate the check.
  *
- * Round 1 of review answered each of those with its own check *inside* one of the calls (a stale
- * block test, a snapshot revert). Round 2 showed why that could not work: a predicate evaluated in
+ * Round 1 of review answered each of those with its own check *inside* one of the calls (a snapshot
+ * revert, a per-write predicate). Round 2 showed why that could not work: a predicate evaluated in
  * one `runtime.read` and acted on in a later `runtime.mutate` is not atomic with the thing it
- * guards, so `clearAccount()` landing between the two reissues counter values, and a snapshot taken
- * before seconds of network I/O restores an older high-water mark over a concurrent reservation.
- * Both are the same defect: **state sampled outside the lock that protects it.** The fix is one
- * lock over the section, held across each whole sequence, not more checks inside the pieces.
+ * guards, and a snapshot taken before seconds of network I/O restores stale state over a concurrent
+ * write. Both are the same defect: **state sampled outside the lock that protects it.** The fix is
+ * one lock over the section, held across each whole sequence, not more checks inside the pieces.
+ *
+ * **[2026-07-27] The counter allocator was the fourth caller and is gone.** `DecoyCounterReservation`
+ * read the durable high-water mark, decided its block was still current, and only then spent it —
+ * the sequence that first forced this lock into existence. The idle ping was cut, paired decoys
+ * mirror the covered envelope's counter, and the allocator was deleted with its field. **This lock
+ * survives on the callers above, which are its own reason and were never the allocator's.**
  *
  * ## Scope: it guards SEQUENCES, not fields
  *
@@ -52,7 +59,7 @@ import kotlin.concurrent.withLock
  * ## Lifetime
  *
  * One lock per live [VaultRuntime], created on first use, weakly keyed so it evaporates with the
- * session. Like [com.zitrone.app.decoy.DecoyCounterReservation]'s allocator registry this is
+ * session. Like [com.zitrone.app.decoy.DecoyAccountProvisioner]'s gate registry this is
  * process-wide but is not a device-global singleton and holds nothing about any vault: no content,
  * no timers, nothing durable, only "which monitor belongs to which live runtime". The values hold
  * no reference back to the key, so an entry never keeps a runtime alive.
