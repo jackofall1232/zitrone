@@ -383,7 +383,40 @@ silently-capped coverage: this gap is written down, not left to be discovered.
 
 ---
 
-## 3. OPEN QUESTION 2 — idle-ping sizing. **RESOLVED, and the premise is corrected.**
+## 3. OPEN QUESTION 2 — idle-ping sizing. **MOOT — THE PING IS CUT.**
+
+### 3.0 ⛔ CUT 2026-07-27 (maintainer decision). Everything below §3.0 is HISTORICAL.
+
+**The idle ping is removed from the design, not deferred.** `VAULT_ARCHITECTURE.md` §8 is amended
+visibly to match; this is the second amendment to that locked design.
+
+**The reasoning is §8's own argument turned on itself.** Pairing was chosen over scheduling because
+decoys *"inherit real human timing for free rather than modeling a pattern that could itself
+fingerprint."* A standalone ping has **no real traffic to inherit timing from**, so it must invent a
+schedule — precisely the modelled pattern that reasoning rejects. An adversary can recognise it and
+filter it, after which it contributes nothing while still costing infrastructure; and being
+recognisable, it advertises that the client runs cover traffic at all.
+
+So the open question below — *how do you size a decoy that has no cover to mirror?* — has no good
+answer, and that is the finding. §8 already conceded the ping "carries little unlinkability burden".
+**The honest resolution is that no sizing is right, because the defect is the schedule, not the size.**
+
+**Dead-air periods are therefore not covered.** That is an accepted, documented limit — see §2.4 —
+not a gap to be filled with something ineffective. Paired decoys remain the entire mechanism, and
+they beat any algorithm modelling real message behaviour because they *are* real message behaviour,
+borrowed.
+
+**Consequences:** U5 is cut. `DecoyCounterReservation` (U1) has no consumer — paired decoys mirror
+the covered envelope's `message_number` — and is removed along with `TAG_DECOY.deadAirNextFireAtMs`
+and writer W4. §2.3's counter-reservation rationale is fully retired.
+
+**Do not confuse this with the earlier ruling on the 24/7 daemon**, which was rejected on different
+grounds (no background execution; a locked vault holds no keys). That narrowed the ping to
+in-session. **This removes it.**
+
+---
+
+### (HISTORICAL, superseded by §3.0) OPEN QUESTION 2 — idle-ping sizing
 
 ### 3.1 The premise correction — this is the finding that most changes §8
 
@@ -475,7 +508,7 @@ encrypted image.
 | W1d | `DecoyAccountProvisioner.clearBackoff()` — the **retirement of a deferral that protected nothing** | An attempt that fails **before** `register` is entered: offline challenge fetch, DNS failure, failed proof-of-work, a local crypto fault, a cancelled scope | `provisionNotBeforeMs` → null, `mutate` + `flushBeforeAck`, **compare-and-clear**: only the deadline *this* attempt wrote is retired, checked under the section lock, so a deferral another writer put there meanwhile is left alone. Emptying the holder is what removes `TAG_DECOY` entirely and restores 0.9.x readability | **DONE (U1 R3)** — **added to this table U1 R4; it was a real durable writer the inventory omitted** |
 | W2 | `DecoyAccountProvisioner.refreshTokens()` | Synthetic session token refresh (7-day refresh-token TTL, `auth/jwt.go:26`) | Tokens only; all other fields untouched | **this unit (U1)** |
 | W3 | `DecoyCounterReservation` | Counter reservation exhausted (once per 64 decoys) | High-water mark only, monotonically increasing | **allocator DONE (U1)**; the `DecoySender` that spends the values is U2 |
-| W4 | `DeadAirPinger.rearm()` | After each dead-air ping fires | Next-fire time only | **this unit (U5)** |
+| ~~W4~~ | ~~`DeadAirPinger.rearm()`~~ | **REMOVED — the ping is cut (§3.0).** `deadAirNextFireAtMs` has no writer and is deleted from `TAG_DECOY`. | — | — |
 | W5 | `VaultRuntime.mutate` (existing) | Every write above, without exception | Re-encodes whole `VaultState` under `stateLock` and **SCHEDULES** a reseal — **it is not durable**, see §2.3's correction | existing |
 | W6 | `VaultRuntime.flushBeforeAck` (existing) | W1, W3, and **all three** back-off writes — W1b, W1d, and W1's retirement — every value that must survive process death | Forces the scheduled payload to disk synchronously. **A throw means the value was never issued / never recorded** | existing — **added 2026-07-27 (U1 R1)**; W1d added R4 |
 
@@ -768,7 +801,7 @@ next begins. No version bump, no push, nothing merged without explicit maintaine
 | **U2** ✅ | Decoy envelope builder. **[R1] `build()` takes the real envelope it covers** and mirrors every size-affecting property of it — shape, ciphertext byte length, counter, timestamp width, TTL, burn, media type — then measures both frames and refuses to return a decoy whose frame is not exactly as long. *(Counter reservation moved to U1, and at R1 out of the paired path entirely — see §2.3/§3.3.)* | **BUILT on `feat/0.10.0-decoy-u2-envelope-builder`, deliberately UNWIRED** — nothing constructs it, so the branch cannot emit cover traffic. `DecoyEnvelopeBuilder` + **16 gate tests** (13 before R1; the count of 14 recorded here previously was wrong — G-F). **694 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0, `--rerun-tasks`. **Fix round 1 of 6 applied: 18 mutations run, 17 discriminated**, the survivor a deliberate probe of a defence-in-depth check (recorded). **No `SessionBuilder.process`, no Signal record written** — now a fact about the type, which has no vault access at all. **Round-1 P1s fixed:** shape followed the decoy's own counter rather than the covered message (G-A); `0x05 ‖ random(32)` is not a valid Curve25519 encoding, keys are now generated and the private half dropped (G-B). **Round-1 ruling deviation, argued in §2.3:** the digit-width difference (G-C) cannot be absorbed in the ciphertext — a base64 field's length is always a multiple of 4 — so the counter is mirrored instead. **Three spec corrections from U2 still PENDING RATIFICATION — §2.1's table, §2.3's ciphertext formula, §2.4's residual list.** Paired-blind review round 1 complete and adjudicated; **round 2 not yet dispatched.** |
 | **U3** | Pairing at the send choke point. Random order (decoy-first / real-first), few-ms stagger, and the **real envelope handed to `DecoyEnvelopeBuilder.build` as the thing to mirror** — not a block count (§2.2 R1). Insertion inside `MessagingCoordinator`'s confined worker, above `ws.sendMessage`. | Ordering is uniformly random and stagger is drawn per-send — pinned by a statistical test, not by inspection. Real-send latency and the `flushSendRatchet` durability barrier provably unaffected. **`build()` throws rather than return a mismatched decoy; U3 owns what happens then, and must not let it fail the real send.** |
 | **U4** | Synthetic-side receive: second WS connection for the synthetic account, deliver → ack → burn at ~30 ms, occasional send-back so the exchange is bidirectional. | Decoys never surface in UI, notifications, or unread counts. Notification parity §7 re-verified with decoys active. |
-| **U5** | Dead-air ping within a session (§3.2), single block (§2.1's first row), per-vault schedule. **Inherits `DecoyCounterReservation` from U1** — the unpaired ping is the only decoy with no envelope to mirror, so it is the only one that has to invent a non-regressing `message_number` (§2.3, §3.3). | Fires only in a live session; torn down at lock with everything else. States no byte count of its own. |
+| ~~**U5**~~ | ~~Dead-air ping within a session~~ **CUT 2026-07-27 by maintainer decision — see §3.0.** No unit, no follow-up gate. `DecoyCounterReservation` (U1) and `TAG_DECOY.deadAirNextFireAtMs` lose their only consumer and are removed with it. | — |
 | **U6** | 🍋‍🟩 indicator + docs. `SECURITY_MODEL.md` honest framing, `VAULT_ARCHITECTURE.md` §8 amendment, the §1 overclaim corrections. | Ships **with** the feature, per deliver-then-claim. Not after. |
 
 **Third lens blind at the cap.** If any unit reaches the review cap without convergence, a third
