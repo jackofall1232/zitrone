@@ -1,12 +1,12 @@
 {
  "schema_version": 1,
- "lock_id": "lock-20260727T-decoy-u3-pairing",
+ "lock_id": "lock-20260727T-u3-r1-grok",
  "owner_agent": null,
  "owner_session": null,
- "acquired_at": "2026-07-27T21:40:00Z",
- "expires_at": "2026-07-28T01:40:00Z",
- "ttl_seconds": 14400,
- "purpose": "0.10.0 decoy U3 \u2014 pairing at the send choke point, BUILT and WIRED on feat/0.10.0-decoy-u3-pairing \u2014 DONE",
+ "acquired_at": "2026-07-27T22:00:41Z",
+ "expires_at": "2026-07-27T23:00:41Z",
+ "ttl_seconds": 3600,
+ "purpose": "U3 R1 grok review written; released",
  "protected_paths": [
   "ledger.md",
   "memory.md",
