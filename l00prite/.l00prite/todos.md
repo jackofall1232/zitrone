@@ -40,6 +40,33 @@ account it created for that vault.* One line, and it belongs with U6's `SECURITY
 alongside the dead-air disclosure. Same class as the 0.9.3 burn-scope correction, which had to fix
 exactly this shape of claim once already.
 
+
+## 🚚 CX23 TRIP — four items, grouped 2026-07-27. All need direct CX23 access.
+
+Grouped deliberately: each needs the same access and CX33 has none, so batch them rather than paying
+the access cost four times.
+
+- [ ] **(a) `onServerError` is EMPTY — a LIVE DEFECT IN SHIPPED CODE, not a decoy concern.**
+      `MessagingCoordinator.kt:2120-2123` is an empty method. **Every server rejection is silently
+      swallowed today.** A rate-limited or otherwise-rejected send leaves the message displayed as
+      `SENDING` forever: not marked failed, not retried, no error surfaced. **Users currently have no
+      way to know a send failed.** This predates decoy traffic and is worth fixing on its own merits.
+      **Fix:** carry the message id on `rate_limited` (and other per-message rejections) so the client
+      can attribute and retry. Relay + client.
+- [ ] **(b) Cover traffic halves the account's send budget** — decoy-scoped, unlike (a). `sendLimit`
+      is charged to the authenticated account, so a covered send costs two permits. **Exempt or raise
+      the budget for cover frames.** Client-side defence was shown UNSOUND: `sendLimit` is a server
+      constant the relay never communicates, so a client assuming 100/min against a relay configured
+      lower inverts the priority it claims to guarantee. **Trails U3's review; does not block it.**
+- [ ] **(c) Onion mirror staging** — the next artefact the onion serves is 0.10.0 (0.9.4 never will;
+      see RELEASE STRATEGY). Forward check at publish time, not a stale-APK defect any more.
+- [ ] **(d) CX23 P2 — non-IP registration keying. NOW UNBLOCKED.** The precondition is answered:
+      **Caddy APPENDS `X-Forwarded-For`** (no `header_up` override), so `ProxyHeader` is unsafe as-is.
+      Two viable routes: `header_up X-Forwarded-For {remote_host}` in the Caddyfile so Caddy
+      overwrites and the header becomes trustworthy, **or** last-hop parsing server-side (take only
+      the element Caddy appended). Neither helps Tor/I2P, which collapse via the sidecars regardless —
+      registration PoW is the per-client cost there.
+
 ## 🗺️ RELEASE STRATEGY — recorded 2026-07-27 (maintainer). Read before planning any unit.
 
 **The "-beta" version labels are a deliberate hedge, not a maturity claim.** Everything shipped so
