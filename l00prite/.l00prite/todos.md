@@ -11,6 +11,35 @@
 - [x] Added the `security-review-loop.md` prompt to `l00prite/.l00prite/prompts/` + the prompt index
       (PR #52 `b8eb652` / PR #53, merged). It drove PR-2's paired-blind loop to clean convergence.
 
+
+## ✅ CLOSED 2026-07-27 — synthetic relay account surviving account-delete / Pucker Burn is NOT a gate
+
+**Maintainer ruling. This was tracked as a merge gate for U3; it is closed, not deferred.**
+
+**The argument.** After a burn, decoy traffic is pointless (there is no real traffic left to hide)
+and real traffic can no longer reach the device (the vault is gone). So a surviving synthetic account
+protects nothing and exposes nothing.
+
+**Two things make it airtight rather than merely pragmatic:**
+
+1. **It is strictly dominated by an exposure already disclosed and accepted.**
+   `SECURITY_MODEL.md:628` states plainly that *a burn is device-local and does not delete your
+   account on the relay.* The REAL account survives a burn. The synthetic one holds strictly less —
+   an `accounts` row with an identity public key and nothing else, no message history (envelopes are
+   deleted on ack), no linkage (`delivery_receipts` carry only `SHA-256(message_id)`), and no request
+   logs by design. If the real account surviving is acceptable, the synthetic one is *a fortiori*.
+
+2. **Post-burn it is unaddressable.** The synthetic account's id lived only inside `TAG_DECOY`, in the
+   wiped vault. An adversary holding the burned device cannot name the account, so cannot query it,
+   cannot link it to the user, and cannot use it to count vaults. It is not merely inert — it is
+   unreachable.
+
+**One documentation consequence, for U6 — not a gate.** The existing disclosure says *your account*
+(singular) survives a burn. Once cover traffic ships that becomes *your account and the cover-traffic
+account it created for that vault.* One line, and it belongs with U6's `SECURITY_MODEL.md` work
+alongside the dead-air disclosure. Same class as the 0.9.3 burn-scope correction, which had to fix
+exactly this shape of claim once already.
+
 ## 🗺️ RELEASE STRATEGY — recorded 2026-07-27 (maintainer). Read before planning any unit.
 
 **The "-beta" version labels are a deliberate hedge, not a maturity claim.** Everything shipped so
