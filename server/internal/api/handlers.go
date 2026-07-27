@@ -44,13 +44,19 @@ type Handlers struct {
 
 func New(store *db.Store, issuer *auth.Issuer, cfg *config.Config) *Handlers {
 	return &Handlers{
-		store:         store,
-		issuer:        issuer,
-		cfg:           cfg,
-		registerLimit: ratelimit.New(5, time.Hour, cfg.RateLimitEnabled),
+		store:  store,
+		issuer: issuer,
+		cfg:    cfg,
+		// INTERIM: still a single global bucket (keyed on Caddy's socket address,
+		// see Caddyfile — X-Forwarded-For is appended not overwritten, so trusting
+		// it as-is would let clients spoof buckets). Widened from 5/hour, which was
+		// a wall at ~2 users worldwide, while the real per-client fix (0.9.4
+		// registration proof-of-work, this branch) is built. Not a fix.
+		registerLimit: ratelimit.New(300, time.Hour, cfg.RateLimitEnabled),
 		// Challenge issuance is regpow's second DoS layer (settled decision 3):
 		// stage-1 verification is cheap, but nothing stops a client requesting
-		// unlimited challenges, so issuance itself is capped independently.
+		// unlimited challenges, so issuance itself is capped independently. Same
+		// shared-bucket caveat as registerLimit above — a separate brake, not a fix.
 		challengeLimit: ratelimit.New(300, time.Hour, cfg.RateLimitEnabled),
 		prekeyLimit:    ratelimit.New(50, time.Minute, cfg.RateLimitEnabled),
 		// Dead drops are unauthenticated — proof-of-work is the main cost, but a
