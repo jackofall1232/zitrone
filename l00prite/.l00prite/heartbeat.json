@@ -1,7 +1,7 @@
 {
  "schema_version": 2,
  "max_iterations": 6,
- "current_iteration": 5,
+ "current_iteration": 6,
  "stop_conditions": [
   "definition_of_done_met",
   "blocked",
@@ -21,7 +21,7 @@
  "last_run_time": "2026-07-27",
  "completion_status": "in_progress",
  "should_continue": false,
- "pause_reason": "U3 fix round 1 stopped on a DESIGN DECISION reserved to the maintainer: decoy-first has no legal position for the drawn gap, so R-U3-1 and R-U3-2 are in genuine conflict. A second decision is owed on the shared sendLimit, which the ordering ruling does not close.",
+ "pause_reason": "U3 fix round 2 complete (the real-frame-first ruling, implemented as a simplification). Stopping at the standing review gate: round 2 of the paired-blind review is owed before anything else, and merge/push/version remain human-only.",
  "execution": {
   "enabled": false,
   "preflight_confirmed": false,
@@ -45,6 +45,6 @@
    "stop_signal"
   ]
  },
- "active_unit": "0.10.0-beta U3 (pairing at the send choke point) on feat/0.10.0-decoy-u3-pairing. Review round 1 adjudicated: 4 P1, 2 P2, 4 P3, all four P1s one error — cover traffic and real traffic were built as peers. FIX ROUND 1 of 6 used: only U3-D landed (the finally guard made unconditional; emit's CancellationException rethrow was defeating the guard from inside the region it protects). Everything else is shaped by the ordering ruling and is held. 697 tests / 3 skipped / 0 failures, assembleDebug exit 0.",
- "loop": "STOPPED at a human review gate. Maintainer rules (1) real-frame-first vs random order and (2) the relay-side answer to the shared sendLimit -> fix round 2 implements the ruling + U3-I's R-U3-1 edge tests -> re-review. U2's own review round 3 is still owed. MERGE GATE before U3 lands: the orphaned synthetic relay account at account-delete / burn. No merge, no push, no version bump."
+ "active_unit": "0.10.0-beta U3 (pairing at the send choke point) on feat/0.10.0-decoy-u3-pairing. FIX ROUND 2 of 6 used. R-U3-1 is now paid for by ONE statement — publish() first, outside every try, no suspension in front of it. U3-A/U3-B/U3-D + U3-C self-preemption impossible by construction; U3-E/U3-G/U3-H gone; U3-F repaired and demoted; U3-I discharged (15 -> 20 tests). Pairing Mutex deleted. 701 tests / 3 skipped / 0 failures, assembleDebug exit 0, 15/15 mutations discriminated.",
+ "loop": "Fix round 2 applied -> DISPATCH PAIRED-BLIND REVIEW ROUND 2 of the WHOLE unit (0.9.3 lesson: not the delta — the class was rewritten) -> adjudicate -> fix round 3 if needed. Out of scope for that review: U3-C cross-send sendLimit (relay-side/CX23) and the empty onServerError. U2's own review round 3 still owed. U3-J closed as a merge gate; one doc line owed to U6. No merge, no push, no version bump. 4 of 6 fix rounds remain."
 }

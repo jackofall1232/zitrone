@@ -1104,24 +1104,23 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       700 B, encoded delta 635/641/645 B — recorded as a DISTRIBUTION, since the previously recorded
       "640–643 B" was a two-run interval that three fresh runs already fall outside.
 
-- [ ] ⚠️ **MAINTAINER DECISION #1 — U3 FIX ROUND 1 STOPPED HERE (2026-07-27). R-U3-1 and R-U3-2 ARE
-      IN GENUINE CONFLICT. Nothing else in U3 can be fixed until this is ruled.**
-      Full derivation: `reviews/decoy-0.10.0/u3-fix-r1-ordering-decision.md`; summary in the ledger.
-      **Decoy-first has no legal position for the drawn gap** — after the durability barrier widens
-      the process-death and `deleteContact` windows (U3-A/U3-B); before it puts the flush's own
-      duration inside the decoy-first interval and nothing else's (U3-E, the asymmetry already found
-      and removed once); inside the tail breaks D2c directly. There is no fourth position, so
-      **U3-B and U3-E are two horns of one dilemma, not independent findings.** A decoy enqueued
-      ahead of a real frame also spends its `sendLimit` permit first, and the only client-side
-      defence is UNSOUND — `sendLimit` is a server constant the relay never communicates.
-      **The ruling to make:** does the real frame always go first, conceding R-U3-2's order
-      unpredictability? Recommended yes — it makes all four P1s *structural* rather than guarded.
-      **Price it knowing what it costs:** order randomness defends against neither adversary it
-      appears to (the relay reads `recipient_id` in cleartext on both envelopes; the passive observer
-      sees two equal-length opaque frames and the same send event either way). It buys exactly one
-      thing — 5–50 ms of ambiguity in outbound→inbound correlation for an observer watching BOTH ends.
+- [x] ✅ **MAINTAINER DECISION #1 — RULED 2026-07-27 (`81761dfb`): REAL-FRAME-FIRST, ALWAYS.
+      Random ordering CONCEDED. Implemented in U3 fix round 2.**
+      Recorded as a RULING rather than a preference because the exhaustion proof makes it one: three
+      possible gap positions on a decoy-first send, all three break something, no fourth position —
+      **decoy-first has no correct implementation, not merely a worse one.** Structural beats
+      guarded. The traded property is near-worthless against the targeted adversary (5–50 ms of
+      correlation ambiguity, only for an observer watching BOTH ends, who already reads
+      `recipient_id` in cleartext on both envelopes). Residual now recorded in §2.4.
+      Derivation: `reviews/decoy-0.10.0/u3-fix-r1-ordering-decision.md`; implementation:
+      `reviews/decoy-0.10.0/u3-fix-r2-real-first.md`.
 
 - [ ] ⚠️ **MAINTAINER DECISION #2 — the rate-budget conflict, which decision #1 does NOT close.**
+      **SPLIT AND SUPERSEDED 2026-07-27 (`75f1b68d`) — see CX23 TRIP items (a) and (b) at the top of
+      this file, which are the live tracking. Kept here as the derivation only.** Fix round 2
+      confirmed the split from the code side: real-first makes SELF-preemption inside a pair
+      impossible by construction and is tested (`with one send permit left the REAL frame takes
+      it`), and cross-send preemption is the part no ordering can touch.
       **The adjudication states U3-C as an ordering defect and that is wrong.** Real-first removes
       only self-preemption inside one pair; send N's cover frame goes out 5–50 ms AFTER send N's real
       frame and can still take the last permit send N+1's real frame needed. Cross-send preemption is
@@ -1133,18 +1132,30 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       or raise the per-account `message.send` budget, or carry the message id on `rate_limited` so
       the client can mark and retry — the second is worth doing independently of decoy traffic.
 
-- [ ] **U3 fix round 1 landed exactly one fix — U3-D, the only ruling-independent one.**
-      `paired`'s `finally` is what makes "the real publish always escapes" absolute, and `emit`
-      rethrows `CancellationException` — the one throwable it does not swallow — from INSIDE the
-      region that guard protects, so on the decoy-first path the rethrow skipped the real publish.
-      Guard made **unconditional** (nested `finally`), not wrapped in a second guard.
-      New discriminator `a CancellationException out of the cover frame cannot skip the real publish`
-      drives the advertised path (a second send cancelled while WAITING for `window`); it **fails
-      against the unfixed source** (expected 1 got 0, Gradle exit 1) and passes after.
-      **697 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0, Gradle exit 0.
-      Still open from round 1: U3-A, U3-B, U3-C, U3-E, U3-F, U3-G, U3-H (all shaped by decision #1),
-      U3-I in full (one of its four gaps now covered), U3-J unchanged as the merge gate.
-      **5 of the 6 fix rounds remain.**
+- [ ] **U3 FIX ROUND 2 of 6 APPLIED (2026-07-27) — the ruling implemented as a SIMPLIFICATION.**
+      Record: `reviews/decoy-0.10.0/u3-fix-r2-real-first.md`. `paired` is now `publish()` — first
+      statement, outside every `try`, no suspension in front of it — then the cover frame after a
+      drawn gap. **U3-A, U3-B, U3-C's self-preemption half and U3-D are impossible BY CONSTRUCTION;
+      U3-E, U3-G and U3-H are GONE rather than repaired; U3-F is repaired and demoted with a
+      derivation** (a coalesced pair is one record of twice the frame length, which says exactly what
+      two frames say — cosmetic, not a leak). **The pairing `Mutex` is DELETED**, argued from its
+      callers: both of its justifications were decoy-first artefacts and it had no third caller.
+      Also deleted: `Plan`, the order bit, three branches, the latching booleans, the nested
+      `finally`. Kept and re-argued: the `finally` (an unpaired frame is a MARKED frame — R-U3-3),
+      `coverFor`'s catch-all (justification INVERTED: it now stops a cover-side throw from marking an
+      already-delivered message FAILED), and `SecureRandom` by type (the gap is now the only drawn
+      quantity and is directly observable — a `java.util.Random` becomes a device fingerprint that
+      could link two vaults' traffic).
+      **U3-I discharged in full:** 15 → 20 tests, all four named gaps covered — process death at the
+      only suspension point, a `deleteContact` queued on one `StandardTestDispatcher`, the
+      `sendLimit` boundary, and a concurrent send delayed by nothing; plus `no cover-side code runs
+      before the real publish`, which catches the quiet regression the others would miss.
+      **15 mutations, 15 discriminated, 0 survivors; all 20 tests killed by at least one.**
+      **701 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0, Gradle exit 0.
+      **The ruling left two gaps, both closed here as documentation:** §2.4 never received the
+      residual the ruling promised it, and §5's U3 row still demanded a statistical order test.
+      Still open: U3-C **cross-send** (relay-side, decision #2 above), review round 2 not dispatched.
+      **4 of the 6 fix rounds remain.**
 
 - [ ] **U3 inherits three things from U2, none of them optional.** *(Rewritten at U2 fix round 1 —
       the interface changed, so two of the three old items no longer say the right thing.)*

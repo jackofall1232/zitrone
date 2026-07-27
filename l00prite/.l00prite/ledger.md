@@ -2851,3 +2851,76 @@ under real-first most of them cease to exist rather than being repaired. Buildin
 waste the stop condition exists to prevent. U3-I is owed in full (one of its four gaps now covered).
 U3-J (synthetic-account delete) unchanged and still the merge gate. No merge, no push, no version
 bump.
+
+---
+
+## U3 FIX ROUND 2 of 6 — the real-frame-first ruling, implemented as a SIMPLIFICATION (2026-07-27)
+
+Branch `feat/0.10.0-decoy-u3-pairing`. Implements §4.3 R-U3-2 as amended in `81761dfb`.
+Full record: `reviews/decoy-0.10.0/u3-fix-r2-real-first.md`.
+
+**The whole of R-U3-1 is now one statement.** `paired` begins with `publish()` — first statement,
+outside every `try`, no suspension point in front of it, no condition guarding it. Everything else
+is downstream of a frame already on the socket.
+
+### Findings: what became of each
+
+- **IMPOSSIBLE BY CONSTRUCTION** — U3-A (a process can only die at a suspension point, and the class
+  has exactly one, strictly after the socket handoff), U3-B (no suspension between the flush and the
+  tail to interleave in), U3-C's self-preemption half (the real frame is enqueued first), U3-D (the
+  `CancellationException` rethrow now runs after the publish; its round-1 nested-`finally` repair was
+  DELETED as a decoy-first artefact).
+- **GONE, not repaired** — U3-E (the asymmetry was between two branches; there is one branch),
+  U3-G and U3-H (there is no lock).
+- **REPAIRED and demoted with a derivation** — U3-F. The finding is right: the floor separates two
+  *calls*, not two socket writes, and OkHttp owns the writer thread. What it did not derive is the
+  cost — with the order fixed, a coalesced pair is one record of twice the frame length, which says
+  exactly what two frames say and names no conversation. Cosmetic, not a leak. The kdoc now claims
+  best-effort where it claimed a guarantee.
+
+### The lock does NOT survive, argued from its callers
+
+`window` had two justifications and the ruling removed both (a real send overtaking a decoy-first
+pairing; branch symmetry so interleaving could not reveal the order). **No third caller** — `paired`
+took it and nothing else did. Deleted with the "Lock order" kdoc section. Also deleted: `Plan`, the
+order bit, three `decoyFirst` branches, the `realDone`/`decoyDone` latches, the nested `finally`,
+the `alwaysDecoyFirst()` test helper.
+
+**Kept, each still load-bearing:** the `finally` (cancellation must not leave a MARKED unpaired
+frame — R-U3-3, not a decoy-first artefact); `coverFor`'s catch-all, whose justification INVERTED —
+it now stops a cover-side throw from reaching the coordinator's `runCatching` and marking an
+already-delivered message FAILED; `SecureRandom` by type, on a rewritten argument (the gap is the
+only drawn quantity and is directly observable, so a `java.util.Random` becomes a device fingerprint
+linking pairs, sessions and — one instance per live vault session — two vaults' traffic).
+
+### Tests — the point of the round (U3-I)
+
+15 → 20. New: process death at the only suspension point; a `deleteContact` queued on ONE
+`StandardTestDispatcher` behind a running send; the `sendLimit` boundary with one permit left; a
+concurrent send delayed by nothing (replaces the lock test whose premise the ruling deleted); and
+`no cover-side code runs before the real publish` — the test for the *quiet* regression, since
+hoisting the envelope build above the publish adds no suspension and would slip past the others.
+The order test is now **absolute** (one decoy-first send is a defect) and runs on the production
+generator. Added a lag-1 autocorrelation assertion on the gap: the old suite could not distinguish a
+per-send draw from one draw reused.
+
+### Evidence
+
+- **15 mutations, 15 discriminated, 0 survivors**, rebuilt between each; **all 20 tests killed by at
+  least one mutation** — nothing in the file is inert. M3 (restore the mutex) is killed by exactly
+  one test, which is the U3-H test doing its job. M6b (each gap reused for the next send) passes
+  support, bound and mean and is killed only by the autocorrelation assertion (`r=0.512`, confirmed
+  by reading the failure message).
+- `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks`
+  from `apps/android` → **BUILD SUCCESSFUL, Gradle exit 0**, **701 tests / 3 skipped / 0 failures /
+  0 errors** (697 → 701), APK produced.
+
+### Two gaps the RULING itself left, closed here as documentation only
+
+1. The ruling says the traded property is "recorded as a residual in §2.4" — **the ruling commit did
+   not add it.** Added, plus the second-order consequence: pairs from concurrent sends may now
+   interleave on the wire, which reveals nothing.
+2. **§5's U3 row still demanded "ordering is uniformly random — pinned by a statistical test"** — the
+   unit's own merge gate contradicting the ruling that governs it. Struck and replaced.
+
+No merge, no push, no version bump. 4 of 6 fix rounds remain.
