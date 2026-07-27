@@ -110,12 +110,33 @@ fields flipping non-null.
 
 ### 2.2 Resolution — size mirroring, and structure by instantiation
 
-**Structure: the decoy is not an imitation of a real envelope, it is a real envelope.**
-It is addressed to a genuinely registered account, over a session that was genuinely established
-with one X3DH first message at setup, with monotonically advancing counters. Every cleartext field
-is populated the way the real send path populates it. There is no field whose value is a constant
-that a real message's value varies over — which is precisely the defect in the existing web
-generator.
+**Structure: the decoy is indistinguishable from a real envelope in every field the relay can read.**
+
+*(Amended 2026-07-27 after U1. This paragraph previously said the decoy "is a real envelope … over a
+session that was genuinely established with one X3DH first message", which read as requiring a real
+`SessionBuilder.process`. It does not — see §2.3, which governs. The requirement is on the
+**observable**, not on the machinery behind it.)*
+
+It is addressed to a genuinely registered account, and every cleartext field is populated the way
+the real send path populates it, with monotonically advancing counters. There is no field whose
+value is a constant that a real message's value varies over — which is precisely the defect in the
+existing web generator.
+
+**The X3DH first-message observable, and how to satisfy it.** A real conversation's first envelope
+carries non-null `ephemeral_key` and `prekey_id` (+39 B, two fields flipping non-null); every later
+one has them null. The synthetic conversation must show the same shape: **emit well-formed-looking
+values exactly once at setup, null thereafter.** A random 32-byte value (base64) for
+`ephemeral_key` is indistinguishable from a real one to anybody without the key, which is everybody.
+
+> **BINDING FOR U2 — `prekey_id` must be drawn from the range the real path actually emits, verified
+> against source, not guessed.** A value outside that range is a fingerprint. It would be the
+> existing web generator's defect reintroduced one field over — a constant-or-implausible value where
+> real traffic varies — and it would defeat the entire point of the synthetic-account approach. Read
+> the real prekey-id assignment before choosing the draw.
+
+U1 already registers a genuine prekey bundle for the synthetic account (so the relay's view of that
+account is an ordinary one) while discarding the private halves, which is exactly the right
+groundwork for this and requires no rework.
 
 **Size: the paired decoy mirrors the block count of the real message it is paired with, exactly.**
 
@@ -144,6 +165,14 @@ so a real-ratchet decoy would double the vault reseal rate.** That is battery co
 pressure against `MAX_PAYLOAD_CONTENT_BYTES`, and — worst — new write traffic through the exact
 `VaultSession` flush machinery that 0.9.1 spent eleven review rounds hardening. Random ciphertext
 buys the same observable at none of that cost.
+
+> **RULING 2026-07-27 (U1 raised the conflict; §2.3 governs). DO NOT call
+> `SessionBuilder.process` for the synthetic peer.** §2.2 as originally written could be read as
+> requiring a genuinely established X3DH session. It is not required and is now amended. Running a
+> real session establishment would write a durable ratchet session into the **real** vault's
+> `signalRecords` — a cost the §4 capacity budget does not cover — to buy an observable that random
+> bytes satisfy identically. The one field that genuinely must look real on the first envelope is
+> `prekey_id`; see the binding constraint in §2.2.
 
 **What must still be durable is the counter**, because a `message_number` that resets or regresses
 is a tell a real ratchet can never produce. Handled by **reservation**: reserve a block of 64
@@ -228,9 +257,11 @@ Source-verified against `apps/android/app/src/main/java/com/zitrone/app/crypto/v
 
 ### The signal
 
-A new optional TLV section in the per-vault sealed payload holding exactly three things: the
-synthetic account's **account id + identity keypair + session tokens**, the **counter reservation
-high-water mark**, and the **dead-air schedule seed/next-fire**. It lives inside the vault region
+A new optional TLV section in the per-vault sealed payload holding: the synthetic account's
+**account id + identity keypair + session tokens**, the **counter reservation high-water mark**, the
+**dead-air schedule next-fire**, and — *added by U1* — a **durable 429 back-off deadline**
+(`provisionNotBeforeMs`), which has no other legal home because cross-session back-off must be
+durable and durable decoy state may not be device-level. It lives inside the vault region
 and nowhere else. Nothing about decoy traffic may be written to device-level storage
 (`SettingsRepository`, `DeviceSettings`, any `SharedPreferences`) — a device-level record of how
 many synthetic accounts exist is a vault-count oracle and destroys the deniability §3 of
@@ -242,9 +273,10 @@ encrypted image.
 
 | # | Writer | When | What it writes into `TAG_DECOY` | Status |
 |---|---|---|---|---|
-| W1 | `DecoyAccountProvisioner.provision()` | First unlocked session in which decoys are enabled and no synthetic account exists | Full section: account id, identity keypair, initial tokens, counter reservation = 64, first dead-air fire time | **this unit (U1)** |
+| W1 | `DecoyAccountProvisioner.provision()` | First unlocked session in which decoys are enabled and no synthetic account exists | Account id, identity keypair, initial tokens, counter reservation = 64. **Dead-air next-fire is written `null`** — the distribution is U5's to settle (§3.2 re-framed the ping from wall-clock to in-session, so a durable wall-clock next-fire is of questionable meaning). The field exists and round-trips. | **DONE (U1)** |
+| W1b | `DecoyAccountProvisioner` on 429 | Registration rate-limited (shared global bucket) | `provisionNotBeforeMs` only — the cross-session back-off deadline | **DONE (U1)** |
 | W2 | `DecoyAccountProvisioner.refreshTokens()` | Synthetic session token refresh (7-day refresh-token TTL, `auth/jwt.go:26`) | Tokens only; all other fields untouched | **this unit (U1)** |
-| W3 | `DecoySender.reserveCounters()` | Counter reservation exhausted (once per 64 decoys) | High-water mark only, monotonically increasing | **this unit (U2)** |
+| W3 | `DecoyCounterReservation` | Counter reservation exhausted (once per 64 decoys) | High-water mark only, monotonically increasing | **allocator DONE (U1)**; the `DecoySender` that spends the values is U2 |
 | W4 | `DeadAirPinger.rearm()` | After each dead-air ping fires | Next-fire time only | **this unit (U5)** |
 | W5 | `VaultRuntime.mutate` (existing) | Every write above, without exception | Re-encodes whole `VaultState` under `stateLock` | existing |
 
@@ -255,8 +287,24 @@ encrypted image.
 | R1 | `VaultStateCodec.decode` | "a section tag I recognize; an unrecognized tag is corruption" | **NO for old builds — see hazard below.** YES for builds carrying the tag. |
 | R2 | `DecoySender.send()` | "a provisioned synthetic account exists and these counters have never been issued before" | YES — reservation is monotone; a crash skips values, never reuses |
 | R3 | `DeadAirPinger` | "next-fire is in this vault's own timeline, not the device's" | YES — per-vault, torn down at lock |
-| R4 | `SessionContainer` construction | "absent section = decoys not yet provisioned; present = ready" | YES — absence is the valid initial state, so the tag stays optional and is omitted when unset |
-| R5 | Capacity guard `VaultRuntime.capacityExceeded` | "encoded state fits `MAX_PAYLOAD_CONTENT_BYTES`" | **Requires sizing proof — see constraints** |
+| R4 | `SessionContainer` construction | ~~"absent section = decoys not yet provisioned; present = ready"~~ → **CORRECTED: readers MUST key on the credential pair, never on section presence** | **NO — FALSIFIED BY U1. See below.** |
+| R5 | Capacity guard `VaultRuntime.capacityExceeded` | "encoded state fits `MAX_PAYLOAD_CONTENT_BYTES`" | YES — measured by U1: worst-case section delta 640–643 B against a 1024 B budget |
+| R6 | `VaultState.wipe()` | **NEW (U1):** "every secret in this section is zeroed, not merely dereferenced" | The section carries a **raw private key** — dereferencing leaves it in the heap |
+| R7 | `VaultStateCodec.parsePlaintext` decode-failure catch | **NEW (U1):** "everything decoded so far is wiped on a mid-parse throw" | Previously wiped only the partial signal map; had to extend to the decoy section's keypair |
+
+**R4 FALSIFIED — and this is the spec-first discipline working, not a spec failure.** U1 needed a
+durable 429 back-off deadline (`provisionNotBeforeMs`), because "back off across sessions" means
+durable and the no-device-storage rule leaves the section as its only legal home. That makes the
+section a **sixth** field where this table said three, and it breaks R4 directly: a section can now
+be *present* while holding nothing but a deferral, so **presence no longer implies readiness.** Every
+reader must key on the credential pair being non-null.
+
+Worth recording plainly, because it is the argument for the whole gate: **the table was wrong, and
+implementation caught it — not review, two rounds later.** That is the round-12 pattern (changing
+what a durable signal MEANS) surfacing at the cheapest possible moment. R6 and R7 are the same story
+from the other direction: two obligations this table simply missed, found by writing the code against
+it. A table that survives implementation unchanged has usually not been tested; one that gets
+corrected has done its job.
 
 ### THE HAZARD THIS TABLE EXISTS TO CATCH
 
@@ -282,6 +330,17 @@ rule on:
 
 **RULING: option (a).** One-way format bump, disclosed as 0.9.1's fresh-install-only decision was.
 
+> **⚠️ BLAST RADIUS NARROWED BY U1 — the break is NOT universal.** The hazard above is written as
+> though every 0.10.0 vault becomes unreadable by 0.9.x. **It does not.** U1's codec omits the
+> section entirely when the decoy state is empty — `state.decoy?.takeUnless { it.isEmpty }` — so
+> `TAG_DECOY` appears **only in a vault that has actually generated cover traffic.** A user who never
+> generates any keeps a vault that opens fine on 0.9.x.
+>
+> Option (a) still stands and the ruling is unchanged; only its scope is smaller than priced. **The
+> disclosure in §4.1 is narrowed accordingly** — an overstated disclosure is its own dishonesty, and
+> scaring every user about a break most of them will never hit is not caution, it is inaccuracy in
+> the direction that happens to feel safe.
+
 ### 4.1 Storage-format-stability gate — ANSWERED, not deferred a third time
 
 The standing gate (`[[zitrone-storage-format-stability-gate]]`) says: before external testers,
@@ -299,10 +358,17 @@ So, shipping **with** 0.10.0, in release notes and in `SECURITY_MODEL.md`:
 
 > **Your vault format is not yet stable.** Zitrone is in beta and the on-disk vault format is still
 > changing. A future release may require a fresh install, which **erases every vault on the device
-> and everything in them** — contacts, sessions, settings. There is no migration and no export. This
-> release, 0.10.0-beta, is one such change: **vaults created by 0.10.0 cannot be opened by 0.9.x,
-> and downgrading will present them as corrupt.** Do not keep anything in Zitrone that you cannot
-> afford to lose.
+> and everything in them** — contacts, sessions, settings. There is no migration and no export. Do
+> not keep anything in Zitrone that you cannot afford to lose.
+>
+> **What 0.10.0-beta specifically changes:** once a vault has generated cover traffic, it can no
+> longer be opened by 0.9.x — downgrading will present that vault as corrupt. A vault that has never
+> generated cover traffic is unaffected and still opens on 0.9.x.
+
+*(Narrowed 2026-07-27 after U1. The first draft said flatly that "vaults created by 0.10.0 cannot be
+opened by 0.9.x", which is false: the tag is written only once cover traffic has actually been
+generated. Corrected rather than left overbroad — the deliver-then-claim rule cuts both ways, and a
+disclosure that overstates harm is as inaccurate as one that understates it.)*
 
 **And the condition under which the promise flips**, so this is a commitment and not an indefinite
 disclaimer: **stability is committed to when a migration path exists and has been exercised across
@@ -313,6 +379,35 @@ and it should now be closed in `todos.md` rather than carried forward a fourth t
 **Sequencing note:** the disclosure is a *precondition* for external testers, not for this release's
 merge. But 0.10.0 must not ship without it, because 0.10.0 is the release that makes the second
 break real.
+
+### 4.2 Account deletion and the synthetic account — RULED 2026-07-27 (raised by U1)
+
+`deleteAccountAndWipe` deletes the real relay account and obliterates the vault image. A provisioned
+synthetic account survives on the relay, because nothing today knows to delete it.
+
+**RULING: delete it too — best-effort, fail-open, and silent.**
+
+The binding constraint is not the deletion, it is what the deletion may not touch:
+
+> **The synthetic delete must never block, delay, or complicate the real account's delete path.**
+> That path is the two-marker no-remanence state machine that took **sixteen review rounds** to
+> harden, and every one of those rounds found a real defect. A decoy cleanup is not worth one unit
+> of added risk to it. Concretely: the synthetic delete may not gate the real delete, may not extend
+> the real delete's critical section, may not introduce a new failure mode into it, and may not add
+> a durable marker of its own. If the two cannot be sequenced without entangling them, **drop the
+> synthetic delete** — the residual is inert.
+
+**Failure is silent and the orphan is a documented accepted residual.** Fail-open is correct here
+for a specific reason, not as a convenience: an unused registered account is **inert**. It is an
+`accounts` row holding an identity public key and nothing else. The relay does no request logging
+(by design), envelopes are deleted on ack, and `delivery_receipts` carry only `SHA-256(message_id)`
+with no account linkage. There is no history attached to it and nothing on the wiped device points
+at it. So a failed synthetic delete leaks nothing beyond what §1 already concedes the relay
+knows — and §1 already concedes the relay knows everything that matters here.
+
+Document the residual in `SECURITY_MODEL.md` with the feature (U6), in one honest line: deleting
+your account removes it from the relay, and best-effort removes the cover-traffic account it
+created; if that second removal fails it leaves an empty account behind that is linked to nothing.
 
 ### CRASH ATOMICITY — to be verified, not assumed
 
@@ -349,8 +444,8 @@ next begins. No version bump, no push, nothing merged without explicit maintaine
 
 | Unit | Scope | Gate to clear before the next unit |
 |---|---|---|
-| **U1** | Synthetic account provisioning + `TAG_DECOY` codec section. Lazy registration, credential storage, token refresh, capacity budget. | Format-break decision (§4 hazard) ruled on by maintainer **before code**. Crash-between-register-and-commit test matrix green. Provisioning is lazy, backs off across sessions on 429, and degrades silently to decoys-off on failure (§6.2a). |
-| **U2** | Decoy envelope builder + counter reservation. Random-ciphertext blob at a requested block count; field population mirroring the real send path. | Byte-level test asserting a decoy frame is indistinguishable field-for-field from a real frame of the same block count, *including* that no field is a constant where a real message varies. |
+| **U1** ✅ | Synthetic account provisioning + `TAG_DECOY` codec section. Lazy registration, credential storage, token refresh, capacity budget, counter-reservation allocator. **Built, deliberately UNWIRED** — nothing constructs it, so the branch cannot spend a registration. | **DONE** on `feat/0.10.0-decoy-u1-provisioning`. 645 tests / 0 failures, `assembleDebug` exit 0, both re-verified independently. Capacity measured: 640–643 B worst case against a 1024 B budget. **Paired-blind review of the WHOLE unit still owed before merge** — review the unit, not the delta. |
+| **U2** | Decoy envelope builder. Random-ciphertext blob at a requested block count; field population mirroring the real send path; the one-time X3DH-shaped first envelope. *(Counter reservation moved to U1.)* | Byte-level test asserting a decoy frame is indistinguishable field-for-field from a real frame of the same block count, *including* that no field is a constant where a real message varies. **`prekey_id` drawn from the real path's actual range, verified against source — see the binding constraint in §2.2.** Must **not** call `SessionBuilder.process` (§2.3 ruling). |
 | **U3** | Pairing at the send choke point. Random order (decoy-first / real-first), few-ms stagger, block-count mirroring. Insertion inside `MessagingCoordinator`'s confined worker, above `ws.sendMessage`. | Ordering is uniformly random and stagger is drawn per-send — pinned by a statistical test, not by inspection. Real-send latency and the `flushSendRatchet` durability barrier provably unaffected. |
 | **U4** | Synthetic-side receive: second WS connection for the synthetic account, deliver → ack → burn at ~30 ms, occasional send-back so the exchange is bidirectional. | Decoys never surface in UI, notifications, or unread counts. Notification parity §7 re-verified with decoys active. |
 | **U5** | Dead-air ping within a session (§3.2), single block, per-vault schedule. | Fires only in a live session; torn down at lock with everything else. |
@@ -379,11 +474,20 @@ a dummy light, and the copy earns that by naming what it does not cover.
 
 ## 6. Dependencies and interactions the maintainer must rule on
 
-1. **Registration PoW × synthetic accounts.** `regpow` is **not in this tree** — it lives on the
-   unmerged `origin/cx23/0.9.4-registration-pow` branch; `Register` (`handlers.go:159-203`) has no
-   PoW check today. Once it lands at D=5 (~2.8 s on a floor device), **provisioning a synthetic
-   account costs a second PoW solve per vault.** U1 must either reuse the existing solver with its
-   progress UI or provision in the background with a defined failure path. Decide before U1.
+1. **Registration PoW × synthetic accounts. — CORRECTED 2026-07-27 by U1; the original text was
+   wrong about the client.** It said `regpow` is "not in this tree". That is true only of the
+   **relay** (`handlers.go` `Register` still has no PoW check on `main`). On the **client** it
+   shipped in 0.9.4-beta: `apps/android/.../crypto/RegistrationPow.kt` is on `main` and wired into
+   `MessagingCoordinator.bootstrapLoop()`, with `ApiClient.registrationChallenge()` /
+   `register(powProof=)` alongside it. The error came from generalizing a server-only research pass
+   to both sides.
+
+   Consequence, and it **answers §6.2a's "decide before U1"**: the synthetic registration mirrors
+   the real path — fetch a challenge, treat a 404 as "this relay predates PoW, register proofless",
+   otherwise solve — and the solve is **background, with no progress UI and silent failure**. The
+   pitcher screen is foreclosed by the hard constraint "never block onboarding, never surface an
+   error implying a fault". **Deliberately not `RegistrationPowSolveRecorder`**, which writes
+   device-level telemetry and would violate the no-device-storage rule. *(Resolved and built in U1.)*
 2. **The register limiter — registration volume is a SHARED GLOBAL RESOURCE, not per-client
    headroom.** `registerLimit` was widened 5/hour → **300/hour** on 2026-07-26 in `20ade12b`
    (maintainer-verified rebuilt, redeployed, and live on CX23; not independently verifiable from
@@ -397,14 +501,17 @@ a dummy light, and the copy earns that by naming what it does not cover.
    **`ProxyHeader` is therefore confirmed unsafe as-is**, and the real fix (non-IP keying) remains
    open as CX23 P2.
 
-   **Two corrections owed outside this spec, found while verifying the above:**
-   - `20ade12b` lives **only** on `origin/cx23/urgent-8443-and-ratelimit-interim` and is **not
-     merged to main** — main still reads `ratelimit.New(5, time.Hour, ...)` at `handlers.go:48`.
-     A relay redeploy built from main silently reverts both the widening **and** the 8443
-     exposure fix. This should be merged or explicitly pinned before anything else touches the
-     relay.
-   - `l00prite/.l00prite/todos.md:592` still records P2 as unchecked at 5/hour. The ledger is
-     stale relative to the deployed box and should be reconciled.
+   **Two corrections that were owed when this was written — both now CLOSED (2026-07-27):**
+   - ~~`20ade12b` is not merged to main~~ → **merged** (`0370710f`, `go build`/`go vet` clean, pushed).
+     `main` now reads `ratelimit.New(300, time.Hour, cfg.RateLimitEnabled)` at `handlers.go:54`, and
+     the 8443 publish is bound to `127.0.0.1`. The "a redeploy from main silently reverts it"
+     warning no longer applies.
+   - ~~`todos.md` still records P2 unchecked at 5/hour~~ → **reconciled** (`1dee76f0`), with the
+     pattern recorded in `failures.md` as a binding process fix: *a fix recorded only in commit
+     history is not recorded.*
+
+   **Unchanged and still open:** the `c.IP()` keying (`handlers.go:166`), so the bucket is **still
+   one global bucket worldwide** and CX23 P2 remains open. All the budget arithmetic below stands.
 
    **Why this constrains 0.10.0.** Because the bucket is global, decoy provisioning does not spend
    a client's own headroom — it spends everyone's. Budget in §6.2a.
