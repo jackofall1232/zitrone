@@ -326,8 +326,18 @@ class DecoyAccountProvisioner private constructor(
             identity = DecoyIdentity.generateIdentity()
             // Same order as an ordinary boot: challenge → solve → register → session. A null
             // challenge means the relay has no PoW endpoint, so register without a proof.
-            // ⚠️ NO LOCK IS HELD HERE. This is seconds of proof-of-work and HTTP; holding the
-            // section monitor across it would stall the counter allocator on the send path.
+            // ⚠️ NO LOCK IS HELD HERE. This is seconds of proof-of-work and HTTP, and the section
+            // monitor serializes every read-modify-write over `TAG_DECOY`: holding it across this
+            // window would block `DecoyAuthStore`'s token writers (a mid-session 401 refresh),
+            // `clearAccount`, and any other provisioner sequence for the whole solve — and, once
+            // U3 wires the send path, that path's own section reads behind it. The commit's
+            // critical section below is where the lock belongs, because that is the sequence whose
+            // check must be atomic with its write.
+            //
+            // ⚠️ The reason above was rewritten in fix round 3. It used to read "would stall the
+            // counter allocator on the send path" — the allocator was DELETED in round 2 with the
+            // idle ping, so the justification named a component that no longer exists while the
+            // conclusion it justified was still right for the reasons now stated.
             val challengeToken = relay.registrationChallenge()
             val powProof = challengeToken?.let {
                 powSolver.solve(it, DecoyIdentity.publicKeyBytes(identity.identityKeyPair))

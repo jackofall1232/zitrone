@@ -28,6 +28,35 @@ enumerated first. The durable signal here is **`VaultState` TLV section `TAG_DEC
 > **written ahead** of any relay contact rather than in response to a failure, which removes the
 > absolute-capacity edge instead of patching it. Corrections are marked **[R2]**.
 
+> # ⚠️ CORRECTED IN PLACE BY U2 FIX ROUND 3 (2026-07-27) — THE COUNTER STATE IS GONE. READ THIS FIRST.
+>
+> **This table is not a historical record. It is the live contract U3 and U4 are required to consult
+> before implementing against `TAG_DECOY`, and both are unwritten.** Until this correction it still
+> specified `counterHighWater`, `deadAirNextFireAtMs`, writers W3 and W4, `DecoyCounterReservation`,
+> the allocator's uniqueness and locking rules, and a counter reset inside `clearAccount` — **all of
+> which U2 round 2 DELETED** when the maintainer cut the idle/dead-air ping (spec §3.0). An
+> implementer following the table faithfully would have rebuilt the allocator and re-added both
+> fields to a durable vault surface, which is the opposite of what the code now says.
+>
+> The removed rows are **struck through in place with the reason**, the way this document already
+> strikes its own superseded text and the way the spec strikes its W3/W4 rows. They are not deleted,
+> because a contract that quietly rewrites itself teaches the next unit nothing — but they are no
+> longer readable as instructions.
+>
+> **THE CANONICAL STATEMENT OF `TAG_DECOY`'s FIELD SET IS `DecoyState`'s KDOC IN
+> `crypto/vault/VaultState.kt`, NEXT TO THE FIELDS THEMSELVES.** It carries the "do not re-add a
+> counter field for a paired decoy" instruction and the reason. **This table's field list is a
+> derived copy: on any disagreement the kdoc wins, and any field-set change is made THERE first.**
+> That is the same canonical-pointer device fix round 4 used for the tag-write trigger (whose four
+> rows now live in the codec kdoc beside the `takeUnless { it.isEmpty }` that produces them) — and
+> it is used here for the same reason: **this is the ninth recurrence in this feature of a correction
+> landing where the reviewer pointed while the parallel copy survived.** Two independent reviewers
+> found this one. The rule in `failures.md` — *grep for every restatement, especially the compressed
+> and summary ones* — was written inside this very document, in the `[R5]` block below, and this
+> document was then the copy that survived.
+>
+> Corrections from this round are marked **[U2R3]**.
+
 Source-verified against `main` @ `d44616c5`:
 `crypto/vault/VaultState.kt` (tags `0x01`–`0x05` at 158–162; strict-v1 unknown-tag throw at 286 under
 the comment at 285; `VaultState.wipe()` at 83–92; `parsePlaintext` decode-failure wipe at 311–320),
@@ -50,8 +79,8 @@ A new **optional** TLV section in the per-vault sealed payload. It holds, for th
 | `accountId` | nullable utf8 | the synthetic relay account's UUID | W1, **W2c (clear) [R1]** |
 | `identityKeyPair` | nullable bytes | libsignal `IdentityKeyPair.serialize()` — the synthetic account's long-term identity (PRIVATE key material) | W1, **W2c (clear) [R1]** |
 | `accessToken` / `refreshToken` | nullable utf8 | that account's session tokens | W1, W2, W2b, **W2c (clear) [R5]** — round 2's G6 made the clear load-bearing (tokens must die with the account, or a cleared account keeps working bearer credentials until expiry); its omission here read as if `clearAccount` left tokens standing |
-| `counterHighWater` | i64 | counter-reservation high-water mark: every value `< counterHighWater` is considered ISSUED | W3, **W2c (reset) [R1]** |
-| `deadAirNextFireAtMs` | nullable i64 | dead-air schedule next-fire (field reserved; **U1 never sets it**) | W4 (U5) |
+| ~~`counterHighWater`~~ | ~~i64~~ | ~~counter-reservation high-water mark: every value `< counterHighWater` is considered ISSUED~~ **[U2R3] FIELD DELETED.** The paired decoy mirrors the covered envelope's `message_number` (arithmetic, not taste: base64 quantises to 4 characters, so the `ciphertext` field cannot absorb a 1–3 byte decimal-width difference), which left the allocator with no consumer on the paired path; its last candidate consumer, the idle ping, was **cut** (spec §3.0). U2 R2 deleted the field, `DecoyCounterReservation` and its test class rather than leave an unreachable writer on a durable vault surface. **Do not re-add it** — see `DecoyState`'s kdoc. | ~~W3, W2c (reset)~~ — **no writers** |
+| ~~`deadAirNextFireAtMs`~~ | ~~nullable i64~~ | ~~dead-air schedule next-fire (field reserved; **U1 never sets it**)~~ **[U2R3] FIELD DELETED** with the ping that was its only consumer (spec §3.0). U5 does not exist. | ~~W4 (U5)~~ — **no writers** |
 | `provisionNotBeforeMs` | nullable i64 | cross-session provisioning deferral — ~~after a 429 **or a capacity failure [R1]**~~ **[R2] written AHEAD of every attempt that reaches the relay sequence** (**added by U1 — see “Deviations”**) | W1 (retires on success), W1b (writes), W1c (restores), **W1d (retires on a spent-nothing failure) [R3, listed R4]** |
 
 It lives inside the vault region and nowhere else. **Nothing decoy-related may be written to
@@ -69,27 +98,31 @@ grow, so the section's presence or absence is not observable from the encrypted 
 
 | # | Writer | When | What it writes into `TAG_DECOY` | Durable? | Status |
 |---|---|---|---|---|---|
-| W1 | `DecoyAccountProvisioner.provision()` | first unlocked session in which provisioning is requested, no synthetic account exists, and no deferral is in force | **ONE `mutate`** setting `accountId` + `identityKeyPair` + both tokens together, **and `provisionNotBeforeMs = null`** — ~~a success is the only thing that retires W1b's write-ahead deferral~~ **[R3/R4] W1d retires it too, on a failure that spent nothing.** Success is the only retirement that happens *while writing something*, which is why it rides in this mutate rather than a second one: there is no window where the credentials are durable and the deferral is not. Never a partial credential set — **[R4] and the codec now enforces that** (`requireDecoyCredentialsPaired` refuses an id without a key, a key without an id, or tokens without an id, on encode **and** decode), so the pairing is a property of the format and not only of this writer's care. **`counterHighWater` is NOT written here [R2]** — it stays 0 until W3 first reserves. | **YES [R1]** — `flushBeforeAck` before it returns. A throw ⇒ returns `false` ("not this session"); the credentials stay live+scheduled, the key is NOT wiped, the next session finds them rather than re-registering, and ~~**[R2]** an instance-scoped~~ **[R3] a per-runtime `Gate`-scoped** `credentialsUnconfirmed` flag keeps `canSend()` false for **every** provisioner over that runtime, so neither a later call nor a second instance can flip to ready on never-flushed bytes (instance scope was H3) | **this unit (U1)** |
+| W1 | `DecoyAccountProvisioner.provision()` | first unlocked session in which provisioning is requested, no synthetic account exists, and no deferral is in force | **ONE `mutate`** setting `accountId` + `identityKeyPair` + both tokens together, **and `provisionNotBeforeMs = null`** — ~~a success is the only thing that retires W1b's write-ahead deferral~~ **[R3/R4] W1d retires it too, on a failure that spent nothing.** Success is the only retirement that happens *while writing something*, which is why it rides in this mutate rather than a second one: there is no window where the credentials are durable and the deferral is not. Never a partial credential set — **[R4] and the codec now enforces that** (`requireDecoyCredentialsPaired` refuses an id without a key, a key without an id, or tokens without an id, on encode **and** decode), so the pairing is a property of the format and not only of this writer's care. ~~**`counterHighWater` is NOT written here [R2]** — it stays 0 until W3 first reserves.~~ **[U2R3] moot — the field is gone.** | **YES [R1]** — `flushBeforeAck` before it returns. A throw ⇒ returns `false` ("not this session"); the credentials stay live+scheduled, the key is NOT wiped, the next session finds them rather than re-registering, and ~~**[R2]** an instance-scoped~~ **[R3] a per-runtime `Gate`-scoped** `credentialsUnconfirmed` flag keeps `canSend()` false for **every** provisioner over that runtime, so neither a later call nor a second instance can flip to ready on never-flushed bytes (instance scope was H3) | **this unit (U1)** |
 | W1b | `DecoyAccountProvisioner.reserveBackoff()` — **WRITE-AHEAD [R2]** | ~~relay answers `register` with 429~~ **BEFORE any relay contact**, on every attempt that passes the deferral check | `provisionNotBeforeMs` only; credentials untouched (still absent) | **YES** — "back off ACROSS sessions" is a durability claim, so mutate **and** flush. ~~Best-effort~~ **[R2] NOT best-effort: a failure means no registration is spent at all.** A capacity failure here is reverted, so a cover-traffic write never leaves `capacityExceeded` set over the real inbound path | **this unit (U1)** — see Deviations |
 | W1c | `DecoyAccountProvisioner.revertSection()` on **`VaultCapacityException`** | the credential commit does not fit the fixed region | restores the section to **exactly what the same critical section read immediately before the commit** — which already carries W1b's durable deferral, so there is no separate "and defer" step and no bare-revert branch left [R2] | **NO, and it needs none [R2]** — the restored value IS what is already on disk; the re-encode's only job is clearing `capacityExceeded` | **this unit (U1)** — **NEW [R1], reshaped [R2]** |
 | W1d | `DecoyAccountProvisioner.clearBackoff(deferral)` — **the retirement W1b's deferral gets when it protected nothing [R3]** | the attempt fails **before** `register` is entered: offline challenge fetch, DNS failure, failed PoW, a local crypto fault (bundle generation), a cancelled scope | `provisionNotBeforeMs` → null, and nothing else. **Compare-and-clear under the section lock**: retires only the deadline THIS attempt wrote, so a deferral another writer put there meanwhile is left standing — the same "only restore what you read under this lock" rule W1c follows. Emptying the holder is what makes the codec omit `TAG_DECOY` and gives the vault back its 0.9.x readability | **YES** — mutate **and** flush, mirroring W1b: a scheduled-only clear is undone by the same crash the write was made to survive. A throw leaves the deferral standing, which is the safe direction | **this unit (U1 R3)** — **row added R4; a genuine durable writer the WRITER inventory omitted, so W1 read as the only retirement path** |
 | W2 | `DecoyAccountProvisioner.refreshTokens()`, via **`DecoyAuthStore.storeTokensForAccount(accountId, …)`** **[R5]** ~~`storeTokens`~~ | session mint at unlock; refresh on a mid-session 401 (refresh-token TTL is 7 days, `auth/jwt.go:26`) | tokens only; all other fields untouched. **The account id is re-read and compared under the section lock, and a mismatch is refused** — this is what closes H4 (snapshot → seconds of network → write, with a `clearAccount()` in the window resurrecting bearer credentials for a cleared account). **A future unit must NOT wire refresh through the bare `storeTokens`**, which writes whatever account is current rather than the one that was refreshed, reopening H4. | **NO, deliberately** — coalesced, exactly like `VaultAuthStore`: tokens are re-mintable from the stored identity key | **this unit (U1)**, path corrected **[R5]** |
 | W2b | `DecoyAuthStore.clearTokens()` | caller drops the synthetic session | both token fields → null; the holder is NOT created if absent | NO — coalesced, same reasoning as W2 | **this unit (U1)** — **missing from the first table [R1]** |
-| W2c | `DecoyAuthStore.clearAccount()` | caller retires the synthetic account | zeroes the identity key in place, then nulls `accountId` + `identityKeyPair` **+ `accessToken` + `refreshToken` [R2]** **and resets `counterHighWater` to 0**. Under the SECTION lock [R2]. | NO — coalesced. A lost clear re-exposes credentials the caller wanted gone; acceptable only because the array was already zeroed in RAM and the next writer re-schedules. **U2+ must flush if it ever means "account destroyed"** | **this unit (U1)** — **missing from the first table [R1]**; tokens added **[R2]** |
-| W3 | `DecoyCounterReservation.next()` | reservation exhausted, or the durable mark no longer matches the held block (once per 64 issued counters) | `counterHighWater` only, **monotonically increasing** | **YES [R1]** — `mutate` then `flushBeforeAck`, and **only then** does the RAM cursor advance. ~~"the reservation is written durably by the mutate"~~ was the round-1 error | **this unit (U1)** — moved from U2 by the U1 task brief |
-| W4 | `DeadAirPinger.rearm()` | after each dead-air ping fires | `deadAirNextFireAtMs` only | U5 decides | **U5 — not built here** |
-| W5 | `VaultRuntime.mutate` (existing) | every write above, without exception | re-encodes the WHOLE `VaultState` under `stateLock` and **SCHEDULES** one atomic reseal | **NO — this is the correction.** ~~"schedules one atomic reseal" read as durability~~; `VaultSession.update` marks dirty and returns | existing |
-| W6 | `VaultRuntime.flushBeforeAck` (existing) | W1, W1b, **W1d [R4]**, W3 (**not** W1c [R2]) | nothing of its own — it forces the scheduled payload to disk synchronously | **it IS the durability**; refuses while `capacityExceeded` is set; a throw means DO NOT ACK / never issued | existing — **new row [R1]** |
+| W2c | `DecoyAuthStore.clearAccount()` | caller retires the synthetic account | zeroes the identity key in place, then nulls `accountId` + `identityKeyPair` **+ `accessToken` + `refreshToken` [R2]** ~~**and resets `counterHighWater` to 0**~~ **[U2R3] no counter reset — there is no counter.** Under the SECTION lock [R2]. | NO — coalesced. A lost clear re-exposes credentials the caller wanted gone; acceptable only because the array was already zeroed in RAM and the next writer re-schedules. **U2+ must flush if it ever means "account destroyed"** | **this unit (U1)** — **missing from the first table [R1]**; tokens added **[R2]** |
+| ~~W3~~ | ~~`DecoyCounterReservation.next()`~~ | ~~reservation exhausted, or the durable mark no longer matches the held block (once per 64 issued counters)~~ | ~~`counterHighWater` only, **monotonically increasing**~~ | ~~**YES [R1]** — `mutate` then `flushBeforeAck`, and **only then** does the RAM cursor advance~~ | **[U2R3] WRITER DELETED.** The class, its allocator registry, its lock participation and its whole test class are gone. **A future unit that finds itself wanting this writer back has almost certainly reintroduced a decoy that carries a counter of its own — which is a decoy whose frame length can differ from the envelope it covers.** Read `DecoyEnvelopeBuilder`'s kdoc before acting on that impulse. |
+| ~~W4~~ | ~~`DeadAirPinger.rearm()`~~ | ~~after each dead-air ping fires~~ | ~~`deadAirNextFireAtMs` only~~ | ~~U5 decides~~ | **[U2R3] WRITER DELETED — U5 is CUT** (spec §3.0, maintainer decision 2026-07-27). There is no dead-air ping and no unit that schedules one. |
+| W5 | `VaultRuntime.mutate` (existing) | every LIVE write above, without exception | re-encodes the WHOLE `VaultState` under `stateLock` and **SCHEDULES** one atomic reseal | **NO — this is the correction.** ~~"schedules one atomic reseal" read as durability~~; `VaultSession.update` marks dirty and returns | existing |
+| W6 | `VaultRuntime.flushBeforeAck` (existing) | W1, W1b, **W1d [R4]** (**not** W1c [R2]; ~~W3~~ **[U2R3] deleted**) | nothing of its own — it forces the scheduled payload to disk synchronously | **it IS the durability**; refuses while `capacityExceeded` is set; a throw means DO NOT ACK / never issued | existing — **new row [R1]** |
 
 **W5 is not a formality, and W6 is the half it was missing.** There is no decoy-specific persistence
-path: `DecoyAuthStore` and `DecoyCounterReservation` reach disk only through `VaultRuntime.mutate`,
+path: `DecoyAuthStore` ~~and `DecoyCounterReservation`~~ **[U2R3]** and the provisioner reach disk
+only through `VaultRuntime.mutate`,
 exactly as `VaultAuthStore` does — but reaching `mutate` only makes a write *scheduled*. Every U1
 write whose correctness depends on surviving process death pairs it with `flushBeforeAck`, and the
 table now states per writer which ones those are.
 
 Lock order stays `decoy SECTION lock → runtime.stateLock → session locks → storage lock`
 (~~the reservation lock is a new OUTERMOST lock held by exactly one class~~ **[R2] it is held by
-THREE**: the allocator, `DecoyAuthStore`'s writers, and the provisioner's commit; nothing takes
+THREE**: ~~the allocator,~~ `DecoyAuthStore`'s writers, and the provisioner's commit — **[U2R3] TWO,
+the allocator having been deleted; the lock still earns its place, and that was re-verified by
+review, because both remaining participants run multi-call read-modify-write sequences over the
+section and must exclude each other**; nothing takes
 `runtime.stateLock` and then the section lock, and no decoy component is ever called from inside a
 session persist sink). **Adding `flushBeforeAck` does not change that** — it takes `stateLock`,
 RELEASES it, then runs the disk-bound `flushNow` (`VaultRuntime.kt:168-186`), so holding the section
@@ -101,17 +134,24 @@ lock across it nests no deeper than `mutate` already did.
 `TAG_DECOY`, not fields.** `stateLock` makes each individual `mutate` atomic, which is the wrong
 granularity, because every correctness argument in this unit spans more than one runtime call:
 
+**[U2R3] The allocator rows below are HISTORY — that class no longer exists.** They are kept because
+they are the derivation of a lock that is still live and still load-bearing, and deleting the reason
+a mechanism exists is how the next round deletes the mechanism. **The lock's remaining justification
+does not depend on them:** `DecoyAuthStore`'s writers and the provisioner's commit each run a
+read-modify-write sequence over the section that must be atomic against the other, and round 2's
+review re-verified that independently of the allocator.
+
 | Sequence | The two calls | What round 1 shipped | What round 2 found |
 |---|---|---|---|
-| allocator | `read` the durable mark → decide the block is current → `mutate`/spend | a private lock + a staleness check | `clearAccount()` takes no such lock, so a reset lands between check and spend; the allocator emits `1, 0` — a cleartext counter regression |
-| provisioner | `read` the section → (seconds of PoW + HTTP) → `mutate` credentials → restore on overflow | a snapshot taken before the network | any concurrent decoy write in that window is clobbered wholesale, including a counter reservation — an OLDER high-water mark restored, values reissued |
-| auth store | `clearAccount()` resets the mark the allocator just checked | no lock at all | see row 1 |
+| ~~allocator~~ **[U2R3] deleted** | ~~`read` the durable mark → decide the block is current → `mutate`/spend~~ | ~~a private lock + a staleness check~~ | ~~`clearAccount()` takes no such lock, so a reset lands between check and spend; the allocator emits `1, 0` — a cleartext counter regression~~ |
+| provisioner | `read` the section → (seconds of PoW + HTTP) → `mutate` credentials → restore on overflow | a snapshot taken before the network | any concurrent decoy write in that window is clobbered wholesale ~~, including a counter reservation — an OLDER high-water mark restored, values reissued~~ **[U2R3]** — today the loss is a concurrent token write or a `clearAccount`, which is enough |
+| auth store | ~~`clearAccount()` resets the mark the allocator just checked~~ **[U2R3]** `storeTokensForAccount` reads the account id, does a network round-trip, then writes — with `clearAccount` free to land in the window (H4) | no lock at all | see row 1 |
 
 Both are the same defect: **state sampled outside the lock that protects it.** More checks inside the
 pieces cannot fix it; one lock across each whole sequence does. So:
 
-- the allocator's `lock` IS the section lock (not a private one), held from the mark read through
-  the mutate, the flush, and the RAM cursor advance;
+- ~~the allocator's `lock` IS the section lock (not a private one), held from the mark read through
+  the mutate, the flush, and the RAM cursor advance;~~ **[U2R3] deleted with the allocator;**
 - `DecoyAuthStore`'s three writers take it (reads do not — `runtime.read` is already atomic and a
   caller acting on a stale single value is the caller's own race);
 - the provisioner takes it around the **whole commit critical section**, and reads the value its
@@ -122,31 +162,38 @@ pieces cannot fix it; one lock across each whole sequence does. So:
 Lifetime: weakly keyed on the runtime, values hold no back-reference, nothing durable, no timers —
 the same argument that cleared the allocator registry, and it evaporates with the session.
 
-### Allocator uniqueness — new invariant [R1]
+### ~~Allocator uniqueness — new invariant [R1]~~ — **[U2R3] SECTION DELETED**
 
-**A runtime must have at most ONE live counter allocator.** Two allocators each hold their own RAM
-block over one durable mark and can interleave `0, 64, 1` — a counter REGRESSION on the wire, which
-is the exact fingerprint the reservation exists to prevent. Round 1 found this enforced only by a
-kdoc sentence, i.e. not enforced. Two structural defences now:
+**There is no counter allocator.** `DecoyCounterReservation` was removed in U2 round 2 along with
+`counterHighWater`; nothing in the decoy path allocates a counter. The struck text below is kept
+only because its *shape* is the reusable lesson — "a guard whose scope does not match the resource's
+scope is not a guard", which H2/H3 then hit twice more with the provisioner's latch and its
+unconfirmed-flush flag, and which the per-runtime `Gate` now answers. **Nothing below is an
+instruction to implement anything.**
 
-1. `DecoyCounterReservation`'s constructor is **private**; `forRuntime(runtime)` returns the SAME
-   instance per runtime (weak on both sides, so nothing is kept alive), making two live allocators
-   unrepresentable rather than merely discouraged.
-2. Every `next()` re-reads the durable mark and **abandons its block unless the mark still equals
-   the block's exclusive end**. So any future writer of `counterHighWater` (W2c's reset, U5) causes
-   a fresh reservation — a skip — never a spend below the mark. **[R2] This defence only means
-   anything because the re-read and the spend are inside the SECTION lock.** As shipped in round 1
-   it was a check in one runtime call acted on in the next, with `clearAccount()` free to land
-   between them — the check passed, the mark was then reset, and the block was spent anyway. A check
-   that is not atomic with the spend is not a check.
+> ~~**A runtime must have at most ONE live counter allocator.** Two allocators each hold their own RAM
+> block over one durable mark and can interleave `0, 64, 1` — a counter REGRESSION on the wire, which
+> is the exact fingerprint the reservation exists to prevent. Round 1 found this enforced only by a
+> kdoc sentence, i.e. not enforced. Two structural defences now:~~
+>
+> ~~1. `DecoyCounterReservation`'s constructor is **private**; `forRuntime(runtime)` returns the SAME
+>    instance per runtime (weak on both sides, so nothing is kept alive), making two live allocators
+>    unrepresentable rather than merely discouraged.~~
+> ~~2. Every `next()` re-reads the durable mark and **abandons its block unless the mark still equals
+>    the block's exclusive end**. So any future writer of `counterHighWater` (W2c's reset, U5) causes
+>    a fresh reservation — a skip — never a spend below the mark. **[R2] This defence only means
+>    anything because the re-read and the spend are inside the SECTION lock.** As shipped in round 1
+>    it was a check in one runtime call acted on in the next, with `clearAccount()` free to land
+>    between them — the check passed, the mark was then reset, and the block was spent anyway. A check
+>    that is not atomic with the spend is not a check.~~
 
 ## READERS, and what each assumes `TAG_DECOY` MEANS
 
 | # | Reader | Assumes `TAG_DECOY` means | Still true after W1–W4? |
 |---|---|---|---|
 | R1 | `VaultStateCodec.decode` | "a section tag I recognize; an unrecognized tag is corruption" (`VaultState.kt:285-286`) | **NO for 0.9.x builds — see the hazard below.** YES for builds carrying the tag. |
-| R2 | `DecoyCounterReservation` / `DecoySender.send()` (U2) | "these counter values have never been issued before" | YES **[R1, corrected mechanism]** — ~~"the reservation is written durably BEFORE any value in it is spent"~~ was true as an invariant and false as a description of the code: `mutate` only scheduled it. The mark is now made durable by `flushBeforeAck` before the RAM cursor advances, so a crash SKIPS values and can never reuse one. A flush throw issues nothing. |
-| R3 | `DeadAirPinger` (U5) | "next-fire is in this vault's own timeline, not the device's" | YES — per-vault, torn down at lock. **U1 leaves the field unset**, so U5 inherits `null` = "never armed". |
+| ~~R2~~ | ~~`DecoyCounterReservation` / `DecoySender.send()` (U2)~~ | ~~"these counter values have never been issued before"~~ | **[U2R3] READER DELETED.** U2 shipped `DecoyEnvelopeBuilder`, which reads **no durable state at all** — it has no `VaultRuntime`, no store, no allocator, and takes the covered `MessageEnvelope` as its only input. "Writes nothing durable" is a fact about its type, not a property a test has to keep re-checking. |
+| ~~R3~~ | ~~`DeadAirPinger` (U5)~~ | ~~"next-fire is in this vault's own timeline, not the device's"~~ | **[U2R3] READER DELETED — U5 is CUT** (spec §3.0). |
 | R4 | provisioning entry point (`DecoyAccountProvisioner.provisionIfNeeded`) | ~~"absent section = not provisioned; present = ready"~~ ~~**CORRECTED:** "`accountId != null && identityKeyPair != null` = ready"~~ ~~**CORRECTED AGAIN [R1]:** "the credential pair is present in the live state **AND** `VaultRuntime.capacityExceeded` is clear"~~ **CORRECTED A THIRD TIME [R2] — there is no single "ready". TWO predicates:** `hasAccount()` = the credential pair is present **and nothing else**, which gates REGISTRATION; `canSend()` = `hasAccount()` ∧ this session's credential flush confirmed ∧ `!capacityExceeded`, which gates COVER TRAFFIC. | YES **only with all three corrections**. The first row is falsified by W1b (a back-off creates a section that is PRESENT and NOT ready). The second by the capacity path: an overflowing `mutate` RETAINS the credential pair unscheduled, so live presence alone answers "ready" for credentials `flushBeforeAck` refuses. **The third falsifies the R1 correction itself:** it is a SEND predicate that was gating REGISTRATION, so an UNRELATED overflow made a vault holding durable credentials re-enter the register path — a second account against a worldwide bucket, and a good durable account replaced if the flag cleared mid-flight. The R1 note calling that "conservative in the right direction" was wrong: it is harmful, and one predicate cannot serve both questions. |
 | R5 | `VaultRuntime.capacityExceeded` (via `mutate` → `encode`) | "the encoded state fits `MAX_PAYLOAD_CONTENT_BYTES`" | YES, **and it is proved, not assumed** — U1 ships a measured worst-case byte budget (`DECOY_SECTION_BUDGET_BYTES`) and a test asserting it. `capacityExceeded` fail-closes `flushBeforeAck` (`VaultRuntime.kt:176-178`), so an overflow here is a durability bug, not cosmetic. |
 | R6 | `VaultState.wipe()` (`VaultState.kt:83`) | "every held secret is zeroed / dereferenced at close" | **NO until amended — this is a NEW obligation.** `identityKeyPair` is raw private key material in a `ByteArray`, the exact class of secret `wipe()` is required to ZERO (not merely dereference). U1 amends `wipe()`. |
@@ -224,24 +271,39 @@ they are recoverable by re-minting a session from the stored identity key, so a 
 correct. **The credential set and the back-offs are not in that category and are flushed** (W1,
 W1b, W1c, W3).
 
-## THE COUNTER INVARIANT — skip, never regress
+## ~~THE COUNTER INVARIANT — skip, never regress~~ — **[U2R3] SECTION DELETED**
 
-`counterHighWater` means: **every counter value strictly below it may already have been issued.**
+**⛔ THERE IS NO COUNTER INVARIANT. NOTHING IN THE DECOY PATH ALLOCATES A COUNTER.** A paired decoy
+carries the `message_number` of the real envelope it covers, read straight off that envelope
+(`DecoyEnvelopeBuilder`), because `message_number` is a JSON *number* whose decimal width is part of
+the frame and no other field can absorb a 1–3 byte difference in it — base64 quantises to four
+characters, so the `ciphertext` field cannot. A monotonic decoy counter and "the two frames are the
+same size" are mutually exclusive, and the observable one wins. See spec §2.3/§2.4 and
+`DecoyEnvelopeBuilder`'s kdoc for the full argument, including what mirroring gives up.
 
-- Session start: RAM `next = limit = 0` — **not** the durable mark. The first `next()` re-reads the
-  mark and reserves from it. **[R5]** ~~`next = limit = counterHighWater` (durable)~~
-- `next()` when `next == limit`: `mutate { counterHighWater += 64 }`, **then `flushBeforeAck()`**;
-  the RAM `next`/`limit` advance **only after the flush returns**. Values in `[old, old+64)` are then
-  issued from RAM. **[R5]** ~~only on a successful *mutate* do the RAM `next`/`limit` advance~~
-- Crash at any point: the next session reads the persisted high-water and starts there. Unspent
-  reserved values are **skipped**.
+**If a future unit finds itself needing this section, it has designed a decoy that does not mirror a
+real envelope — stop and re-read §2.3 before adding a durable field.**
 
-A skip is invisible — a real Double Ratchet skips counters on any dropped message. A REGRESSION is a
-tell no real ratchet can produce, which is why the **durable flush** precedes the first spend and why
-the RAM advance is conditional on **`flushBeforeAck` returning**, not on the mutate. One durable
-write per 64 decoys, per §2.3.
+The mechanism is struck through below rather than deleted, because the `[R5]` note attached to it is
+a process lesson this project keeps needing and the note is meaningless without the text it corrects.
 
-> **[R5] WHY THIS BLOCK WAS WRONG UNTIL ROUND 5, AND WHY IT MATTERS MOST.** The text struck through
+> ~~`counterHighWater` means: **every counter value strictly below it may already have been issued.**~~
+>
+> ~~- Session start: RAM `next = limit = 0` — **not** the durable mark. The first `next()` re-reads the
+>   mark and reserves from it. **[R5]** `next = limit = counterHighWater` (durable)~~
+> ~~- `next()` when `next == limit`: `mutate { counterHighWater += 64 }`, **then `flushBeforeAck()`**;
+>   the RAM `next`/`limit` advance **only after the flush returns**. Values in `[old, old+64)` are then
+>   issued from RAM. **[R5]** only on a successful *mutate* do the RAM `next`/`limit` advance~~
+> ~~- Crash at any point: the next session reads the persisted high-water and starts there. Unspent
+>   reserved values are **skipped**.~~
+>
+> ~~A skip is invisible — a real Double Ratchet skips counters on any dropped message. A REGRESSION is a
+> tell no real ratchet can produce, which is why the **durable flush** precedes the first spend and why
+> the RAM advance is conditional on **`flushBeforeAck` returning**, not on the mutate. One durable
+> write per 64 decoys, per §2.3.~~
+
+> **[R5] WHY THIS BLOCK WAS WRONG UNTIL ROUND 5, AND WHY IT MATTERS MOST — and [U2R3] why it is the
+> reason this whole document had to be corrected in place rather than merely flagged.** The text struck through
 > above is **round 1's F1 misconception verbatim — "`mutate` = durable"** — the single conceptual
 > error that started this entire review arc. It survived **four fix rounds inside the very document
 > written to prevent it**, because each round corrected the detailed W3 row and left this abstract
@@ -250,6 +312,14 @@ write per 64 decoys, per §2.3.
 > **Rule, now in `failures.md`: when a misconception is corrected, grep for every restatement of it
 > — especially the compressed, abstract, or summary ones. Those are the copies that survive**,
 > because fixes are applied where the reviewer pointed and summaries are where nobody points.
+>
+> **[U2R3] And then this whole document became that copy.** U2 round 2 deleted the field, the writer
+> and the class; the deletion was applied to the code, to the spec's W3/W4 rows, and to
+> `u2-invariant-table-decision.md`'s supersession header — and the U1 table, the one artefact the
+> process *requires* an implementer to read first, kept 18 references to the deleted design. Both
+> reviewers found it independently. The rule above was written here and then broken here. That is why
+> the corrections are struck in place instead of announced in a banner, and why the field set now has
+> a single canonical home in `DecoyState`'s kdoc with this table explicitly derived from it.
 
 ## WHAT THIS WRITE MUST NOT DO
 
@@ -261,10 +331,11 @@ write per 64 decoys, per §2.3.
    parity invariant 3). U1 ships the components unwired (see “Scope boundary”), constructed from a
    `VaultRuntime` — which is already per-session — so a global is structurally impossible.
 4. **Must not survive teardown.** The provisioner is `suspend` and owns no timers; cancelling the
-   session scope cancels it. U3/U5 add the `cancelAll()`-equivalent when they add timers.
+   session scope cancels it. ~~U3/U5~~ **[U2R3] U3** adds the `cancelAll()`-equivalent when it adds
+   timers (U5 is cut; U2 owns no timer either — `DecoyEnvelopeBuilder` is a pure shaper).
 5. **Must not name a slot, vault index, or real/decoy VAULT status** in code, logs, diagnostics, or
    string resources. (`TAG_DECOY` / `Decoy*` name the *cover-traffic mechanism*, which is the spec's
-   own vocabulary — §4 W1–W4. The forbidden thing is labelling a VAULT as real vs decoy, or naming a
+   own vocabulary — §4 ~~W1–W4~~ **[U2R3] W1–W2**. The forbidden thing is labelling a VAULT as real vs decoy, or naming a
    slot index. U1 adds no string resource and no log line at all.)
 6. **Must not push `VaultState` near `MAX_PAYLOAD_CONTENT_BYTES`.** U1 delivers a measured worst-case
    budget + a headroom test, since R5 depends on it.
@@ -307,25 +378,37 @@ address — **one bucket worldwide** for clearnet and every Tor/I2P client. Ther
 
 Worst-case section contents: 36-char UUID + 65-byte `IdentityKeyPair.serialize()` + an RS256 access
 JWT (~530 chars: 342-char base64 signature over a 2048-bit key, plus header/claims) + a 43-char
-refresh token (`auth/jwt.go` `NewRefreshToken`: 32 random bytes, RawURL base64) + three fixed-width
-integers. Uncompressed section ≈ 790 B. `DECOY_SECTION_BUDGET_BYTES = 1024` with the measured
+refresh token (`auth/jwt.go` `NewRefreshToken`: 32 random bytes, RawURL base64) + ~~three~~ **[U2R3]
+one** fixed-width nullable long (`provisionNotBeforeMs`; the two counter/dead-air integers were
+deleted with the allocator and the ping).
+~~Uncompressed section ≈ 790 B.~~ **[U2R3] the raw section body is a test-asserted, deterministic
+700 B.** `DECOY_SECTION_BUDGET_BYTES = 1024` with the measured
 deflated delta asserted under it. `MAX_PAYLOAD_CONTENT_BYTES = 262 112`, and a realistic full state
 is ~8 KB (PR-D benchmark), so the headroom is ~3 orders of magnitude — the budget test exists to
 catch a FUTURE field addition, not because this one is tight.
 
-**MEASURED** (`VaultDecoySectionTest."the decoy section costs less than its declared budget…"`,
-run 2026-07-27, twice): worst-case **encoded delta = 640–643 B** against a declared budget of
-**1024 B**; a realistic populated state carrying the section encodes to **924–927 B of 262 112 B**,
-leaving **~261 185 B (99.6 %) free**. The few-byte run-to-run spread is DEFLATE reacting to a
-freshly generated (genuinely random) identity keypair, not fixture noise. The test asserts
-`delta > 0` as well as `delta ≤ budget`, so a codec that silently dropped the section cannot
+**MEASURED** (`VaultDecoySectionTest."the decoy section costs less than its declared budget…"`).
+~~Run 2026-07-27, twice: worst-case **encoded delta = 640–643 B**; a realistic populated state
+carrying the section encodes to **924–927 B of 262 112 B**, leaving **~261 185 B (99.6 %) free**.~~
+
+**[U2R3] RE-MEASURED after the field removals, three runs 2026-07-27:** raw section body **700 B**
+(deterministic, test-asserted); **encoded delta 635 / 641 / 645 B** against a declared budget of
+**1024 B**; a realistic populated state carrying the section encodes to **919 / 925 / 929 B of
+262 112 B**, leaving **~261 187 B (99.6 %) free**.
+
+**The encoded delta is a DISTRIBUTION, not a point estimate, and the old two-run "640–643 B" read
+like one.** The spread is DEFLATE reacting to a freshly generated — genuinely random — identity
+keypair, not fixture noise, and three runs already fall outside the previously recorded interval.
+The budget is a **bound**; quote it as such. Note also that removing two integers did *not* reduce
+the delta measurably: the section is dominated by incompressible key and token material. The test
+asserts `delta > 0` as well as `delta ≤ budget`, so a codec that silently dropped the section cannot
 satisfy it.
 
 ## SCOPE BOUNDARY — what U1 deliberately does NOT do
 
 The trigger for provisioning is "the first session that actually sends a decoy", and the decoy sender
-is U2/U3. U1 therefore ships the codec section, the provisioner, the auth facade, and the counter
-reservation **unwired from `SessionContainer`** — the same posture `VaultRuntime` itself shipped in
+is U2/U3. U1 therefore ships the codec section, the provisioner, the auth facade ~~, and the counter
+reservation~~ **[U2R3] (the counter reservation was deleted in U2 R2)** **unwired from `SessionContainer`** — the same posture `VaultRuntime` itself shipped in
 (`VaultRuntime.kt:69-70`: "deliberately NOT wired into any app coordinator, DI graph, unlock router,
 or migration — that is a later sub-phase"). Nothing in production calls them yet, so U1 cannot
 register a synthetic account on any real device and cannot spend a registration from the shared
@@ -352,20 +435,54 @@ bucket. U3 supplies the call site.
 
 ## DEVIATIONS FROM THE SPEC, AND WHY
 
-1. **`provisionNotBeforeMs` is a SIXTH thing in a section §4 describes as holding three.** The U1
+1. **`provisionNotBeforeMs` is a SIXTH thing in a section §4 describes as holding three.**
+   **[U2R3] It is now the FIFTH and last thing**, the section holding exactly
+   `accountId ‖ identityKeyPair ‖ accessToken ‖ refreshToken ‖ provisionNotBeforeMs`. The U1
    brief requires "on 429 back off **across sessions**". Across-sessions means durable, and the
    no-device-storage rule means vault-scoped, so the deferral has exactly one legal home: this
    section. Consequence, carried into R4 above: **section presence no longer implies readiness**, and
    every reader must key on the credential pair. Flagged rather than absorbed silently, because it is
    precisely the "moving what a durable signal MEANS" shape the round-12 pattern warns about.
-2. **W1 does not write a first dead-air fire time**, though §4's W1 row says it does. The dead-air
+2. ~~**W1 does not write a first dead-air fire time**, though §4's W1 row says it does. The dead-air
    *schedule* is U5 and §3.2 re-framed it from wall-clock to in-session ("1–2 per equivalent
    unlocked-day"), which makes a durable wall-clock next-fire of questionable meaning — U5 must
    settle that. The field exists and round-trips; U1 writes `null`. Deciding the distribution here
-   would be U1 designing U5's mechanism blind.
-3. **W3 (counter reservation) is built in U1**, not U2 as §4's writer table says. This follows the U1
+   would be U1 designing U5's mechanism blind.~~ **[U2R3] DEVIATION WITHDRAWN — the field is gone and
+   U5 is cut.** This one is worth reading as a lesson rather than a note: the deviation was "U1 ships
+   the field but declines to give it meaning, and a later unit will decide". The later unit was cut
+   and the field was left behind, unwritten and unread, on a durable vault surface. **A field with no
+   writer in the unit that adds it is a field nobody is accountable for.**
+3. ~~**W3 (counter reservation) is built in U1**, not U2 as §4's writer table says. This follows the U1
    task brief, which lists counter reservation in U1 scope. Only the reservation ALLOCATOR is built;
-   the `DecoySender` that spends the values is still U2.
+   the `DecoySender` that spends the values is still U2.~~ **[U2R3] DEVIATION WITHDRAWN — U2 R2
+   deleted the allocator.** Same lesson as 2, one step further along: U1 built an allocator whose
+   only consumer lived in a later unit, and when U2 was actually written the arithmetic said mirror
+   the covered counter instead. **A mechanism whose consumer is in a future unit is a mechanism
+   nobody has validated the requirement for.**
+
+---
+
+> # ⚠️ [U2R3] EVERYTHING BELOW THIS LINE IS A HISTORICAL RECORD OF U1's REVIEW ROUNDS
+>
+> The round tables record **what each round found and did at the time**. They are deliberately NOT
+> rewritten — a review record that is edited to match today's code stops being evidence. But they are
+> **not the contract**, and two things in them are no longer true of the tree:
+>
+> 1. **Every allocator/counter item is history.** F1, F2, F8, G1, G7, G11, H7 and the `[R5]` note all
+>    concern `DecoyCounterReservation` and `counterHighWater`, **deleted in U2 round 2**. Read them
+>    for the *reasoning patterns* — "a check that is not atomic with the spend is not a check", "the
+>    guard's scope must match the resource's scope" — which are live and were reapplied to the
+>    provisioner's `Gate`. Do not read them as descriptions of code that exists.
+> 2. **The mutation tables list tests that were DELETED with the code they covered.** Everything
+>    naming a reservation, a block, a high-water mark or an allocator — the `two callers over one
+>    runtime get the SAME allocator` row, the `clearAccount resets the counter mark` row, the
+>    `NEGATIVE counter high-water mark` row, and the whole first block of the F9 table — went with
+>    `DecoyCounterReservationTest`. **A future round must not treat their absence as regression.**
+>    The surviving mutation record for the current tree is the U2 round tables in
+>    `u2-r*-adjudication.md` plus the round-2/3 fix commits.
+>
+> The live contract is everything ABOVE this line, with `DecoyState`'s kdoc canonical for the field
+> set.
 
 ## REVIEW ROUND 1 — what changed in the unit, and what did not
 

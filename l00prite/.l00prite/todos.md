@@ -945,9 +945,10 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       **694 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0. **Fix round 1 of 6 applied:
       18 mutations, 17 discriminated** (the survivor a deliberate defence-in-depth probe). No invariant table: U2 adds no durable field and no writer — the decision and
       its justification are in `reviews/decoy-0.10.0/u2-invariant-table-decision.md`.
-      **Paired-blind review round 1 complete, adjudicated and fixed; ROUND 2 NOT YET DISPATCHED —
-      that is the next thing U2 owes. Ruling 2 was deviated from with a proof of impossibility and
-      needs a MAINTAINER decision, not just a reviewer's.**
+      ~~**Paired-blind review round 1 complete, adjudicated and fixed; ROUND 2 NOT YET DISPATCHED —
+      that is the next thing U2 owes.**~~ **Rounds 1 AND 2 complete, adjudicated and fixed; ROUND 3
+      NOT YET DISPATCHED — that is the next thing U2 owes.** Ruling 2 was deviated from with a proof
+      of impossibility and still needs a MAINTAINER decision, not just a reviewer's.
       **FIX ROUND 2 of 6 applied 2026-07-27 — NOT review-driven.** It implements the maintainer's
       §3.0 cut of the idle ping (`c65d9a3e`), which round 1's Ruling-2 finding made decidable.
       Removed: `DecoyCounterReservation` + its 14 tests, `TAG_DECOY.counterHighWater` (W3) and
@@ -956,6 +957,25 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       `--rerun-tasks`; **6 mutations, 6 discriminated**. Re-measured section: raw body 717 B → 700 B;
       the *encoded* delta is run-to-run noise at 636–646 B and did **not** shrink — the removed bytes
       were the most compressible in the section. Budget stays 1024 B as a bound.
+      **FIX ROUND 3 of 6 applied 2026-07-27 — review-driven, answering round 2 (0 P1, 1 P2, 4 P3).**
+      **G2-A (P2): a real first message may carry `ephemeral_key` set and `prekey_id` NULL** —
+      ordinary signed-prekey-only X3DH, reached whenever the peer's one-time prekey batch is
+      exhausted. The builder asserted the biconditional and the whole first-shaped path rested on it
+      (the `require`, `requireNotNull(cover.preKeyId)`, protobuf field 1 always written, the wrapper
+      sized with it, `baseKeyOffset` assuming it). **Once U3 wires the pairing that meant a real send
+      to such a peer got NO COVER AT ALL — an unpaired real frame.** Fixed in all four places;
+      measured against real libsignal (no-OPK 402 B vs OPK-present 404 B). The "covering" test pinned
+      the wrong property with an internally inconsistent fixture; both variants are now built from
+      genuine no-OPK sessions and are in the gate cross-product. G2-B: the gate fixtures now VARY
+      `media_type`/`version`/`previous_chain_length` — they only ever compared defaults, and `"file"`
+      is the same width as `"text"`. G2-C: the U1 invariant table corrected IN PLACE (18 stale
+      references), with `DecoyState`'s kdoc made the canonical field-set pointer. G2-D: the
+      provisioner's allocator-based lock justification rewritten, decision kept.
+      **681 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0, `--rerun-tasks`;
+      **7 mutations, 7 discriminated** — and M5/M6/M7 fail ONLY the new test, confirming the old
+      coverage proved nothing about mirroring. Section budget re-measured over three runs: raw body
+      700 B, encoded delta 635/641/645 B — recorded as a DISTRIBUTION, since the previously recorded
+      "640–643 B" was a two-run interval that three fresh runs already fall outside.
 
 - [ ] **U3 inherits three things from U2, none of them optional.** *(Rewritten at U2 fix round 1 —
       the interface changed, so two of the three old items no longer say the right thing.)*

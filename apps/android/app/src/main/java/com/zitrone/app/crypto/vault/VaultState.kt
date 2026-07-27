@@ -147,6 +147,14 @@ class VaultState(
  * frame length can differ from the envelope it covers. See `docs/design/DECOY_TRAFFIC_0.10.0_SPEC.md`
  * §3.0 and `docs/VAULT_ARCHITECTURE.md` §8's 2026-07-27 amendment.
  *
+ * ⚠️ **THIS KDOC IS THE CANONICAL STATEMENT OF `TAG_DECOY`'s FIELD SET.** The WRITER/READER invariant
+ * table (`l00prite/.l00prite/reviews/decoy-0.10.0/u1-invariant-table.md`) and spec §4 both carry
+ * derived copies for their own arguments; **on any disagreement this file wins, and a field-set
+ * change is made HERE first and propagated outward in the same commit.** The pointer exists because
+ * the counter removal was applied to the code, the spec's writer rows and the U2 decision record —
+ * and the invariant table, the artefact the process requires an implementer to read FIRST, kept
+ * eighteen references to the deleted design until two reviewers found it.
+ *
  * VAULT-SCOPED BY REQUIREMENT. None of this may be mirrored into `SettingsRepository`,
  * `DeviceSettings`, any `SharedPreferences`, or any device-level diagnostics file: a
  * device-level record of how many synthetic accounts exist is a vault-count oracle.

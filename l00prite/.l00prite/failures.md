@@ -730,3 +730,55 @@ resets is a tell a real ratchet can never produce"; §2.4, forty lines later, co
 client resets `message_number` on **every inbound ratchet turn**. Nobody read the two together.
 **When a design decision rests on a claim about real behaviour, grep the document for the same
 claim — the contradiction is more often already written down than not.**
+
+---
+
+## 2026-07-27 — "the two fields go together" was a claim about the SPEC, not about the protocol
+
+**Class:** a design document asserted a biconditional between two protocol fields; the code turned
+it into a `require`; the `require` refused a shape production emits every day. Three review rounds
+and a dedicated fail-closed test did not catch it, because the test asserted the same wrong belief.
+
+`DECOY_TRAFFIC_0.10.0_SPEC.md` §2.2 said: *"A real conversation's first envelope carries non-null
+`ephemeral_key` and `prekey_id`; every later one has them null."* `DecoyEnvelopeBuilder` encoded it
+as `require((cover.ephemeralKey == null) == (cover.preKeyId == null))`, and the whole first-shaped
+path — wrapper sizing, protobuf serialization, base-key offset — was built on the assumption.
+
+**It is false.** `ephemeral_key` marks an X3DH first message; `prekey_id` names the **one-time**
+prekey it consumed. A peer whose one-time batch is exhausted serves a bundle without one, and the
+sender does signed-prekey-only X3DH: still a first message, still a base key, `pre_key_id` absent.
+**Four places in this repo already implemented that path** — `ApiClient.fetchPreKeyBundle`,
+`SignalProtocolManager.establishSession`, `EncryptResult.preKeyId`, and a comment in
+`packages/crypto/src/x3dh.ts` that says "null if no OPK was available" in so many words.
+
+### Why the test made it worse rather than catching it
+
+The fail-closed test asserted `build(real.copy(preKeyId = null))` **throws** — and passed. The
+fixture was **internally inconsistent**: cleartext `prekey_id` null while the ciphertext still
+carried protobuf field 1, built by `copy()` from an OPK-present encrypt rather than by a real
+no-OPK session. A test built that way **cannot distinguish "reject garbage" from "reject a
+legitimate shape"**, and it was pinning the second while reading as the first. Its name and comment
+both said "half a first message", which is what the author believed rather than what the fixture was.
+
+**The rules:**
+
+1. **A `require` derived from a design document is only as true as the document.** Before encoding a
+   claim about protocol shape as a fail-closed assertion, find the code that PRODUCES that shape and
+   read it. Here the producer was in the same repo, four files, one of them commented with the exact
+   counterexample.
+2. **Test the negative space from a real producer, not from `copy()`.** A fixture mutated into a
+   shape no encoder emits proves the guard rejects that fixture — not that the guard is right. If the
+   shape under test is reachable in production, build it the way production builds it; if it is not
+   reachable, say so and pin the reachable half instead.
+3. **A biconditional between two protocol fields deserves suspicion by default.** Optional fields
+   usually carry an implication, not an equivalence. Ask which direction actually holds, and what
+   emits the other three quadrants.
+
+### And the shape of the consequence, which is the part worth remembering
+
+Failing closed is normally the safe direction. **Here it was not.** A refused cover envelope is an
+**unpaired real frame** — precisely the observable the feature exists to remove — and it would have
+appeared for a whole class of RECIPIENTS (those whose prekeys ran out) rather than at random, which
+is worse than a uniform leak. **When "fail closed" means "emit the thing you were built to hide",
+the guard is not conservative; it is the defect.** Check what the closed state actually looks like
+to the adversary before calling it safe.

@@ -95,8 +95,19 @@ class DecoyEnvelopeBuilderTest {
      * [advanceTo] drives the real session to the counter under test. [signedPreKeyId] is the PEER's,
      * so a fixture can be built where it does NOT match the synthetic account's own — the case the
      * cover blob has to absorb in its body length.
+     *
+     * [oneTimePreKey] `false` builds the session from a bundle carrying **no one-time prekey**, the
+     * bundle the relay serves once a peer's batch is exhausted (`ApiClient.fetchPreKeyBundle`
+     * returns a null `one_time_prekey`, and `SignalProtocolManager.establishSession` passes
+     * libsignal's `-1` sentinel with a null key — exactly what is reproduced here). The first
+     * message is still `PREKEY_TYPE` and still carries a base key; its `pre_key_id` is absent, so
+     * the real envelope carries `ephemeral_key` set and `prekey_id` null. That is a production
+     * shape, not a malformed fixture, and it is the shape the builder used to refuse.
      */
-    private inner class RealPath(signedPreKeyId: Int = DecoyIdentity.SIGNED_PREKEY_ID) {
+    private inner class RealPath(
+        signedPreKeyId: Int = DecoyIdentity.SIGNED_PREKEY_ID,
+        oneTimePreKey: Boolean = true,
+    ) {
         private val peerIdentity = IdentityKeyPair.generate()
         private val local = InMemorySignalProtocolStore(senderIdentity, senderRegistrationId)
         private val peer = InMemorySignalProtocolStore(peerIdentity, 4_211)
@@ -111,21 +122,34 @@ class DecoyEnvelopeBuilderTest {
                 signedPreKeyPair.publicKey.serialize(),
             )
             // The id the relay would issue for a first fetch, and the signed id the bundle carries.
-            peer.storePreKey(
-                DecoyIdentity.FIRST_ONE_TIME_PREKEY_ID,
-                PreKeyRecord(DecoyIdentity.FIRST_ONE_TIME_PREKEY_ID, preKeyPair),
-            )
+            if (oneTimePreKey) {
+                peer.storePreKey(
+                    DecoyIdentity.FIRST_ONE_TIME_PREKEY_ID,
+                    PreKeyRecord(DecoyIdentity.FIRST_ONE_TIME_PREKEY_ID, preKeyPair),
+                )
+            }
             peer.storeSignedPreKey(
                 signedPreKeyId,
                 SignedPreKeyRecord(signedPreKeyId, fixedInstant.toEpochMilli(), signedPreKeyPair, signature),
             )
             SessionBuilder(local, peerAddr).process(
-                PreKeyBundle(
-                    4_211, 1,
-                    DecoyIdentity.FIRST_ONE_TIME_PREKEY_ID, preKeyPair.publicKey,
-                    signedPreKeyId, signedPreKeyPair.publicKey,
-                    signature, peerIdentity.publicKey,
-                ),
+                // `-1` with a null key is libsignal's "no one-time prekey in this bundle", which is
+                // literally what `establishSession` passes for `preKeyId ?: -1`.
+                if (oneTimePreKey) {
+                    PreKeyBundle(
+                        4_211, 1,
+                        DecoyIdentity.FIRST_ONE_TIME_PREKEY_ID, preKeyPair.publicKey,
+                        signedPreKeyId, signedPreKeyPair.publicKey,
+                        signature, peerIdentity.publicKey,
+                    )
+                } else {
+                    PreKeyBundle(
+                        4_211, 1,
+                        -1, null,
+                        signedPreKeyId, signedPreKeyPair.publicKey,
+                        signature, peerIdentity.publicKey,
+                    )
+                },
             )
         }
 
@@ -149,12 +173,23 @@ class DecoyEnvelopeBuilderTest {
             repeat(counter) { encrypt(1) }
         }
 
-        /** The production envelope, populated exactly as `MessagingCoordinator.deliverText` does. */
+        /**
+         * The production envelope, populated exactly as `MessagingCoordinator.deliverText` does.
+         *
+         * [mediaType], [previousChainLength] and [version] are parameters rather than the constants
+         * the send path happens to use today, because a fixture that only ever carries the default
+         * cannot tell "the builder MIRRORS this field" from "the builder hard-codes the value the
+         * fixture uses". `media_type` is the sharp one: `"file"` is the same width as `"text"`, so
+         * the frame-length postcondition passes while a relay-visible field differs.
+         */
         fun envelope(
             message: CiphertextMessage,
             ttlSeconds: Int? = null,
             burnOnRead: Boolean = false,
             at: Instant = fixedInstant,
+            mediaType: String = MessageEnvelope.MEDIA_TEXT,
+            previousChainLength: Int = 0,
+            version: String = MessageEnvelope.PROTOCOL_VERSION,
         ): MessageEnvelope {
             val serialized = message.serialize()
             val prekey = message.type == CiphertextMessage.PREKEY_TYPE
@@ -171,11 +206,12 @@ class DecoyEnvelopeBuilderTest {
                 } else {
                     SignalMessage(serialized).counter
                 },
-                previousChainLength = 0,
+                previousChainLength = previousChainLength,
                 timestamp = DateTimeFormatter.ISO_INSTANT.format(at),
                 ttlSeconds = ttlSeconds,
                 burnOnRead = burnOnRead,
-                mediaType = MessageEnvelope.MEDIA_TEXT,
+                mediaType = mediaType,
+                version = version,
             )
         }
     }
@@ -233,13 +269,27 @@ class DecoyEnvelopeBuilderTest {
             for (counter in listOf(0, 5, 128)) {
                 for ((ttl, burn) in listOf(null to false, 86_400 to true)) {
                     // First-shaped: a real X3DH message stays PREKEY_TYPE until the peer replies,
-                    // so counters 0..n are all reachable in that shape.
-                    val firstPath = RealPath()
-                    repeat(counter) { firstPath.encrypt(1) }
-                    val realFirst = firstPath.envelope(firstPath.encrypt(blocks), ttl, burn)
-                    assertEquals("fixture is first-shaped at $counter", counter, realFirst.messageNumber)
-                    assertTrue("fixture really is an X3DH first message", realFirst.ephemeralKey != null)
-                    assertCovers(realFirst, cover(realFirst), "first-shaped, $blocks blocks, counter $counter")
+                    // so counters 0..n are all reachable in that shape. BOTH X3DH variants are in
+                    // the product: with a one-time prekey, and — when the peer's batch is
+                    // exhausted — signed-prekey-only, which carries `ephemeral_key` and NO
+                    // `prekey_id`. The second is a production shape the builder used to refuse.
+                    for (opk in listOf(true, false)) {
+                        val firstPath = RealPath(oneTimePreKey = opk)
+                        repeat(counter) { firstPath.encrypt(1) }
+                        val realFirst = firstPath.envelope(firstPath.encrypt(blocks), ttl, burn)
+                        assertEquals("fixture is first-shaped at $counter", counter, realFirst.messageNumber)
+                        assertTrue("fixture really is an X3DH first message", realFirst.ephemeralKey != null)
+                        assertEquals(
+                            "fixture's one-time prekey id follows the bundle it was built from",
+                            opk,
+                            realFirst.preKeyId != null,
+                        )
+                        assertCovers(
+                            realFirst,
+                            cover(realFirst),
+                            "first-shaped (one-time prekey=$opk), $blocks blocks, counter $counter",
+                        )
+                    }
 
                     // Subsequent-shaped at the same counter.
                     val path = RealPath().also { it.advanceTo(counter) }
@@ -378,10 +428,18 @@ class DecoyEnvelopeBuilderTest {
         Curve.decodePoint(serialized, 0)
     }
 
-    /** Offsets of the serialized-key VALUES in a blob built by the builder's own layout. */
-    private fun keyValueOffsets(blob: ByteArray, firstShaped: Boolean): List<Int> {
+    /**
+     * Offsets of the serialized-key VALUES in a blob built by the builder's own layout. [preKeyId]
+     * is null for a no-OPK first message, whose protobuf field 1 is absent entirely — so the base
+     * key starts two bytes earlier.
+     */
+    private fun keyValueOffsets(
+        blob: ByteArray,
+        firstShaped: Boolean,
+        preKeyId: Int? = DecoyIdentity.FIRST_ONE_TIME_PREKEY_ID,
+    ): List<Int> {
         if (!firstShaped) return listOf(1 + 2) // version, ratchet-key tag + length
-        val baseKeyAt = 1 + 1 + DecoyEnvelopeBuilder.varintLength(DecoyIdentity.FIRST_ONE_TIME_PREKEY_ID) + 2
+        val baseKeyAt = 1 + (if (preKeyId == null) 0 else 1 + DecoyEnvelopeBuilder.varintLength(preKeyId)) + 2
         val identityKeyAt = baseKeyAt + 33 + 2
         val innerSize = PreKeySignalMessage(blob).whisperMessage.serialize().size
         val trailing = 1 + DecoyEnvelopeBuilder.varintLength(senderRegistrationId) +
@@ -447,22 +505,98 @@ class DecoyEnvelopeBuilderTest {
         assertEquals("and so is the cover blob", counter, SignalMessage(coverPlain).counter)
         assertSameLayout(realPlain, coverPlain, innerRandom(0, realPlain.size, bodyLen), listOf(3))
 
-        // First message: the same rules for the inner blob, plus the base key value.
-        val freshPath = RealPath()
-        val realFirstEnvelope = freshPath.envelope(freshPath.encrypt(2))
-        val realFirst = bytes(realFirstEnvelope.ciphertext)
-        val coverFirst = bytes(cover(realFirstEnvelope).ciphertext)
-        val innerSize = PreKeySignalMessage(realFirst).whisperMessage.serialize().size
-        val trailing = 1 + DecoyEnvelopeBuilder.varintLength(senderRegistrationId) +
-            1 + DecoyEnvelopeBuilder.varintLength(DecoyIdentity.SIGNED_PREKEY_ID)
-        val innerAt = realFirst.size - trailing - innerSize
-        val baseKeyValueAt = 1 + 1 + DecoyEnvelopeBuilder.varintLength(DecoyIdentity.FIRST_ONE_TIME_PREKEY_ID) + 2
-        assertSameLayout(
-            realFirst,
-            coverFirst,
-            innerRandom(innerAt, innerSize, bodyLen) +
-                listOf((baseKeyValueAt + 1) until (baseKeyValueAt + 33)),
-            listOf(baseKeyValueAt, innerAt + 3),
+        // First message: the same rules for the inner blob, plus the base key value. Run for BOTH
+        // X3DH variants — with a one-time prekey (protobuf field 1 present) and without it
+        // (field 1 absent, so every offset after the version byte moves two bytes earlier). The
+        // no-OPK arm is the one that would have thrown before round 3.
+        fun assertFirstMessageLayout(opk: Boolean) {
+            val freshPath = RealPath(oneTimePreKey = opk)
+            val realFirstEnvelope = freshPath.envelope(freshPath.encrypt(2))
+            assertEquals(
+                "the fixture carries a one-time prekey id exactly when its bundle did",
+                opk,
+                realFirstEnvelope.preKeyId != null,
+            )
+            val realFirst = bytes(realFirstEnvelope.ciphertext)
+            val coverFirst = bytes(cover(realFirstEnvelope).ciphertext)
+            val innerSize = PreKeySignalMessage(realFirst).whisperMessage.serialize().size
+            val trailing = 1 + DecoyEnvelopeBuilder.varintLength(senderRegistrationId) +
+                1 + DecoyEnvelopeBuilder.varintLength(DecoyIdentity.SIGNED_PREKEY_ID)
+            val innerAt = realFirst.size - trailing - innerSize
+            val baseKeyValueAt = keyValueOffsets(
+                realFirst,
+                firstShaped = true,
+                preKeyId = realFirstEnvelope.preKeyId,
+            ).first()
+            assertSameLayout(
+                realFirst,
+                coverFirst,
+                innerRandom(innerAt, innerSize, bodyLen) +
+                    listOf((baseKeyValueAt + 1) until (baseKeyValueAt + 33)),
+                listOf(baseKeyValueAt, innerAt + 3),
+            )
+        }
+        assertFirstMessageLayout(opk = true)
+        assertFirstMessageLayout(opk = false)
+    }
+
+    @Test
+    fun `a first message whose peer had NO one-time prekey left is covered, not refused`() {
+        // G2-A. A peer's one-time batch runs out; the relay serves a bundle with no
+        // `one_time_prekey`; the sender does signed-prekey-only X3DH. The real envelope then
+        // carries `ephemeral_key` SET and `prekey_id` NULL — the combination the builder's
+        // `require` declared impossible. Refusing it means a real send to that peer gets no cover
+        // envelope at all, which is the unpaired real frame this whole unit exists to prevent, and
+        // it happens for a whole class of RECIPIENTS rather than at random.
+        val noOpk = RealPath(oneTimePreKey = false)
+        val real = noOpk.envelope(noOpk.encrypt(2))
+
+        // The fixture is a genuine no-OPK encrypt, not a `copy(preKeyId = null)` of an OPK one:
+        // the CIPHERTEXT itself has to lack protobuf field 1, or the cleartext and the bytes it
+        // describes disagree and the test proves nothing about the shape it claims to cover.
+        assertTrue("a no-OPK first message is still an X3DH first message", real.ephemeralKey != null)
+        assertNull("but it consumed no one-time prekey", real.preKeyId)
+        val realBlob = bytes(real.ciphertext)
+        assertTrue(
+            "and its ciphertext really omits protobuf field 1",
+            !PreKeySignalMessage(realBlob).preKeyId.isPresent,
+        )
+        assertEquals("field 2 (base key) follows the version byte directly", 0x12, realBlob[1].toInt())
+
+        val c = cover(real)
+        assertCovers(real, c, "a first message with no one-time prekey")
+        assertTrue("the cover is first-shaped too", c.ephemeralKey != null)
+        assertNull("and names no one-time prekey either", c.preKeyId)
+
+        // The cover BLOB mirrors the shape, not just the cleartext: a cover that wrote field 1
+        // anyway would be self-inconsistent to anyone who parses it, exactly as a mismatched
+        // counter would be.
+        val coverBlob = bytes(c.ciphertext)
+        val parsed = PreKeySignalMessage(coverBlob)
+        assertTrue("the cover ciphertext omits field 1 as well", !parsed.preKeyId.isPresent)
+        assertEquals("the sender's own registration id", senderRegistrationId, parsed.registrationId)
+        assertEquals("the synthetic account's signed prekey id", DecoyIdentity.SIGNED_PREKEY_ID, parsed.signedPreKeyId)
+        assertEquals(
+            "ephemeral_key is still read back out of the blob, at the offset field 1's absence moves it to",
+            c.ephemeralKey,
+            b64(parsed.baseKey.serialize()),
+        )
+        assertEquals("message_number still matches the counter inside", c.messageNumber, parsed.whisperMessage.counter)
+
+        // And the two X3DH variants really are different sizes, so the assertions above had
+        // something to be wrong about: the absent field costs the tag and its varint.
+        val withOpk = RealPath()
+        val realWithOpk = withOpk.envelope(withOpk.encrypt(2))
+        assertTrue("the comparison fixture did consume one", realWithOpk.preKeyId != null)
+        assertEquals(
+            "an absent one-time prekey id is exactly two bytes of ciphertext",
+            2,
+            bytes(realWithOpk.ciphertext).size - realBlob.size,
+        )
+        assertNotEquals(
+            "so the frames differ too, and a cover built for the wrong variant could not match either",
+            frameLength(realWithOpk),
+            frameLength(real),
         )
     }
 
@@ -609,8 +743,6 @@ class DecoyEnvelopeBuilderTest {
         assertEquals("ttl mirrors the covered message", 86_400, c.ttlSeconds)
         assertEquals("burn mirrors the covered message", false, a.burnOnRead)
         assertEquals("burn mirrors the covered message", true, c.burnOnRead)
-        assertEquals("media type mirrors the covered message", plainReal.mediaType, a.mediaType)
-        assertEquals("previous_chain_length mirrors the covered message", 0, a.previousChainLength)
         assertNotEquals("block count mirrors the covered message", a.ciphertext.length, c.ciphertext.length)
         assertNotEquals("counters advance with the covered conversation", a.messageNumber, c.messageNumber)
         assertNotEquals("message ids are fresh", a.id, c.id)
@@ -620,6 +752,62 @@ class DecoyEnvelopeBuilderTest {
         assertEquals("same subject, same size", a.ciphertext.length, d.ciphertext.length)
         assertNotEquals("but never the same bytes", a.ciphertext, d.ciphertext)
         assertNotEquals("nor the same message id", a.id, d.id)
+    }
+
+    @Test
+    fun `media_type, previous_chain_length and version are MIRRORED, and a fixture that never varies them proves nothing`() {
+        // G2-B. The test above only ever compared DEFAULT values, so hard-coding
+        // `mediaType = "text"`, `previousChainLength = 0` or `version = "1"` in the builder left
+        // every test green. `media_type` is the sharpest: "file" is exactly as wide as "text", so
+        // the frame-length postcondition passes while a relay-visible field differs — a
+        // one-field discriminator that costs zero bytes.
+        val path = RealPath().also { it.advanceTo(4) }
+
+        // "file" is the SAME WIDTH as "text": only a value comparison can see this one.
+        val fileReal = path.envelope(path.encrypt(1), mediaType = MessageEnvelope.MEDIA_FILE)
+        assertEquals(
+            "the two media types really are the same width, or the frame check would carry this test",
+            MessageEnvelope.MEDIA_TEXT.length,
+            MessageEnvelope.MEDIA_FILE.length,
+        )
+        val fileCover = cover(fileReal)
+        assertEquals("media_type is mirrored, not defaulted", MessageEnvelope.MEDIA_FILE, fileCover.mediaType)
+        assertCovers(fileReal, fileCover, "a file-media covered message")
+
+        // "image" is a different width, so this one moves the frame as well.
+        val imageReal = path.envelope(path.encrypt(1), mediaType = MessageEnvelope.MEDIA_IMAGE)
+        val imageCover = cover(imageReal)
+        assertEquals("media_type is mirrored for the wider value too", MessageEnvelope.MEDIA_IMAGE, imageCover.mediaType)
+        assertCovers(imageReal, imageCover, "an image-media covered message")
+        assertNotEquals(
+            "and the wider media type really does move the frame",
+            frameLength(fileReal),
+            frameLength(imageReal),
+        )
+
+        // previous_chain_length is 0 on every send Android makes today, so a fixture that only
+        // ever carries 0 cannot tell mirroring from a hard-coded 0. Two non-default values, one of
+        // them a different decimal width from the other.
+        for (previous in listOf(7, 4_096)) {
+            val real = path.envelope(path.encrypt(1), previousChainLength = previous)
+            val c = cover(real)
+            assertEquals("previous_chain_length is mirrored, not defaulted", previous, c.previousChainLength)
+            assertCovers(real, c, "a covered message with previous_chain_length=$previous")
+        }
+        assertNotEquals(
+            "the two widths really do move the frame",
+            frameLength(path.envelope(path.encrypt(1), previousChainLength = 7)),
+            frameLength(path.envelope(path.encrypt(1), previousChainLength = 4_096)),
+        )
+
+        // version is "1" on every envelope the protocol currently defines, and a same-width "2" is
+        // the mutation a constant would survive. The builder must MIRROR the field, so that a
+        // future protocol version is covered by construction rather than by remembering to come
+        // back here.
+        val v2Real = path.envelope(path.encrypt(1), version = "2")
+        val v2Cover = cover(v2Real)
+        assertEquals("version is mirrored, not pinned to the current constant", "2", v2Cover.version)
+        assertCovers(v2Real, v2Cover, "a covered message of a future protocol version")
     }
 
     @Test
@@ -673,12 +861,23 @@ class DecoyEnvelopeBuilderTest {
         assertThrows(IllegalArgumentException::class.java) {
             b.build(sender(), syntheticAccountId, real.copy(senderId = UUID.randomUUID().toString()))
         }
-        // Half a first message.
-        assertThrows(IllegalArgumentException::class.java) {
-            b.build(sender(), syntheticAccountId, real.copy(preKeyId = null))
-        }
+        // A `prekey_id` with no `ephemeral_key`. This is the half that really is impossible: the
+        // one-time prekey id names a key consumed by X3DH, and X3DH always publishes its base key.
+        //
+        // The MIRROR of it — `ephemeral_key` set, `prekey_id` null — used to be rejected here too,
+        // by the same `require`, and it is ORDINARY signed-prekey-only X3DH. That case now has its
+        // own test (`a first message whose peer had NO one-time prekey left…`) built from a real
+        // no-OPK session, because the old fixture (`real.copy(preKeyId = null)`) was internally
+        // inconsistent — cleartext null, ciphertext still carrying protobuf field 1 — so it could
+        // not tell "reject garbage" from "reject a production shape". It rejected the shape.
         assertThrows(IllegalArgumentException::class.java) {
             b.build(sender(), syntheticAccountId, real.copy(ephemeralKey = null))
+        }
+        val subsequentPath = RealPath().also { it.advanceTo(3) }
+        val subsequent = subsequentPath.envelope(subsequentPath.encrypt(1))
+        assertNull("the fixture really is an ordinary message", subsequent.ephemeralKey)
+        assertThrows(IllegalArgumentException::class.java) {
+            b.build(sender(), syntheticAccountId, subsequent.copy(preKeyId = 1))
         }
         // A recipient id of a different width cannot be mirrored.
         assertThrows(IllegalArgumentException::class.java) {

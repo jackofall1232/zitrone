@@ -132,6 +132,31 @@ import java.util.UUID
  * durable vault surface. Nothing in the decoy path allocates a counter any more: this class reads one
  * off the envelope it covers, and that is the whole mechanism.
  *
+ * ## A first message may carry NO `prekey_id` at all, and that is ordinary X3DH
+ *
+ * `ephemeral_key` marks an X3DH first message. `prekey_id` names the ONE-TIME prekey it consumed —
+ * and a peer whose one-time batch is exhausted serves a bundle with none, so the sender falls back
+ * to signed-prekey-only X3DH. The message is still `PREKEY_TYPE` and still carries a base key; its
+ * `pre_key_id` is simply absent. The whole path exists in production already: `ApiClient` returns a
+ * null `one_time_prekey` (`fetchPreKeyBundle`), `SignalProtocolManager.establishSession` passes
+ * libsignal's `-1` sentinel with a null key, and `EncryptResult.preKeyId` comes back null
+ * (`preKeyMessage.preKeyId.isPresent` is false). `packages/crypto/src/x3dh.ts` documents the same.
+ *
+ * So the two fields are **not** "together or not at all" — the implication runs one way:
+ * `prekey_id` present ⇒ `ephemeral_key` present. Asserting the biconditional made a legitimate send
+ * uncoverable, which is worse than the defect it guarded against: an unpaired real frame is exactly
+ * the observable this whole feature exists to remove, and it would appear precisely for the peers
+ * whose prekeys ran out — a property of the RECIPIENT, not of chance.
+ *
+ * The absent field costs two bytes on the wire (measured: a no-OPK first ciphertext is 402 B where
+ * the OPK-present one is 404 B), which the body absorbs like any other unmirrorable width. The
+ * cleartext `prekey_id` is null on both sides, so the frame matches on the JSON side too.
+ *
+ * Residual, same family as the one `coverPreKeyId` already declares: the synthetic account uploads
+ * a full one-time batch and never has it consumed, so "this send found no one-time prekey left" is
+ * a claim the relay could contradict — relay-visible only, and the relay already knows nothing ever
+ * fetched that account's bundle.
+ *
  * ## Consistency between the cleartext fields and the bytes they describe
  *
  * A real envelope's `ephemeral_key` is a verbatim copy of the base key *inside* its ciphertext, its
@@ -231,8 +256,12 @@ class DecoyEnvelopeBuilder(
         require(syntheticAccountId.length == cover.recipientId.length) {
             "the synthetic recipient id must be the same width as the covered recipient id"
         }
-        require((cover.ephemeralKey == null) == (cover.preKeyId == null)) {
-            "a real envelope carries ephemeral_key and prekey_id together or not at all"
+        // A first message ALWAYS carries `ephemeral_key`; it carries `prekey_id` only when the
+        // peer's bundle still had a one-time prekey to consume. The implication runs one way, and
+        // asserting the biconditional here refused ordinary signed-prekey-only X3DH — see the
+        // "A first message may carry no prekey_id at all" section of the class kdoc.
+        require(cover.preKeyId == null || cover.ephemeralKey != null) {
+            "a prekey_id without an ephemeral_key is not a shape a real send can produce"
         }
         require(cover.messageNumber >= 0) { "message_number is never negative" }
 
@@ -250,7 +279,10 @@ class DecoyEnvelopeBuilder(
             require(coveredKey.length == KEY_BASE64_CHARS) {
                 "a real ephemeral_key is $KEY_BASE64_CHARS base64 characters"
             }
-            val id = coverPreKeyId(requireNotNull(cover.preKeyId))
+            // Null when the covered first message consumed no one-time prekey. The cover then
+            // omits protobuf field 1 exactly as libsignal does, and its cleartext `prekey_id` is
+            // null exactly as the covered envelope's is.
+            val id = cover.preKeyId?.let { coverPreKeyId(it) }
             val baseKey = coverPublicKey()
             val innerSize = lengthPrefixedPayload(
                 target - preKeyWrapperFixedBytes(id, sender.registrationId),
@@ -342,10 +374,16 @@ class DecoyEnvelopeBuilder(
             1 + // the ciphertext field's tag
             MAC_BYTES
 
-    /** Everything in a `PreKeySignalMessage` except the inner message's length varint and bytes. */
-    private fun preKeyWrapperFixedBytes(preKeyId: Int, registrationId: Int): Int =
+    /**
+     * Everything in a `PreKeySignalMessage` except the inner message's length varint and bytes.
+     *
+     * [preKeyId] is null for a no-OPK first message, and the pre-key-id field then costs **nothing**
+     * — libsignal omits an absent `optional uint32` rather than writing a zero, so the wrapper is
+     * two bytes shorter and the body has two more bytes to absorb.
+     */
+    private fun preKeyWrapperFixedBytes(preKeyId: Int?, registrationId: Int): Int =
         1 + // version
-            (1 + varintLength(preKeyId)) +
+            (if (preKeyId == null) 0 else 1 + varintLength(preKeyId)) +
             (1 + 1 + KEY_SERIALIZED_BYTES) + // base key
             (1 + 1 + KEY_SERIALIZED_BYTES) + // identity key
             1 + // the inner message field's tag
@@ -433,9 +471,13 @@ class DecoyEnvelopeBuilder(
      * A `PreKeySignalMessage`: version byte, then protobuf {1 pre-key id, 2 base key,
      * 3 identity key, 4 the whole SignalMessage, 5 registration id, 6 signed pre-key id}.
      * There is no MAC of its own — the inner message carries it.
+     *
+     * Field 1 is `optional` on the wire and is **skipped entirely** when [preKeyId] is null, which
+     * is what a real no-OPK first message looks like: measured 0x34, 0x12, 0x21, 0x05… where an
+     * OPK-present one reads 0x34, 0x08, id, 0x12, 0x21, 0x05…
      */
     private fun preKeySignalMessageBytes(
-        preKeyId: Int,
+        preKeyId: Int?,
         baseKey: ByteArray,
         identityKey: ByteArray,
         registrationId: Int,
@@ -444,8 +486,10 @@ class DecoyEnvelopeBuilder(
     ): ByteArray {
         val out = ByteArrayOutputStream()
         out.write(VERSION_BYTE)
-        out.write(TAG_PREKEY_ID)
-        writeVarint(out, preKeyId)
+        if (preKeyId != null) {
+            out.write(TAG_PREKEY_ID)
+            writeVarint(out, preKeyId)
+        }
         writeKeyField(out, TAG_PREKEY_BASE_KEY, baseKey)
         writeKeyField(out, TAG_PREKEY_IDENTITY_KEY, identityKey)
         out.write(TAG_PREKEY_MESSAGE)
@@ -460,9 +504,11 @@ class DecoyEnvelopeBuilder(
 
     /**
      * Byte offset of the base key's VALUE inside a `PreKeySignalMessage` built above: the version
-     * byte, the pre-key id field, then this field's own tag and length byte.
+     * byte, the pre-key id field (absent entirely when [preKeyId] is null), then this field's own
+     * tag and length byte.
      */
-    private fun baseKeyOffset(preKeyId: Int): Int = 1 + 1 + varintLength(preKeyId) + 1 + 1
+    private fun baseKeyOffset(preKeyId: Int?): Int =
+        1 + (if (preKeyId == null) 0 else 1 + varintLength(preKeyId)) + 1 + 1
 
     private fun writeKeyField(out: ByteArrayOutputStream, tag: Int, key: ByteArray) {
         out.write(tag)

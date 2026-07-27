@@ -154,10 +154,33 @@ would have advanced one was deleted at R2, §3.0)**. There is no field whose
 value is a constant that a real message's value varies over — which is precisely the defect in the
 existing web generator.
 
-**The X3DH first-message observable, and how to satisfy it.** A real conversation's first envelope
-carries non-null `ephemeral_key` and `prekey_id`; every later one has them null. The synthetic
+**The X3DH first-message observable, and how to satisfy it.** ~~A real conversation's first envelope
+carries non-null `ephemeral_key` and `prekey_id`; every later one has them null.~~ The synthetic
 conversation must show the same shape: **emit well-formed-looking values exactly once at setup, null
 thereafter.**
+
+> **⚠️ CORRECTION [U2 R3, 2026-07-27] — A FIRST ENVELOPE MAY CARRY `prekey_id` NULL, AND THE
+> SENTENCE ABOVE IS THE ORIGIN OF A P2.** The two fields are not a pair. `ephemeral_key` marks an
+> X3DH first message; `prekey_id` names the **one-time** prekey it consumed, and a peer whose
+> one-time batch is exhausted serves a bundle without one. The sender then does signed-prekey-only
+> X3DH: still `PREKEY_TYPE`, still a base key, `pre_key_id` simply absent from the protobuf. The
+> whole path is in production — `ApiClient.fetchPreKeyBundle` returns a null `one_time_prekey`,
+> `SignalProtocolManager.establishSession` passes libsignal's `-1` sentinel with a null key,
+> `EncryptResult.preKeyId` comes back null, and `packages/crypto/src/x3dh.ts:35-36` documents
+> "null if no OPK was available".
+>
+> **The correct rule is an implication, not a biconditional: `prekey_id` present ⇒ `ephemeral_key`
+> present.** U2 shipped the biconditional as a `require`, which refused an ordinary send and — once
+> U3 wires the pairing — would have left a **real frame with no cover at all**, the exact observable
+> this feature exists to remove, for a whole class of RECIPIENTS rather than at random. Measured
+> cost of the absent field: a no-OPK first ciphertext is **402 B where the OPK-present one is 404 B**
+> (tag + varint), absorbed by the random body like any other unmirrorable width; the cleartext
+> `prekey_id` is null on both sides, so the JSON side matches too.
+>
+> **Both variants are now in U2's gate cross-product**, built from genuine no-OPK sessions rather
+> than from a `copy(preKeyId = null)` of an OPK-present fixture — an internally inconsistent fixture
+> (cleartext null, ciphertext still carrying field 1) could not tell "reject garbage" from "reject a
+> production shape", and it was the latter.
 
 > **⚠️ [R7] THREE CORRECTIONS, from source research done before U2 started. The first would have
 > shipped a fingerprint.**
@@ -388,6 +411,14 @@ decoy exchange does not naturally produce.
 >    in-batch counterpart at all and is mirrored verbatim. The relay could see that this account
 >    never published that id — and can already see that it never *consumed* the one it does name,
 >    which `DecoyIdentity.FIRST_ONE_TIME_PREKEY_ID` has declared since U1.
+>
+> 4. **[U2 R3] A cover of a no-OPK first message claims a one-time batch that was never exhausted.**
+>    When the covered envelope carries `ephemeral_key` set and `prekey_id` null, the cover mirrors
+>    that shape — asserting, to anyone parsing it, that the sender found no one-time prekey left on
+>    the synthetic account. That account uploads a full batch of 100 and has none of them consumed,
+>    because nothing ever fetches its bundle. Same family as residual 3 and bounded the same way:
+>    **relay-visible only**, and the relay already knows this account's bundle was never served.
+>    Not mirroring the shape is strictly worse — it costs the covered send its cover entirely.
 
 Partial mitigation is in scope (§5, U4): the synthetic side acks and burns, and occasionally sends
 back, so a decoy exchange produces control frames of its own rather than being a conspicuously
@@ -813,7 +844,7 @@ next begins. No version bump, no push, nothing merged without explicit maintaine
 | Unit | Scope | Gate to clear before the next unit |
 |---|---|---|
 | **U1** ✅ | Synthetic account provisioning + `TAG_DECOY` codec section. Lazy registration, credential storage, token refresh, capacity budget, ~~counter-reservation allocator~~ **(deleted 2026-07-27 with the ping — §3.0)**. **Built, deliberately UNWIRED** — nothing constructs it, so the branch cannot spend a registration. | **DONE** on `feat/0.10.0-decoy-u1-provisioning`. **678 tests / 0 failures** after fix round 4, `assembleDebug` exit 0, re-verified independently each round. Capacity measured: 640–643 B worst case against a 1024 B budget. **[U2 R2] Re-measured after the two field removals: raw section body 717 B → 700 B (deterministic); the encoded delta is run-to-run noise at 636–646 B either side of the change, so the budget stands at 1024 B as a bound.** **Paired-blind review of the WHOLE unit: four rounds complete** (findings 10 → 11 → 10 → 6; P1s 2 → 1 → 0 → 0), fixes applied and mutation-verified each round. **Merge still owed an explicit maintainer decision**, plus re-ratification of §4.1's third-pass wording. |
-| **U2** ✅ | Decoy envelope builder. **[R1] `build()` takes the real envelope it covers** and mirrors every size-affecting property of it — shape, ciphertext byte length, counter, timestamp width, TTL, burn, media type — then measures both frames and refuses to return a decoy whose frame is not exactly as long. *(Counter reservation moved to U1, at R1 out of the paired path entirely, and at R2 **deleted outright** — see §2.3/§3.0.)* | **BUILT on `feat/0.10.0-decoy-u2-envelope-builder`, deliberately UNWIRED** — nothing constructs it, so the branch cannot emit cover traffic. `DecoyEnvelopeBuilder` + **16 gate tests** (13 before R1; the count of 14 recorded here previously was wrong — G-F). **694 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0, `--rerun-tasks`. **Fix round 1 of 6 applied: 18 mutations run, 17 discriminated**, the survivor a deliberate probe of a defence-in-depth check (recorded). **No `SessionBuilder.process`, no Signal record written** — now a fact about the type, which has no vault access at all. **Round-1 P1s fixed:** shape followed the decoy's own counter rather than the covered message (G-A); `0x05 ‖ random(32)` is not a valid Curve25519 encoding, keys are now generated and the private half dropped (G-B). **Round-1 ruling deviation, argued in §2.3:** the digit-width difference (G-C) cannot be absorbed in the ciphertext — a base64 field's length is always a multiple of 4 — so the counter is mirrored instead. **Three spec corrections from U2 still PENDING RATIFICATION — §2.1's table, §2.3's ciphertext formula, §2.4's residual list.** Paired-blind review round 1 complete and adjudicated; **round 2 not yet dispatched.** **Fix round 2 of 6 applied (2026-07-27) — NOT review-driven: it implements the maintainer's §3.0 cut.** `DecoyCounterReservation` + its 14 tests deleted; `TAG_DECOY.counterHighWater` (W3) and `deadAirNextFireAtMs` (W4) removed from the codec on both sides; `DecoySectionLock` **kept**, argued from its surviving callers. Codec-canonicity coverage retargeted onto `provisionNotBeforeMs` rather than dropped, plus a new offset tripwire and a deterministic raw-body-length assertion. |
+| **U2** ✅ | Decoy envelope builder. **[R1] `build()` takes the real envelope it covers** and mirrors every size-affecting property of it — shape, ciphertext byte length, counter, timestamp width, TTL, burn, media type — then measures both frames and refuses to return a decoy whose frame is not exactly as long. *(Counter reservation moved to U1, at R1 out of the paired path entirely, and at R2 **deleted outright** — see §2.3/§3.0.)* | **BUILT on `feat/0.10.0-decoy-u2-envelope-builder`, deliberately UNWIRED** — nothing constructs it, so the branch cannot emit cover traffic. `DecoyEnvelopeBuilder` + **18 gate tests** (16 before R3, 13 before R1; the count of 14 recorded here before R1 was wrong — G-F). ~~694 tests~~ **(see the round-3 count at the end of this cell)**, `assembleDebug` exit 0, `--rerun-tasks`. **Fix round 1 of 6 applied: 18 mutations run, 17 discriminated**, the survivor a deliberate probe of a defence-in-depth check (recorded). **No `SessionBuilder.process`, no Signal record written** — now a fact about the type, which has no vault access at all. **Round-1 P1s fixed:** shape followed the decoy's own counter rather than the covered message (G-A); `0x05 ‖ random(32)` is not a valid Curve25519 encoding, keys are now generated and the private half dropped (G-B). **Round-1 ruling deviation, argued in §2.3:** the digit-width difference (G-C) cannot be absorbed in the ciphertext — a base64 field's length is always a multiple of 4 — so the counter is mirrored instead. **Three spec corrections from U2 still PENDING RATIFICATION — §2.1's table, §2.3's ciphertext formula, §2.4's residual list.** **Fix round 2 of 6 applied (2026-07-27) — NOT review-driven: it implements the maintainer's §3.0 cut.** `DecoyCounterReservation` + its 14 tests deleted; `TAG_DECOY.counterHighWater` (W3) and `deadAirNextFireAtMs` (W4) removed from the codec on both sides; `DecoySectionLock` **kept**, argued from its surviving callers. Codec-canonicity coverage retargeted onto `provisionNotBeforeMs` rather than dropped, plus a new offset tripwire and a deterministic raw-body-length assertion. **Paired-blind review round 2 complete and adjudicated (0 P1, 1 P2, 4 P3); FIX ROUND 3 OF 6 APPLIED (2026-07-27).** The P2 was **G2-A: a first message may carry `ephemeral_key` set and `prekey_id` NULL** — ordinary signed-prekey-only X3DH — and the builder refused it in four places, so a real send to a peer whose one-time prekeys were exhausted would have got **no cover at all** once U3 wires the pairing. Fixed; §2.2's sentence that seeded it is struck; §2.4 gains a fourth residual. Also: the gate fixtures now VARY `media_type`/`version`/`previous_chain_length` (they only ever compared defaults, and `"file"` is the same width as `"text"`); the U1 WRITER/READER invariant table corrected in place with `DecoyState`'s kdoc made the canonical field-set pointer; the provisioner's stale allocator-based lock justification rewritten. **681 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0, `--rerun-tasks`; **7 mutations, 7 discriminated**. **Review round 3 not yet dispatched.** |
 | **U3** | Pairing at the send choke point. Random order (decoy-first / real-first), few-ms stagger, and the **real envelope handed to `DecoyEnvelopeBuilder.build` as the thing to mirror** — not a block count (§2.2 R1). Insertion inside `MessagingCoordinator`'s confined worker, above `ws.sendMessage`. | Ordering is uniformly random and stagger is drawn per-send — pinned by a statistical test, not by inspection. Real-send latency and the `flushSendRatchet` durability barrier provably unaffected. **`build()` throws rather than return a mismatched decoy; U3 owns what happens then, and must not let it fail the real send.** |
 | **U4** | Synthetic-side receive: second WS connection for the synthetic account, deliver → ack → burn at ~30 ms, occasional send-back so the exchange is bidirectional. | Decoys never surface in UI, notifications, or unread counts. Notification parity §7 re-verified with decoys active. |
 | ~~**U5**~~ | ~~Dead-air ping within a session~~ **CUT 2026-07-27 by maintainer decision — see §3.0.** No unit, no follow-up gate. `DecoyCounterReservation` (U1) and `TAG_DECOY.deadAirNextFireAtMs` lose their only consumer and are removed with it. | **REMOVAL DONE (U2 fix round 2, 2026-07-27)** — allocator, both fields and their tests are out of the tree; `DecoySectionLock` survives on its other callers. |

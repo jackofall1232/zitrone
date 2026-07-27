@@ -2533,3 +2533,119 @@ tag-write-trigger list in `VaultState.kt` was not touched — no removed field a
 **Still owed:** paired-blind review round 2 (2 of a hard cap of 6 used). Maintainer ratification of
 U2's three original spec corrections and of the round-1 Ruling-2 deviation. **No merge, no push, no
 version bump.**
+
+---
+
+## 2026-07-27 — 0.10.0 decoy U2 **FIX ROUND 3 of 6** (review round 2, paired-blind Codex + Grok)
+
+Branch `feat/0.10.0-decoy-u2-envelope-builder`, on top of `ebfe31f5`. Round 2 returned **0 P1,
+1 P2, 4 P3** — the reviewers were disjoint on the top finding for a **third consecutive round**, and
+the P2 came from the reviewer the adjudicator's own summary would otherwise have compressed away.
+
+### G2-A (P2) — the builder could not represent an ordinary send
+
+**A real X3DH first message may carry `ephemeral_key` set and `prekey_id` NULL.** That is
+signed-prekey-only X3DH, and it happens whenever the peer's one-time prekey batch is exhausted — a
+property of the RECIPIENT, not of chance. Production models it end to end
+(`ApiClient.fetchPreKeyBundle` returns a null `one_time_prekey`; `establishSession` passes
+libsignal's `-1` sentinel with a null key; `EncryptResult.preKeyId` comes back null;
+`packages/crypto/src/x3dh.ts:35-36` says so in as many words).
+
+The builder asserted the **biconditional** — "together or not at all" — and the whole first-shaped
+path was built on it: `requireNotNull(cover.preKeyId)`, protobuf field 1 always written, the wrapper
+sized as `1 + varintLength(preKeyId)`, and `baseKeyOffset` assuming field 1 present. **Consequence
+once U3 wires the pairing: a real send to such a peer gets no cover envelope at all — an unpaired
+real frame, the exact observable this feature exists to remove.**
+
+Fixed in all four places. The rule is an implication: `prekey_id` present ⇒ `ephemeral_key` present.
+Field 1 is now omitted when the covered envelope names no one-time prekey, the wrapper is sized
+without it, and the base-key offset moves with it. **Measured against real libsignal 0.46.0 before
+writing a line:** a no-OPK first ciphertext is `0x34, 0x12, 0x21, 0x05…` at **402 B** where the
+OPK-present one is `0x34, 0x08, id, 0x12, 0x21, 0x05…` at **404 B**.
+
+**The test that "covered" this pinned the wrong property with an internally inconsistent fixture** —
+`real.copy(preKeyId = null)`, cleartext null while the ciphertext still carried field 1, so it could
+not tell "reject garbage" from "reject a production shape". It rejected the shape. Replaced: the
+`RealPath` fixture now builds genuine no-OPK sessions from a real `PreKeyBundle` with no one-time
+key, through the real `SessionCipher`, and **both X3DH variants are in the gate cross-product**, in
+the byte-identical-layout test, and in a dedicated test that asserts the cover blob omits field 1
+too. The fail-closed test now pins the half that really is impossible: `prekey_id` with no
+`ephemeral_key`.
+
+### G2-B (P3) — the gate test asserted its own fixtures
+
+`no cleartext field is a CONSTANT where a real message varies` only ever compared **default**
+values, so hard-coding `mediaType = "text"`, `previousChainLength = 0` or `version = "1"` left every
+test green. Sharpest case: **`"file"` is exactly as wide as `"text"`**, so the frame-equality
+postcondition passes while a relay-visible field differs. The `envelope()` fixture now takes all
+three, and a new test varies them (`file`, `image`, previous-chain 7 and 4096, version `"2"`).
+
+### G2-C (P3 by blast radius) — the invariant table, **corrected in place** per the architect's ruling
+
+The mandated WRITER/READER table still documented **18 references** to state round 2 deleted. It is
+**not a historical document — it is the live contract for U3 and U4, both unwritten**, and an
+implementer following it would have rebuilt the allocator and re-added the fields. Struck in place
+with the reason, the way the spec's own W3/W4 rows are struck: the two field rows, W3, W4, W2c's
+counter reset, W1's counter note, W6's flush list, the lock-order "THREE", the allocator row of the
+section-lock table, the whole "Allocator uniqueness" section, readers R2 and R3, the whole "COUNTER
+INVARIANT" section, the capacity budget's "three fixed-width integers", and deviations 2 and 3.
+
+**Canonical-pointer device applied, as the adjudication asked.** `DecoyState`'s kdoc in
+`VaultState.kt` is now declared the canonical statement of `TAG_DECOY`'s field set, with the table
+and spec §4 marked as derived copies and "on disagreement this file wins". A banner scopes
+everything below the round-1 heading as historical, and warns that the mutation tables list tests
+deleted with the code they covered so a future round does not read their absence as regression.
+
+**Ninth recurrence of the stale-contract class in this feature — and the sharpest.** The rule
+"grep for every restatement, especially the summary ones" was *written inside this very document*,
+in its own `[R5]` block, and this document was then the copy that survived. Recorded there.
+
+Two deviations were **withdrawn with the lesson attached**: a field whose writer lives in a later
+unit is a field nobody is accountable for (`deadAirNextFireAtMs`), and a mechanism whose consumer
+lives in a later unit is a requirement nobody has validated (the allocator).
+
+### G2-D (P3) — the reason, not the conclusion
+
+`DecoyAccountProvisioner`'s unlocked network window was justified by "would stall the counter
+allocator on the send path". The allocator is gone; the conclusion is still right. Rewritten to the
+reasons that survive — token writers, `clearAccount`, other provisioner sequences, and U3's send-path
+reads — with a note saying what it used to claim and why that was wrong.
+
+### Also corrected at the source
+
+`DECOY_TRAFFIC_0.10.0_SPEC.md` §2.2 carried the sentence that **seeded G2-A** ("a real conversation's
+first envelope carries non-null `ephemeral_key` and `prekey_id`"). Struck, with the implication rule,
+the measured two-byte cost, and the fixture requirement. §2.4 gains a fourth declared residual: a
+cover of a no-OPK first message claims a one-time batch that was never exhausted — relay-visible
+only, same family and same bound as residual 3.
+
+**The capacity budget was RE-MEASURED**, three runs: raw section body **700 B** (deterministic,
+test-asserted), encoded delta **635 / 641 / 645 B** against the 1024 B budget. The recorded
+"640–643 B" was a two-run interval read as a point estimate, and three fresh runs already fall
+outside it. Recorded as a **distribution** with the note that removing two integers did not move it
+measurably — the section is dominated by incompressible key and token material.
+
+### Evidence
+
+- `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks`
+  from `apps/android` → **BUILD SUCCESSFUL, Gradle exit 0**, **681 tests / 3 skipped / 0 failures /
+  0 errors**, APK produced. (679 → 681: two new tests.)
+- **7 mutations, 7 discriminated**, each rebuilt through Gradle and the source restored
+  byte-for-byte afterwards (verified by `diff`):
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | the `require` restored to the biconditional | 3 FAILED |
+| M2 | `preKeyWrapperFixedBytes` sizes field 1 even when absent | 3 FAILED |
+| M3 | `preKeySignalMessageBytes` always writes field 1 (as 0) | 3 FAILED |
+| M4 | `baseKeyOffset` ignores the field's absence | 3 FAILED |
+| M5 | `mediaType` hard-coded to `"text"` | 1 FAILED |
+| M6 | `previousChainLength` hard-coded to `0` | 1 FAILED |
+| M7 | `version` hard-coded to `PROTOCOL_VERSION` | 1 FAILED |
+
+**M5/M6/M7 fail ONLY the new test** — which is the direct confirmation of Codex's finding: the
+pre-existing suite was green under all three, so the old coverage proved nothing about mirroring.
+
+**Still owed:** paired-blind review round 3 (3 of a hard cap of 6 used). Maintainer ratification of
+U2's original spec corrections and of the round-1 Ruling-2 deviation. **No merge, no push, no
+version bump.**
