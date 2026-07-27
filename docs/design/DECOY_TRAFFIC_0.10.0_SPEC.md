@@ -123,20 +123,46 @@ value is a constant that a real message's value varies over — which is precise
 existing web generator.
 
 **The X3DH first-message observable, and how to satisfy it.** A real conversation's first envelope
-carries non-null `ephemeral_key` and `prekey_id` (+39 B, two fields flipping non-null); every later
-one has them null. The synthetic conversation must show the same shape: **emit well-formed-looking
-values exactly once at setup, null thereafter.** A random 32-byte value (base64) for
-`ephemeral_key` is indistinguishable from a real one to anybody without the key, which is everybody.
+carries non-null `ephemeral_key` and `prekey_id`; every later one has them null. The synthetic
+conversation must show the same shape: **emit well-formed-looking values exactly once at setup, null
+thereafter.**
 
-> **BINDING FOR U2 — `prekey_id` must be drawn from the range the real path actually emits, verified
-> against source, not guessed.** A value outside that range is a fingerprint. It would be the
-> existing web generator's defect reintroduced one field over — a constant-or-implausible value where
-> real traffic varies — and it would defeat the entire point of the synthetic-account approach. Read
-> the real prekey-id assignment before choosing the draw.
+> **⚠️ [R7] THREE CORRECTIONS, from source research done before U2 started. The first would have
+> shipped a fingerprint.**
+>
+> 1. **`ephemeral_key` is 33 bytes, NOT 32.** This spec said "a random 32-byte value (base64)".
+>    Wrong. The real field is `ECPublicKey.serialize()` — a **`0x05` type tag + 32-byte Curve25519
+>    point**, `KEY_SIZE = 33` confirmed in libsignal 0.46.0 bytecode. The tell is in the encoding:
+>    **33 bytes base64 to exactly 44 characters with NO padding, while 32 bytes produce 44
+>    characters ending in `=`.** A decoy built to this spec's original wording would have carried a
+>    trailing `=` that no real first message ever has — a perfect one-field discriminator, in the
+>    exact field added to defeat discrimination. **U2 must emit `0x05 ‖ random(32)`.**
+> 2. **`previous_chain_length` is NOT a web-generator tell.** §0 lists it among that generator's
+>    distinguishers. It is not: Android hardcodes the field to `0` on every send
+>    (`MessagingCoordinator.kt:924,1159,1315` — libsignal's Java API does not expose it) and iOS
+>    likewise never mutates its counter. **Real traffic always emits 0**, so the generator matching
+>    it is correct behaviour, not a defect. The other three items in that list stand.
+> 3. **A first message's ciphertext is structurally LARGER**, and §2.1's frame table understates it.
+>    A `PreKeySignalMessage` carries `registrationId`, `preKeyId`, `signedPreKeyId`, a 33-byte
+>    `baseKey` and a 33-byte `identityKey` *on top of* the inner `SignalMessage`. The table's "+39 B"
+>    counts only the two JSON fields. **U2 must size the synthetic first envelope's ciphertext to a
+>    real `PreKeySignalMessage`, not to a subsequent-message blob** — today's web generator only ever
+>    produces the subsequent shape, so there is no prior art to copy here.
+
+> **BINDING FOR U2 — `prekey_id`. RESOLVED FROM SOURCE; the constraint is now specific.** It is the
+> **RECIPIENT's** one-time prekey id, not the sender's: the sender fetches the peer's bundle, and
+> libsignal replays that consumed id on every message until the peer's reply completes the ratchet
+> (`SignalProtocolManager.kt:299-329`, `ApiClient.kt:215-231`, `store.go:143-157`). Ids are
+> **sequential from 1, +1 per allocation, wrapping at `0xFFFFFF`**, issued in batches of 100
+> (`SignalProtocolManager.kt:406-413`).
+>
+> **This makes the decoy case easy and exact:** the "recipient" is our own synthetic account, whose
+> prekey ids *we* generated at registration. **U2 draws from that account's own uploaded batch** —
+> not from a guessed range, and not at random. A value outside it is a fingerprint.
 
 U1 already registers a genuine prekey bundle for the synthetic account (so the relay's view of that
-account is an ordinary one) while discarding the private halves, which is exactly the right
-groundwork for this and requires no rework.
+account is an ordinary one) while discarding the private halves — which turns out to be exactly what
+makes the `prekey_id` constraint satisfiable, since the ids in that bundle are the legitimate draw.
 
 **Size: the paired decoy mirrors the block count of the real message it is paired with, exactly.**
 
@@ -387,23 +413,20 @@ rule on:
 > **⚠️ BLAST RADIUS NARROWED BY U1 — the break is NOT universal.** The hazard above is written as
 > though every 0.10.0 vault becomes unreadable by 0.9.x. **It does not.** U1's codec omits the
 > section entirely when the decoy state is empty — `state.decoy?.takeUnless { it.isEmpty }` — so
-> `TAG_DECOY` appears **only in a vault that has set up cover traffic.** A user whose vault never
-> does keeps one that opens fine on 0.9.x.
+> `TAG_DECOY` is omitted whenever there is nothing to record, so a large class of vaults keeps full
+> 0.9.x readability. A user whose vault never uses cover traffic keeps one that opens fine.
 >
 > Option (a) still stands and the ruling is unchanged; only its scope is smaller than priced. **The
 > disclosure in §4.1 is narrowed accordingly** — an overstated disclosure is its own dishonesty, and
 > scaring every user about a break most of them will never hit is not caution, it is inaccuracy in
 > the direction that happens to feel safe.
 >
-> **[U1 round 3, corrected round 4] The trigger is setup that REACHES THE RELAY.** U1 writes a
-> durable back-off *before* contacting the relay, so the section appears earlier than the first sent
-> decoy — but an attempt that fails **before** `register` retires its deferral, which empties the
-> holder and puts the vault back in the omitted case. So the tag is not attached by *attempting*
-> provisioning either (round 3 said "the moment provisioning is attempted", which overstated it);
-> it is attached from `register` onwards, whatever happens next. Three consequences: a vault that
-> registers and never sends **does** carry the tag; a vault whose first attempt failed offline does
-> **not**; and the trigger coincides with the first send only because U3 provisions lazily from the
-> session that needs one. Wording below adjusted to match.
+> **⭐ For exactly when the tag lands on disk, see the CANONICAL list in `VaultState.kt`'s codec
+> kdoc. It is not restated here, deliberately.** This block previously carried its own paraphrase
+> ("the trigger is setup that REACHES THE RELAY"), which went stale when round 5 added the crash
+> path — the seventh time a paraphrase of this claim was found rotten. **[R7]** Restating it in a
+> second place buys nothing and guarantees a future mismatch; §4.1's user-facing sentence is
+> deliberately written as a possibility claim so that it does *not* depend on that list.
 
 ### 4.1 Storage-format-stability gate — ANSWERED, not deferred a third time
 
@@ -427,9 +450,8 @@ So, shipping **with** 0.10.0, in release notes and in `SECURITY_MODEL.md`:
 >
 > **What 0.10.0-beta specifically changes:** any vault on which cover traffic has ever been enabled
 > or attempted — even once, even if the attempt failed, was interrupted, or never completed — **may**
-> no longer be readable by 0.9.x, and downgrading may present that vault as corrupt. Only a vault on
-> which cover traffic was **never enabled** is guaranteed to be unaffected. If you are unsure, assume
-> the vault is affected.
+> no longer be readable by 0.9.x, and downgrading may present that vault as corrupt. A vault on which
+> cover traffic was **never enabled** is unaffected. If you are unsure, assume the vault is affected.
 
 > **✅ SIXTH PASS — RATIFIED BY THE MAINTAINER 2026-07-27. THIS WORDING IS FINAL.** Arrived at by
 > third-lens tie-break; the reasoning is preserved below because the *process* that produced it is
@@ -480,16 +502,20 @@ So, shipping **with** 0.10.0, in release notes and in `SECURITY_MODEL.md`:
 > below, which is where it belongs.**
 
 *(Narrowed 2026-07-27 after U1. The first draft said flatly that "vaults created by 0.10.0 cannot be
-opened by 0.9.x", which is false: the tag is written only once cover traffic has actually been
-generated. Corrected rather than left overbroad — the deliver-then-claim rule cuts both ways, and a
-disclosure that overstates harm is as inaccurate as one that understates it.)*
+opened by 0.9.x", which is false: the tag is omitted whenever there is nothing to record. Corrected
+rather than left overbroad — the deliver-then-claim rule cuts both ways, and a disclosure that
+overstates harm is as inaccurate as one that understates it. **[R7] This note previously said the
+tag is written "only once cover traffic has actually been generated" — itself a stale paraphrase of
+the trigger, teaching the wrong rule inside an explanation of an earlier wrong rule. See the
+CANONICAL list in `VaultState.kt`.**)*
 
-> **⚠️ ADJUSTED AGAIN AFTER U1 REVIEW ROUND 4 — PENDING MAINTAINER RE-RATIFICATION. This is the
-> THIRD pass at this sentence, and the maintainer has already ratified it once.** It moved again
-> because the round-3 wording still understated the break, and because the architect's own proposed
-> replacement — "the first time it *tries to* send any" — was rejected in review as **overstating**
-> it. Both errors have the same cause: each pass reasoned from the *previous wording* rather than
-> from what the code does. The code's actual trigger, enumerated:
+> **[R7] PROCESS BANNER CORRECTED — the sentence above is the SIXTH pass and is RATIFIED FINAL.**
+> This block previously still announced itself as the "THIRD pass … PENDING RE-RATIFICATION", three
+> versions out of date, sitting directly beneath a sentence marked ratified — a process-stale banner
+> is as misleading as a stale technical claim, because a reader trusts it to tell them whether the
+> thing above is settled. The table below is current and correct (it carries the crash row); only
+> its banner had rotted. Kept as the enumerated trigger, cross-checked against the CANONICAL list in
+> `VaultState.kt`:
 >
 > | Path | `TAG_DECOY` on disk? |
 > |---|---|
