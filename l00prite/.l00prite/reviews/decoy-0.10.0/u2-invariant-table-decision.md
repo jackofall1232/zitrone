@@ -1,5 +1,29 @@
 # U2 (decoy envelope builder) — WRITER/READER invariant table: **NOT BUILT, and why**
 
+> # ⚠️ SUPERSEDED IN PART BY FIX ROUND 1 (2026-07-27). READ THIS FIRST.
+>
+> This document records U2 **as it was built before paired-blind review round 1**. Two of its
+> load-bearing claims are no longer true of the code, and it is left in place as the measurement
+> record rather than rewritten, because its NUMBERS are still the measurement and were confirmed by
+> an independent reviewer. Its DESIGN NARRATIVE is not current. What changed:
+>
+> 1. **U2 no longer touches `TAG_DECOY.counterHighWater` at all, and no longer calls
+>    `DecoyCounterReservation`.** The paired decoy mirrors the covered envelope's `message_number`.
+>    The reason is in spec §2.3 and is arithmetic, not taste: a padded base64 field's length is always
+>    a multiple of 4, so the `ciphertext` field cannot absorb a 1–3 byte decimal-width difference in
+>    `message_number`, and a monotonic counter cannot be steered to an arbitrary real counter's
+>    width. The allocator's consumer moves to U5's dead-air ping. **So the conclusion of this
+>    document — that no invariant table is warranted — is now MORE true than when it was written:
+>    U2 touches no durable signal whatsoever.**
+> 2. **"Exactly once" is no longer derived from the decoy's counter 0.** The X3DH shape is emitted
+>    exactly when the covered envelope carries one, because `build()` now takes the real envelope and
+>    mirrors it (review finding G-A). The "interrupted session can skip counter 0" residual recorded
+>    below is therefore withdrawn along with the mechanism that created it.
+>
+> The frame-size table below (§2, "821 → 829") is the ORIGINAL measurement record and states the old
+> numbers deliberately, as the before-and-after it was written to be. **Spec §2.1's table is the
+> single canonical statement of frame sizes; nothing here overrides it.**
+
 The standing rule is: *any change to a durable multi-reader signal gets its writers, its readers, and
 what each reader assumes the signal MEANS at the moment it reads, enumerated first.* The rule has a
 precondition. **U2 does not meet it, and performing the ritual anyway would be worse than skipping
