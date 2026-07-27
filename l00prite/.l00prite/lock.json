@@ -1,12 +1,12 @@
 {
  "schema_version": 1,
- "lock_id": "lock-20260727T-decoy-u2-fix-round-3",
+ "lock_id": "lock-20260727T-decoy-u3-pairing",
  "owner_agent": null,
  "owner_session": null,
- "acquired_at": "2026-07-27T20:05:00Z",
- "expires_at": "2026-07-28T00:05:00Z",
+ "acquired_at": "2026-07-27T21:40:00Z",
+ "expires_at": "2026-07-28T01:40:00Z",
  "ttl_seconds": 14400,
- "purpose": "0.10.0 decoy U2 FIX ROUND 3 of 6 — G2-A no-OPK first message, G2-B gate fixtures, G2-C invariant table corrected in place, G2-D stale lock reason — DONE",
+ "purpose": "0.10.0 decoy U3 \u2014 pairing at the send choke point, BUILT and WIRED on feat/0.10.0-decoy-u3-pairing \u2014 DONE",
  "protected_paths": [
   "ledger.md",
   "memory.md",

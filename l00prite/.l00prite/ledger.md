@@ -2649,3 +2649,124 @@ pre-existing suite was green under all three, so the old coverage proved nothing
 **Still owed:** paired-blind review round 3 (3 of a hard cap of 6 used). Maintainer ratification of
 U2's original spec corrections and of the round-1 Ruling-2 deviation. **No merge, no push, no
 version bump.**
+
+---
+
+## 2026-07-27 — 0.10.0 U3: pairing at the send choke point. **BUILT and WIRED** on `feat/0.10.0-decoy-u3-pairing` (`ba5a6b9e`)
+
+**This is the unit that makes cover traffic real.** U1 and U2 were deliberately unwired; from this
+branch a device provisions a synthetic account — one registration from the **shared worldwide
+bucket** — lazily, on its first send whose durable barrier passed.
+
+### What was built
+
+`decoy/DecoySendPairing.kt`: the `CoverTraffic` seam (`paired(cover, publish)` + `stop()`, with
+`CoverTraffic.NONE` as the whole "off" implementation) and its one real implementation. Wired at the
+three `ws.sendMessage` sites in `MessagingCoordinator` (text, attachment control payload, read
+receipt), torn down from `MessagingCoordinator.stop()` beside `notificationScheduler.cancelAll()`,
+and constructed in `SessionContainer` from lambdas only — no `VaultRuntime`, no store, no
+`ApiClient`, so "the pairing path writes nothing durable" is a fact about the type.
+`SignalProtocolManager.localIdentitySerialized()` was added for the 33-byte `IdentityKey.serialize()`
+form the builder's `Sender` requires (the registration wire format next to it is the raw 32-byte one
+— they are deliberately different representations).
+
+### The mechanism, and the two things it had to work around
+
+- **The publish tail is handed over as a plain `() -> Unit`.** The D2c contract is that nothing
+  suspends between `contactExists` and `ws.sendMessage`; passing that tail through a non-suspending
+  function type makes the rule **compiler-enforced at all three sites** instead of a comment repeated
+  at each. It also means the seam physically cannot insert a suspension into the window.
+- **The real publish runs EXACTLY ONCE on every path** — build refusal, socket throw, cancelled
+  scope, cancellation while waiting for the pairing lock — enforced by a `finally` with latched
+  one-shot emitters, not argued in prose. R-U3-1 is therefore paid for structurally.
+- **The decoy-first branch cannot put its delay before the durable flush.** The first shape tried was
+  `emit decoy → sleep → flush → tail`; the flush's own duration would then be ADDED to the
+  decoy-first gap and to nothing else, so the observer could read the order off the gap
+  (short gap ⇒ real-first). The sleep sits between the flush and the tail instead, where a suspension
+  is already legal and the gap is symmetric between branches.
+- **A pairing lock (`Mutex`) holds the pair's two frames exclusive against another pair's.** Without
+  it the decoy-first branch's sleep lets a queued send publish first — **reordering**, which R-U3-1
+  forbids categorically (it only *bounds* delay) — and only one of the two branches would ever be
+  interleaved, so "a foreign frame between the pair" would itself identify the order. Acquired after
+  the flush, i.e. at the point that already decides today's wire order, so order is preserved rather
+  than reconstructed; a concurrent send waits at most one drawn gap.
+
+### The two OPEN questions, answered with their justification
+
+1. **Delay distribution: uniform over 5‥50 ms, drawn per send.** Uniform because it is the
+   maximum-entropy distribution over a bounded support, and a bound is forced by R-U3-1 (the real
+   frame waits out the gap on half of all sends). An exponential is rejected twice over: its tail
+   breaks the bound and its mode at zero makes short gaps *more* guessable. The ceiling is under the
+   ~100 ms perceptibility threshold and under the median RTT on every supported transport; the floor
+   exists so the two writes cannot be coalesced into one TCP segment (which would present the pair as
+   a single double-length frame and throw away the equal-length property).
+   **`random` is a `SecureRandom` BY TYPE, and that is a security requirement:** the gap is directly
+   observable and the order bit is not, both come from the same generator, so a `java.util.Random`
+   would let an observer recover the 48-bit LCG state from measured gaps and then predict every
+   subsequent order bit — the one value the mechanism hides.
+2. **Every envelope through the choke point is paired — receipts and attachment control payloads
+   included.** Pairing only user-visible messages would **destroy a property the product already
+   has**: a receipt is deliberately built to be indistinguishable from text (`ttl_seconds: null`,
+   `burn_on_read: false`, `media_type: "text"`, padded ciphertext), so selective pairing would sort
+   the one size class an observer can see into paired and unpaired halves and hand it a receipt
+   detector that does not exist today — a new leak introduced by the privacy feature, R-U3-3's
+   marked-frame problem exactly. Observable consequence: outbound `message.send` volume doubles for
+   every class (`sendLimit` 100/min per account is untouched by human senders). It does not interact
+   with §2.4's uncovered plaintext control channel, which is separable by size regardless.
+
+### The send predicate, and why it is NOT `canSend()`
+
+The only per-send condition is "does this vault have a synthetic account id". It is durable, flips at
+most once per session (absent → present) and never flaps, which is exactly R-U3-3's acceptable
+"persistent cause → uniformly-off cover". **`DecoyAccountProvisioner.canSend()` was deliberately not
+used**: it folds in `VaultRuntime.capacityExceeded`, which is transient — the stutter R-U3-3 forbids
+— and it is unobservable here anyway, because `capacityExceeded` fail-closes `flushBeforeAck` for the
+whole vault, so a send that reaches the seam has already flushed. `canSend` answers a provisioning
+question; the send path's question is `hasAccount`.
+
+### Invariant table: NOT PERFORMED, and the reason
+
+**U3 adds no durable field and no writer or reader of one.** The pairing path performs zero
+mutations; it reads `TAG_DECOY.accountId` through `DecoyAuthStore`'s existing getter, which is
+already a row in U1's table. The registration writes it triggers are U1's, unchanged. Per the
+standing rule, the ritual is skipped where it does not apply rather than performed emptily.
+
+### Evidence
+
+- `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks`
+  from `apps/android` → **BUILD SUCCESSFUL, Gradle exit 0**, **696 tests / 3 skipped / 0 failures /
+  0 errors** (681 → 696: fifteen new gate tests), APK produced.
+- **15 mutations, 15 killed.** Every one of the 15 new tests discriminated against at least one.
+
+| # | Mutation | Tests failed |
+|---|---|---|
+| M1 | order is always real-first | 4 |
+| M2 | order alternates (predictable, still exactly 50%) | 3 |
+| M3 | order is a biased coin, p = 0.55 | 1 |
+| M4 | the gap is a fixed delay | 2 |
+| M5 | the gap distribution depends on the order | 1 |
+| M6 | no `finally` — a cancelled pairing drops the frame that had not gone | 1 |
+| M7 | an uncovered send does not publish the real frame | 5 |
+| M8 | no pairing lock — pairs interleave and a queued send overtakes | 1 |
+| M9 | provisioning is launched on every uncovered send | 1 |
+| M10 | `stop()` does not tear the provisioning job down | 1 |
+| M11 | only user-visible messages are paired | 2 |
+| M12 | the cover emit is not contained — a socket throw escapes | 1 |
+| M13 | the cover is addressed to the real contact | 2 |
+| M14 | `CoverTraffic.NONE` drops the real send | 1 |
+| M15 | a dead socket on the cover frame is treated as an error | 2 |
+
+**M14 and M15 were added because the first thirteen left two tests undiscriminated** — the
+`CoverTraffic.NONE` test and the dead-socket test. Both mutations killed them, so no test in the unit
+is carried by another guard. Source restored byte-for-byte (`git status` clean) and a full
+`--rerun-tasks` build run after the final revert, per the harness rule in `failures.md`.
+
+### Owed before merge
+
+- **Paired-blind review round 1 of U3 has not been dispatched.**
+- **The U1 follow-up that this unit made LIVE**: `todos.md` says account deletion / burn leaves the
+  synthetic relay account registered and that it "must be answered before U3 wires provisioning".
+  U3 wires provisioning. It is now reachable and unanswered.
+- U4 (synthetic-side receive) does not exist, so cover envelopes rest on the relay until the janitor
+  TTL purges them, and the 🍋‍🟩 indicator + honest docs (U6) are not built.
+- No merge, no push, no version bump.

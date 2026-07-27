@@ -962,12 +962,16 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       dishonesty) still holds; an understated one is just worse, which is why it was applied rather
       than left standing while it waits.
 
-- [ ] **U1 follow-up — account deletion / burn leaves the synthetic relay account registered.**
+- [ ] **U1 follow-up — account deletion / burn leaves the synthetic relay account registered.
+      ⚠️ NOW LIVE AND UNANSWERED — U3 WIRED PROVISIONING (2026-07-27). MERGE GATE.**
       `deleteAccountAndWipe` deletes the REAL relay account and obliterates the image; a provisioned
-      synthetic account would survive on the relay as an orphan. Not live today (U1 is unwired and
-      nothing provisions), but it must be answered before U3 wires provisioning: either delete the
-      synthetic account alongside the real one, or state in `SECURITY_MODEL.md` that it is left and
-      why that leaks nothing beyond what §1's threat model already concedes.
+      synthetic account survives on the relay as an orphan. ~~Not live today (U1 is unwired and
+      nothing provisions), but it must be answered before U3 wires provisioning~~ — **U3 is built and
+      wired on `feat/0.10.0-decoy-u3-pairing`, so a vault that sends anything now provisions.** The
+      answer is still owed and is now a precondition for MERGING U3, not for writing it: either
+      delete the synthetic account alongside the real one, or state in `SECURITY_MODEL.md` that it is
+      left and why that leaks nothing beyond what §1's threat model already concedes. Same question
+      applies to the Pucker Burn wipe, which never contacts the relay at all.
 
 - [x] **U2 must settle §2.2 vs §2.3 for the first envelope. — SETTLED, and the ruling was already
       made before U2 started.** The maintainer's §2.3 ruling governs: **no `SessionBuilder.process`**,
@@ -1008,6 +1012,36 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       is the same width as `"text"`. G2-C: the U1 invariant table corrected IN PLACE (18 stale
       references), with `DecoyState`'s kdoc made the canonical field-set pointer. G2-D: the
       provisioner's allocator-based lock justification rewritten, decision kept.
+
+- [x] **U3 — pairing at the send choke point. BUILT and WIRED 2026-07-27 on
+      `feat/0.10.0-decoy-u3-pairing` (`ba5a6b9e`; LOCAL, not pushed, not merged, no version bump).**
+      `decoy/DecoySendPairing.kt` — the `CoverTraffic` seam (`paired(cover, publish)` + `stop()`,
+      `CoverTraffic.NONE` as the whole "off" implementation) wrapped around the NON-SUSPENDING publish
+      tail at all three `ws.sendMessage` sites, plus `SignalProtocolManager.localIdentitySerialized()`
+      for the 33-byte `IdentityKey.serialize()` form the builder's `Sender` needs.
+      **696 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0, `--rerun-tasks`;
+      **15 mutations, 15 killed** (M14/M15 added because the first thirteen left two tests
+      undiscriminated — no test in the unit is carried by another guard).
+      **No invariant table: U3 adds no durable field and no writer** — it reads
+      `TAG_DECOY.accountId` through `DecoyAuthStore`'s existing getter and mutates nothing; the
+      registration writes it triggers are U1's.
+      **The two OPEN questions are answered in `DecoySendPairing`'s kdoc, with the argument:**
+      (1) the gap is **uniform over 5‥50 ms per send** — max-entropy over the bound R-U3-1 forces,
+      floor set so the two writes cannot share one TCP segment, and the generator is typed
+      `SecureRandom` because the OBSERVABLE gap would otherwise leak the state that produces the
+      UNOBSERVABLE order bit; (2) **every envelope through the choke point is paired**, receipts and
+      attachment control payloads included, because those are built to be indistinguishable from text
+      and selective pairing would hand an observer a receipt detector that does not exist today.
+      **Mechanism notes worth carrying into review:** the tail is passed as a plain `() -> Unit`, so
+      "no suspension between `contactExists` and `ws.sendMessage`" is now compiler-enforced; a
+      `finally` guarantees the real publish runs exactly once on every path including cancellation; a
+      pairing `Mutex` keeps a queued real send from overtaking a decoy-first pairing (reordering is
+      forbidden categorically, unlike delay) and keeps both branches equally interleaving-free.
+      `canSend()` is deliberately NOT the send predicate — it folds in the transient
+      `capacityExceeded`, which is the stutter R-U3-3 forbids, and is unobservable at a point the
+      flush has already passed.
+      **OWED: paired-blind review round 1 of U3 (0 of a hard cap of 6 used), and the now-live U1
+      follow-up above (orphaned synthetic account on delete/burn) as a merge gate.**
       **681 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0, `--rerun-tasks`;
       **7 mutations, 7 discriminated** — and M5/M6/M7 fail ONLY the new test, confirming the old
       coverage proved nothing about mirroring. Section budget re-measured over three runs: raw body

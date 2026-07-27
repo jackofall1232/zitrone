@@ -903,3 +903,59 @@ appeared for a whole class of RECIPIENTS (those whose prekeys ran out) rather th
 is worse than a uniform leak. **When "fail closed" means "emit the thing you were built to hide",
 the guard is not conservative; it is the defect.** Check what the closed state actually looks like
 to the adversary before calling it safe.
+
+### THE OBSERVABLE DRAW AND THE UNOBSERVABLE DRAW MUST NOT SHARE A WEAK GENERATOR (0.10.0 U3)
+
+Cover traffic draws two values per send: an **order bit** (which of the two same-length frames goes
+first — the value the whole mechanism exists to hide) and a **gap** in milliseconds (which the
+observer *measures directly*, because it is the time between two packets it can see).
+
+Drawn from the same generator, the observable one is a **state oracle for the unobservable one**. A
+`java.util.Random` is a 48-bit LCG whose state is recoverable from a couple of outputs, so an
+observer who times a handful of pairs can predict every subsequent order bit and read the real frame
+off the wire from then on — with the frames still perfectly equal in length, which is what makes it
+hard to notice. The fix is not "use SecureRandom by convention": the parameter is **typed**
+`SecureRandom`, so passing a weak generator is unrepresentable.
+
+**RULE.** When one draw is exposed to the adversary and another must stay hidden, ask whether the
+exposed one reveals the generator's state. If they share a generator, the shared generator inherits
+the *stronger* requirement — and encode that in the type, not in a comment.
+
+### A DELAY PLACED BEFORE A VARIABLE-DURATION STEP LEAKS THE THING IT WAS ADDED TO HIDE (0.10.0 U3)
+
+The first shape for the decoy-first branch was `emit decoy → sleep(gap) → flushSendRatchet → publish
+real`, which reads as obviously correct: the gap is drawn per send, so the observed separation is
+random. It is not correct. The **flush's own duration is added to the decoy-first gap and to nothing
+else** (the real-first branch measures its gap from a frame that has already gone), so the two
+branches have *different* gap distributions and the observer reads the order straight off the
+timing — short gap ⇒ real went first.
+
+The delay was moved to sit between the flush and the publish tail, where a suspension is already
+legal and the gap means the same thing in both branches.
+
+**RULE, and it generalises past this feature:** a randomised delay only hides what it is adjacent to.
+Before placing one, ask **what else runs between the two observable events** — any variable-duration
+step inside the interval is added to the measurement, and if it is present in only one branch it is a
+discriminator. The mutation that catches this class is "make the gap distribution depend on the
+order" (M5 here); it is worth writing whenever a timing property is claimed.
+
+### PROCESS FIX (BINDING) — BRANCH FIRST, COMMIT AS SOON AS IT COMPILES (0.10.0 U3)
+
+U3's whole first implementation — five files, the new class, the 15-test gate, a green
+`:app:testDebugUnitTest` run — was **lost to an external revert of the working tree** partway through
+the unit. The tree came back at `4438cd72` with `git status` clean; nothing was recoverable, because
+the work had never been branched or committed. The instruction for the unit *said* "branch from
+current `main`", and the branch had not been created: the work was sitting uncommitted on `main`.
+
+Nothing about the loss was subtle, and the cost was the whole implementation window. Two rules:
+
+1. **Create the unit's branch as the FIRST action of the unit**, before the first edit, not when the
+   work is ready to commit. A branch that exists cannot be forgotten under time pressure.
+2. **Commit as soon as the unit compiles and its own tests pass** — before mutation sweeps, before
+   doc updates, before memory writes. A mutation harness rewrites source files in place; if the tree
+   is not committed, its `finally` restore is the only copy of the work in existence. Committing
+   first turns "restore the file" into "`git checkout` the file", which is verifiable.
+
+The second rule has a corollary that already exists in this file for a different reason (a harness
+that leaves mutated artifacts behind): **`git status` clean is the harness's real postcondition**, and
+it can only be checked against a commit.

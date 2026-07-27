@@ -1,7 +1,7 @@
 {
  "schema_version": 2,
  "max_iterations": 6,
- "current_iteration": 3,
+ "current_iteration": 4,
  "stop_conditions": [
   "definition_of_done_met",
   "blocked",
@@ -10,10 +10,10 @@
   "max_iterations_reached"
  ],
  "human_review_gates": [
-  "MERGE — always, per-action, never lapses (convergence does NOT authorize it)",
+  "MERGE \u2014 always, per-action, never lapses (convergence does NOT authorize it)",
   "version bump / release cut",
   "push beyond the draft-PR exception already recorded",
-  "round-6 cap reached — stop and hand to the human regardless of outcome",
+  "round-6 cap reached \u2014 stop and hand to the human regardless of outcome",
   "before executing destructive operations",
   "before changing architecture or security boundaries",
   "before declaring completion"
@@ -45,6 +45,6 @@
    "stop_signal"
   ]
  },
- "active_unit": "0.10.0-beta U2 (decoy envelope builder): FIX ROUND 2 of a hard cap of 6 APPLIED. NOT review-driven — it implements the maintainer's §3.0 decision to CUT the idle ping (commit c65d9a3e), which round 1's finding made decidable. REMOVED: DecoyCounterReservation + DecoyCounterReservationTest, TAG_DECOY.counterHighWater (W3) and TAG_DECOY.deadAirNextFireAtMs (W4) from both encode and decode. KEPT with the argument written down: DecoySectionLock, which still guards the DecoyAuthStore token writers and the provisioner's commit/revert and compare-and-clear. Nothing of the allocator was kept 'just in case'. Deliberately UNWIRED. 679 tests / 0 failures, assembleDebug exit 0, 6 mutations / 6 discriminated.",
- "loop": "U2 review round 1 adjudicated -> fix round 1 -> maintainer CUT (c65d9a3e) -> fix round 2 (this run, scope-decision driven) -> dispatch review round 2 -> ... hard cap 6. 2 of 6 rounds used. No merge, no push, no version bump."
+ "active_unit": "0.10.0-beta U3 (pairing at the send choke point): BUILT and WIRED on feat/0.10.0-decoy-u3-pairing (ba5a6b9e). CoverTraffic seam around the NON-SUSPENDING publish tail at all three ws.sendMessage sites; order is a per-send SecureRandom bit, gap uniform over 5..50 ms; a finally guarantees the real publish runs exactly once on every path; a pairing Mutex prevents reordering and keeps both order branches equally interleaving-free. Every envelope class is paired, receipts included. No durable field, so no invariant table. 696 tests / 3 skipped / 0 failures, assembleDebug exit 0 with --rerun-tasks, 15 mutations / 15 killed. FIRST unit that can spend a registration from the shared worldwide bucket.",
+ "loop": "U3 built and committed on its own branch -> dispatch paired-blind review round 1 of U3 (0 of a hard cap of 6 used) -> adjudicate -> fix. U2's own review round 3 is still owed. MERGE GATE before U3 lands: the orphaned synthetic relay account at account-delete / burn is now live and unanswered. No merge, no push, no version bump."
 }
