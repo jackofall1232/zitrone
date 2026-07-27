@@ -274,12 +274,27 @@ class DecoySendPairing(
             // R-U3-1: cover traffic never costs a real send. R-U3-3: a real frame is never left
             // unpaired. Both calls are non-suspending, so they complete even under cancellation —
             // where the drawn gap is the only thing lost and the drawn ORDER is still honoured.
+            //
+            // The guard is UNCONDITIONAL, and that is the point of the nested `finally`. This block
+            // is the mechanism that makes "the real publish always escapes" absolute, so nothing
+            // inside it may be able to defeat it from within: [emit] deliberately rethrows
+            // `CancellationException` (the one throwable it does not swallow), and on the
+            // decoy-first path the cover emitter runs FIRST. A plain sequence would let that rethrow
+            // skip the real publish — a safety mechanism broken from inside the region it protects.
+            // The pairing of the OTHER order is guarded the same way for symmetry: a throw out of
+            // the real publish must not be what leaves its frame unpaired (R-U3-3).
             if (plan.decoyFirst) {
-                decoy()
-                real()
+                try {
+                    decoy()
+                } finally {
+                    real()
+                }
             } else {
-                real()
-                decoy()
+                try {
+                    real()
+                } finally {
+                    decoy()
+                }
             }
         }
     }

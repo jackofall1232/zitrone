@@ -10,6 +10,7 @@ import com.zitrone.app.decoy.CoverTraffic
 import com.zitrone.app.decoy.DecoyEnvelopeBuilder
 import com.zitrone.app.decoy.DecoySendPairing
 import com.zitrone.app.net.WsClient
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -79,6 +80,15 @@ class DecoySendPairingTest {
     /** Deterministic, and still a [SecureRandom] — the type the production seam requires. */
     private fun seeded(seed: Long): SecureRandom =
         SecureRandom.getInstance("SHA1PRNG").apply { setSeed(seed) }
+
+    /**
+     * A [SecureRandom] whose ORDER bit is pinned to decoy-first; the gap is still drawn normally.
+     * Used only where the test is about the decoy-first branch's control flow rather than about the
+     * distribution — the distribution tests must never see a pinned bit.
+     */
+    private fun alwaysDecoyFirst(): SecureRandom = object : SecureRandom() {
+        override fun nextBoolean(): Boolean = true
+    }
 
     private fun b64(bytes: Int): String =
         Base64.getEncoder().encodeToString(ByteArray(bytes).also { SecureRandom().nextBytes(it) })
@@ -397,6 +407,45 @@ class DecoySendPairingTest {
         }
         assertTrue("the decoy-first branch was never exercised", sawDecoyFirst)
         assertTrue("the real-first branch was never exercised", sawRealFirst)
+    }
+
+    @Test
+    fun `a CancellationException out of the cover frame cannot skip the real publish`() = runTest {
+        // U3-D. The `finally` in `paired` is the guard that makes "the real send always escapes"
+        // absolute; a helper that rethrows AFTER latching defeats that guard from inside the region
+        // it protects. CancellationException is the one throwable `emit` deliberately does not
+        // swallow, and on the decoy-first `finally` path the decoy emitter runs FIRST — so a CE out
+        // of it used to take the real publish with it.
+        //
+        // The path is reached exactly as the class kdoc advertises it: a second send cancelled while
+        // WAITING for the window, so its `finally` is the first place either emitter runs.
+        val frames = mutableListOf<Any>()
+        var coverThrowsCancellation = false
+        val pairing = pairing(
+            frames,
+            random = alwaysDecoyFirst(),
+            sleep = { delay(it) },
+            send = {
+                if (coverThrowsCancellation) throw CancellationException("cover frame")
+                frames.add(it)
+                true
+            },
+        )
+
+        val holder = launch { pairing.record(textEnvelope(counter = 1), frames) }
+        runCurrent()
+
+        var published = 0
+        val waiter = launch { pairing.paired(textEnvelope(counter = 2)) { published++ } }
+        runCurrent()
+
+        coverThrowsCancellation = true
+        waiter.cancelAndJoin()
+        assertEquals("cover traffic swallowed a real send", 1, published)
+
+        coverThrowsCancellation = false
+        advanceUntilIdle()
+        holder.join()
     }
 
     @Test
