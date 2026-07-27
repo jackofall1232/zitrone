@@ -821,3 +821,125 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       WEAKER in-process arrangement than production ships. A burn → relaunch → assert-at-boot test
       would cover the contract actually shipped. Needs multi-process orchestration the current
       harness lacks.
+
+## 0.10.0-beta — decoy traffic
+
+- [x] **U1: synthetic-account provisioning + `TAG_DECOY` (0x06)** — branch
+      `feat/0.10.0-decoy-u1-provisioning` (LOCAL, not pushed, not merged, no version bump).
+      Invariant table written BEFORE code at
+      `l00prite/.l00prite/reviews/decoy-0.10.0/u1-invariant-table.md`. Shipped: the codec section
+      (optional, omitted when empty), `DecoyState`, `DecoyAuthStore` + `StagingAuthStore`,
+      `DecoyIdentity`, `DecoyRelayApi`/`ApiClientDecoyRelay`/`RegistrationPowSolver`,
+      `DecoyAccountProvisioner`, `DecoyCounterReservation`.
+      Evidence: `:app:testDebugUnitTest` 645 tests / 0 failures / 3 skipped (was 598; +47 new) and
+      `:app:assembleDebug`, both BUILD SUCCESSFUL, GRADLE_EXIT=0, `--rerun-tasks`, 2026-07-27.
+      Measured byte budget: worst-case section delta **640–643 B** against a declared
+      `DECOY_SECTION_BUDGET_BYTES = 1024`; realistic state with the section 924–927 B of 262 112 B.
+      **U1 is deliberately UNWIRED** — nothing in production constructs these yet, because the
+      trigger ("first session that actually sends a decoy") is U3. No registration can be spent
+      from the shared global bucket by this branch.
+      **REVIEW ROUND 1 DONE + FIXED (2026-07-27).** Paired-blind Codex + Grok, adjudicated in
+      `reviews/decoy-0.10.0/u1-r1-adjudication.md`: ten confirmed findings, F1-F10, all fixed in
+      fix round 1 of a hard cap of 6. Root cause of three of the five most severe:
+      **`VaultRuntime.mutate` is NOT durable** — it schedules; `flushBeforeAck` is the durable
+      step and its throw means the value was never issued. The counter reservation, the credential
+      commit and both back-offs now flush; readiness consults `capacityExceeded`; the counter
+      allocator is one-per-runtime structurally; a capacity failure reverts and backs off durably.
+      Spec §2.3/§4/§6.2a and the invariant table were corrected too — the "persisted by writing to
+      `VaultState`" wording was the architect's error and is amended in place.
+      Re-verified: `:app:testDebugUnitTest` **659 tests / 0 failures / 0 errors / 3 skipped** and
+      `:app:assembleDebug`, GRADLE_EXIT=0, `--rerun-tasks`, 47/47 executed, 2026-07-27.
+      Re-measured budget: worst-case delta **645 B** of 1024; realistic state 929 B of 262 112 B.
+      **REVIEW ROUND 2 DONE + FIXED (2026-07-27).** Paired-blind Codex + Grok over the whole unit,
+      adjudicated in `reviews/decoy-0.10.0/u1-r2-adjudication.md`: 1 P1, 7 P2, 6 P3 → eleven
+      confirmed findings G1-G11, all fixed in fix round 2 of a hard cap of 6.
+      **All three guards added in round 1 became round-2 defects**, sharing one shape: state sampled
+      outside the lock that protects it, or two questions folded into one predicate. Fixed at the
+      root, not per interleaving — three structural changes:
+      (1) **one SECTION lock** (`crypto/vault/DecoySectionLock.kt`) shared by the allocator,
+      `DecoyAuthStore` and the provisioner, guarding SEQUENCES rather than single mutates — closes
+      the P1 TOCTOU counter regression and the stale-snapshot revert together;
+      (2) **the readiness predicate SPLIT** into `hasAccount()` (gates registration, reads nothing
+      but the section) and `canSend()` (gates cover traffic) — the round-1 single predicate was the
+      ARCHITECT's error, ratified into the spec and falsified by review;
+      (3) **the back-off is written AHEAD of the registration**, so a vault too full to record that
+      it tried never spends one — the absolute-capacity edge is removed rather than patched.
+      Two deliberate behaviour changes: every failed attempt now defers 60-90 min (not only a 429),
+      and a `TAG_DECOY` section appears before any relay contact, which moves the 0.9.x downgrade
+      trigger from "generated cover traffic" to "tried to provision" — **§4.1's disclosure must be
+      re-read when U3 wires the call.**
+      Ten mutations applied and each observed to FAIL its intended test, then reverted; two needed a
+      second attempt to become discriminating, and that is recorded in the invariant table.
+      Re-verified: `:app:testDebugUnitTest` **669 tests / 0 failures / 0 errors / 3 skipped** and
+      `:app:assembleDebug`, GRADLE_EXIT=0, 2026-07-27.
+      **REVIEW ROUND 3 DONE + FIXED (2026-07-27).** Paired-blind Codex + Grok over the whole unit,
+      adjudicated in `reviews/decoy-0.10.0/u1-r3-adjudication.md`: **0 P1**, 6 P2, 5 P3 → ten
+      confirmed findings H1-H10, all fixed in fix round 3 of a hard cap of 6. First real convergence
+      signal: the two blind reviewers independently found the SAME top three defects (r1 was fully
+      disjoint, r2 overlapped on 2 of 11), and round 2's section lock and predicate split were probed
+      by both and broken by neither.
+      **H2/H3/H4 are one pattern — the guard's scope did not match the resource's scope**, the
+      0.9.2 PR-3 lesson, and the fix round 1 already applied once to the counter allocator:
+      (1) `DecoyAccountProvisioner`'s constructor is now **private** with a `forRuntime` factory, and
+      the one-attempt latch + the unconfirmed-flush memory live in a per-runtime `Gate` — two
+      provisioners over one runtime used to each hold their own latch (two registrations from the
+      shared worldwide bucket, one orphan) and disagree about durability;
+      (2) `refreshTokens`' read→network→write is now conditional on the account still being the one
+      refreshed (`DecoyAuthStore.storeTokensForAccount`), so a concurrent `clearAccount` is no longer
+      undone by the relay's response restoring live bearer credentials for a retired account.
+      **H1/H5: the write-ahead back-off is retired when the attempt failed BEFORE `register`** —
+      round 2 made it permanent, so an offline attempt cost 60-90 min of cover-traffic silence AND a
+      `TAG_DECOY` section that a 0.9.x build rejects, for something that spent nothing. From
+      `register` onwards it stands (a `register` that throws may still have created the account).
+      Twelve mutations applied and each observed to FAIL its intended test, then reverted; **four
+      tests had to be restructured** to keep discriminating, because a runtime-scoped latch means "a
+      later session" must be a new runtime built from the image on disk, not a fresh provisioner over
+      a live one.
+      Re-verified: `:app:testDebugUnitTest` **675 tests / 0 failures / 0 errors** and
+      `:app:assembleDebug`, GRADLE_EXIT=0, 2026-07-27.
+      **STILL OWED:** review ROUND 4 against the WHOLE unit, then a maintainer merge decision. Three
+      of six rounds used. Flag to the round-4 reviewers: the per-runtime `Gate` (a THIRD process-wide
+      `WeakHashMap` registry — allocators, section monitors, now gates) and whether `forRuntime`
+      returning a fresh instance over shared guard state is the right call; the deferral
+      retire/keep boundary (is `register` the correct discriminator?); and §4.1's re-worded
+      disclosure.
+
+- [ ] **§4.1 disclosure wording needs MAINTAINER RE-RATIFICATION — now on its THIRD pass.** This
+      adjusts a maintainer ruling, not a typo, which is why it is flagged in the spec rather than
+      quietly rewritten. Current text: *"once a vault has **set up cover traffic** — which happens
+      the first time it sends any, and is complete as soon as its cover-traffic account is
+      registered — it can no longer be opened by 0.9.x; downgrading will present that vault as
+      corrupt. A vault that has never used cover traffic, or whose setup never reached the relay, is
+      unaffected."*
+      **It has now been wrong in BOTH directions in consecutive rounds:** round 3's "which happens
+      the first time it sends any" understated the break (a vault that registers and never sends
+      still carries the tag); the round-4 replacement first proposed, "the first time it *tries to*
+      send any", overstated it (a vault that fails offline before `register` retires its deferral
+      and keeps its 0.9.x readability). The durable trigger is **setup that reaches relay
+      registration**. The four-path truth table it must be re-derived from now lives in
+      `VaultState.kt`'s codec kdoc, next to the code that produces it — see the failures.md entry
+      "A doc that drifts in BOTH directions is being edited from itself".
+      The maintainer's stated reason for the original narrowing (an overstated disclosure is its own
+      dishonesty) still holds; an understated one is just worse, which is why it was applied rather
+      than left standing while it waits.
+
+- [ ] **U1 follow-up — account deletion / burn leaves the synthetic relay account registered.**
+      `deleteAccountAndWipe` deletes the REAL relay account and obliterates the image; a provisioned
+      synthetic account would survive on the relay as an orphan. Not live today (U1 is unwired and
+      nothing provisions), but it must be answered before U3 wires provisioning: either delete the
+      synthetic account alongside the real one, or state in `SECURITY_MODEL.md` that it is left and
+      why that leaks nothing beyond what §1's threat model already concedes.
+
+- [ ] **U2 must settle §2.2 vs §2.3 for the first envelope.** §2.2 says the decoy rides "a session
+      genuinely established with one X3DH first message at setup"; §2.3 rules the ciphertext is
+      random bytes and nothing ever decrypts it. Both are satisfiable, but U2 must decide whether
+      the sender really runs `SessionBuilder.process` against the synthetic bundle (which writes a
+      durable ratchet session into the REAL vault — a capacity and reseal cost U1's budget does NOT
+      cover) or fabricates the `ephemeral_key`/`prekey_id` fields. U1 registers a genuine bundle
+      either way, but DISCARDS the prekey private halves, since §2.3 rules out ever decrypting.
+
+- [ ] **U6 owes the DELIVERY of the storage-format disclosure.** The gate itself is answered above
+      (line ~598, `a4f118df`) — do not re-answer it here. What is still outstanding is shipping the
+      text: release notes plus `SECURITY_MODEL.md`, saying that 0.10.0 vaults cannot be opened by
+      0.9.x and that downgrading presents them as corrupt. 0.10.0 must not ship without it, because
+      0.10.0 is the release that makes the second break real (spec §4.1 sequencing note).

@@ -1744,3 +1744,488 @@ CX23 relay work list (needs HoboJoe; CX33 has no SSH):
    ARGON2_DIFFICULTY_BITS=5 (default is STILL the D=8 placeholder), REGISTRATION_CHALLENGE_SECRET
    ≥32B, verify-concurrency semaphore in place (feat/0.9.4-pow-verify-concurrency), rollback =
    flag off + restart.
+
+## 2026-07-27 — 0.10.0-beta decoy traffic, U1 (session: decoy-u1-provisioning)
+
+Branch `feat/0.10.0-decoy-u1-provisioning` off `main` @ `d44616c5`. **Local only — nothing
+pushed, nothing merged, no version bump.**
+
+**Gate cleared first, as required:** the WRITER/READER invariant table was written BEFORE any
+code and every row of the spec's §4 draft was re-verified against current source:
+`l00prite/.l00prite/reviews/decoy-0.10.0/u1-invariant-table.md`.
+
+Built:
+- `VaultState.kt` — `TAG_DECOY = 0x06`, an OPTIONAL section carrying the synthetic account's
+  id + libsignal identity keypair + tokens, the counter high-water mark, the dead-air next-fire
+  (reserved, unset by U1), and a 429 provisioning deferral. `DecoyState` holder with explicit
+  content-based equals (a `ByteArray` field makes the generated one a trap). `VaultState.wipe()`
+  now ZEROES the identity private key; `parsePlaintext`'s decode-failure catch and `decodeDecoy`
+  wipe it on every throw path.
+- `data/DecoyAuthStore.kt` — vault-backed token surface + a RAM-only `StagingAuthStore`.
+- `decoy/` — `DecoyIdentity`, `DecoyRelayApi` + `ApiClientDecoyRelay` + `RegistrationPowSolver`,
+  `DecoyAccountProvisioner`, `DecoyCounterReservation`.
+
+**Evidence (real, `--rerun-tasks`, JDK 17, SDK /opt/android-sdk):**
+- `./gradlew :app:testDebugUnitTest :app:assembleDebug` → `GRADLE_EXIT=0`, `BUILD SUCCESSFUL in 1m 23s`
+- 645 tests / 0 failures / 0 errors / 3 skipped (598 before; 47 new across 4 decoy test classes)
+- APK produced at `app/build/outputs/apk/debug/app-debug.apk`
+- Measured capacity budget (from the test's own stdout, twice): worst-case decoy-section encoded
+  delta **640–643 B** vs a declared `DECOY_SECTION_BUDGET_BYTES = 1024`; a realistic populated
+  state carrying the section is **924–927 B of 262 112 B**.
+
+**Constraints held, verified by grep not by assertion:** no `SharedPreferences` /
+`SettingsRepository` / `DeviceSettings` / `BootDiagnostics` / `Log` reference anywhere in the
+decoy code or `DecoyAuthStore` (0 hits); no slot, vault-index or real-vs-decoy VAULT naming
+(0 hits); no string resource added. The provisioner takes no diagnostics or log sink at all, so
+"nothing decoy-related reaches device-level storage" is structural, not disciplinary.
+
+**Two spec facts found STALE while source-verifying the table** (recorded here, not only in the
+commit message, per the binding rule):
+1. §6.1 "`regpow` is not in this tree" — false for the CLIENT since 0.9.4: `RegistrationPow.kt`
+   is on main and wired into `bootstrapLoop`. Still true for the RELAY (`handlers.go` `Register`
+   has no PoW check on main). U1 therefore mirrors the real path and answers §6.2a's open
+   question: background solve, NO progress UI, NO diagnostics recorder, silent failure.
+2. §6.2 "main still reads `ratelimit.New(5, time.Hour)` at `handlers.go:48`" — false; main now
+   reads `ratelimit.New(300, time.Hour, cfg.RateLimitEnabled)` at `handlers.go:54`. The interim
+   widening IS merged. The `c.IP()` keying is unchanged at `handlers.go:166`, so the bucket is
+   still global and CX23 P2 remains open.
+
+**Deviations from the spec, all recorded in the invariant table with reasoning:**
+- a sixth field (`provisionNotBeforeMs`) was added to the section, because "back off across
+  sessions on 429" requires durable, vault-scoped state. Consequence: **section presence no
+  longer implies readiness** — the spec's R4 reader row is corrected to key on the credential
+  pair. This is exactly the round-12 shape (changing what a durable signal MEANS), so it is
+  flagged rather than absorbed.
+- W1 does not write a first dead-air fire time (§3.2 re-framed the ping to in-session; a durable
+  wall-clock next-fire is U5's decision). The field exists and round-trips; U1 writes null.
+- counter reservation is built in U1 per the task brief, not U2 per the spec's writer table. Only
+  the allocator — the sender that spends the values is still U2.
+
+**Not done, deliberately:** U1 is UNWIRED. Nothing in `SessionContainer` or `MessagingCoordinator`
+constructs these classes, because the trigger ("first session that actually sends a decoy") is
+U3's. Same posture `VaultRuntime` itself shipped in. Consequence: this branch cannot spend a
+registration from the global bucket on any device.
+
+**Owed:** independent paired-blind review of the WHOLE unit (0.9.3 lesson), then a maintainer
+merge decision. No push, no merge, no version bump was performed.
+
+**Post-rebase re-verification (same session).** `main` advanced to `a4f118df` while U1 was in
+flight (a concurrent session closed the storage-format gate in `todos.md`), so the branch was
+rebased onto it and the duplicate gate entry the U1 append had created was reduced to the part
+still open. The full suite was then RE-RUN at the rebased head `3a3c68c2`:
+`./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks` → `GRADLE_EXIT=0`,
+`BUILD SUCCESSFUL in 1m 6s`, 645 tests / 0 failures / 0 errors / 3 skipped.
+
+Per the by-head-SHA rule: the ONLY commit after that verification is this ledger note itself,
+which touches no code, no test and no build file — so `3a3c68c2`'s result still covers every
+compiled and executed file on this branch. Nothing was pushed or merged.
+
+---
+
+## 2026-07-27 — 0.10.0 U1, FIX ROUND 1 (of a hard cap of 6): the paired-blind findings F1–F10
+
+Branch `feat/0.10.0-decoy-u1-provisioning`, on top of `64ba97b3`. Adjudication:
+`reviews/decoy-0.10.0/u1-r1-adjudication.md` (Codex 2 P1 / 1 P2 / 1 P3, Grok 0 P1 / 2 P2 / 5 P3,
+architect-verified against source before acceptance). Nothing pushed, merged or version-bumped.
+
+### The root cause, which was one defect wearing three costumes
+
+**`VaultRuntime.mutate` was treated as durable. It is not.** It encodes the state and hands the
+bytes to `VaultSession.update`, which snapshots, marks dirty and returns — *"Non-blocking by session
+contract: it copies + schedules, no I/O here"* (`VaultRuntime.kt:132`). The synchronous durable path
+is `flushBeforeAck()` → `VaultSession.flushNow()`, **and its throw means the value was never issued /
+the state was never recorded.** F1 (counter reservation), F4 (capacity back-off) and F5 (429
+back-off) are the same misconception on the write side; F3 is it on the read side.
+
+The pair is what caught it: **Codex called it a P1 and Grok explicitly listed "durable advance
+before spend" as a NON-finding and marked the invariant *Holds*.** A single reviewer would have
+passed either this or Grok's capacity findings.
+
+The fix is the concept, not the three call sites: every U1 writer was re-audited against "must this
+survive process death?", and the answer is recorded per writer in the invariant table. Tokens stay
+coalesced (re-mintable from the identity key, exactly like `VaultAuthStore`'s).
+
+### What changed
+
+| # | Fix |
+|---|---|
+| F1 | `DecoyCounterReservation.reserveLocked` mutates, **flushes**, and only then advances the RAM cursor. A flush throw issues nothing; the next call re-reserves (a skip). |
+| F2 | Private constructor + `forRuntime(runtime)` returns the ONE allocator per runtime (weak on both sides), so two live allocators are unrepresentable. Plus: every `next()` abandons its block unless the durable mark still equals the block's end, so any future writer of the mark causes a skip rather than a regression. Chosen over a construction guard that throws: a throw turns a caller mistake into a crash on a path whose contract is silent degradation. |
+| F3 | `isProvisioned()` also requires `!capacityExceeded`. Conservative on a runtime-wide flag, deliberately: while it is set nothing decoy-related can be made durable anyway. |
+| F4 | On `VaultCapacityException` the provisioner **reverts** the retained over-capacity mutation and writes a durable back-off in ONE mutate. The revert is not optional — leaving `capacityExceeded` set would block flush-before-ack for the INBOUND message path, i.e. a cover-traffic write degrading the real one. Residual recorded: one registration per 60–90 min for a chronically full vault, not zero. |
+| F5 | The 429 back-off mutates **and** flushes (best-effort; this path may not throw). |
+| F6 | The one-attempt latch is taken immediately before the relay sequence, so a purely local refusal no longer burns it. One *attempt*, not one *check*. |
+| F7 | **Partially fixable, and the rest is stated rather than pretended.** The prekey private halves are never serialized — they live in Rust-owned memory behind a libsignal handle, and `ECPrivateKey` in libsignal-client 0.46.0 has no `close()`/`destroy()`, only `finalize()` (verified with `javap` against the resolved jar). `Native.ECPrivateKey_Destroy` via `unsafeNativeHandleWithoutGuard()` would double-free at finalization: memory corruption traded for a wipe. The same residue applies to every libsignal key the app creates, the real account's identity included. What WAS in reach is residency, so `DecoyIdentity` split into `generateIdentity()` / `generateBundle()` and the 101 keys are created immediately before `register` instead of before the seconds-long PoW solve. |
+| F8 | `clearAccount()` resets `counterHighWater`. Safe against a live allocator because of F2's staleness check. |
+| F9 | Six tests rewritten; every replacement verified BY MUTATION (broken impl → observed FAIL → reverted → green). Two tests survived their mutation and were re-labelled instead of left implying coverage. Full list in the invariant table. |
+| F10 | Invariant table corrected: W3/W5/R2/R4, the missing `DecoyAuthStore` writers, W1c and W6 added, the in-session capacity-retain row added to the crash matrix, and an allocator-uniqueness invariant. |
+
+### Docs corrected, not just code
+
+- **`docs/design/DECOY_TRAFFIC_0.10.0_SPEC.md` §2.3** said the reservation is "persisted" by writing
+  to `VaultState` — the right invariant against the wrong mechanism. Amended in place, marked as the
+  architect's error, and generalized so U2–U6 inherit the corrected rule. §4's W5 row now says
+  "SCHEDULES", a W6 `flushBeforeAck` row was added, R4 was corrected a second time (capacity, not
+  just the 429), and §6.2a gained the capacity back-off requirement.
+- **`u1-invariant-table.md`** corrections are marked `[R1]` with the superseded text struck through
+  rather than deleted — a table that quietly rewrites itself teaches the next unit nothing.
+- **`failures.md`** gains the 7th cluster under the non-discriminating-assertion class, with the new
+  shape named: *asserting the right property against the wrong OBSERVABLE* (reading the live
+  `VaultState` after a `mutate` proves scheduling, never durability — the P1 lived in that gap).
+
+### Evidence
+
+`ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks`
+from `apps/android` → **`GRADLE_EXIT=0`, `BUILD SUCCESSFUL in 1m 5s`, 47/47 tasks executed**,
+**659 tests / 0 failures / 0 errors / 3 skipped** (645 before this round; +14 net).
+Re-measured section budget: worst-case encoded delta **645 B** of a 1024 B budget; a realistic
+populated state with the section **929 B of 262 112 B**.
+
+Intermediate mutation runs (each reverted before the final verification): batch A stripped every
+added flush → 11 tests failed; batch B reverted the logic fixes → 9 tests failed; batch C split the
+credential commit into two mutates → the new every-generation test failed. Exit codes read from
+Gradle, not from `echo`.
+
+### Discrepancy with the fix brief, recorded rather than absorbed
+
+The brief said the spec had been amended with "§2.2/§2.3 rulings, new §4.2, R4/R6/R7". At
+`d44616c5` — the only commit ever to touch that file — **there is no §4.2, no R6/R7 and no mention
+of `flushBeforeAck`.** The amendment described was not in the tree. The corrections above were
+therefore written from scratch against the adjudication's own wording; no §4.2 was invented, so a
+later real amendment cannot collide with a guess.
+
+### Still owed
+
+Round 2 of the paired-blind review, against the WHOLE unit rather than this delta (the 0.9.3
+lesson). Then a maintainer merge decision. U1 remains UNWIRED: nothing in `SessionContainer` or
+`MessagingCoordinator` constructs any of it, so this branch still cannot spend a registration on any
+device.
+
+---
+
+## 2026-07-27 — 0.10.0 U1, FIX ROUND 2 (of a hard cap of 6): eleven findings G1–G11
+
+Paired-blind round 2 (Codex + Grok) over the WHOLE unit, adjudicated in `u1-r2-adjudication.md`:
+1 P1, 7 P2, 6 P3 after dedup. Branch `feat/0.10.0-decoy-u1-provisioning`, head `5e3ee28d`.
+Not merged, not pushed, no version bump. U1 remains UNWIRED.
+
+### The finding that shaped the whole round
+
+**All three guards added in round 1 became round-2 defects.** The stale-block check (F2), the
+capacity revert (F4) and the capacity-aware readiness flag (F3) each produced a new finding, and all
+three share one shape: *each reasons about `TAG_DECOY` state sampled outside the lock that protects
+it, or folds two different questions into one predicate.* `failures.md` records the rule — when a fix
+keeps spawning edge cases the APPROACH is wrong, and patching interleavings one at a time is what
+took three rounds and ended in a revert in 0.9.2 PR-3. So this round changed **three structures**
+instead of patching four interleavings:
+
+1. **One SECTION lock** — `crypto/vault/DecoySectionLock.kt`, a per-runtime monitor shared by
+   `DecoyCounterReservation`, `DecoyAuthStore` and `DecoyAccountProvisioner`. It guards SEQUENCES
+   (read-check-spend; read-commit-revert), which is the granularity `stateLock` cannot give. Closes
+   G1 (P1) and G5 together, because they were one defect seen from two directions.
+2. **The readiness predicate SPLIT** — `hasAccount()` gates registration and reads nothing but the
+   section; `canSend()` gates cover traffic and adds "flush confirmed" and `!capacityExceeded`.
+   Closes G3 and G2. **This was the architect's error**: round 1's single capacity-aware predicate
+   was ratified into the spec, and review falsified it. The implementer's round-1 note calling that
+   direction "conservative" was wrong — it made a vault holding a good durable account re-enter the
+   one path that spends a worldwide rate-limit bucket.
+3. **The back-off is WRITTEN AHEAD of the registration**, not in response to a failure. Closes G4 by
+   removing the absolute-capacity edge rather than repairing it: if the smallest decoy write will
+   not encode, no registration is spent at all, and every revert path inherits a deferral that is
+   already durable. The bare-revert branch is gone.
+
+### Findings
+
+| # | Disposition |
+|---|---|
+| G1 (P1) | Section lock; the staleness check is now atomic with the spend. Not another check. |
+| G2 | Instance-scoped `credentialsUnconfirmed` gates `canSend()` — the right scope, because anything read from disk is durable by definition. |
+| G3 | Predicate split (see above). |
+| G4 | Write-ahead back-off (see above). |
+| G5 | The revert value is read INSIDE the commit's critical section. **A revert may only restore state observed under the lock the revert runs under.** |
+| G6 | `clearAccount()` nulls both tokens in the same mutate as the id and key. A retired account whose bearer credentials survive is not retired. |
+| G7 | Canonical strict-v1: presence byte ∈ {0,1}, absent long must carry zero, negative `counterHighWater` rejected. |
+| G8 | `parsePlaintext` accumulates into a caller-supplied `PartialDecode`, so the decode-failure wipe is observable through the REAL decoder path. Round 1 had explicitly declined to claim this; it is now claimed and pinned. |
+| G9 | Every new/changed test mutation-checked (10 mutations, all observed to fail). |
+| G10 | The one-attempt latch's CAS loser returns `canSend()`, not a flat false. |
+| G11 | Spec §4 W1 corrected: the first provision does NOT write `counterHighWater = 64`. |
+
+### Two behaviour changes stated rather than buried
+
+- **Every failed attempt now defers 60–90 min, not only a 429** (offline, dead session mint, crash
+  between register and commit). That is the cost of recording intent before spending a shared global
+  resource, and it is deliberate.
+- **A `TAG_DECOY` section now appears as soon as `provisionIfNeeded()` is called**, before any relay
+  contact — so the 0.9.x downgrade break attaches to "tried" rather than "generated cover traffic".
+  §4.1's narrowed disclosure still holds for a vault that never asks, but the trigger moved one step
+  earlier and must be re-read when U3 wires the call.
+
+### Mutation testing — the G9 requirement, done and reported
+
+Ten mutations applied to the real implementation, each observed to FAIL the intended test, each
+reverted: private allocator lock (G1); `credentialsUnconfirmed` dropped (G2); registration gated on
+`canSend()` again (G3); `reserveBackoff()`'s return ignored (G4); pre-network revert snapshot (G5);
+tokens retained by `clearAccount` (G6); lenient `readNullableLong` and the negative-mark require
+removed (G7, two runs); `partial.wipe()` removed from the catch (G8); CAS loser returns false (G10).
+
+**Two of them needed a second attempt to become discriminating**, recorded because it is the same
+class G9 exists to catch: the G3 test first passed under its mutation because the one-attempt latch
+was doing the work (fixed by using a fresh provisioner instance — a later session), and passed again
+because the write-ahead back-off independently blocked the registration. It only discriminates in
+the window where `capacityExceeded` is set AND the state would now encode, which the test now
+constructs explicitly.
+
+### Docs corrected
+
+- `docs/design/DECOY_TRAFFIC_0.10.0_SPEC.md`: §4 W1 (G11 — no counter write), W1b rewritten as the
+  write-ahead back-off, **R4 corrected a THIRD time** with the two-predicate table and the round-2
+  falsifier written up as the architect's, §6.2a's capacity back-off bullet struck and superseded by
+  the write-ahead rule, and the signal description generalized from "429 back-off" to "provisioning
+  back-off".
+- `u1-invariant-table.md`: `[R2]` corrections through W1/W1b/W1c/W2c/W6/R4, a new **THE SECTION
+  LOCK** section with the three sequences and what round 1 shipped for each, a rewritten crash
+  matrix (including the new "back-off cannot be encoded → nothing is spent" row), and a REVIEW
+  ROUND 2 section with the mutation table.
+
+### Evidence
+
+`ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug` from
+`apps/android` → **`GRADLE_EXIT=0`, `BUILD SUCCESSFUL`**, **669 tests / 0 failures / 0 errors /
+3 skipped** (659 before this round; +10 net). Exit code read from Gradle, not from `echo`. The ten
+mutation runs above were each verified FAILED and reverted before this final green run.
+
+### Still owed
+
+Round 3 of the paired-blind review, whole unit again. Then a maintainer merge decision. Two rounds of
+the cap of six are now used.
+
+---
+
+## 2026-07-27 — 0.10.0 U1: review round 3 fixed (H1–H10). Zero P1s, and the reviewers converged.
+
+Branch `feat/0.10.0-decoy-u1-provisioning` (LOCAL — nothing pushed, nothing merged, no version
+bump). Fix round **3 of a hard cap of 6**. Adjudication: `reviews/decoy-0.10.0/u1-r3-adjudication.md`.
+
+**The convergence signal.** Round 1 the two blind reviewers found fully disjoint sets; round 2, two
+of eleven overlapped; round 3 they independently landed on the **same top three defects** and found
+**zero P1s** (2 in r1, 1 in r2). Round 2's structural work — the section lock and the predicate
+split — was probed by both and broken by neither.
+
+### The pattern behind three of the four P2s
+
+H2, H3 and H4 are one defect wearing three hats: **the guard's scope does not match the resource's
+scope** — the lesson `failures.md` records from 0.9.2 PR-3, and the exact fix round 1 already
+applied once (private constructor + `forRuntime` for `DecoyCounterReservation`, because kdoc-only
+uniqueness is not a defence). It was not applied to the provisioner or to the token-refresh path.
+
+| # | Fix |
+|---|---|
+| H2 | `DecoyAccountProvisioner`'s constructor is **private**; `forRuntime` is the only way to build one. The one-attempt latch moved into a per-runtime `Gate` (weakly keyed, like `DecoySectionLock`'s monitor registry). Two provisioners over one runtime used to each hold their own latch: both passed the deferral check, both registered — one orphan and **two spends of a bucket shared by every client worldwide**, for one vault. |
+| H3 | `credentialsUnconfirmed` moved into the same `Gate`. A second provisioner over a runtime whose credential flush had thrown defaulted the flag to false and answered `canSend() == true` on bytes no reader will ever find on disk. Round 2's ledger claimed instance scope was "the right scope" — it was not; that row is now marked superseded in the invariant table. |
+| H4 | `refreshTokens` snapshots identity + refresh token, blocks on the relay, then writes — the same read→network→write shape round 2 eliminated for the commit path. A concurrent `clearAccount` was **undone by the response**: `storeTokens` materialized a token-only section, restoring a live access JWT and a refresh token (which mints whole new sessions) for a retired account. Fixed with `DecoyAuthStore.storeTokensForAccount`, which re-reads and compares the account id under the section lock; `storeTokens` is fail-closed the same way and never materializes a token-only section. |
+
+`forRuntime` deliberately returns a **new instance sharing the runtime's gate** rather than a cached
+instance — the one place this differs from the allocator's registry. The allocator caches because
+its *cursor* must be unique; the provisioner's collaborators (relay over a per-attempt
+`StagingAuthStore`, PoW solver, clock) are per-attempt, so a cached instance would silently bind a
+later caller to an earlier attempt's staging store. Caching the guard state and not the
+collaborators gives the same structural guarantee without that trap.
+
+### H1 + H5 — one defect: the pre-network write was made permanent, not just unconditional
+
+Round 2 wrote the back-off before any relay contact (which closed G4: a vault too full to record
+that it tried never spends a registration) and let **only a success** retire it. So an offline
+challenge fetch, a DNS failure, a failed PoW — none of which spend anything — disabled cover traffic
+for 60–90 minutes while protecting nothing, **and** left a deferral-only `TAG_DECOY` on disk, which
+a 0.9.x build rejects as corruption. §4.1 promised such a vault would still open.
+
+Per the architect's ruling, the write stays and the **retirement** is what was missing:
+
+- capacity — the deferral cannot be written, so no registration is attempted (unchanged);
+- failure **before** `register` is called — deferral cleared, cover traffic recovers next attempt;
+- failure from `register` onwards — deferral **stays**, G4's protection intact;
+- crash between the write and the clear — a spurious ≤90 min deferral, accepted and documented.
+
+Because an emptied holder is omitted entirely, clearing also restores 0.9.x readability, which
+repairs H1 at the root rather than papering over it. `clearBackoff` compares the deadline it wrote
+under the section lock before clearing, so another writer's deferral is never retired.
+
+**One place the ruling's parenthetical contradicted its own rule, and what was implemented.** The
+brief lists "session-mint" among the transients to clear on. A session mint happens *after* a
+successful `register`, so a registration was definitely spent; clearing there would re-register
+within the hour and orphan the account — exactly G4's failure. The **rule** ("fails BEFORE any
+registration is spent") was implemented, not the example. The discriminator is set immediately
+*before* the `register` call rather than after it, because a `register` that throws may still have
+created the account on the relay: "may have spent" counts as spent.
+
+### The rest
+
+H6 `parsePlaintext`'s version check moved inside the `try`, so a header throw wipes the accumulator.
+H7 `encodeDecoy` now `require`s a non-negative `counterHighWater` — strict v1 refuses to produce
+what it refuses to read. H8 `provisionNotBeforeMs`'s kdoc rewritten (it still described the removed
+429-only behaviour — the stale-contract class `failures.md` records as having recurred twice).
+H9 `clearer.join(30_000).let { true }` → `assertFalse(clearer.isAlive)` (fourth non-discriminating
+assertion in this unit). H10 the "same image" reopen now uses `vault.durableState()` instead of a
+freshly rebuilt fixture.
+
+### Docs
+
+`docs/design/DECOY_TRAFFIC_0.10.0_SPEC.md` §4.1 now says *"once a vault has **set up cover
+traffic** — which happens the first time it sends any — it can no longer be opened by 0.9.x. A vault
+that has never used cover traffic is unaffected."* — **flagged in the document as PENDING MAINTAINER
+RE-RATIFICATION**, because the narrower wording was their explicit ruling and the reason they gave
+(an overstated disclosure is its own dishonesty) is right; an understated one is worse, so it could
+not be left either. The same false claim is fixed in the `VaultState` codec kdoc and the encode-site
+comment, and the invariant table's round-2 conclusion ("§4.1's narrowed disclosure is still
+accurate") is marked superseded rather than deleted.
+
+### Mutation testing — 12 mutations, every one observed to FAIL
+
+Each applied to the real source, the intended test observed FAILING, then reverted: latch back in an
+instance field (H2); `credentialsUnconfirmed` back in an instance field (H3); the account-id compare
+dropped from `storeTokensForAccount` (H4); `storeTokens` allowed to materialize a section (H4b);
+`clearBackoff` removed (H5) and `clearBackoff` made unconditional (H5b — 5 tests failed, which is
+the "spent ⇒ stays" side); the version check back outside the `try` (H6); the encoder `require`
+removed (H7); the clearer thread made to outlive its join (H9); plus three re-verifications of
+restructured tests — `hasAccount()` short-circuit removed, `capacityExceeded` folded back into
+`hasAccount()`, and the latch taken before the deferral check.
+
+**Four tests had to be restructured to keep discriminating, and that is the finding to carry
+forward.** With the latch runtime-scoped, "a later session" can no longer be modelled as a fresh
+provisioner over the same live runtime — that shares the burned latch, and the latch would silently
+do the test's work. They now build a genuinely new runtime from the image on disk, which is what a
+later session actually is. This is the same trap round 2 hit twice (another guard carrying the
+property); it was found here by running the mutations rather than by reasoning about them.
+
+**Not claimed:** H10 is a fidelity fix to a test's construction, not a new production property.
+There is no mutation it newly discriminates, and the invariant table says so.
+
+### Evidence
+
+`ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug` from
+`apps/android` → **`BUILD SUCCESSFUL`, exit code 0** (read from Gradle), **675 tests / 0 failures /
+0 errors** (669 before this round; +6 net after restructuring). The twelve mutation runs above were
+each verified FAILED and reverted before this final green run.
+
+### Still owed
+
+Review round 4 (three of six rounds used), then a maintainer merge decision. And the §4.1 wording
+needs the maintainer's re-ratification — it is a ruling being adjusted, not a typo being fixed.
+
+---
+
+## 2026-07-27 — 0.10.0 U1 review round 4 fixes: an argument evaluated after its own guard
+
+**Branch:** `feat/0.10.0-decoy-u1-provisioning` (from `c137dc78`). **Fix round 4 of a hard cap of 6.**
+Adjudication: `reviews/decoy-0.10.0/u1-r4-adjudication.md`. Union after dedup: **0 P1, 2 P2, 4 P3.**
+
+Findings by round: **10 → 11 → 10 → 6**; P1s **2 → 1 → 0 → 0**. Both blind reviewers now
+independently reach the same top findings *and propose the same remedy*. The round-2 and round-3
+structural work (the section lock, the split predicates, the per-runtime `Gate`) survived two further
+full rounds of adversarial probing without a break. Nothing was redesigned this round.
+
+### J1 (P2, both reviewers) — the spent/not-spent discriminator was one line too early
+
+`registrationSpent = true` preceded `relay.register(DecoyIdentity.generateBundle(identity), powProof)`.
+**Kotlin evaluates the argument after the preceding statement runs**, so the flag was already true
+while `generateBundle` built 101 local keypairs and a signature — pure local crypto, **zero bytes to
+the relay**. A failure there (OOM on the batch, a crypto-provider fault) was therefore treated as a
+possibly-spent registration: `clearBackoff` skipped, a 60–90 minute cover-traffic silence, **and** a
+durable deferral-only `TAG_DECOY` costing the vault its 0.9.x readability — for an attempt that never
+contacted anything. The hinge comment's own justification is that *`register`* may have created the
+account; generating a bundle is not `register`.
+
+Fixed by hoisting the bundle to its own statement above the flag. **A `bundleFactory` seam was added
+so the step is failable in a test** — the relay fake can only throw once `register()` is entered,
+which is precisely why three rounds of review and twelve prior mutations never touched this line.
+
+### J2 (P2) — the codec did not enforce credential-pair integrity
+
+`DecoyState(accountId = "…", identityKeyPair = null)` encoded and decoded cleanly: the exact dangling
+account reference the register-before-commit invariant calls structurally impossible.
+`isProvisioned`/`hasAccount` only **hid** it by answering `false`. Concealment is not prevention.
+`requireDecoyCredentialsPaired` now runs on **both** sides — an id without a key, a key without an
+id, and tokens without an id are all refused, on encode and on decode. Strict v1 refuses to produce
+what it refuses to read, the same rule H7 applied to the negative counter mark. Unreachable from every
+writer in the codebase, so it is an assertion and not a repair: a silent fix-up would launder a
+corrupt image into a plausible-looking one.
+
+### J3 / J4 / J5 — the prose was the lagging surface, and the sweep went past the cited lines
+
+**Three of five findings this round were documentation that had drifted from behaviour, not defects
+in behaviour.** `failures.md` already records "when a change removes or alters behaviour, update its
+doc/contract/spec in the SAME change"; this round is that rule broken three times inside one unit.
+The brief was to sweep every contract describing the back-off lifecycle and the tag-write trigger,
+not only the lines the reviewers cited. Swept:
+
+- **spec §4.1** — the disclosure sentence, third pass, see below.
+- **spec §4's blast-radius block** — said the tag lands "the moment provisioning is attempted",
+  which overstated it. Corrected to the `register` boundary. *(Not cited by either reviewer.)*
+- **spec §6.2a** — J4's target. The round-2 rule ("only a successful commit retires", "*every*
+  failure defers", "a purely local failure therefore costs a 60–90 minute wait") was stated as
+  current law. Now carries an explicit RETIREMENT sub-rule superseding R2's second half, the
+  `register` boundary, and the R4 flag-placement constraint.
+- **spec §4's WRITER table** — new **W1d** row for `clearBackoff`; W1's "only a success retires"
+  struck; W6's flush inventory corrected to all three back-off writes. *(W6 not cited.)*
+- **invariant table** — J5's target: new **W1d** row; W1 corrected on both the retirement path and
+  the `credentialsUnconfirmed` scope (still described as instance-scoped after H3 moved it into the
+  per-runtime `Gate`); the field table's writer column; the crash matrix's "before `register`" row,
+  which taught a back-off wait when the deferral is now retired; the scarce-resource section's
+  "one attempt per SESSION" and "a **429** backs off" bullets; and the ordering section's
+  no-dangling-reference claim, now that the format enforces it. *(Only W1 and the crash matrix were
+  cited.)*
+- **`VaultState.kt` codec kdoc** — the four-row truth table for when `TAG_DECOY` becomes durable now
+  lives next to the `takeUnless { it.isEmpty }` that produces it, with the instruction that §4.1 must
+  be re-derived from those rows rather than edited from its own previous version. *(Not cited.)*
+- **`DecoyAccountProvisioner` kdoc + the success-path comment** — "Success is the ONLY thing that
+  retires the write-ahead deferral" was false in the source itself once `clearBackoff` existed; the
+  spent-nothing failure lists now include the local bundle fault. *(Not cited.)*
+- **`DecoyState` kdoc** — records that the pairing is now a format property, not only a writer
+  convention. *(Not cited.)*
+
+### The §4.1 disclosure — third pass, and the architect's own proposed fix was ALSO wrong
+
+Round 3 shipped "which happens the first time it sends any", which **understates**. The replacement
+proposed for round 4 — "the first time it *tries to* send any" — **overstates**: a vault that tries,
+fails offline before `register`, and retires its deferral keeps full 0.9.x readability. The
+adjudication caught its own error and recorded it. Shipped wording:
+
+> once a vault has **set up cover traffic** — which happens the first time it sends any, and is
+> complete as soon as its cover-traffic account is registered — it can no longer be opened by 0.9.x;
+> downgrading will present that vault as corrupt. A vault that has never used cover traffic, or whose
+> setup never reached the relay, is unaffected.
+
+Marked **ADJUSTED AGAIN — PENDING MAINTAINER RE-RATIFICATION**, third pass, with the truth table and
+the reason recorded. Applied rather than left standing, because an understated format-break
+disclosure is the more dangerous direction. **The lesson, recorded in `failures.md`:** every pass
+reasoned from the *previous wording* instead of from the code, so the sentence drifted in both
+directions in consecutive rounds.
+
+### Mutation evidence — every mutation discriminated
+
+| Test | Mutation | Result |
+|---|---|---|
+| `the LAST LOCAL step before register is still spent-nothing - the flag sits below it` | bundle re-inlined as `register`'s argument (the shipped R3 code) | FAILED, 1 of 32 |
+| `the ENCODER refuses a credential half-set …` | `requireDecoyCredentialsPaired` removed from `encodeDecoy` | FAILED, 1 of 80 |
+| `the DECODER refuses a credential half-set too …` | `requireDecoyCredentialsPaired` removed from `decodeDecoy` | FAILED, 1 of 24 |
+
+**No mutation failed to discriminate, and none was carried by another guard.** The encoder and
+decoder mutations were deliberately run separately: each left the other side's test green, which is
+what proves the two assertions are independently load-bearing. For J1 the discriminating mutation is
+the **flag placement**, not "make the bundle throw" — a correct implementation passes the test for a
+trivial reason either way, and without the `bundleFactory` seam no mutation of that line is
+expressible at all. That is the honest reason three rounds missed it.
+
+### Evidence
+
+`ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug` from
+`apps/android` → **`BUILD SUCCESSFUL`, exit code 0** (read from Gradle), **678 tests / 3 skipped /
+0 failures / 0 errors** (675 before this round; +3). Each mutation above was verified FAILED and
+reverted before the final green run.
+
+### Still owed
+
+Round 5 is available (four of six used) but the surface is converging hard — zero P1s for two
+consecutive rounds, findings halved, and both reviewers landing on the same items with the same
+remedies. **A maintainer merge decision is owed either way, and §4.1's third-pass wording needs
+re-ratification.** U1 remains deliberately UNWIRED; nothing merged, nothing pushed, no version bump.

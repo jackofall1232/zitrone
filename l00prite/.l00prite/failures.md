@@ -211,7 +211,7 @@ doc records something as impossible, the cost of re-checking is one derivation a
 a capability the project already paid for and then forgot it had. Do NOT treat the residuals section
 of a design doc as settled just because the defects section has been reviewed.
 
-### THE NON-DISCRIMINATING ASSERTION — satisfied by BOTH the correct and the broken behaviour (6 occurrences)
+### THE NON-DISCRIMINATING ASSERTION — satisfied by BOTH the correct and the broken behaviour (6 occurrences + a 7th and 8th cluster, 0.10.0 U1)
 Distinct from a vacuous test (asserts nothing) and from a stand-in test (asserts against a copy of the
 logic). This one asserts something REAL about something REAL — it just cannot tell the two apart, so
 it passes against the very defect it exists to catch.
@@ -261,6 +261,60 @@ looks.
 Applies especially to `assertFalse`/`assertNotEquals`/`!= null`: a negative assertion is satisfied by
 enormous numbers of wrong states, so it must name WHICH wrong state it rejects, or pair with a
 positive assertion that fails when the discriminator is removed.
+
+**7th cluster — 0.10.0 U1 decoy provisioning, review round 1 (both lenses, four tests at once).**
+The scenario-level form again, with one new shape worth naming: **a test that asserts the property
+against the wrong OBSERVABLE.** Four cases, all fixed in fix-round 1:
+- *restart-skips-counters* rebuilt `DecoyState(counterHighWater = <the live value>)` in RAM and
+  opened a new session over it. It read the value out of the very state whose durability it claimed
+  to test, so it passed against a reservation that never reached disk. **Reading the live
+  `VaultState` after a `mutate` proves scheduling, never durability** — the whole P1 hid in that
+  gap. Now every durability assertion in the unit decodes the SEALED PAYLOAD the persist sink was
+  handed.
+- *decode-failure wipe* asserted only the throw, and its own comment conceded the wipe was "read in
+  review". Correct diagnosis, wrong response: the fix is not a weaker comment, it is to make the
+  cleanup a function a test can call on arrays it owns, and then to say plainly which single step
+  (the call from the catch) is still unobserved.
+- *"commits the whole set at once"* injected no fault between mutates, so it passed for a two-mutate
+  commit. Fixed by flushing every mutation (zero coalescing ceiling) and decoding EVERY generation
+  the sink was handed.
+- *"worst-case" budget* was a realistic measurement wearing an adversarial name. Renamed; the
+  measurement was fine.
+
+**THE ADDITIONAL RULE: name the observable, not just the assertion.** Before asserting that
+something was recorded, ask *where the value being read comes from* — if it comes from the same
+in-memory object the code just wrote, the assertion cannot distinguish "wrote it" from "made it
+survive". And the counterpart, applied here: **if a property genuinely cannot be observed from a
+test, say so in the test rather than leaving an assertion whose name implies coverage.**
+
+**PROCESS, and it is what caught these:** every replacement test in the U1 fix round was run against
+a deliberately broken implementation and observed to FAIL before the fix was restored — the mutation
+list is recorded in `reviews/decoy-0.10.0/u1-invariant-table.md`. Two tests survived their mutation
+and were re-labelled rather than left implying more than they prove.
+
+**8th cluster — 0.10.0 U1 round 2, and the mutation process caught it INSIDE the round that was
+already applying it.** Two of the ten round-2 mutations *passed*, i.e. the new test did not
+discriminate, and both for the same reason: **a second, independent guard was doing the work.**
+
+- The "unrelated capacity overflow must not re-register" test passed under its mutation because the
+  ONE-ATTEMPT LATCH had already been burned by the same provisioner instance. Fixed by using a fresh
+  instance — which is also the real scenario (a later session).
+- It then passed again because the WRITE-AHEAD BACK-OFF independently refused to register while the
+  overflow was outstanding. The predicate defect is only observable in the narrow window where
+  `capacityExceeded` is set *and* the state would now encode. The test now constructs that window.
+
+**THE RULE THIS ADDS: a mutation that does not fail is not proof the property holds — it is a
+question about which guard is load-bearing.** When redundant defences overlap, a test aimed at one of
+them silently measures the other. Do not conclude "already correct"; find the scenario in which only
+the guard under test can save you, or state plainly that the test does not distinguish them (as
+`interleaved use never regresses` does).
+
+**And the round-2 meta-finding, which is a design lesson rather than a test one:** all three guards
+added in U1 fix round 1 became fix round-2 defects, because each reasoned about durable state sampled
+OUTSIDE the lock protecting it, or folded two questions into one predicate. That is the "when a fix
+keeps spawning edge cases, the APPROACH is wrong" rule above, seen one round earlier than 0.9.2 PR-3
+saw it. Round 2 replaced the three guards with three structures (one section lock, a split predicate,
+a write-ahead back-off) instead of adding a fourth guard.
 
 ### GOOD HANDLING — demonstrate why a concern is latent; never assert a property the test cannot prove
 Grok's round-4 INFO-3 said `runCatching { afterPublish() }` swallows `CancellationException` while the
@@ -343,6 +397,206 @@ not the record — they are invisible to every future reader who starts from `.l
 **Why this one stings.** The ledger-cadence rule had been added one day earlier. The rule did not
 fail — the follow-through did. A process that is written down but not executed produces *more*
 confident wrong answers than having no process at all, because the next reader trusts the record.
+
+## 2026-07-27 — "match the guard's scope to the resource's scope" recurred THREE more times in one unit
+
+**What happened.** 0.10.0 U1 review round 3 confirmed ten findings. Three of the four P2s were the
+same defect: a guard whose scope was narrower than the resource it guards.
+
+- the one-attempt registration latch was an INSTANCE field guarding a RUNTIME resource (this vault's
+  one synthetic account, and the worldwide rate-limit bucket it may spend from once) — two
+  provisioners over one runtime each held their own and both registered;
+- the "this commit was never confirmed durable" memory was an INSTANCE field guarding the same
+  runtime's state — a second provisioner answered "ready" on credentials whose flush had thrown;
+- `refreshTokens` guarded its write with a snapshot taken BEFORE a multi-second network round-trip,
+  so a `clearAccount` in that window was undone by the response.
+
+**Why it stings.** This rule is already in this file, from 0.9.2 PR-3. Fix round 1 of this very unit
+applied it correctly to `DecoyCounterReservation` — private constructor, `forRuntime` registry — and
+wrote down the reason: *kdoc-only uniqueness is not a defence.* The sibling class with the identical
+problem was left on a public constructor, and the token path with the identical shape was left
+alone. **Applying a rule where a reviewer pointed is not the same as applying it where it holds.**
+
+**BINDING RULE.** When a finding is fixed by changing a guard's SCOPE, the same session must
+enumerate every other guard over the same resource and state, per guard, whether it needs the same
+change. Not "does this look similar" — *what resource does this guard protect, and what is that
+resource's lifetime?* Two answers that disagree is the defect, before any interleaving is imagined.
+
+**Second, smaller lesson from the same round.** Tightening a guard's scope can silently destroy a
+test's discriminating power: once the latch became runtime-scoped, four tests that modelled "a later
+session" as a fresh provisioner over the same live runtime were being carried by the shared burned
+latch rather than by the property they named. That was found by RUNNING the mutations, not by
+reading the tests. A scope change is also a test-fidelity change.
+
+### THE INVALIDATED-FROM-UNDERNEATH CLAIM — true when written, made false by a later fix (U1, 0.10.0)
+
+**The mirror image of "the claim that was born wrong", and it needs naming separately because the
+detection rule is different.** The maintainer narrowed the §4.1 storage-format disclosure to "a vault
+that has never **generated cover traffic** still opens on 0.9.x". That was **true when written**: the
+codec omits `TAG_DECOY` when the section is empty, so a vault with no cover traffic carried no tag.
+
+Two rounds later, a fix for an unrelated finding (the capacity back-off, G4) started writing a
+durable deferral-only section **before any relay contact**. Nothing about the doc changed. Nothing
+about the codec's omit-when-empty logic changed. The disclosure simply **became false underneath**,
+because its truth had always depended on *when the provisioner first writes to the section* — an
+implementation detail three layers below the sentence.
+
+**A disclosure whose truth depends on an implementation detail is fragile by construction.** The
+born-wrong class is caught by attacking a claim's first appearance hardest. This class is invisible
+to that: the claim was attacked, and it passed, because it was correct. It has no first appearance to
+re-attack.
+
+**DETECTION RULE (binding): when a fix changes WHAT gets written to durable state, or WHEN, re-check
+every doc claim whose truth depends on that behaviour.** Not just the docs the diff touches — the
+diff here touched no docs at all. Ask: "which written promises would become false if this write
+happened earlier, later, or in a case it previously did not?"
+
+**What actually caught it:** both blind reviewers, independently, in the same round. Nothing
+mechanical would have — no test asserted the disclosure's trigger condition, and no doc test exists.
+That is a direct argument for keeping documentation and user-facing claims **in review scope**, not
+just code. Corollary already recorded elsewhere and reinforced here: an **overstated** disclosure is
+its own dishonesty, and an **understated** one is worse; a claim invalidated from underneath will
+usually fail in the understating direction, which is the more dangerous one.
+
+### Guard scope vs resource scope — third recurrence, and the first with a SECURITY consequence (U1)
+
+Recorded already from 0.9.2 PR-3 ("match the guard's scope to the resource's scope"). U1 hit it three
+times in one unit — the counter allocator (round 1), the provisioner's latch and flush flag (round
+3), and the token-refresh path (round 3). **Name the token-refresh one specifically, because it is
+the sharpest and it is not a robustness bug:**
+
+> `refreshTokens()` snapshots the account identity and refresh token, **blocks on the relay for
+> seconds**, then writes the response back. A concurrent `clearAccount()` in that window wipes the
+> account — and the arriving response then **resurrects valid bearer credentials for the cleared
+> account**. The access token works until expiry; the refresh token mints new sessions. The section
+> lock protected each individual write and not the read→network→write **sequence**, which is the
+> whole shape of the defect class.
+
+The other two cost a wasted global registration and a readiness lie. This one hands working
+credentials back to an account the user asked to be gone.
+
+**Reinforced rule:** fix every instance of a recognized shape with the **same** pattern. U1 fixed
+three sites with one registry pattern rather than inventing a third — a third pattern is what makes
+the *fourth* site inconsistent later, and inconsistency is what lets the fifth site be wrong without
+looking wrong.
+
+### CALIBRATION — what reviewer convergence means, and what it does not
+
+Recorded so future rounds are read correctly. U1's paired-blind arc:
+
+| Round | P1s | Reviewer agreement |
+|---|---|---|
+| 1 | 2 | **fully disjoint** — Codex found the durability defect, Grok explicitly listed it as a non-finding; Grok found the capacity/re-registration defects, Codex missed them |
+| 2 | 1 | 2 of 11 convergent |
+| 3 | 0 | **top 3 found independently by both** |
+
+**Reviewers converging is the surface stabilising, not the reviewers tiring.** The distinction
+matters and is easy to get backwards. Read it this way:
+
+- **Disjoint findings early** = the surface is large and unexplored. It is also the strongest
+  possible argument for running two blind reviewers instead of one: at round 1 a single reviewer
+  would have shipped a real P1 **whichever one you picked**.
+- **Convergence later, with P1s falling to zero** = the remaining surface is small enough that two
+  independent searches hit the same things. That is evidence of exhaustion.
+- **Convergence with findings still rising, or with severity flat** would mean the opposite — the
+  reviewers are anchoring on the same salient area and missing the rest. Check for that before
+  reading agreement as good news.
+
+One reviewer being *wrong* is also data, not noise: Grok's round-1 "durable advance before spend" was
+a **false negative on a P1**, resolved against source. A reviewer asserting a property *holds* is a
+claim like any other and gets verified like any other.
+
+## An argument list is not "after" the statement above it (0.10.0 U1, review round 4)
+
+`registrationSpent = true` sat one line above
+`relay.register(DecoyIdentity.generateBundle(identity), powProof)`. **Kotlin evaluates the argument
+after the preceding statement**, so a guard whose entire meaning was "the relay may now have created
+an account" was already true while 101 local keypairs were being generated. Reading top to bottom it
+looks correct; the failing step is *visually inside* the call it is supposed to follow.
+
+**The rule:** when a flag's meaning is "everything after this point may have side effects", nothing
+that can fail may hide in the guarded call's argument list. Hoist it to its own statement, above the
+flag, where the reader can see which side of the boundary it is on.
+
+**And the reason no test caught it in three rounds: the failure was not injectable.** The relay fake
+could only throw once `register()` was entered, so no mutation of that line was even expressible.
+When a boundary is load-bearing, check that both sides of it can be made to fail in a test — an
+untestable step next to a guard is an untested step. The fix added a factory seam for exactly that.
+
+## A doc that drifts in BOTH directions is being edited from itself, not derived from the code
+
+0.10.0 U1's §4.1 format-break disclosure moved three times: "generated cover traffic" (false once the
+back-off was written ahead of relay contact) → "the first time it sends any" (**understated** — a
+vault that registers and never sends still carries the tag) → the proposed "the first time it *tries
+to* send any" (**overstated** — a vault that fails offline before `register` retires its deferral and
+keeps its 0.9.x readability). Two consecutive corrections in opposite directions, and the architect
+caught the second one only in adjudication.
+
+**The cause was the same each time: each pass reasoned from the previous wording rather than from the
+code.** A sentence whose truth depends on an implementation detail cannot be edited incrementally. It
+has to be re-derived from an enumeration of the actual paths — which now lives in the codec's kdoc,
+next to the branch that produces the behaviour, with that instruction attached to it.
+
+This is also the fourth recurrence of the stale-contract class recorded above. Round 4 of that unit
+was **three of five findings in documentation and two in code**: once the code stabilises under
+repeated review, the prose describing it becomes the defect surface, and it is not exercised by any
+test. Sweep every contract describing a changed behaviour, not only the lines a reviewer cited.
+
+### ADJUDICATION LOSS — a multi-part finding compressed into one row loses the parts (U1 round 4)
+
+**The adjudicator is a lossy stage between the reviewers and the fix, and this is the first recorded
+instance of it dropping a real defect.**
+
+Grok's round-4 Finding 4 had **three** parts. The architect's adjudication compressed it into one
+table row (J5) carrying two of them, and the third was lost: *the invariant table still described
+`credentialsUnconfirmed` as instance-scoped* after round 3 had moved it into the per-runtime `Gate`.
+That is not a wording nit — a reader working from the table alone rebuilds the exact
+second-provisioner readiness lie round 3 existed to close. It was recovered only because the
+implementer read the raw reviews alongside the adjudication and noticed the shortfall.
+
+**Why it happened:** the adjudication format is one row per finding, which silently pressures
+multi-part findings into their most quotable part. Severity survives; enumeration does not.
+
+**RULES (binding):**
+1. **A multi-part finding gets one adjudication row per part**, or an explicit sub-list. Never one
+   row for "Finding N" when Finding N contains an enumerated set.
+2. **The fix brief must instruct the implementer to read the raw reviews**, not only the
+   adjudication. It did here, which is the only reason this was caught — keep that instruction.
+3. **Treat the implementer as a check on the adjudicator**, not merely a consumer of it. The
+   pipeline reviewer → adjudicator → implementer has three stages and the middle one was, until
+   now, the only unreviewed link.
+
+Related but distinct from the "verify bot claims before acting" rule: that guards against accepting
+a reviewer's *wrong* finding. This guards against losing a reviewer's *right* one.
+
+### THE SUMMARY THAT OUTLIVED THE CORRECTION — fix the restatements, not just the cited line (U1 round 5)
+
+**The single most instructive finding of the U1 arc, because of what survived and where.**
+
+Round 1's headline P1 was the misconception that `VaultRuntime.mutate` is durable (it schedules; only
+`flushBeforeAck` persists). It was fixed in code, and the invariant table's detailed W3/R2 rows were
+corrected to match. **Four fix rounds later, round 5 found the misconception still stated verbatim in
+the same document's abstract summary block** — "only on a successful *mutate* do the RAM `next`/`limit`
+advance" — under a heading a reader is *more* likely to consult than the detailed row.
+
+The correction had been applied exactly where the reviewer pointed, and nowhere else.
+
+**Why summaries are the surviving copy:** a reviewer cites the line that produces the defect, which is
+always the detailed one. Fixes get applied at the citation. Abstract restatements — summaries,
+overviews, "in short" paragraphs, kdoc one-liners, README bullets — restate the same claim in
+compressed form and are never cited, because no code path passes through them. They are the highest-
+leverage place for a stale claim to survive, since they are what a hurried reader reads *instead of*
+the detail.
+
+**RULE (binding): when a misconception is corrected, grep for every restatement of it — especially
+the compressed, abstract, and summary ones — and correct them in the same change.** Ask "where else
+is this same claim said in fewer words?" A detailed row and its summary are two writers of one
+contract; the WRITER/READER discipline applies to prose as much as to durable state.
+
+Related: this is the fifth recurrence of the stale-contract class in this unit alone (G1 doc claims,
+J3/J4/J5, K1/K2/K3). By round 5 **every remaining finding in the unit was prose lagging code, with
+zero code defects at any severity** — the documentation surface outlived the implementation surface
+by two full rounds. Budget review attention accordingly on future units: docs are not the cheap part.
 
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
