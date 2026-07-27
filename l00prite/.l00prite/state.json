@@ -1,8 +1,8 @@
 {
  "schema_version": 2,
  "project_name": "Zitrone",
- "current_goal": "0.10.0-beta decoy traffic — U2 (envelope builder) BUILT and mutation-verified on a local branch; independent paired-blind review of U2 not yet run",
- "current_phase": "U1 merged to main (2cd82a2b). U2 on local branch feat/0.10.0-decoy-u2-envelope-builder: DecoyEnvelopeBuilder + 14 gate tests, deliberately UNWIRED. Three spec errors found by measurement and applied PENDING RATIFICATION (§2.1 frame table, §2.3 ciphertext formula, §2.4 counter residual). U3 not started",
+ "current_goal": "0.10.0-beta decoy traffic \u2014 U2 (envelope builder) FIX ROUND 1 of 6 applied on a local branch; paired-blind review round 2 not yet dispatched",
+ "current_phase": "U1 merged to main (2cd82a2b). U2 on local branch feat/0.10.0-decoy-u2-envelope-builder: DecoyEnvelopeBuilder rewritten at fix round 1 to take THE REAL ENVELOPE IT COVERS and mirror it, with a measured frame-equality postcondition; keys now generated rather than 0x05||random(32). Deliberately UNWIRED. U3 not started",
  "active_agent": null,
  "last_agent": "claude",
  "last_updated": "2026-07-27",
@@ -13,8 +13,8 @@
  "last_event_processed": null,
  "pending_event_count": 0,
  "review_response_required": false,
- "ci_status": "local only — :app:testDebugUnitTest 691 tests / 3 skipped / 0 failures / 0 errors; :app:assembleDebug exit 0, re-verified with --rerun-tasks. Nothing pushed, so no CI run.",
+ "ci_status": "local only \u2014 :app:testDebugUnitTest 694 tests / 3 skipped / 0 failures / 0 errors; :app:assembleDebug exit 0, --rerun-tasks. 18 mutations / 17 discriminated. Nothing pushed, so no CI run.",
  "execution_active": false,
  "execution_stop_reason": null,
- "next_recommended_action": "Dispatch the INDEPENDENT paired-blind review of U2, scoped to the WHOLE unit rather than a delta (the carried-forward 0.9.3 lesson). Point it at the three places U2 makes a judgement call rather than a measurement: (a) the derivation 'the first envelope is the one issued counter 0', which replaces a durable flag with an inference from counterHighWater and carries a stated skip-counter-0 residual; (b) prekey_id = 1, drawn from a batch that is DERIVABLE from generateBundle's source but is NOT persisted anywhere in TAG_DECOY — the honest gap, made checked rather than closed; (c) whether the byte-diff test's random regions are drawn tightly enough that a real defect cannot hide inside one. SEPARATELY OWED: maintainer ratification of the three spec corrections — §2.1's numbers and §2.3's ciphertext paragraph were previously ratified architect text, and §2.3's formula was actionable-and-wrong in exactly R7's own base64-padding error class."
+ "next_recommended_action": "Dispatch paired-blind review ROUND 2 of U2, scoped to the WHOLE unit. Point it at the three places this round made a judgement call rather than a measurement: (a) the DEVIATION from Ruling 2 \u2014 the ruling said absorb the message_number digit-width difference in the ciphertext length, which is impossible because a base64 field's length is always a multiple of 4, so the decoy's counter now MIRRORS the covered envelope's and DecoyCounterReservation loses its paired-path consumer (moved to U5); this needs the maintainer, not just a reviewer; (b) the three residuals now declared in \u00a72.4 (body not a padded-block multiple, repeated counters, a prekey_id that may name an unpublished id) \u2014 are they priced right, and is anything else being paid for silently; (c) whether taking the whole real MessageEnvelope into the builder creates any path by which real content could reach the wire (the builder reads the ciphertext's base64 LENGTH and never decodes it; one test asserts no run of the covered ciphertext survives). ALSO STILL OWED: maintainer ratification of U2's three original spec corrections."
 }

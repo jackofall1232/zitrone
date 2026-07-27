@@ -940,29 +940,41 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       `decoy/DecoyEnvelopeBuilder.kt` + `DecoyEnvelopeBuilderTest.kt` (14 gate tests);
       `DecoyIdentity` gained `ONE_TIME_PREKEY_IDS` / `FIRST_ONE_TIME_PREKEY_ID` / `SIGNED_PREKEY_ID`
       so the prekey batch has ONE declaration that both the generator and the builder read.
-      **691 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0. **16 mutations, 16
-      discriminated.** No invariant table: U2 adds no durable field and no writer — the decision and
+      **694 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0. **Fix round 1 of 6 applied:
+      18 mutations, 17 discriminated** (the survivor a deliberate defence-in-depth probe). No invariant table: U2 adds no durable field and no writer — the decision and
       its justification are in `reviews/decoy-0.10.0/u2-invariant-table-decision.md`.
-      **Independent paired-blind review NOT yet run — that is the next thing U2 owes.**
+      **Paired-blind review round 1 complete, adjudicated and fixed; ROUND 2 NOT YET DISPATCHED —
+      that is the next thing U2 owes. Ruling 2 was deviated from with a proof of impossibility and
+      needs a MAINTAINER decision, not just a reviewer's.**
 
-- [ ] **U3 inherits three things from U2, none of them optional.**
-      1. **Supply `ttl_seconds` and `burn_on_read` by MIRRORING the covered message.** The builder
-         deliberately gives them no defaults, because pinning them is one of the three real
-         distinguishers in the existing web generator. A caller that passes constants recreates it.
+- [ ] **U3 inherits three things from U2, none of them optional.** *(Rewritten at U2 fix round 1 —
+      the interface changed, so two of the three old items no longer say the right thing.)*
+      1. **Hand `DecoyEnvelopeBuilder.build` THE REAL ENVELOPE**, the one about to go to
+         `ws.sendMessage`. Not a block count, not a descriptor you assemble — the envelope. It is the
+         only input that carries shape, counter magnitude, timestamp width and TTL width, and the
+         round-1 P1 was precisely that a block count does not.
       2. **Supply the sender's own registration id and 33-byte serialized identity key**
          (`SignalProtocolManager.localRegistrationId()` / `localIdentityPublicKeyBytes()`), not
          placeholders — both are inside a real first message's ciphertext and both change its length.
-      3. **Mirror the block count exactly**, per §2.2. The measured frames are 829 B (1 block) /
-         1169 B (2 blocks) / 976 B (1-block first message) — the last is +147 B, so a decoy stuck in
-         the first-message shape would identify the real frame of its own pair by size.
+         The registration id is now range-checked to `1..16380` and fails closed outside it.
+      3. **`build()` THROWS rather than return a decoy whose frame does not match**, and U3 owns what
+         happens next. Whatever it does, it must not fail or delay the REAL send: the durability
+         barrier and the send latency are U3's gate. Decide deliberately whether an unmatched decoy
+         means "send the real message uncovered" or "do not send at all", and write the reasoning
+         down — it is a threat-model choice, not an error-handling detail.
 
-- [ ] **U4/U5 inherit the counter residual U2 measured and §2.4 now declares.** A real client resets
-      `message_number` to 0 on every inbound ratchet turn; the reservation is monotonic and never
-      resets. Invisible while the synthetic side only acks and burns; **visible to the relay once U4
-      makes the exchange bidirectional.** Not a reason to abandon monotonicity (a REGRESSING counter
-      is a tell no real ratchet can produce at all), but U6 must not claim coverage it does not have.
-      **U5 also inherits the corrected §3.3 number: the single-block dead-air ping is an 829 B frame,
-      not 821 B.**
+- [ ] **U4/U5 inherit what U2's fix round 1 changed about counters — the OLD residual is withdrawn
+      and three new ones are declared.** The monotonic-counter residual (a decoy counter climbing
+      through replies that should have reset it) is **gone**: the paired decoy mirrors the covered
+      envelope's `message_number`, because a base64 field's length is always a multiple of 4 and so
+      the ciphertext cannot absorb a decimal-width difference. What replaces it, all relay-visible
+      only and all in §2.4: the random body is not always a padded-block multiple; the synthetic
+      conversation's counters repeat; `prekey_id` may name an id the account never published when the
+      covered id has four or more digits. **U6 must not claim coverage past those.**
+      **U5 additionally inherits `DecoyCounterReservation` itself** — the dead-air ping is the only
+      decoy with no envelope to mirror, so it is the only one that must invent a non-regressing
+      `message_number`. And it takes its size from §2.1's table; the spec no longer states a byte
+      count anywhere else, deliberately (G-D, eighth recurrence).
 
 - [ ] **U6 owes the DELIVERY of the storage-format disclosure.** The gate itself is answered above
       (line ~598, `a4f118df`) — do not re-answer it here. What is still outstanding is shipping the

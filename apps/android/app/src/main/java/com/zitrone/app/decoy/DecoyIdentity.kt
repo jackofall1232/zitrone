@@ -73,9 +73,11 @@ object DecoyIdentity {
      * Declared here rather than inline in [generateBundle] so the generator and the consumer read
      * one source. **This range is not recorded in the vault** — nothing durable stores which ids
      * were uploaded, so its authority rests entirely on [generateBundle] being unconditional about
-     * them. `DecoyIdentityTest` pins that: it asserts a generated bundle's ids are exactly this
-     * range, so a future change to the allocation cannot silently strand already-provisioned
-     * accounts whose real batch this range would then misdescribe.
+     * them. `DecoyEnvelopeBuilderTest` pins that (in
+     * `prekey_id is drawn from the synthetic account's OWN uploaded batch and mirrors the covered
+     * width` — there is no separate `DecoyIdentityTest`): it asserts a generated bundle's ids are
+     * exactly this range, so a future change to the allocation cannot silently strand
+     * already-provisioned accounts whose real batch this range would then misdescribe.
      */
     val ONE_TIME_PREKEY_IDS: IntRange = 1..ONE_TIME_PREKEY_BATCH
 

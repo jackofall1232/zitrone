@@ -1,50 +1,50 @@
 {
-  "schema_version": 2,
-  "max_iterations": 6,
-  "current_iteration": 1,
-  "stop_conditions": [
-    "definition_of_done_met",
-    "blocked",
-    "review_round_cap_reached_6_HARD_CAP_no_self_reset",
-    "merge_confirmation_required",
-    "max_iterations_reached"
-  ],
-  "human_review_gates": [
-    "MERGE — always, per-action, never lapses (convergence does NOT authorize it)",
-    "version bump / release cut",
-    "push beyond the draft-PR exception already recorded",
-    "round-6 cap reached — stop and hand to the human regardless of outcome",
-    "before executing destructive operations",
-    "before changing architecture or security boundaries",
-    "before declaring completion"
-  ],
-  "last_run_time": "2026-07-27",
-  "completion_status": "in_progress",
-  "should_continue": true,
-  "pause_reason": null,
-  "execution": {
-    "enabled": false,
-    "preflight_confirmed": false,
-    "preflight_confirmed_at": null,
-    "preflight_confirmed_by": null,
-    "max_iterations": 25,
-    "current_iteration": 0,
-    "last_run_boundary": null,
-    "iterations_since_progress": 0,
-    "last_progress_iteration": null,
-    "no_progress_threshold": 3,
-    "run_boundaries": [
-      "definition_of_done_met",
-      "iteration_limit_reached",
-      "human_review_gate",
-      "destructive_operation_required",
-      "ambiguous_requirements",
-      "unfixable_failing_tests",
-      "missing_secrets_or_credentials",
-      "lock_lease_conflict",
-      "stop_signal"
-    ]
-  },
-  "active_unit": "0.10.0-beta U2 (decoy envelope builder): BUILT and mutation-verified (16/16 discriminated, one only after a new byte-diff test was added). Deliberately UNWIRED. NO invariant table, on purpose — U2 adds no durable field and no writer; the decision is recorded rather than the ritual performed. Independent paired-blind review NOT yet run: 0 of 6 rounds used.",
-  "loop": "U2 generate (this run) -> dispatch paired-blind review r1 -> fix -> ... hard cap 6. No merge, no push, no version bump. Three spec corrections applied PENDING maintainer ratification."
+ "schema_version": 2,
+ "max_iterations": 6,
+ "current_iteration": 2,
+ "stop_conditions": [
+  "definition_of_done_met",
+  "blocked",
+  "review_round_cap_reached_6_HARD_CAP_no_self_reset",
+  "merge_confirmation_required",
+  "max_iterations_reached"
+ ],
+ "human_review_gates": [
+  "MERGE \u2014 always, per-action, never lapses (convergence does NOT authorize it)",
+  "version bump / release cut",
+  "push beyond the draft-PR exception already recorded",
+  "round-6 cap reached \u2014 stop and hand to the human regardless of outcome",
+  "before executing destructive operations",
+  "before changing architecture or security boundaries",
+  "before declaring completion"
+ ],
+ "last_run_time": "2026-07-27",
+ "completion_status": "in_progress",
+ "should_continue": true,
+ "pause_reason": null,
+ "execution": {
+  "enabled": false,
+  "preflight_confirmed": false,
+  "preflight_confirmed_at": null,
+  "preflight_confirmed_by": null,
+  "max_iterations": 25,
+  "current_iteration": 0,
+  "last_run_boundary": null,
+  "iterations_since_progress": 0,
+  "last_progress_iteration": null,
+  "no_progress_threshold": 3,
+  "run_boundaries": [
+   "definition_of_done_met",
+   "iteration_limit_reached",
+   "human_review_gate",
+   "destructive_operation_required",
+   "ambiguous_requirements",
+   "unfixable_failing_tests",
+   "missing_secrets_or_credentials",
+   "lock_lease_conflict",
+   "stop_signal"
+  ]
+ },
+ "active_unit": "0.10.0-beta U2 (decoy envelope builder): FIX ROUND 1 of a hard cap of 6 APPLIED. Both round-1 P1s fixed (G-A interface/shape mirroring, G-B invalid Curve25519 encodings) plus G-D..G-H. Ruling 2 was found to be arithmetically impossible and is DEVIATED FROM with the proof recorded \u2014 needs a maintainer decision, not just a reviewer's. Deliberately UNWIRED. 694 tests / 0 failures, assembleDebug exit 0, 18 mutations / 17 discriminated.",
+ "loop": "U2 review round 1 adjudicated -> fix round 1 (this run) -> dispatch review round 2 -> ... hard cap 6. 1 of 6 rounds used. No merge, no push, no version bump."
 }

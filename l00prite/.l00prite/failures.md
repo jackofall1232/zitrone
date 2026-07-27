@@ -701,3 +701,32 @@ failure signature matches a mutation you were just running, suspect the harness 
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
   round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked
   follow-up (todos.md), not a blocker on Unit 1. Not blockers — gates.
+
+### "ABSORB THE DIFFERENCE IN THE OTHER FIELD" NEEDS THE OTHER FIELD TO HAVE BYTE GRANULARITY (0.10.0 U2 R1)
+
+The architect's ruling on the `message_number` digit-width tell was: absorb it in the random
+ciphertext's length. It is the right *instinct* — a network observer sees the total frame length and
+not the internal split, so the observable beats the unobservable — and it is **arithmetically
+impossible**, for a reason that is one line long once seen:
+
+> **base64 encodes 3 bytes to 4 characters, so a padded base64 field's length is always a multiple
+> of 4 — on BOTH sides. The two `ciphertext` fields can therefore differ only by a multiple of 4,
+> and a 1-, 2- or 3-byte difference anywhere else in the frame is unreachable through them.**
+
+Whatever length the blob is given, the residue mod 4 does not move. So the compensating field has to
+have byte granularity, and in a JSON envelope the only such knobs are the DECIMAL widths of numeric
+fields. That in turn forced the real design change: the decoy's counter mirrors the covered one
+instead of advancing monotonically, because a monotonic counter can be skipped forward but never
+back, and real counters reset on every inbound ratchet turn.
+
+**The rule:** before ruling that field B absorbs a difference in field A, check B's *quantisation*.
+Encodings quantise (base64 by 4, hex by 2, block ciphers by the block, `ISO_INSTANT` to
+{0,3,6,9} fractional digits). A knob that only moves in steps of N can never correct a residue that
+is not 0 mod N, however much slack it has.
+
+**And the meta-lesson, which is the third instance in this feature:** the same document that carried
+the ruling also carried the refutation. §2.3 justified monotonicity with "a `message_number` that
+resets is a tell a real ratchet can never produce"; §2.4, forty lines later, conceded that a real
+client resets `message_number` on **every inbound ratchet turn**. Nobody read the two together.
+**When a design decision rests on a claim about real behaviour, grep the document for the same
+claim — the contradiction is more often already written down than not.**

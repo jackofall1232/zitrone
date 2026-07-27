@@ -2338,3 +2338,88 @@ mutation sweep, precisely because of the stale-artifact problem above.
 carried-forward 0.9.3 lesson it must be scoped to the WHOLE unit, not to a delta. The three spec
 corrections are **applied but marked pending ratification**; §2.1's numbers and §2.3's ciphertext
 paragraph were the architect's ratified text. U2 stays UNWIRED; nothing merged, nothing pushed.
+
+---
+
+### Run 2026-07-27T18:30Z — claude (CX33) — **0.10.0 U2 FIX ROUND 1 of 6** (paired-blind r1 adjudicated)
+
+Branch `feat/0.10.0-decoy-u2-envelope-builder`, on top of `5e5b242f`. **No merge, no push, no version
+bump.** Adjudication: `reviews/decoy-0.10.0/u2-r1-adjudication.md` (2 P1, 1 P2, 5 P3 after dedup).
+
+#### The two P1s, both real
+
+- **G-A — the interface was the defect.** `build(blockCount)` derived the envelope's SHAPE from the
+  DECOY's own counter, so a real X3DH first message (976 B) could be paired with an ordinary decoy
+  (829 B) and the observer read the answer off the size. **Fixed per Ruling 1:** `build()` now takes
+  **the real `MessageEnvelope` it is covering** and mirrors every size-affecting property of it —
+  shape, ciphertext byte length, counter, `timestamp` width, `ttl_seconds`, `burn_on_read`,
+  `media_type`, `previous_chain_length`, `version` — and then **measures both `message.send` frames
+  and throws rather than return a decoy whose frame is not exactly as long.** The property is a
+  checked postcondition now, not a promise in prose.
+  *Incidental:* this also closes the residual Grok recorded but did not raise (a decoy in the
+  subsequent shape after one unacked first message is not what libsignal does — it stays
+  `PREKEY_TYPE` until the peer replies). Mirroring makes the cover follow the real shape, so the
+  question no longer arises.
+- **G-B — `0x05 ‖ random(32)` is not a valid Curve25519 public key.** Now
+  `Curve.generateKeyPair().publicKey.serialize()` with the private half dropped — canonical by
+  construction rather than by masking the one bit that was measured. The structural byte-diff no
+  longer *skips* the key regions: it asserts each is 33 bytes, DJB-tagged, parses through
+  `Curve.decodePoint`, and has bit 255 clear. A separate test re-measures 200 real libsignal keys
+  (0 with bit 255 set) **and** 200 random draws (must set it often, or the assertion proves nothing).
+
+#### G-C + Ruling 2 — **the ruling is arithmetically impossible, and the finding is recorded as such**
+
+Ruling 2 was to absorb `message_number`'s DECIMAL-width difference in the random ciphertext's length.
+**It cannot be done.** Base64 encodes 3 bytes to 4 characters, so a base64 field's length is always a
+multiple of 4 — on both sides. Whatever byte length the cover blob is given, the two `ciphertext`
+fields differ by a multiple of 4, and a difference of 1, 2 or 3 bytes anywhere else is unreachable.
+The only byte-granular knob in the envelope is the decimal width of a numeric field. A monotonic
+counter cannot be steered to an arbitrary real counter's width — it skips forward, never back, while
+real counters reset on every inbound ratchet turn. **"Monotonic decoy counter" and "the two frames
+are the same size" are mutually exclusive.**
+
+Applying the architect's own priority rule (the observable beats the unobservable), **the paired
+decoy's `message_number` mirrors the covered envelope's.** §2.3's justification for monotonicity was
+already contradicted by §2.4 of the same document, which conceded that a real client resets
+`message_number` on every inbound ratchet turn — resetting is what real traffic does.
+**Consequence:** `DecoyCounterReservation` (U1) has no consumer on the paired path; it moves to U5's
+dead-air ping, the one decoy with no envelope to mirror. Recorded in §2.3, §2.4, §3.3 and the §5 rows.
+
+Ruling 2's *mechanism* is implemented and load-bearing where it does work: the cover blob is built to
+the covered ciphertext's exact byte length and the random AEAD body absorbs the two blob-internal
+fields that cannot be mirrored (`signed_pre_key_id`, `previous_counter`). Residual — the body is then
+not a padded-block multiple — is written into §2.4 as instructed, with two others (repeated counters,
+and a `prekey_id` that may name an unpublished id at four-plus digits). All three relay-visible only.
+
+#### The P3s
+
+- **G-D — stale 821 / 1161 / +39 B, eighth recurrence.** Swept **by claim, not by phrasing**, and
+  swept **structurally**: §2.1's table is now declared the single canonical statement of every frame
+  size in the document, with the same "⭐ CANONICAL … do not restate" device used for the `TAG_DECOY`
+  land-on-disk trigger. §2.2, §2.4, §3.3, §5 and the executive summary now link to it and state no
+  byte count. The four surviving instances of the old numbers are inside correction callouts that
+  quote them as *previously read*, which is what those callouts are for.
+- **G-E** — `DecoyIdentity` kdoc named a non-existent `DecoyIdentityTest`; now names the real test.
+- **G-F** — "14 gate tests" was wrong (13). Now 16, stated with the suite total.
+- **G-G** — `blockCount` is gone with the interface, and with it the `blockCount * 256` overflow. The
+  covered ciphertext length is read from the base64 string (never decoded) and fail-closed at 1 MiB.
+- **G-H** — `registrationId` now `require(... in 1..16380)`, the interval both real generators emit.
+
+#### Evidence
+
+- `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks`
+  → **BUILD SUCCESSFUL, exit 0**, **694 tests / 3 skipped / 0 failures / 0 errors**, APK produced.
+- **18 mutations, 17 discriminated.** The survivor (M18) is a deliberate probe: defeating the final
+  frame-equality `check`. It is defence in depth and every property it guards has its own assertion,
+  so nothing fails when it alone is removed — **but it is not decorative**: M16 (removing the
+  recipient-id width `require`) was caught *by that check firing*, with the test recording
+  `expected IllegalArgumentException but was IllegalStateException`. Reported rather than papered over.
+- **Harness fixed** (`scratchpad/mutate-r1.py`). The round-0 phantom had a specific mechanism: the
+  harness read the JUnit XML after every run, so a mutation that failed to COMPILE produced no new
+  report and the previous mutation's failures were attributed to it. The report is now deleted before
+  every run, every run goes through Gradle (so classes are always recompiled from what is on disk),
+  the restore is verified byte-for-byte, and a clean baseline is required green before the first
+  mutation and again after the last restore. Both baselines were green.
+
+**Still owed:** paired-blind review round 2 (round 1 of a hard cap of 6 used). Maintainer ratification
+of the U2 spec corrections AND of the Ruling-2 deviation above.
