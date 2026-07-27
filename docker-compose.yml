@@ -24,7 +24,7 @@ services:
     volumes:
       - ./server/keys:/keys:ro
     ports:
-      - "8443:8443"
+      - "127.0.0.1:8443:8443"
 
   postgres:
     image: postgres:16-alpine
