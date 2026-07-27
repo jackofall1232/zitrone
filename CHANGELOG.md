@@ -7,6 +7,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.4-beta] - 2026-07-27
+
+**Registration now proves your device is real instead of asking who you are.** Zitrone has no
+phone numbers, emails, or IP-based identification to rate-limit account creation with — and
+IP-keying is structurally meaningless behind Tor and I2P anyway. So account creation now runs a
+short proof-of-work on your device: a SHA-256 pre-stage plus a memory-hard Argon2id puzzle, bound
+to a server-issued challenge and your identity key so a proof cannot be farmed ahead of time or
+replayed for another key. Calibrated on the slowest supported device in battery saver: expect a
+few seconds — typically around one to three, occasionally longer (the work is a random draw; the
+UI is honest about that rather than pretending a full bar).
+
+- **Android**: while the solve runs you get a lemon being squeezed into a pitcher. The fill
+  tracks the actual work done, never a timer; past 100% it overflows instead of stalling full,
+  because some lemons are juicier than others. At 60 seconds a non-blocking prompt offers
+  "keep waiting" / "try later" over the still-running solve. Reduced-motion settings are
+  honoured. Registration happens once per account, so most users see this screen exactly once.
+- **Diagnostics**: every solve writes privacy-safe `pow:` lines (stage timings, work counts,
+  parameters, battery-saver state — never keys, tokens, or content) to Settings → Diagnostics.
+- **Relay**: verification costs the relay exactly one Argon2id evaluation per registration while
+  the client searches ~2^D — that asymmetry is the design. Enforcement ships **off**
+  (`REGISTRATION_POW_ENABLED=false`) and flips only after all test devices are on 0.9.4; a
+  0.9.4 client also registers fine against a relay that predates the PoW deploy entirely.
+- **Also**: the burn setup dialog now states plainly that a burn is device-local and the relay
+  account survives it.
+
 ## [0.9.3-beta] - 2026-07-26
 
 **The Pucker Burn duress credential is now settable — the feature 0.9.2 shipped deliberately
