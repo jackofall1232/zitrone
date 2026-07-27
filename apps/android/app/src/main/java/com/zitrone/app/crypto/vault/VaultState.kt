@@ -285,23 +285,39 @@ class VaultCapacityException(message: String) : IllegalStateException(message)
  * that option (it cannot rescue builds already in the field), and the mitigation that IS in
  * force is that the section is omitted entirely while there is nothing to record.
  *
- * **[R3, sharpened R4] What that mitigation is worth, stated exactly.** The tag appears the moment a
- * vault has anything to record. `DecoyAccountProvisioner` writes its back-off before contacting the
- * relay, so that is earlier than the first sent decoy — but an attempt that fails **before**
- * `register` retires that deferral, and the holder then encodes as empty and is omitted again. The
- * durable trigger is therefore **provisioning that reaches relay registration**, not a completed
- * send and not a send attempt:
+ * ## ⭐ CANONICAL: when `TAG_DECOY` lands on disk. Every other statement of this POINTS HERE.
+ *
+ * **Do not restate this list anywhere else — reference it.** The claim it makes has been paraphrased
+ * across the spec, the invariant table and neighbouring kdoc, and *seven separate review rounds*
+ * found a stale copy each time: fixes landed wherever a reviewer pointed, and the paraphrases
+ * survived because no code path runs through prose. One canonical list, pointers elsewhere, is the
+ * structural fix — a claim restated in eight places has eight chances to rot and one chance to be
+ * right.
+ *
+ * **[R3, sharpened R4, corrected R7] Stated exactly.** The tag appears the moment a vault has
+ * anything to record. `DecoyAccountProvisioner` writes its back-off before contacting the relay, so
+ * that is earlier than the first sent decoy — but an attempt that fails **before** `register`
+ * retires that deferral **and durably flushes the retirement**, after which the holder encodes as
+ * empty and is omitted again. So the trigger is **provisioning that reaches relay registration, OR
+ * any attempt that could not durably retire its own write-ahead marker** — not a completed send,
+ * and not merely a send attempt:
  *
  *  - never attempted → no tag;
- *  - failed before `register` (offline, DNS, failed PoW, a local crypto fault) → no tag, so a vault
- *    whose only brush with cover traffic was a failed offline attempt keeps its 0.9.x readability;
+ *  - failed before `register` (offline, DNS, failed PoW, a local crypto fault), **and the
+ *    retirement flushed** → no tag, so a vault whose only brush with cover traffic was a failed
+ *    offline attempt keeps its 0.9.x readability;
+ *  - failed before `register`, but **the process died after the write-ahead flush, or the
+ *    retirement's own flush failed** → **tag**, with the relay never contacted. Nothing can run to
+ *    retire it. *(Row added round 6 — its omission is what made the earlier "no tag before
+ *    `register`" claim false under the crash-at-any-instruction model this project assumes.)*
  *  - reached `register`, including a 429 or a lost response → **tag**, whatever happens next;
  *  - registered and never sent a decoy → **tag**.
  *
- * That is the honest trigger, and it is the one spec §4.1 states. **If a change moves any
- * provisioning failure path across the `register` boundary, §4.1's user-facing sentence changes with
- * it** — it has drifted three times because each pass edited the previous wording instead of
- * re-deriving it from these four rows.
+ * **If a change moves any provisioning failure path across the `register` boundary, re-derive §4.1's
+ * user-facing sentence FROM THESE ROWS** — never by editing its previous wording, which is how it
+ * drifted through six versions. §4.1 deliberately states no precise boundary of its own; it makes a
+ * possibility claim keyed on *any attempt*, which is why it survives changes to this list. **The
+ * precision is HERE. This list is the single source of truth.**
  *
  * COMPRESSION lives INSIDE the sealed, padded plaintext, so the on-disk region stays a
  * constant [SLOT_PAYLOAD_BYTES] regardless of how compressible the state is — zero

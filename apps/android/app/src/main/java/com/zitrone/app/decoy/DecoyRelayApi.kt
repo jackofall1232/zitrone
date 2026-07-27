@@ -53,8 +53,12 @@ interface DecoyRelayApi {
  * id into its store the moment the 201 lands, and `createSession()` writes tokens the moment they
  * are minted. Pointing those at the vault would commit an account id with no identity keypair —
  * a reference this client could never authenticate to. Staging keeps every intermediate in RAM so
- * [DecoyAccountProvisioner] can commit the whole credential set in one durable mutate, and an
+ * [DecoyAccountProvisioner] can commit the whole credential set in **one `mutate`, made durable by
+ * the `flushBeforeAck` that follows it** — `mutate` alone only schedules a reseal — and an
  * interruption leaves an orphaned relay account rather than a dangling reference.
+ * *(Corrected round 6: this kdoc said "one durable mutate", which is round 1's headline
+ * misconception restated in source. It survived five fix rounds here because no reviewer cited this
+ * file until the final round.)*
  *
  * One instance per provisioning attempt; it holds no durable state and no listener.
  */
