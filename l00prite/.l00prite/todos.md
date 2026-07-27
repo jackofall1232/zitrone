@@ -821,3 +821,43 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       WEAKER in-process arrangement than production ships. A burn → relaunch → assert-at-boot test
       would cover the contract actually shipped. Needs multi-process orchestration the current
       harness lacks.
+
+## 0.10.0-beta — decoy traffic
+
+- [x] **U1: synthetic-account provisioning + `TAG_DECOY` (0x06)** — branch
+      `feat/0.10.0-decoy-u1-provisioning` (LOCAL, not pushed, not merged, no version bump).
+      Invariant table written BEFORE code at
+      `l00prite/.l00prite/reviews/decoy-0.10.0/u1-invariant-table.md`. Shipped: the codec section
+      (optional, omitted when empty), `DecoyState`, `DecoyAuthStore` + `StagingAuthStore`,
+      `DecoyIdentity`, `DecoyRelayApi`/`ApiClientDecoyRelay`/`RegistrationPowSolver`,
+      `DecoyAccountProvisioner`, `DecoyCounterReservation`.
+      Evidence: `:app:testDebugUnitTest` 645 tests / 0 failures / 3 skipped (was 598; +47 new) and
+      `:app:assembleDebug`, both BUILD SUCCESSFUL, GRADLE_EXIT=0, `--rerun-tasks`, 2026-07-27.
+      Measured byte budget: worst-case section delta **640–643 B** against a declared
+      `DECOY_SECTION_BUDGET_BYTES = 1024`; realistic state with the section 924–927 B of 262 112 B.
+      **U1 is deliberately UNWIRED** — nothing in production constructs these yet, because the
+      trigger ("first session that actually sends a decoy") is U3. No registration can be spent
+      from the shared global bucket by this branch.
+      **OWED before U1 is done:** independent paired-blind review of the whole unit (the 0.9.3
+      lesson — review the unit, not the delta), then maintainer merge decision.
+
+- [ ] **U1 follow-up — account deletion / burn leaves the synthetic relay account registered.**
+      `deleteAccountAndWipe` deletes the REAL relay account and obliterates the image; a provisioned
+      synthetic account would survive on the relay as an orphan. Not live today (U1 is unwired and
+      nothing provisions), but it must be answered before U3 wires provisioning: either delete the
+      synthetic account alongside the real one, or state in `SECURITY_MODEL.md` that it is left and
+      why that leaks nothing beyond what §1's threat model already concedes.
+
+- [ ] **U2 must settle §2.2 vs §2.3 for the first envelope.** §2.2 says the decoy rides "a session
+      genuinely established with one X3DH first message at setup"; §2.3 rules the ciphertext is
+      random bytes and nothing ever decrypts it. Both are satisfiable, but U2 must decide whether
+      the sender really runs `SessionBuilder.process` against the synthetic bundle (which writes a
+      durable ratchet session into the REAL vault — a capacity and reseal cost U1's budget does NOT
+      cover) or fabricates the `ephemeral_key`/`prekey_id` fields. U1 registers a genuine bundle
+      either way, but DISCARDS the prekey private halves, since §2.3 rules out ever decrypting.
+
+- [x] **Storage-format-stability gate — ANSWERED for 0.10.0: disclose.** Spec §4.1. The disclosure
+      text and the condition that flips the promise ("stability is committed when a migration path
+      exists and has been exercised across one real format change") ship with U6, and 0.10.0 must
+      not ship without them. Recording the ANSWER here so it is not deferred a fourth time; the
+      DELIVERY is U6's checkbox.

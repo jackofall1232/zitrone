@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "lock_id": "lock-20260727T-094-cut",
-  "owner_agent": null,
-  "owner_session": null,
-  "acquired_at": "2026-07-27T02:05:00Z",
-  "expires_at": "2026-07-27T02:35:00Z",
+  "lock_id": "lock-20260727T-decoy-u1",
+  "owner_agent": "claude",
+  "owner_session": "decoy-0.10.0-u1",
+  "acquired_at": "2026-07-27T09:00:00Z",
+  "expires_at": "2026-07-27T09:30:00Z",
   "ttl_seconds": 1800,
-  "purpose": "ledger: 0.9.4-beta cut + website flip",
+  "purpose": "0.10.0 decoy U1: invariant table + todos/ledger/state",
   "protected_paths": [
     "ledger.md",
     "memory.md",
@@ -18,5 +18,5 @@
     "reviews/",
     "sessions/"
   ],
-  "status": "released"
+  "status": "active"
 }

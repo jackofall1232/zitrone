@@ -1744,3 +1744,67 @@ CX23 relay work list (needs HoboJoe; CX33 has no SSH):
    ARGON2_DIFFICULTY_BITS=5 (default is STILL the D=8 placeholder), REGISTRATION_CHALLENGE_SECRET
    ≥32B, verify-concurrency semaphore in place (feat/0.9.4-pow-verify-concurrency), rollback =
    flag off + restart.
+
+## 2026-07-27 — 0.10.0-beta decoy traffic, U1 (session: decoy-u1-provisioning)
+
+Branch `feat/0.10.0-decoy-u1-provisioning` off `main` @ `d44616c5`. **Local only — nothing
+pushed, nothing merged, no version bump.**
+
+**Gate cleared first, as required:** the WRITER/READER invariant table was written BEFORE any
+code and every row of the spec's §4 draft was re-verified against current source:
+`l00prite/.l00prite/reviews/decoy-0.10.0/u1-invariant-table.md`.
+
+Built:
+- `VaultState.kt` — `TAG_DECOY = 0x06`, an OPTIONAL section carrying the synthetic account's
+  id + libsignal identity keypair + tokens, the counter high-water mark, the dead-air next-fire
+  (reserved, unset by U1), and a 429 provisioning deferral. `DecoyState` holder with explicit
+  content-based equals (a `ByteArray` field makes the generated one a trap). `VaultState.wipe()`
+  now ZEROES the identity private key; `parsePlaintext`'s decode-failure catch and `decodeDecoy`
+  wipe it on every throw path.
+- `data/DecoyAuthStore.kt` — vault-backed token surface + a RAM-only `StagingAuthStore`.
+- `decoy/` — `DecoyIdentity`, `DecoyRelayApi` + `ApiClientDecoyRelay` + `RegistrationPowSolver`,
+  `DecoyAccountProvisioner`, `DecoyCounterReservation`.
+
+**Evidence (real, `--rerun-tasks`, JDK 17, SDK /opt/android-sdk):**
+- `./gradlew :app:testDebugUnitTest :app:assembleDebug` → `GRADLE_EXIT=0`, `BUILD SUCCESSFUL in 1m 23s`
+- 645 tests / 0 failures / 0 errors / 3 skipped (598 before; 47 new across 4 decoy test classes)
+- APK produced at `app/build/outputs/apk/debug/app-debug.apk`
+- Measured capacity budget (from the test's own stdout, twice): worst-case decoy-section encoded
+  delta **640–643 B** vs a declared `DECOY_SECTION_BUDGET_BYTES = 1024`; a realistic populated
+  state carrying the section is **924–927 B of 262 112 B**.
+
+**Constraints held, verified by grep not by assertion:** no `SharedPreferences` /
+`SettingsRepository` / `DeviceSettings` / `BootDiagnostics` / `Log` reference anywhere in the
+decoy code or `DecoyAuthStore` (0 hits); no slot, vault-index or real-vs-decoy VAULT naming
+(0 hits); no string resource added. The provisioner takes no diagnostics or log sink at all, so
+"nothing decoy-related reaches device-level storage" is structural, not disciplinary.
+
+**Two spec facts found STALE while source-verifying the table** (recorded here, not only in the
+commit message, per the binding rule):
+1. §6.1 "`regpow` is not in this tree" — false for the CLIENT since 0.9.4: `RegistrationPow.kt`
+   is on main and wired into `bootstrapLoop`. Still true for the RELAY (`handlers.go` `Register`
+   has no PoW check on main). U1 therefore mirrors the real path and answers §6.2a's open
+   question: background solve, NO progress UI, NO diagnostics recorder, silent failure.
+2. §6.2 "main still reads `ratelimit.New(5, time.Hour)` at `handlers.go:48`" — false; main now
+   reads `ratelimit.New(300, time.Hour, cfg.RateLimitEnabled)` at `handlers.go:54`. The interim
+   widening IS merged. The `c.IP()` keying is unchanged at `handlers.go:166`, so the bucket is
+   still global and CX23 P2 remains open.
+
+**Deviations from the spec, all recorded in the invariant table with reasoning:**
+- a sixth field (`provisionNotBeforeMs`) was added to the section, because "back off across
+  sessions on 429" requires durable, vault-scoped state. Consequence: **section presence no
+  longer implies readiness** — the spec's R4 reader row is corrected to key on the credential
+  pair. This is exactly the round-12 shape (changing what a durable signal MEANS), so it is
+  flagged rather than absorbed.
+- W1 does not write a first dead-air fire time (§3.2 re-framed the ping to in-session; a durable
+  wall-clock next-fire is U5's decision). The field exists and round-trips; U1 writes null.
+- counter reservation is built in U1 per the task brief, not U2 per the spec's writer table. Only
+  the allocator — the sender that spends the values is still U2.
+
+**Not done, deliberately:** U1 is UNWIRED. Nothing in `SessionContainer` or `MessagingCoordinator`
+constructs these classes, because the trigger ("first session that actually sends a decoy") is
+U3's. Same posture `VaultRuntime` itself shipped in. Consequence: this branch cannot spend a
+registration from the global bucket on any device.
+
+**Owed:** independent paired-blind review of the WHOLE unit (0.9.3 lesson), then a maintainer
+merge decision. No push, no merge, no version bump was performed.

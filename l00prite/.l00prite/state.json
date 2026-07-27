@@ -1,20 +1,20 @@
 {
  "schema_version": 2,
  "project_name": "Zitrone",
- "current_goal": "0.9.4-beta: registration proof-of-work (relay code on a CX23 branch; client built this session)",
- "current_phase": "0.9.4 \u2014 client solver + UI + instrumented solve path wired into registration (feat/0.9.4-registration-pow-client, local); first-attempt D=4 shipped client-side; awaiting Revvl 6x measurement via Diagnostics screen",
+ "current_goal": "0.10.0-beta decoy traffic \u2014 U1 (synthetic-account provisioning + TAG_DECOY) built, awaiting independent review",
+ "current_phase": "0.10.0 U1 complete on local branch feat/0.10.0-decoy-u1-provisioning; unwired by design; U2 (envelope builder) not started",
  "active_agent": null,
  "last_agent": "claude",
  "last_updated": "2026-07-27",
  "status": "in_progress",
- "blocked": true,
- "blocker_reason": "Argon2id difficulty is still UNMEASURED on the client side \u2014 but the measurement channel now exists: the solve is wired into registration through RegistrationPowSolveRecorder, so one registration attempt on the Revvl 6x writes per-stage timings/conditions to the Diagnostics screen (no adb needed). Client ships D=4 as a first calibration attempt (NOT measured); TODO(pow-calibration) stands until the device number is read back. REGISTRATION_POW_ENABLED stays false until all test devices are on 0.9.4; relay env must pin all four PoW params at flip time (relay config default is still the D=8 placeholder).",
+ "blocked": false,
+ "blocker_reason": null,
  "active_event_id": null,
  "last_event_processed": null,
  "pending_event_count": 0,
  "review_response_required": false,
- "ci_status": "local only \u2014 :app:testDebugUnitTest 585 tests / 0 failures / 3 skipped; :app:assembleDebug exit 0. Nothing pushed, so no CI run.",
+ "ci_status": "local only \u2014 :app:testDebugUnitTest 645 tests / 0 failures / 3 skipped; :app:assembleDebug exit 0 (--rerun-tasks). Nothing pushed, so no CI run.",
  "execution_active": false,
  "execution_stop_reason": null,
- "next_recommended_action": "Human: (1) run RegistrationPowCalibrationTest on the Revvl 6x in battery saver, unplugged, and record the sweep; (2) pick Argon2DifficultyBits from it \u2014 the shipped placeholder 8 is measurably far too high, likely landing zone 4-5; (3) review the two local branches (feat/0.9.4-registration-pow-client, docs/four-file-compose-correction) and decide push/PR. Independent review is owed on the PoW client before merge (security-sensitive). Still unbuilt: the Argon2id verification concurrency semaphore on the relay, and the foreground service + wiring behind the UI stub."
+ "next_recommended_action": "Dispatch the independent paired-blind review of the WHOLE U1 unit (not just a delta) per [[zitrone-review-cli-invocation]]; then maintainer decides merge. Before U3 wires provisioning, answer the account-delete/burn orphan question in todos.md."
 }

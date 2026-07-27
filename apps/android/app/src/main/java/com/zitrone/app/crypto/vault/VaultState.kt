@@ -57,6 +57,12 @@ class VaultState(
     var settings: VaultScopedSettings,
     /** Account id + session tokens. */
     var auth: AuthState,
+    /**
+     * Cover-traffic state for THIS vault, or null when this vault has none (the valid
+     * initial state — see [DecoyState]). Vault-scoped by requirement: nothing about it
+     * may reach device-level storage.
+     */
+    var decoy: DecoyState? = null,
 ) {
     /**
      * Zero every held secret. Called by [VaultRuntime.close] under its lock.
@@ -89,6 +95,12 @@ class VaultState(
         tombstonesJson = null
         auth = AuthState()
         settings = VaultScopedSettings()
+        // [DecoyState.identityKeyPair] is RAW PRIVATE KEY MATERIAL in a ByteArray — the same
+        // class of secret as a Signal record, so it is ZEROED (not merely dereferenced) before
+        // the reference is dropped. Its token Strings share the un-zeroable-String tradeoff
+        // documented above.
+        decoy?.wipe()
+        decoy = null
     }
 
     companion object {
@@ -99,8 +111,125 @@ class VaultState(
             tombstonesJson = null,
             settings = VaultScopedSettings(),
             auth = AuthState(),
+            decoy = null,
         )
     }
+}
+
+/**
+ * Cover-traffic state for ONE vault — the whole content of `TAG_DECOY` (0x06).
+ *
+ * Holds the synthetic relay account this vault addresses its cover traffic to (account id +
+ * long-term identity keypair + session tokens), the counter-reservation high-water mark, the
+ * dead-air schedule's next fire, and a provisioning deferral. Immutable: it is swapped
+ * wholesale inside a [VaultRuntime.mutate] block, never field-mutated, exactly like
+ * [com.zitrone.app.data.AuthState].
+ *
+ * ⚠️ **PRESENCE IS NOT READINESS.** A section exists as soon as there is anything at all to
+ * record — including a bare 429 deferral with no account. The ONLY test for "this vault has a
+ * usable synthetic account" is [isProvisioned] (both [accountId] and [identityKeyPair]
+ * non-null). Those two are always committed in the SAME mutate, so a state carrying one
+ * without the other is unreachable — an interrupted provision leaves an orphaned relay
+ * account and NO section change, never a section referencing an account whose signing key was
+ * never persisted.
+ *
+ * ⚠️ **[counterHighWater] is a RESERVATION, and its meaning is "every value strictly below
+ * this may already have been issued".** It is persisted BEFORE any value in the newly reserved
+ * block is spent, so an interruption SKIPS counter values (invisible — a real Double Ratchet
+ * skips on any dropped message) and can never REGRESS them (a tell no real ratchet produces).
+ * It must only ever increase.
+ *
+ * VAULT-SCOPED BY REQUIREMENT. None of this may be mirrored into `SettingsRepository`,
+ * `DeviceSettings`, any `SharedPreferences`, or any device-level diagnostics file: a
+ * device-level record of how many synthetic accounts exist is a vault-count oracle.
+ *
+ * [identityKeyPair] is libsignal `IdentityKeyPair.serialize()` — PUBLIC ‖ PRIVATE. It is
+ * zeroed by [wipe], which [VaultState.wipe] calls at close.
+ */
+class DecoyState(
+    /** The synthetic relay account's UUID, or null before it is provisioned. */
+    val accountId: String? = null,
+    /** libsignal `IdentityKeyPair.serialize()` for that account (PRIVATE material), or null. */
+    val identityKeyPair: ByteArray? = null,
+    /** That account's current access JWT, or null when no session is held. */
+    val accessToken: String? = null,
+    /** That account's current (single-use, rotated) refresh token, or null. */
+    val refreshToken: String? = null,
+    /** Reservation high-water mark: every counter value below it may already be issued. */
+    val counterHighWater: Long = 0L,
+    /** Dead-air schedule next-fire (epoch ms), or null when never armed. Written by U5 only. */
+    val deadAirNextFireAtMs: Long? = null,
+    /**
+     * Earliest epoch-ms at which provisioning may be attempted again, or null for "no
+     * deferral". Set only when the relay answers a registration with 429: registration is a
+     * scarce GLOBAL resource (one rate-limit bucket worldwide), so a 429 is contention with
+     * other users, not a client fault, and the back-off must survive the session that saw it.
+     */
+    val provisionNotBeforeMs: Long? = null,
+) {
+    /** True only when a usable synthetic account exists — see the presence-vs-readiness note. */
+    val isProvisioned: Boolean
+        get() = accountId != null && identityKeyPair != null
+
+    /**
+     * True when nothing here is worth persisting, so the section may be OMITTED entirely.
+     * Keeping the section absent for such a state is what lets a vault that never provisions
+     * stay byte-compatible with a 0.9.x reader (which rejects tag 0x06 as corruption).
+     */
+    val isEmpty: Boolean
+        get() = accountId == null && identityKeyPair == null && accessToken == null &&
+            refreshToken == null && counterHighWater == 0L && deadAirNextFireAtMs == null &&
+            provisionNotBeforeMs == null
+
+    /** Copy-with, mirroring a data class (which a ByteArray field makes unsafe to generate). */
+    fun copy(
+        accountId: String? = this.accountId,
+        identityKeyPair: ByteArray? = this.identityKeyPair,
+        accessToken: String? = this.accessToken,
+        refreshToken: String? = this.refreshToken,
+        counterHighWater: Long = this.counterHighWater,
+        deadAirNextFireAtMs: Long? = this.deadAirNextFireAtMs,
+        provisionNotBeforeMs: Long? = this.provisionNotBeforeMs,
+    ): DecoyState = DecoyState(
+        accountId = accountId,
+        identityKeyPair = identityKeyPair,
+        accessToken = accessToken,
+        refreshToken = refreshToken,
+        counterHighWater = counterHighWater,
+        deadAirNextFireAtMs = deadAirNextFireAtMs,
+        provisionNotBeforeMs = provisionNotBeforeMs,
+    )
+
+    /** Zero the private key bytes this holder owns. Called by [VaultState.wipe]. */
+    fun wipe() {
+        identityKeyPair?.let { wipe(it) }
+    }
+
+    // A ByteArray field makes a generated equals/hashCode reference-based, which is a trap in
+    // tests (the same reason RegistrationPow.Proof overrides them). Compare by content.
+    override fun equals(other: Any?): Boolean =
+        other is DecoyState &&
+            accountId == other.accountId &&
+            identityKeyPair.contentEquals(other.identityKeyPair) &&
+            accessToken == other.accessToken &&
+            refreshToken == other.refreshToken &&
+            counterHighWater == other.counterHighWater &&
+            deadAirNextFireAtMs == other.deadAirNextFireAtMs &&
+            provisionNotBeforeMs == other.provisionNotBeforeMs
+
+    override fun hashCode(): Int {
+        var result = accountId?.hashCode() ?: 0
+        result = 31 * result + identityKeyPair.contentHashCode()
+        result = 31 * result + (accessToken?.hashCode() ?: 0)
+        result = 31 * result + (refreshToken?.hashCode() ?: 0)
+        result = 31 * result + counterHighWater.hashCode()
+        result = 31 * result + (deadAirNextFireAtMs?.hashCode() ?: 0)
+        result = 31 * result + (provisionNotBeforeMs?.hashCode() ?: 0)
+        return result
+    }
+
+    /** Never render secrets. Mirrors the "nothing here is ever logged" discipline. */
+    override fun toString(): String = "DecoyState(provisioned=$isProvisioned)"
 }
 
 /**
@@ -126,8 +255,20 @@ class VaultCapacityException(message: String) : IllegalStateException(message)
  *    is OMITTED entirely when the field is null.
  *  - `0x04` **settings**: fixed 9-byte k/v (see [encodeSettings]). ALWAYS emitted.
  *  - `0x05` **auth**: three length-prefixed nullable strings (see [encodeAuth]). ALWAYS emitted.
+ *  - `0x06` **decoy**: cover-traffic state (see [encodeDecoy]). NULLABLE — the tag is OMITTED
+ *    entirely when the vault has no decoy state, which is the valid initial condition.
  *  An UNKNOWN tag on decode THROWS (strict v1 — a future format change owns its own
  *  migration behind a version bump; there is no forward-tolerant skip).
+ *
+ * ⚠️ FORMAT BREAK (0.10.0-beta, ruled and accepted). `0x06` did not exist before 0.10.0, and
+ * strict-v1 means a 0.9.x build opening a vault that carries it rejects the whole state as
+ * corruption — `SessionContainer` decodes before it builds anything, so that surfaces as a
+ * refused unlock. This is a ONE-WAY format bump, disclosed in the release notes exactly as
+ * 0.9.1's fresh-install-only decision was. **Do NOT "fix" this by making the decoder tolerant
+ * of unknown high tags** — the strictness is deliberate, the ruling considered and rejected
+ * that option (it cannot rescue builds already in the field), and the mitigation that IS in
+ * force is that the section is omitted entirely while there is nothing to record, so a vault
+ * that never generates cover traffic never carries the tag.
  *
  * COMPRESSION lives INSIDE the sealed, padded plaintext, so the on-disk region stays a
  * constant [SLOT_PAYLOAD_BYTES] regardless of how compressible the state is — zero
@@ -160,9 +301,23 @@ object VaultStateCodec {
     private const val TAG_TOMBSTONES = 0x03
     private const val TAG_SETTINGS = 0x04
     private const val TAG_AUTH = 0x05
+    private const val TAG_DECOY = 0x06
 
     /** A null nullable-string is written as this sentinel length (see [encodeAuth]). */
     private const val NULL_LEN = -1
+
+    /**
+     * Worst-case bound on what [TAG_DECOY] may add to the ENCODED (deflated) state.
+     *
+     * Measured, not guessed — `VaultDecoySectionTest` builds a maximum-length section (36-char
+     * account UUID, 65-byte `IdentityKeyPair.serialize()`, an RS256 access JWT, a 43-char
+     * refresh token, three fixed-width integers) and asserts the real encode-size delta stays
+     * under this. It exists to catch a FUTURE field addition, not because the section is
+     * tight: [MAX_PAYLOAD_CONTENT_BYTES] is ~262 KB and a realistic full state is single-digit
+     * KB. It matters because [VaultRuntime.capacityExceeded] fail-closes `flushBeforeAck`, so
+     * overflowing the region is a durability failure, not a cosmetic one.
+     */
+    const val DECOY_SECTION_BUDGET_BYTES: Int = 1024
 
     /**
      * Largest deflated payload that fits the fixed region: the region's plaintext
@@ -240,6 +395,12 @@ object VaultStateCodec {
             // 0x04 / 0x05 — always present objects.
             writeSection(out, TAG_SETTINGS, encodeSettings(state.settings))
             writeSection(out, TAG_AUTH, encodeAuth(state.auth))
+            // 0x06 — nullable: the tag is omitted entirely when there is no decoy state, AND
+            // when the holder is present but carries nothing worth persisting. Omitting an
+            // empty holder is not tidiness: while the section is absent the payload stays
+            // readable by a 0.9.x build (see the format-break note in the class kdoc), so a
+            // vault that never generates cover traffic never pays for the break.
+            state.decoy?.takeUnless { it.isEmpty }?.let { writeSection(out, TAG_DECOY, encodeDecoy(it)) }
             return out.toByteArray()
         } finally {
             // The whole plaintext (raw records) lived here — zero it. The exact-size result
@@ -258,6 +419,7 @@ object VaultStateCodec {
         var tombstonesJson: String? = null
         var settings: VaultScopedSettings? = null
         var auth: AuthState? = null
+        var decoy: DecoyState? = null
 
         // v1 emits each tag AT MOST once; a repeat is a noncanonical/malformed payload. Reject it
         // — otherwise the second assignment silently replaces the first decoded value, and for
@@ -282,6 +444,7 @@ object VaultStateCodec {
                         TAG_TOMBSTONES -> tombstonesJson = String(body, Charsets.UTF_8)
                         TAG_SETTINGS -> settings = decodeSettings(body)
                         TAG_AUTH -> auth = decodeAuth(body)
+                        TAG_DECOY -> decoy = decodeDecoy(body)
                         // Strict v1: an unknown tag is corruption / a wrong version, never skipped.
                         else -> throw IllegalArgumentException("unknown vault state section tag: $tag")
                     }
@@ -307,6 +470,7 @@ object VaultStateCodec {
                 tombstonesJson = tombstonesJson,
                 settings = decodedSettings,
                 auth = decodedAuth,
+                decoy = decoy,
             )
         } catch (t: Throwable) {
             // A malformed/unknown later section (or a missing-mandatory require) can throw AFTER
@@ -316,6 +480,11 @@ object VaultStateCodec {
                 for (value in partial.values) wipe(value)
                 partial.clear()
             }
+            // Same obligation for the decoy section's identity keypair: decodeDecoy copies a
+            // PRIVATE key out of the (about-to-be-wiped) body into an array this local owns, and
+            // a throw here means no VaultState is ever constructed, so VaultState.wipe() can
+            // never reach it. Zero it on the failure path too.
+            decoy?.wipe()
             throw t
         }
     }
@@ -436,6 +605,62 @@ object VaultStateCodec {
         return auth
     }
 
+    // ── 0x06 decoy (cover-traffic state) ────────────────────────────────────────
+
+    /**
+     * Fixed field order:
+     * `accountId ‖ identityKeyPair ‖ accessToken ‖ refreshToken` (four nullable
+     * length-prefixed blobs, [NULL_LEN] for null) `‖ counterHighWater(8 BE)`
+     * `‖ deadAirNextFire(present(1) ‖ 8 BE) ‖ provisionNotBefore(present(1) ‖ 8 BE)`.
+     *
+     * The absent-long form mirrors [encodeSettings]'s nullable-ttl encoding (a present flag
+     * plus a fixed-width value) rather than inventing a sentinel, so an absent value and a
+     * legitimately-zero one stay distinguishable.
+     */
+    private fun encodeDecoy(d: DecoyState): ByteArray {
+        val out = WipeableBuffer(128)
+        try {
+            writeNullableString(out, d.accountId)
+            writeNullableBytes(out, d.identityKeyPair)
+            writeNullableString(out, d.accessToken)
+            writeNullableString(out, d.refreshToken)
+            writeLong(out, d.counterHighWater)
+            writeNullableLong(out, d.deadAirNextFireAtMs)
+            writeNullableLong(out, d.provisionNotBeforeMs)
+            return out.toByteArray()
+        } finally {
+            // out held the identity PRIVATE key + the token bytes — zero it. The exact-size
+            // result is the decoy section body, wiped by writeSection.
+            out.wipe()
+        }
+    }
+
+    private fun decodeDecoy(body: ByteArray): DecoyState {
+        val r = Reader(body)
+        val accountId = readNullableString(r)
+        // The identity keypair is PRIVATE key material. On any throw AFTER this read (a
+        // truncated later field, trailing bytes) nothing else can reach the array — the
+        // DecoyState is not constructed, so neither VaultState.wipe() nor parsePlaintext's
+        // catch sees it — so zero it here before rethrowing.
+        val identityKeyPair = readNullableBytes(r)
+        try {
+            val decoded = DecoyState(
+                accountId = accountId,
+                identityKeyPair = identityKeyPair,
+                accessToken = readNullableString(r),
+                refreshToken = readNullableString(r),
+                counterHighWater = r.i64(),
+                deadAirNextFireAtMs = readNullableLong(r),
+                provisionNotBeforeMs = readNullableLong(r),
+            )
+            require(!r.hasRemaining()) { "trailing bytes in decoy section" }
+            return decoded
+        } catch (t: Throwable) {
+            identityKeyPair?.let { wipe(it) }
+            throw t
+        }
+    }
+
     /** A nullable string as `len(4 BE)`; [NULL_LEN] (-1) means null, else utf8 bytes follow. */
     private fun writeNullableString(out: WipeableBuffer, s: String?) {
         if (s == null) {
@@ -470,6 +695,41 @@ object VaultStateCodec {
         }
     }
 
+    /**
+     * A nullable byte blob as `len(4 BE)`; [NULL_LEN] (-1) means null, else the bytes follow.
+     * Unlike [writeNullableString] this does NOT wipe its input — the caller still owns the
+     * array (it is the live state's, e.g. the decoy identity keypair), exactly as
+     * [encodeSignal] treats record values.
+     */
+    private fun writeNullableBytes(out: WipeableBuffer, bytes: ByteArray?) {
+        if (bytes == null) {
+            writeInt(out, NULL_LEN)
+            return
+        }
+        writeInt(out, bytes.size)
+        out.write(bytes)
+    }
+
+    /** Inverse of [writeNullableBytes]. The returned array is a fresh copy the caller owns. */
+    private fun readNullableBytes(r: Reader): ByteArray? {
+        val len = r.i32()
+        if (len == NULL_LEN) return null
+        require(len >= 0) { "invalid nullable-bytes length: $len" }
+        return r.bytes(len)
+    }
+
+    /** A nullable long as `present(1) ‖ value(8 BE)`; the value is 0 when absent. */
+    private fun writeNullableLong(out: WipeableBuffer, value: Long?) {
+        out.write(if (value == null) 0 else 1)
+        writeLong(out, value ?: 0L)
+    }
+
+    private fun readNullableLong(r: Reader): Long? {
+        val present = r.u8() != 0
+        val value = r.i64()
+        return if (present) value else null
+    }
+
     // ── section framing helpers ──────────────────────────────────────────────────
 
     private fun writeSection(out: WipeableBuffer, tag: Int, body: ByteArray) {
@@ -489,6 +749,12 @@ object VaultStateCodec {
         out.write((value ushr 16) and 0xff)
         out.write((value ushr 8) and 0xff)
         out.write(value and 0xff)
+    }
+
+    private fun writeLong(out: WipeableBuffer, value: Long) {
+        for (shift in 56 downTo 0 step 8) {
+            out.write(((value ushr shift) and 0xff).toInt())
+        }
     }
 
     private fun writeShort(out: WipeableBuffer, value: Int) {
@@ -630,6 +896,14 @@ object VaultStateCodec {
                 ((a[pos + 2].toInt() and 0xff) shl 8) or
                 (a[pos + 3].toInt() and 0xff)
             pos += 4
+            return v
+        }
+
+        fun i64(): Long {
+            require(pos + 8 <= a.size) { "unexpected end of vault state" }
+            var v = 0L
+            for (i in 0 until 8) v = (v shl 8) or (a[pos + i].toLong() and 0xff)
+            pos += 8
             return v
         }
 
