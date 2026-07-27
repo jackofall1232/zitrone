@@ -856,8 +856,8 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       cover) or fabricates the `ephemeral_key`/`prekey_id` fields. U1 registers a genuine bundle
       either way, but DISCARDS the prekey private halves, since §2.3 rules out ever decrypting.
 
-- [x] **Storage-format-stability gate — ANSWERED for 0.10.0: disclose.** Spec §4.1. The disclosure
-      text and the condition that flips the promise ("stability is committed when a migration path
-      exists and has been exercised across one real format change") ship with U6, and 0.10.0 must
-      not ship without them. Recording the ANSWER here so it is not deferred a fourth time; the
-      DELIVERY is U6's checkbox.
+- [ ] **U6 owes the DELIVERY of the storage-format disclosure.** The gate itself is answered above
+      (line ~598, `a4f118df`) — do not re-answer it here. What is still outstanding is shipping the
+      text: release notes plus `SECURITY_MODEL.md`, saying that 0.10.0 vaults cannot be opened by
+      0.9.x and that downgrading presents them as corrupt. 0.10.0 must not ship without it, because
+      0.10.0 is the release that makes the second break real (spec §4.1 sequencing note).
