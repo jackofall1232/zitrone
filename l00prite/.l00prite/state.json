@@ -1,8 +1,8 @@
 {
  "schema_version": 2,
  "project_name": "Zitrone",
- "current_goal": "0.10.0-beta decoy traffic — U1 review round 3 FIXED (H1-H10, 0 P1s); awaiting review round 4 on the whole unit",
- "current_phase": "0.10.0 U1 on local branch feat/0.10.0-decoy-u1-provisioning: built, paired-blind reviewed three times, fix round 3 of 6 applied. Unwired by design; U2 (envelope builder) not started",
+ "current_goal": "0.10.0-beta decoy traffic \u2014 U1 review round 4 FIXED (J1-J5, 0 P1s, 2 P2s); surface converging, maintainer merge decision owed",
+ "current_phase": "0.10.0 U1 on local branch feat/0.10.0-decoy-u1-provisioning: built, paired-blind reviewed FOUR times, fix round 4 of 6 applied. Unwired by design; U2 (envelope builder) not started",
  "active_agent": null,
  "last_agent": "claude",
  "last_updated": "2026-07-27",
@@ -13,8 +13,8 @@
  "last_event_processed": null,
  "pending_event_count": 0,
  "review_response_required": false,
- "ci_status": "local only — :app:testDebugUnitTest 675 tests / 0 failures / 0 errors; :app:assembleDebug exit 0. Nothing pushed, so no CI run.",
+ "ci_status": "local only \u2014 :app:testDebugUnitTest 678 tests / 3 skipped / 0 failures / 0 errors; :app:assembleDebug exit 0. Nothing pushed, so no CI run.",
  "execution_active": false,
  "execution_stop_reason": null,
- "next_recommended_action": "Dispatch review ROUND 4 of the WHOLE U1 unit (not the fix delta) per [[zitrone-review-cli-invocation]]; fix cap is 6 rounds, 3 used. Round 3 found ZERO P1s and the two blind reviewers converged on the same top three defects, so weigh whether the surface is exhausted. Point round 4 at: the per-runtime Gate (a THIRD process-wide WeakHashMap registry) and whether forRuntime returning a fresh instance over shared guard state is right; the deferral retire/keep boundary (is the register call the correct discriminator, given a register that throws may still have created the account?); and §4.1's re-worded disclosure, which is PENDING MAINTAINER RE-RATIFICATION."
+ "next_recommended_action": "Take the MAINTAINER DECISION on U1: merge, or spend round 5 (four of six used). The convergence case for stopping is strong \u2014 findings 10 -> 11 -> 10 -> 6, zero P1s for two consecutive rounds, and both blind reviewers independently reaching the same top findings AND the same remedies. Round 4's own shape supports it: three of five findings were stale documentation, not defects in behaviour. If round 5 runs, point it at the two things round 4 changed structurally \u2014 the codec's new credential-pairing rejection (does refusing at DECODE turn a recoverable half-set into a refused unlock for any image that could reach that state?) and the bundleFactory seam. SEPARATELY OWED regardless: maintainer RE-RATIFICATION of the \u00a74.1 disclosure, now on its THIRD pass \u2014 it has been corrected in both directions in consecutive rounds."
 }

@@ -52,7 +52,7 @@ A new **optional** TLV section in the per-vault sealed payload. It holds, for th
 | `accessToken` / `refreshToken` | nullable utf8 | that account's session tokens | W1, W2, W2b |
 | `counterHighWater` | i64 | counter-reservation high-water mark: every value `< counterHighWater` is considered ISSUED | W3, **W2c (reset) [R1]** |
 | `deadAirNextFireAtMs` | nullable i64 | dead-air schedule next-fire (field reserved; **U1 never sets it**) | W4 (U5) |
-| `provisionNotBeforeMs` | nullable i64 | cross-session provisioning deferral after a 429 **or a capacity failure [R1]** (**added by U1 — see “Deviations”**) | W1b, **W1c [R1]** |
+| `provisionNotBeforeMs` | nullable i64 | cross-session provisioning deferral — ~~after a 429 **or a capacity failure [R1]**~~ **[R2] written AHEAD of every attempt that reaches the relay sequence** (**added by U1 — see “Deviations”**) | W1 (retires on success), W1b (writes), W1c (restores), **W1d (retires on a spent-nothing failure) [R3, listed R4]** |
 
 It lives inside the vault region and nowhere else. **Nothing decoy-related may be written to
 device-level storage** (`SettingsRepository`, `DeviceSettings`, any `SharedPreferences`) — a
@@ -69,16 +69,17 @@ grow, so the section's presence or absence is not observable from the encrypted 
 
 | # | Writer | When | What it writes into `TAG_DECOY` | Durable? | Status |
 |---|---|---|---|---|---|
-| W1 | `DecoyAccountProvisioner.provision()` | first unlocked session in which provisioning is requested, no synthetic account exists, and no deferral is in force | **ONE `mutate`** setting `accountId` + `identityKeyPair` + both tokens together, **and `provisionNotBeforeMs = null`** — a success is the only thing that retires W1b's write-ahead deferral. Never a partial credential set. **`counterHighWater` is NOT written here [R2]** — it stays 0 until W3 first reserves. | **YES [R1]** — `flushBeforeAck` before it returns. A throw ⇒ returns `false` ("not this session"); the credentials stay live+scheduled, the key is NOT wiped, the next session finds them rather than re-registering, and **[R2]** an instance-scoped `credentialsUnconfirmed` flag keeps THIS session's `canSend()` false so the next call cannot flip to ready on never-flushed bytes | **this unit (U1)** |
+| W1 | `DecoyAccountProvisioner.provision()` | first unlocked session in which provisioning is requested, no synthetic account exists, and no deferral is in force | **ONE `mutate`** setting `accountId` + `identityKeyPair` + both tokens together, **and `provisionNotBeforeMs = null`** — ~~a success is the only thing that retires W1b's write-ahead deferral~~ **[R3/R4] W1d retires it too, on a failure that spent nothing.** Success is the only retirement that happens *while writing something*, which is why it rides in this mutate rather than a second one: there is no window where the credentials are durable and the deferral is not. Never a partial credential set — **[R4] and the codec now enforces that** (`requireDecoyCredentialsPaired` refuses an id without a key, a key without an id, or tokens without an id, on encode **and** decode), so the pairing is a property of the format and not only of this writer's care. **`counterHighWater` is NOT written here [R2]** — it stays 0 until W3 first reserves. | **YES [R1]** — `flushBeforeAck` before it returns. A throw ⇒ returns `false` ("not this session"); the credentials stay live+scheduled, the key is NOT wiped, the next session finds them rather than re-registering, and ~~**[R2]** an instance-scoped~~ **[R3] a per-runtime `Gate`-scoped** `credentialsUnconfirmed` flag keeps `canSend()` false for **every** provisioner over that runtime, so neither a later call nor a second instance can flip to ready on never-flushed bytes (instance scope was H3) | **this unit (U1)** |
 | W1b | `DecoyAccountProvisioner.reserveBackoff()` — **WRITE-AHEAD [R2]** | ~~relay answers `register` with 429~~ **BEFORE any relay contact**, on every attempt that passes the deferral check | `provisionNotBeforeMs` only; credentials untouched (still absent) | **YES** — "back off ACROSS sessions" is a durability claim, so mutate **and** flush. ~~Best-effort~~ **[R2] NOT best-effort: a failure means no registration is spent at all.** A capacity failure here is reverted, so a cover-traffic write never leaves `capacityExceeded` set over the real inbound path | **this unit (U1)** — see Deviations |
 | W1c | `DecoyAccountProvisioner.revertSection()` on **`VaultCapacityException`** | the credential commit does not fit the fixed region | restores the section to **exactly what the same critical section read immediately before the commit** — which already carries W1b's durable deferral, so there is no separate "and defer" step and no bare-revert branch left [R2] | **NO, and it needs none [R2]** — the restored value IS what is already on disk; the re-encode's only job is clearing `capacityExceeded` | **this unit (U1)** — **NEW [R1], reshaped [R2]** |
+| W1d | `DecoyAccountProvisioner.clearBackoff(deferral)` — **the retirement W1b's deferral gets when it protected nothing [R3]** | the attempt fails **before** `register` is entered: offline challenge fetch, DNS failure, failed PoW, a local crypto fault (bundle generation), a cancelled scope | `provisionNotBeforeMs` → null, and nothing else. **Compare-and-clear under the section lock**: retires only the deadline THIS attempt wrote, so a deferral another writer put there meanwhile is left standing — the same "only restore what you read under this lock" rule W1c follows. Emptying the holder is what makes the codec omit `TAG_DECOY` and gives the vault back its 0.9.x readability | **YES** — mutate **and** flush, mirroring W1b: a scheduled-only clear is undone by the same crash the write was made to survive. A throw leaves the deferral standing, which is the safe direction | **this unit (U1 R3)** — **row added R4; a genuine durable writer the WRITER inventory omitted, so W1 read as the only retirement path** |
 | W2 | `DecoyAccountProvisioner.refreshTokens()`, via `DecoyAuthStore.storeTokens` | session mint at unlock; refresh on a mid-session 401 (refresh-token TTL is 7 days, `auth/jwt.go:26`) | tokens only; all other fields untouched | **NO, deliberately** — coalesced, exactly like `VaultAuthStore`: tokens are re-mintable from the stored identity key | **this unit (U1)** |
 | W2b | `DecoyAuthStore.clearTokens()` | caller drops the synthetic session | both token fields → null; the holder is NOT created if absent | NO — coalesced, same reasoning as W2 | **this unit (U1)** — **missing from the first table [R1]** |
 | W2c | `DecoyAuthStore.clearAccount()` | caller retires the synthetic account | zeroes the identity key in place, then nulls `accountId` + `identityKeyPair` **+ `accessToken` + `refreshToken` [R2]** **and resets `counterHighWater` to 0**. Under the SECTION lock [R2]. | NO — coalesced. A lost clear re-exposes credentials the caller wanted gone; acceptable only because the array was already zeroed in RAM and the next writer re-schedules. **U2+ must flush if it ever means "account destroyed"** | **this unit (U1)** — **missing from the first table [R1]**; tokens added **[R2]** |
 | W3 | `DecoyCounterReservation.next()` | reservation exhausted, or the durable mark no longer matches the held block (once per 64 issued counters) | `counterHighWater` only, **monotonically increasing** | **YES [R1]** — `mutate` then `flushBeforeAck`, and **only then** does the RAM cursor advance. ~~"the reservation is written durably by the mutate"~~ was the round-1 error | **this unit (U1)** — moved from U2 by the U1 task brief |
 | W4 | `DeadAirPinger.rearm()` | after each dead-air ping fires | `deadAirNextFireAtMs` only | U5 decides | **U5 — not built here** |
 | W5 | `VaultRuntime.mutate` (existing) | every write above, without exception | re-encodes the WHOLE `VaultState` under `stateLock` and **SCHEDULES** one atomic reseal | **NO — this is the correction.** ~~"schedules one atomic reseal" read as durability~~; `VaultSession.update` marks dirty and returns | existing |
-| W6 | `VaultRuntime.flushBeforeAck` (existing) | W1, W1b, W3 (**not** W1c [R2]) | nothing of its own — it forces the scheduled payload to disk synchronously | **it IS the durability**; refuses while `capacityExceeded` is set; a throw means DO NOT ACK / never issued | existing — **new row [R1]** |
+| W6 | `VaultRuntime.flushBeforeAck` (existing) | W1, W1b, **W1d [R4]**, W3 (**not** W1c [R2]) | nothing of its own — it forces the scheduled payload to disk synchronously | **it IS the durability**; refuses while `capacityExceeded` is set; a throw means DO NOT ACK / never issued | existing — **new row [R1]** |
 
 **W5 is not a formality, and W6 is the half it was missing.** There is no decoy-specific persistence
 path: `DecoyAuthStore` and `DecoyCounterReservation` reach disk only through `VaultRuntime.mutate`,
@@ -198,7 +199,7 @@ afterwards. Interruption points and their outcomes:
 | Crash / failure point | Relay state | `VaultState` state | Reported to caller | Verdict |
 |---|---|---|---|---|
 | **W1b write-ahead back-off cannot be encoded/flushed [R2]** | **nothing — not contacted** | reverted to its pre-attempt value; `capacityExceeded` cleared | `false` | **the absolute-capacity edge, CLOSED.** No registration is spent, this unlock or any other. Round 1 reached this state only *after* spending one, with no back-off on disk |
-| before `register` | nothing | W1b's deferral, durable | `false` | clean retry — **after the back-off window [R2]**, not on the next unlock |
+| **anywhere before `register` is entered** — offline challenge fetch, DNS failure, failed PoW, **[R4]** a local fault while generating the prekey bundle, a cancelled scope | nothing | ~~W1b's deferral, durable~~ **[R3] W1d RETIRES the deferral, and the emptied holder is omitted — so NO `TAG_DECOY` at all** | `false` | ~~clean retry after the back-off window [R2]~~ **[R3] clean retry on the NEXT UNLOCK, immediately.** Nothing was spent, so there is nothing for a back-off to protect, and this vault keeps its 0.9.x readability (§4.1). The one-attempt latch still stops a retry inside the same runtime. **[R4] The boundary is the `registrationSpent` flag, which must sit BELOW the bundle generation** — inlined as `register`'s argument it was evaluated after the flag, charging this row's local fault as a possible spend |
 | `register` request sent, response lost | account may exist | W1b's deferral, durable | `false` | **orphan — accepted, harmless**; the deferral bounds the repeat to once per 60–90 min |
 | after 201, before `createSession` | account exists | W1b's deferral, durable | `false` | **orphan — accepted** |
 | after tokens minted, before `mutate` | account exists | W1b's deferral, durable | `false` | **orphan — accepted** |
@@ -208,8 +209,12 @@ afterwards. Interruption points and their outcomes:
 | after `mutate` returns, before `flushBeforeAck` **[R1]** | account exists | credentials scheduled, not durable | `false` (the flush's throw is not swallowed into `true`) | orphan on the next open **unless** the pending reseal or `close()` lands them; **[R2] and `credentialsUnconfirmed` keeps every LATER call in this session from reporting ready either** — round 1 closed only the first call |
 | after `flushBeforeAck` returns | account exists | credentials durable; W1b's deferral retired in the same mutate | `true` (i.e. `canSend()`) | success |
 
-**No row produces `accountId` without `identityKeyPair`, in RAM or on disk.** The on-disk half of
-that is now pinned by a test that inspects **every sealed generation** the persist sink was handed,
+**No row produces `accountId` without `identityKeyPair`, in RAM or on disk.** **[R4] And the format
+can no longer express one:** `VaultStateCodec` rejects an id without a key, a key without an id, and
+tokens without an id, on encode **and** on decode. Until R4 that was a property of the writers only —
+the codec round-tripped the forbidden state happily and `isProvisioned` merely *hid* it by answering
+`false`, which is concealment of a dangling reference rather than prevention of one. The on-disk half
+of the writer-side claim is pinned by a test that inspects **every sealed generation** the persist sink was handed,
 under a zero-length coalescing ceiling (`no generation EVER written carries a half credential set`)
 — a multi-step commit's intermediate state would show up there, and does: the test was verified to
 fail against a deliberately two-mutate commit.
@@ -259,14 +264,19 @@ address — **one bucket worldwide** for clearnet and every Tor/I2P client. Ther
 - **Lazy.** `provisionIfNeeded()` is called from the first session that actually needs a decoy — never
   eagerly at vault creation. A vault that never sends never spends a registration. (U1 ships the entry
   point; U3 supplies the caller.)
-- **One RELAY attempt per session, ever.** An in-RAM latch means a failure is not retried within the
+- **One RELAY attempt per RUNTIME, ever.** An in-RAM latch means a failure is not retried within the
   session — no tight loop is even expressible. **[R1]** The latch is taken immediately before the
   relay sequence and is NOT burned by a purely local refusal: a back-off window that expires
   mid-session must still get its one attempt, because the latch is one *attempt*, not one *check*.
   (Round 1: burning it on the deferral check meant a long-lived session made zero attempts for the
-  whole 60–90 min window and then still made none.)
-- **429 backs off ACROSS sessions**, durably (W1b), for a randomized 60–90 min (the limiter window is
-  1 h; the jitter avoids a synchronized retry stampede).
+  whole 60–90 min window and then still made none.) **[R3]** ~~per SESSION, in an instance field~~ —
+  the latch lives in a per-runtime `Gate` behind a private constructor, because two provisioners over
+  one runtime each held their own and both registered (H2).
+- **An attempt that REACHES THE RELAY backs off ACROSS sessions**, durably (W1b), for a randomized
+  60–90 min (the limiter window is 1 h; the jitter avoids a synchronized retry stampede). ~~a 429
+  backs off~~ **[R2/R3] a 429 is not the trigger and never was the only one:** the deferral is
+  written *ahead* of every attempt, and what varies is whether it is retired — kept from `register`
+  onwards whatever the cause, retired by W1d for any failure before it.
 - **A vault that cannot STORE the account backs off the same way (W1c) [R1].** Without it, a vault
   near `MAX_PAYLOAD_CONTENT_BYTES` registers a fresh account on EVERY unlock and discards it —
   systematic, unbounded spend against a bucket shared by every client worldwide, which is a
@@ -551,3 +561,82 @@ session actually is. The last three rows above are those tests re-verified after
 there is no mutation it newly discriminates. The comment now describes what the code does, and the
 reopened image is the one the first run left (`requireNotNull(vault.durableState())` would throw
 otherwise).
+
+---
+
+## FIX ROUND 4 (2026-07-27) — an argument evaluated after its own guard, and the prose lagging the code
+
+Two code findings, three documentation findings. Both reviewers independently reached the same top
+two items **and proposed the same remedy** for the first, which is the convergence signal the
+adjudication acted on: 10 → 11 → 10 → 6 findings, zero P1 for a second consecutive round.
+
+**The shape of this round is worth naming: three of five findings were documentation that had
+drifted from behaviour, not defects in behaviour.** The code has now survived two full rounds of
+adversarial probing without a structural break; the contracts describing it had not kept up. That is
+the `failures.md` rule "when a change removes or alters behaviour, update its doc/contract/spec in
+the SAME change" broken three times inside one unit, and the fix was a sweep of every contract
+describing the back-off lifecycle and the tag-write trigger, not only the lines the reviewers cited.
+
+| # | Finding | Disposition |
+|---|---|---|
+| J1 | `registrationSpent = true` sat one line above `relay.register(DecoyIdentity.generateBundle(identity), powProof)`. Kotlin evaluates arguments **after** the preceding statement, so the spent/not-spent discriminator was already true while 101 local keypairs were being generated — a failure there sent **zero bytes to the relay** and was charged as a possible spend, costing the vault a 60–90 min silence plus a durable deferral-only `TAG_DECOY` and its 0.9.x break | **fixed** — the bundle is hoisted to its own statement above the flag. A `bundleFactory` seam was added so the step is failable in a test: the relay fake can only throw once `register()` is entered, which is exactly why three rounds of review found nothing here |
+| J2 | The codec did not enforce credential-pair integrity: `DecoyState(accountId = "…", identityKeyPair = null)` encoded and decoded cleanly — the dangling account reference the register-before-commit invariant calls structurally impossible. `isProvisioned`/`hasAccount` only *hid* it | **fixed** — `requireDecoyCredentialsPaired` on **both** sides, refusing an id without a key, a key without an id, and tokens without an id. Strict v1 refuses to produce what it refuses to read; the same rule H7 applied to the negative counter mark |
+| J3 | §4.1's user-facing disclosure still understated the break | **fixed, and marked PENDING RE-RATIFICATION** — third pass, recorded below |
+| J4 | §6.2a stated round-2 semantics as current law ("only a successful commit retires", "*every* failure defers", "an offline challenge fetch costs a 60–90 minute wait"), contradicting round-3 code. Fourth recurrence of the stale-contract class | **fixed** — §6.2a now carries an explicit RETIREMENT rule superseding R2's second half, with the `register` boundary and the R4 flag-placement constraint stated |
+| J5 | This table's WRITER inventory omitted `clearBackoff` — a genuine durable writer (`mutate` + `flushBeforeAck`) — so W1 read as the only retirement path; the crash matrix's "before `register`" row still taught a back-off wait; W1 still described `credentialsUnconfirmed` as instance-scoped after H3 moved it | **fixed** — new row **W1d**; W1, W6, the field table, the crash matrix, the scarce-resource section and the ordering section all corrected |
+
+### The §4.1 disclosure — third pass, and the architect's own proposed fix was ALSO wrong
+
+Round 3 shipped "set up cover traffic — which happens the first time it sends any", which
+**understates**. The correction proposed for round 4 was "the first time it *tries to* send any",
+which **overstates**: a vault that tries, fails offline before `register`, and retires its deferral
+keeps full 0.9.x readability. Grok's truth table is what settled it — the durable trigger is
+**setup that reaches relay registration**:
+
+| Path | `TAG_DECOY` on disk? |
+|---|---|
+| Never calls `provisionIfNeeded` | no |
+| Fails **before** `register`, deferral retired | no — emptied holder is omitted |
+| **Reaches `register`** (including 429, or a lost response) | **yes** |
+| Succeeds, never sends a decoy | **yes** |
+
+**Why this sentence keeps drifting, recorded so a fifth pass does not repeat it:** its truth depends
+on an implementation detail that three rounds have each moved, and every pass so far reasoned from
+the *previous wording* rather than from the code. It must be re-derived from those four rows on any
+change to a provisioning failure path. The four rows now live in `VaultState.kt`'s codec kdoc, next
+to the `takeUnless { it.isEmpty }` that produces them, with that instruction attached.
+
+Applied rather than left standing while it waits for the maintainer, because an understated
+format-break disclosure is the more dangerous direction and the previous wording was understated.
+
+### Behaviour changes worth stating plainly
+
+1. **A local fault between the proof-of-work solve and the relay call no longer costs a back-off.**
+   Bundle generation is the last local step, and it is now above the discriminator rather than
+   inside `register`'s argument list. A vault that OOMs on the prekey batch retires its deferral,
+   carries no `TAG_DECOY`, keeps its 0.9.x readability, and gets its next attempt at the next unlock.
+2. **The decoy section's credential pair is a FORMAT rule, not just a writer convention.** A crafted
+   or corrupt image carrying an id without a key is now rejected at decode instead of being quietly
+   reported as "not provisioned". No writer in this codebase can reach the state, which is why it is
+   an assertion and not a repair — a silent fix-up would launder a corrupt image into a plausible one.
+
+### The round-4 tests, and the mutation each was checked against
+
+Same discipline: each mutation applied to the real source, the test observed to FAIL, the mutation
+reverted.
+
+| Test | Mutation it was verified against | Result |
+|---|---|---|
+| `the LAST LOCAL step before register is still spent-nothing - the flag sits below it` | the bundle re-inlined as `register`'s argument (the shipped R3 code) | **FAILED** — 1 of 32, and only this one |
+| `the ENCODER refuses a credential half-set - an id without its key, and a key without its id` | `requireDecoyCredentialsPaired` removed from `encodeDecoy` | **FAILED** — 1 of 80, and only this one |
+| `the DECODER refuses a credential half-set too - strict v1 is symmetric` | `requireDecoyCredentialsPaired` removed from `decodeDecoy` | **FAILED** — 1 of 24, and only this one |
+
+**Every mutation discriminated; none needed a fallback guard to carry it.** The encoder and decoder
+mutations were run separately on purpose: removing the encoder check alone left the decoder test
+green and vice versa, which is what proves the two assertions are independently load-bearing rather
+than one test riding on the other side's guard.
+
+**Note on the J1 seam.** The test would pass against a *correct* implementation for a trivial reason
+(any throw before `register` retires the deferral), so the discriminating mutation is not "make the
+bundle throw" but **the flag placement** — which M1 is precisely. Without the `bundleFactory` seam no
+mutation of this line is expressible at all, which is the actual reason three rounds missed it.

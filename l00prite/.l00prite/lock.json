@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "lock_id": "lock-20260727T-decoy-u1-r3fix",
+  "lock_id": "lock-20260727T-decoy-u1-r4fix",
   "owner_agent": null,
   "owner_session": null,
-  "acquired_at": "2026-07-27T16:00:00Z",
-  "expires_at": "2026-07-27T17:00:00Z",
+  "acquired_at": "2026-07-27T17:10:00Z",
+  "expires_at": "2026-07-27T18:10:00Z",
   "ttl_seconds": 3600,
-  "purpose": "0.10.0 decoy U1: review round-3 fixes (H1-H10) + table/spec corrections — DONE",
+  "purpose": "0.10.0 decoy U1: review round-4 fixes (J1-J5) + spec/table contract sweep \u2014 DONE",
   "protected_paths": [
     "ledger.md",
     "memory.md",

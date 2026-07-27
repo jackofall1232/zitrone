@@ -506,6 +506,42 @@ One reviewer being *wrong* is also data, not noise: Grok's round-1 "durable adva
 a **false negative on a P1**, resolved against source. A reviewer asserting a property *holds* is a
 claim like any other and gets verified like any other.
 
+## An argument list is not "after" the statement above it (0.10.0 U1, review round 4)
+
+`registrationSpent = true` sat one line above
+`relay.register(DecoyIdentity.generateBundle(identity), powProof)`. **Kotlin evaluates the argument
+after the preceding statement**, so a guard whose entire meaning was "the relay may now have created
+an account" was already true while 101 local keypairs were being generated. Reading top to bottom it
+looks correct; the failing step is *visually inside* the call it is supposed to follow.
+
+**The rule:** when a flag's meaning is "everything after this point may have side effects", nothing
+that can fail may hide in the guarded call's argument list. Hoist it to its own statement, above the
+flag, where the reader can see which side of the boundary it is on.
+
+**And the reason no test caught it in three rounds: the failure was not injectable.** The relay fake
+could only throw once `register()` was entered, so no mutation of that line was even expressible.
+When a boundary is load-bearing, check that both sides of it can be made to fail in a test — an
+untestable step next to a guard is an untested step. The fix added a factory seam for exactly that.
+
+## A doc that drifts in BOTH directions is being edited from itself, not derived from the code
+
+0.10.0 U1's §4.1 format-break disclosure moved three times: "generated cover traffic" (false once the
+back-off was written ahead of relay contact) → "the first time it sends any" (**understated** — a
+vault that registers and never sends still carries the tag) → the proposed "the first time it *tries
+to* send any" (**overstated** — a vault that fails offline before `register` retires its deferral and
+keeps its 0.9.x readability). Two consecutive corrections in opposite directions, and the architect
+caught the second one only in adjudication.
+
+**The cause was the same each time: each pass reasoned from the previous wording rather than from the
+code.** A sentence whose truth depends on an implementation detail cannot be edited incrementally. It
+has to be re-derived from an enumeration of the actual paths — which now lives in the codec's kdoc,
+next to the branch that produces the behaviour, with that instruction attached to it.
+
+This is also the fourth recurrence of the stale-contract class recorded above. Round 4 of that unit
+was **three of five findings in documentation and two in code**: once the code stabilises under
+repeated review, the prose describing it becomes the defect surface, and it is not exercised by any
+test. Sweep every contract describing a changed behaviour, not only the lines a reviewer cited.
+
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
   round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked

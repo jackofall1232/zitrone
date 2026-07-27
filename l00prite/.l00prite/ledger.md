@@ -2111,3 +2111,121 @@ each verified FAILED and reverted before this final green run.
 
 Review round 4 (three of six rounds used), then a maintainer merge decision. And the §4.1 wording
 needs the maintainer's re-ratification — it is a ruling being adjusted, not a typo being fixed.
+
+---
+
+## 2026-07-27 — 0.10.0 U1 review round 4 fixes: an argument evaluated after its own guard
+
+**Branch:** `feat/0.10.0-decoy-u1-provisioning` (from `c137dc78`). **Fix round 4 of a hard cap of 6.**
+Adjudication: `reviews/decoy-0.10.0/u1-r4-adjudication.md`. Union after dedup: **0 P1, 2 P2, 4 P3.**
+
+Findings by round: **10 → 11 → 10 → 6**; P1s **2 → 1 → 0 → 0**. Both blind reviewers now
+independently reach the same top findings *and propose the same remedy*. The round-2 and round-3
+structural work (the section lock, the split predicates, the per-runtime `Gate`) survived two further
+full rounds of adversarial probing without a break. Nothing was redesigned this round.
+
+### J1 (P2, both reviewers) — the spent/not-spent discriminator was one line too early
+
+`registrationSpent = true` preceded `relay.register(DecoyIdentity.generateBundle(identity), powProof)`.
+**Kotlin evaluates the argument after the preceding statement runs**, so the flag was already true
+while `generateBundle` built 101 local keypairs and a signature — pure local crypto, **zero bytes to
+the relay**. A failure there (OOM on the batch, a crypto-provider fault) was therefore treated as a
+possibly-spent registration: `clearBackoff` skipped, a 60–90 minute cover-traffic silence, **and** a
+durable deferral-only `TAG_DECOY` costing the vault its 0.9.x readability — for an attempt that never
+contacted anything. The hinge comment's own justification is that *`register`* may have created the
+account; generating a bundle is not `register`.
+
+Fixed by hoisting the bundle to its own statement above the flag. **A `bundleFactory` seam was added
+so the step is failable in a test** — the relay fake can only throw once `register()` is entered,
+which is precisely why three rounds of review and twelve prior mutations never touched this line.
+
+### J2 (P2) — the codec did not enforce credential-pair integrity
+
+`DecoyState(accountId = "…", identityKeyPair = null)` encoded and decoded cleanly: the exact dangling
+account reference the register-before-commit invariant calls structurally impossible.
+`isProvisioned`/`hasAccount` only **hid** it by answering `false`. Concealment is not prevention.
+`requireDecoyCredentialsPaired` now runs on **both** sides — an id without a key, a key without an
+id, and tokens without an id are all refused, on encode and on decode. Strict v1 refuses to produce
+what it refuses to read, the same rule H7 applied to the negative counter mark. Unreachable from every
+writer in the codebase, so it is an assertion and not a repair: a silent fix-up would launder a
+corrupt image into a plausible-looking one.
+
+### J3 / J4 / J5 — the prose was the lagging surface, and the sweep went past the cited lines
+
+**Three of five findings this round were documentation that had drifted from behaviour, not defects
+in behaviour.** `failures.md` already records "when a change removes or alters behaviour, update its
+doc/contract/spec in the SAME change"; this round is that rule broken three times inside one unit.
+The brief was to sweep every contract describing the back-off lifecycle and the tag-write trigger,
+not only the lines the reviewers cited. Swept:
+
+- **spec §4.1** — the disclosure sentence, third pass, see below.
+- **spec §4's blast-radius block** — said the tag lands "the moment provisioning is attempted",
+  which overstated it. Corrected to the `register` boundary. *(Not cited by either reviewer.)*
+- **spec §6.2a** — J4's target. The round-2 rule ("only a successful commit retires", "*every*
+  failure defers", "a purely local failure therefore costs a 60–90 minute wait") was stated as
+  current law. Now carries an explicit RETIREMENT sub-rule superseding R2's second half, the
+  `register` boundary, and the R4 flag-placement constraint.
+- **spec §4's WRITER table** — new **W1d** row for `clearBackoff`; W1's "only a success retires"
+  struck; W6's flush inventory corrected to all three back-off writes. *(W6 not cited.)*
+- **invariant table** — J5's target: new **W1d** row; W1 corrected on both the retirement path and
+  the `credentialsUnconfirmed` scope (still described as instance-scoped after H3 moved it into the
+  per-runtime `Gate`); the field table's writer column; the crash matrix's "before `register`" row,
+  which taught a back-off wait when the deferral is now retired; the scarce-resource section's
+  "one attempt per SESSION" and "a **429** backs off" bullets; and the ordering section's
+  no-dangling-reference claim, now that the format enforces it. *(Only W1 and the crash matrix were
+  cited.)*
+- **`VaultState.kt` codec kdoc** — the four-row truth table for when `TAG_DECOY` becomes durable now
+  lives next to the `takeUnless { it.isEmpty }` that produces it, with the instruction that §4.1 must
+  be re-derived from those rows rather than edited from its own previous version. *(Not cited.)*
+- **`DecoyAccountProvisioner` kdoc + the success-path comment** — "Success is the ONLY thing that
+  retires the write-ahead deferral" was false in the source itself once `clearBackoff` existed; the
+  spent-nothing failure lists now include the local bundle fault. *(Not cited.)*
+- **`DecoyState` kdoc** — records that the pairing is now a format property, not only a writer
+  convention. *(Not cited.)*
+
+### The §4.1 disclosure — third pass, and the architect's own proposed fix was ALSO wrong
+
+Round 3 shipped "which happens the first time it sends any", which **understates**. The replacement
+proposed for round 4 — "the first time it *tries to* send any" — **overstates**: a vault that tries,
+fails offline before `register`, and retires its deferral keeps full 0.9.x readability. The
+adjudication caught its own error and recorded it. Shipped wording:
+
+> once a vault has **set up cover traffic** — which happens the first time it sends any, and is
+> complete as soon as its cover-traffic account is registered — it can no longer be opened by 0.9.x;
+> downgrading will present that vault as corrupt. A vault that has never used cover traffic, or whose
+> setup never reached the relay, is unaffected.
+
+Marked **ADJUSTED AGAIN — PENDING MAINTAINER RE-RATIFICATION**, third pass, with the truth table and
+the reason recorded. Applied rather than left standing, because an understated format-break
+disclosure is the more dangerous direction. **The lesson, recorded in `failures.md`:** every pass
+reasoned from the *previous wording* instead of from the code, so the sentence drifted in both
+directions in consecutive rounds.
+
+### Mutation evidence — every mutation discriminated
+
+| Test | Mutation | Result |
+|---|---|---|
+| `the LAST LOCAL step before register is still spent-nothing - the flag sits below it` | bundle re-inlined as `register`'s argument (the shipped R3 code) | FAILED, 1 of 32 |
+| `the ENCODER refuses a credential half-set …` | `requireDecoyCredentialsPaired` removed from `encodeDecoy` | FAILED, 1 of 80 |
+| `the DECODER refuses a credential half-set too …` | `requireDecoyCredentialsPaired` removed from `decodeDecoy` | FAILED, 1 of 24 |
+
+**No mutation failed to discriminate, and none was carried by another guard.** The encoder and
+decoder mutations were deliberately run separately: each left the other side's test green, which is
+what proves the two assertions are independently load-bearing. For J1 the discriminating mutation is
+the **flag placement**, not "make the bundle throw" — a correct implementation passes the test for a
+trivial reason either way, and without the `bundleFactory` seam no mutation of that line is
+expressible at all. That is the honest reason three rounds missed it.
+
+### Evidence
+
+`ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug` from
+`apps/android` → **`BUILD SUCCESSFUL`, exit code 0** (read from Gradle), **678 tests / 3 skipped /
+0 failures / 0 errors** (675 before this round; +3). Each mutation above was verified FAILED and
+reverted before the final green run.
+
+### Still owed
+
+Round 5 is available (four of six used) but the surface is converging hard — zero P1s for two
+consecutive rounds, findings halved, and both reviewers landing on the same items with the same
+remedies. **A maintainer merge decision is owed either way, and §4.1's third-pass wording needs
+re-ratification.** U1 remains deliberately UNWIRED; nothing merged, nothing pushed, no version bump.

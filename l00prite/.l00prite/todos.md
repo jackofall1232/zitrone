@@ -904,14 +904,24 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       retire/keep boundary (is `register` the correct discriminator?); and §4.1's re-worded
       disclosure.
 
-- [ ] **§4.1 disclosure wording needs MAINTAINER RE-RATIFICATION.** Round 3 adjusted a maintainer
-      ruling rather than a typo. "Once a vault has GENERATED cover traffic" became false in U1 (the
-      back-off is written before any relay contact), and is now *"once a vault has **set up cover
-      traffic** — which happens the first time it sends any — it can no longer be opened by 0.9.x. A
-      vault that has never used cover traffic is unaffected."* Flagged in the spec itself, not
-      quietly rewritten: the narrowing was the maintainer's explicit ruling and their stated reason
-      (an overstated disclosure is its own dishonesty) still holds — an understated one is just
-      worse, so it could not be left as it stood either.
+- [ ] **§4.1 disclosure wording needs MAINTAINER RE-RATIFICATION — now on its THIRD pass.** This
+      adjusts a maintainer ruling, not a typo, which is why it is flagged in the spec rather than
+      quietly rewritten. Current text: *"once a vault has **set up cover traffic** — which happens
+      the first time it sends any, and is complete as soon as its cover-traffic account is
+      registered — it can no longer be opened by 0.9.x; downgrading will present that vault as
+      corrupt. A vault that has never used cover traffic, or whose setup never reached the relay, is
+      unaffected."*
+      **It has now been wrong in BOTH directions in consecutive rounds:** round 3's "which happens
+      the first time it sends any" understated the break (a vault that registers and never sends
+      still carries the tag); the round-4 replacement first proposed, "the first time it *tries to*
+      send any", overstated it (a vault that fails offline before `register` retires its deferral
+      and keeps its 0.9.x readability). The durable trigger is **setup that reaches relay
+      registration**. The four-path truth table it must be re-derived from now lives in
+      `VaultState.kt`'s codec kdoc, next to the code that produces it — see the failures.md entry
+      "A doc that drifts in BOTH directions is being edited from itself".
+      The maintainer's stated reason for the original narrowing (an overstated disclosure is its own
+      dishonesty) still holds; an understated one is just worse, which is why it was applied rather
+      than left standing while it waits.
 
 - [ ] **U1 follow-up — account deletion / burn leaves the synthetic relay account registered.**
       `deleteAccountAndWipe` deletes the REAL relay account and obliterates the image; a provisioned
