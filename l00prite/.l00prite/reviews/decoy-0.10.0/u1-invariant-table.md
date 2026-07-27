@@ -49,7 +49,7 @@ A new **optional** TLV section in the per-vault sealed payload. It holds, for th
 |---|---|---|---|
 | `accountId` | nullable utf8 | the synthetic relay account's UUID | W1, **W2c (clear) [R1]** |
 | `identityKeyPair` | nullable bytes | libsignal `IdentityKeyPair.serialize()` — the synthetic account's long-term identity (PRIVATE key material) | W1, **W2c (clear) [R1]** |
-| `accessToken` / `refreshToken` | nullable utf8 | that account's session tokens | W1, W2, W2b |
+| `accessToken` / `refreshToken` | nullable utf8 | that account's session tokens | W1, W2, W2b, **W2c (clear) [R5]** — round 2's G6 made the clear load-bearing (tokens must die with the account, or a cleared account keeps working bearer credentials until expiry); its omission here read as if `clearAccount` left tokens standing |
 | `counterHighWater` | i64 | counter-reservation high-water mark: every value `< counterHighWater` is considered ISSUED | W3, **W2c (reset) [R1]** |
 | `deadAirNextFireAtMs` | nullable i64 | dead-air schedule next-fire (field reserved; **U1 never sets it**) | W4 (U5) |
 | `provisionNotBeforeMs` | nullable i64 | cross-session provisioning deferral — ~~after a 429 **or a capacity failure [R1]**~~ **[R2] written AHEAD of every attempt that reaches the relay sequence** (**added by U1 — see “Deviations”**) | W1 (retires on success), W1b (writes), W1c (restores), **W1d (retires on a spent-nothing failure) [R3, listed R4]** |
@@ -73,7 +73,7 @@ grow, so the section's presence or absence is not observable from the encrypted 
 | W1b | `DecoyAccountProvisioner.reserveBackoff()` — **WRITE-AHEAD [R2]** | ~~relay answers `register` with 429~~ **BEFORE any relay contact**, on every attempt that passes the deferral check | `provisionNotBeforeMs` only; credentials untouched (still absent) | **YES** — "back off ACROSS sessions" is a durability claim, so mutate **and** flush. ~~Best-effort~~ **[R2] NOT best-effort: a failure means no registration is spent at all.** A capacity failure here is reverted, so a cover-traffic write never leaves `capacityExceeded` set over the real inbound path | **this unit (U1)** — see Deviations |
 | W1c | `DecoyAccountProvisioner.revertSection()` on **`VaultCapacityException`** | the credential commit does not fit the fixed region | restores the section to **exactly what the same critical section read immediately before the commit** — which already carries W1b's durable deferral, so there is no separate "and defer" step and no bare-revert branch left [R2] | **NO, and it needs none [R2]** — the restored value IS what is already on disk; the re-encode's only job is clearing `capacityExceeded` | **this unit (U1)** — **NEW [R1], reshaped [R2]** |
 | W1d | `DecoyAccountProvisioner.clearBackoff(deferral)` — **the retirement W1b's deferral gets when it protected nothing [R3]** | the attempt fails **before** `register` is entered: offline challenge fetch, DNS failure, failed PoW, a local crypto fault (bundle generation), a cancelled scope | `provisionNotBeforeMs` → null, and nothing else. **Compare-and-clear under the section lock**: retires only the deadline THIS attempt wrote, so a deferral another writer put there meanwhile is left standing — the same "only restore what you read under this lock" rule W1c follows. Emptying the holder is what makes the codec omit `TAG_DECOY` and gives the vault back its 0.9.x readability | **YES** — mutate **and** flush, mirroring W1b: a scheduled-only clear is undone by the same crash the write was made to survive. A throw leaves the deferral standing, which is the safe direction | **this unit (U1 R3)** — **row added R4; a genuine durable writer the WRITER inventory omitted, so W1 read as the only retirement path** |
-| W2 | `DecoyAccountProvisioner.refreshTokens()`, via `DecoyAuthStore.storeTokens` | session mint at unlock; refresh on a mid-session 401 (refresh-token TTL is 7 days, `auth/jwt.go:26`) | tokens only; all other fields untouched | **NO, deliberately** — coalesced, exactly like `VaultAuthStore`: tokens are re-mintable from the stored identity key | **this unit (U1)** |
+| W2 | `DecoyAccountProvisioner.refreshTokens()`, via **`DecoyAuthStore.storeTokensForAccount(accountId, …)`** **[R5]** ~~`storeTokens`~~ | session mint at unlock; refresh on a mid-session 401 (refresh-token TTL is 7 days, `auth/jwt.go:26`) | tokens only; all other fields untouched. **The account id is re-read and compared under the section lock, and a mismatch is refused** — this is what closes H4 (snapshot → seconds of network → write, with a `clearAccount()` in the window resurrecting bearer credentials for a cleared account). **A future unit must NOT wire refresh through the bare `storeTokens`**, which writes whatever account is current rather than the one that was refreshed, reopening H4. | **NO, deliberately** — coalesced, exactly like `VaultAuthStore`: tokens are re-mintable from the stored identity key | **this unit (U1)**, path corrected **[R5]** |
 | W2b | `DecoyAuthStore.clearTokens()` | caller drops the synthetic session | both token fields → null; the holder is NOT created if absent | NO — coalesced, same reasoning as W2 | **this unit (U1)** — **missing from the first table [R1]** |
 | W2c | `DecoyAuthStore.clearAccount()` | caller retires the synthetic account | zeroes the identity key in place, then nulls `accountId` + `identityKeyPair` **+ `accessToken` + `refreshToken` [R2]** **and resets `counterHighWater` to 0**. Under the SECTION lock [R2]. | NO — coalesced. A lost clear re-exposes credentials the caller wanted gone; acceptable only because the array was already zeroed in RAM and the next writer re-schedules. **U2+ must flush if it ever means "account destroyed"** | **this unit (U1)** — **missing from the first table [R1]**; tokens added **[R2]** |
 | W3 | `DecoyCounterReservation.next()` | reservation exhausted, or the durable mark no longer matches the held block (once per 64 issued counters) | `counterHighWater` only, **monotonically increasing** | **YES [R1]** — `mutate` then `flushBeforeAck`, and **only then** does the RAM cursor advance. ~~"the reservation is written durably by the mutate"~~ was the round-1 error | **this unit (U1)** — moved from U2 by the U1 task brief |
@@ -228,15 +228,28 @@ W1b, W1c, W3).
 
 `counterHighWater` means: **every counter value strictly below it may already have been issued.**
 
-- Session start: RAM `next = limit = counterHighWater` (durable).
-- `next()` when `next == limit`: `mutate { counterHighWater += 64 }` FIRST; only on a successful
-  mutate do the RAM `next`/`limit` advance. Values in `[old, old+64)` are then issued from RAM.
+- Session start: RAM `next = limit = 0` — **not** the durable mark. The first `next()` re-reads the
+  mark and reserves from it. **[R5]** ~~`next = limit = counterHighWater` (durable)~~
+- `next()` when `next == limit`: `mutate { counterHighWater += 64 }`, **then `flushBeforeAck()`**;
+  the RAM `next`/`limit` advance **only after the flush returns**. Values in `[old, old+64)` are then
+  issued from RAM. **[R5]** ~~only on a successful *mutate* do the RAM `next`/`limit` advance~~
 - Crash at any point: the next session reads the persisted high-water and starts there. Unspent
   reserved values are **skipped**.
 
 A skip is invisible — a real Double Ratchet skips counters on any dropped message. A REGRESSION is a
-tell no real ratchet can produce, which is why the durable write precedes the first spend and why the
-RAM advance is conditional on the mutate succeeding. One durable write per 64 decoys, per §2.3.
+tell no real ratchet can produce, which is why the **durable flush** precedes the first spend and why
+the RAM advance is conditional on **`flushBeforeAck` returning**, not on the mutate. One durable
+write per 64 decoys, per §2.3.
+
+> **[R5] WHY THIS BLOCK WAS WRONG UNTIL ROUND 5, AND WHY IT MATTERS MOST.** The text struck through
+> above is **round 1's F1 misconception verbatim — "`mutate` = durable"** — the single conceptual
+> error that started this entire review arc. It survived **four fix rounds inside the very document
+> written to prevent it**, because each round corrected the detailed W3 row and left this abstract
+> summary alone. A reader who skips to "THE COUNTER INVARIANT" would have rebuilt the original P1.
+>
+> **Rule, now in `failures.md`: when a misconception is corrected, grep for every restatement of it
+> — especially the compressed, abstract, or summary ones. Those are the copies that survive**,
+> because fixes are applied where the reviewer pointed and summaries are where nobody points.
 
 ## WHAT THIS WRITE MUST NOT DO
 
@@ -596,7 +609,8 @@ keeps full 0.9.x readability. Grok's truth table is what settled it — the dura
 | Path | `TAG_DECOY` on disk? |
 |---|---|
 | Never calls `provisionIfNeeded` | no |
-| Fails **before** `register`, deferral retired | no — emptied holder is omitted |
+| Fails **before** `register`, deferral retired **and the retirement flushed** | no — emptied holder is omitted |
+| Fails before `register`, but **the process dies after the write-ahead flush**, or the retirement's own flush fails | **yes** — nothing can run to retire it **[R5]** |
 | **Reaches `register`** (including 429, or a lost response) | **yes** |
 | Succeeds, never sends a decoy | **yes** |
 

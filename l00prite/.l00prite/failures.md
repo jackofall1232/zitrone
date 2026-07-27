@@ -569,6 +569,35 @@ multi-part findings into their most quotable part. Severity survives; enumeratio
 Related but distinct from the "verify bot claims before acting" rule: that guards against accepting
 a reviewer's *wrong* finding. This guards against losing a reviewer's *right* one.
 
+### THE SUMMARY THAT OUTLIVED THE CORRECTION — fix the restatements, not just the cited line (U1 round 5)
+
+**The single most instructive finding of the U1 arc, because of what survived and where.**
+
+Round 1's headline P1 was the misconception that `VaultRuntime.mutate` is durable (it schedules; only
+`flushBeforeAck` persists). It was fixed in code, and the invariant table's detailed W3/R2 rows were
+corrected to match. **Four fix rounds later, round 5 found the misconception still stated verbatim in
+the same document's abstract summary block** — "only on a successful *mutate* do the RAM `next`/`limit`
+advance" — under a heading a reader is *more* likely to consult than the detailed row.
+
+The correction had been applied exactly where the reviewer pointed, and nowhere else.
+
+**Why summaries are the surviving copy:** a reviewer cites the line that produces the defect, which is
+always the detailed one. Fixes get applied at the citation. Abstract restatements — summaries,
+overviews, "in short" paragraphs, kdoc one-liners, README bullets — restate the same claim in
+compressed form and are never cited, because no code path passes through them. They are the highest-
+leverage place for a stale claim to survive, since they are what a hurried reader reads *instead of*
+the detail.
+
+**RULE (binding): when a misconception is corrected, grep for every restatement of it — especially
+the compressed, abstract, and summary ones — and correct them in the same change.** Ask "where else
+is this same claim said in fewer words?" A detailed row and its summary are two writers of one
+contract; the WRITER/READER discipline applies to prose as much as to durable state.
+
+Related: this is the fifth recurrence of the stale-contract class in this unit alone (G1 doc claims,
+J3/J4/J5, K1/K2/K3). By round 5 **every remaining finding in the unit was prose lagging code, with
+zero code defects at any severity** — the documentation surface outlived the implementation surface
+by two full rounds. Budget review attention accordingly on future units: docs are not the cheap part.
+
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
   round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked

@@ -425,10 +425,28 @@ So, shipping **with** 0.10.0, in release notes and in `SECURITY_MODEL.md`:
 > and everything in them** — contacts, sessions, settings. There is no migration and no export. Do
 > not keep anything in Zitrone that you cannot afford to lose.
 >
-> **What 0.10.0-beta specifically changes:** once a vault has **set up cover traffic** — which
-> happens the first time it sends any, and is complete as soon as its cover-traffic account is
-> registered — it can no longer be opened by 0.9.x; downgrading will present that vault as corrupt.
-> A vault that has never used cover traffic, or whose setup never reached the relay, is unaffected.
+> **What 0.10.0-beta specifically changes:** once a vault has **set up cover traffic**, it can no
+> longer be opened by 0.9.x; downgrading will present that vault as corrupt. Setup begins the first
+> time a vault sends cover traffic and is complete once its cover-traffic account is registered —
+> and because an interrupted setup can leave the vault marked either way, **if you are unsure
+> whether a vault got that far, assume it did.** A vault that has never used cover traffic is
+> unaffected.
+
+> **⚠️ FOURTH PASS — PENDING MAINTAINER RE-RATIFICATION.** This sentence has now been rewritten four
+> times and **each previous version was found wrong by a later review round, in a different
+> direction each time**: originally too broad ("vaults created by 0.10.0"), then understating ("the
+> first time it sends any", when registration alone installs the tag), then overstating (the
+> architect's proposed "tries to send", when a pre-`register` failure retires the deferral), and
+> most recently false under crash-at-any-instruction — a crash between the write-ahead flush and
+> `register` leaves the tag with the relay never contacted.
+>
+> **This version deliberately stops stating a precise boundary.** Four good-faith attempts to state
+> one failed, because the boundary depends on implementation details that keep moving — exactly the
+> fragility recorded in `failures.md` as *the invalidated-from-underneath claim*. A disclosure's job
+> is to let a reader decide what to do, not to document a state machine. "If you are unsure, assume
+> it did" is honest about the uncertainty, covers the crash case without enumerating it, and stays
+> true if U2/U3 move when the tag is written. **The precision lives in the internal truth table
+> below, which is where it belongs.**
 
 *(Narrowed 2026-07-27 after U1. The first draft said flatly that "vaults created by 0.10.0 cannot be
 opened by 0.9.x", which is false: the tag is written only once cover traffic has actually been
@@ -445,7 +463,8 @@ disclosure that overstates harm is as inaccurate as one that understates it.)*
 > | Path | `TAG_DECOY` on disk? |
 > |---|---|
 > | Never attempts provisioning | no |
-> | Fails **before** `register` (offline, DNS, failed PoW, local crypto fault) — deferral retired | no — the emptied holder is omitted |
+> | Fails **before** `register` (offline, DNS, failed PoW, local crypto fault) — deferral retired **and the retirement flushed** | no — the emptied holder is omitted |
+> | Fails before `register`, but **the process dies after the write-ahead flush**, or the retirement's own flush fails | **yes** — nothing can run to retire it. *(Added round 5: the crash model requires this row; its omission is what made §4.1 false.)* |
 > | **Reaches `register`** (including a 429, or a lost response) | **yes** |
 > | Succeeds, never sends a decoy | **yes** |
 >
