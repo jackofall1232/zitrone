@@ -838,8 +838,22 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       **U1 is deliberately UNWIRED** — nothing in production constructs these yet, because the
       trigger ("first session that actually sends a decoy") is U3. No registration can be spent
       from the shared global bucket by this branch.
-      **OWED before U1 is done:** independent paired-blind review of the whole unit (the 0.9.3
-      lesson — review the unit, not the delta), then maintainer merge decision.
+      **REVIEW ROUND 1 DONE + FIXED (2026-07-27).** Paired-blind Codex + Grok, adjudicated in
+      `reviews/decoy-0.10.0/u1-r1-adjudication.md`: ten confirmed findings, F1-F10, all fixed in
+      fix round 1 of a hard cap of 6. Root cause of three of the five most severe:
+      **`VaultRuntime.mutate` is NOT durable** — it schedules; `flushBeforeAck` is the durable
+      step and its throw means the value was never issued. The counter reservation, the credential
+      commit and both back-offs now flush; readiness consults `capacityExceeded`; the counter
+      allocator is one-per-runtime structurally; a capacity failure reverts and backs off durably.
+      Spec §2.3/§4/§6.2a and the invariant table were corrected too — the "persisted by writing to
+      `VaultState`" wording was the architect's error and is amended in place.
+      Re-verified: `:app:testDebugUnitTest` **659 tests / 0 failures / 0 errors / 3 skipped** and
+      `:app:assembleDebug`, GRADLE_EXIT=0, `--rerun-tasks`, 47/47 executed, 2026-07-27.
+      Re-measured budget: worst-case delta **645 B** of 1024; realistic state 929 B of 262 112 B.
+      **STILL OWED:** review ROUND 2 against the WHOLE unit (not this fix delta — the 0.9.3
+      lesson), then a maintainer merge decision. Flag to the round-2 reviewers: the process-wide
+      `WeakHashMap` allocator registry, the deliberate absence of a capacity pre-flight (with its
+      recorded residual), and the one decode-failure wipe step no test can observe.
 
 - [ ] **U1 follow-up — account deletion / burn leaves the synthetic relay account registered.**
       `deleteAccountAndWipe` deletes the REAL relay account and obliterates the image; a provisioned

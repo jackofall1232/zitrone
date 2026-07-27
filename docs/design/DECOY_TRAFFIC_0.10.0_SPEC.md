@@ -147,9 +147,34 @@ buys the same observable at none of that cost.
 
 **What must still be durable is the counter**, because a `message_number` that resets or regresses
 is a tell a real ratchet can never produce. Handled by **reservation**: reserve a block of 64
-counter values in `VaultState`, spend them from RAM, persist a new reservation when exhausted. A
-crash therefore *skips* counter values (invisible — a real ratchet skips too, on any dropped
-message) but can never *regress* them. One durable write per 64 decoys instead of one per decoy.
+counter values, make the new high-water mark durable, then spend the block from RAM and reserve
+again when it is exhausted. A crash therefore *skips* counter values (invisible — a real ratchet
+skips too, on any dropped message) but can never *regress* them. One durable write per 64 decoys
+instead of one per decoy.
+
+> **CORRECTION (2026-07-27, U1 review round 1 — the architect's error, not the implementer's).**
+> This paragraph originally read "reserve a block of 64 counter values **in `VaultState`** … persist
+> a new reservation when exhausted", which specified the right invariant against the wrong
+> mechanism. **Writing to `VaultState` is not persistence.** `VaultRuntime.mutate` applies the block
+> to the live state, encodes it, and hands the bytes to `VaultSession.update`, which snapshots,
+> marks the session dirty and returns — "Non-blocking by session contract: it copies + schedules, no
+> I/O here" (`VaultRuntime.kt:132`). The write lands later, when the ≤2 s coalescing ceiling fires.
+> A crash inside that window loses the high-water mark, and the next session reissues the whole
+> block — precisely the regression this mechanism exists to prevent.
+>
+> **The durable step is `VaultRuntime.flushBeforeAck()` → `VaultSession.flushNow()`, and its throw
+> means the value was never issued.** The rule generalizes past the counter, and every U1 writer was
+> re-audited against it: **anything whose correctness depends on surviving process death must
+> `mutate` AND `flushBeforeAck`, and must treat a throw from the flush as "it never happened".**
+> That covers the counter reservation (the RAM cursor advances only after the flush returns), the
+> credential commit (which reports readiness, and had spent a scarce global registration), and both
+> back-offs (§6.2a's "back off across sessions" is a durability claim). It does NOT cover the
+> session tokens, which stay coalesced because they are re-mintable from the stored identity key —
+> the same exception `VaultAuthStore` makes.
+>
+> §4's R4 reader row and the U1 WRITER/READER table inherited the same error and are corrected in
+> `l00prite/.l00prite/reviews/decoy-0.10.0/u1-invariant-table.md`. **U2–U6 inherit the corrected
+> rule, not this paragraph's original wording.**
 
 ### 2.4 The uncovered channel — declared, not silently ignored
 
@@ -246,16 +271,17 @@ encrypted image.
 | W2 | `DecoyAccountProvisioner.refreshTokens()` | Synthetic session token refresh (7-day refresh-token TTL, `auth/jwt.go:26`) | Tokens only; all other fields untouched | **this unit (U1)** |
 | W3 | `DecoySender.reserveCounters()` | Counter reservation exhausted (once per 64 decoys) | High-water mark only, monotonically increasing | **this unit (U2)** |
 | W4 | `DeadAirPinger.rearm()` | After each dead-air ping fires | Next-fire time only | **this unit (U5)** |
-| W5 | `VaultRuntime.mutate` (existing) | Every write above, without exception | Re-encodes whole `VaultState` under `stateLock` | existing |
+| W5 | `VaultRuntime.mutate` (existing) | Every write above, without exception | Re-encodes whole `VaultState` under `stateLock` and **SCHEDULES** a reseal — **it is not durable**, see §2.3's correction | existing |
+| W6 | `VaultRuntime.flushBeforeAck` (existing) | W1, W3, and both back-off writes — every value that must survive process death | Forces the scheduled payload to disk synchronously. **A throw means the value was never issued / never recorded** | existing — **added 2026-07-27 (U1 R1)** |
 
 ### READERS, and what each assumes `TAG_DECOY` MEANS
 
 | # | Reader | Assumes `TAG_DECOY` means | Still true after W1–W4? |
 |---|---|---|---|
 | R1 | `VaultStateCodec.decode` | "a section tag I recognize; an unrecognized tag is corruption" | **NO for old builds — see hazard below.** YES for builds carrying the tag. |
-| R2 | `DecoySender.send()` | "a provisioned synthetic account exists and these counters have never been issued before" | YES — reservation is monotone; a crash skips values, never reuses |
+| R2 | `DecoySender.send()` | "a provisioned synthetic account exists and these counters have never been issued before" | YES **only with §2.3's correction** — the mark must be FLUSHED, not merely mutated, before any value in the block is spent |
 | R3 | `DeadAirPinger` | "next-fire is in this vault's own timeline, not the device's" | YES — per-vault, torn down at lock |
-| R4 | `SessionContainer` construction | "absent section = decoys not yet provisioned; present = ready" | YES — absence is the valid initial state, so the tag stays optional and is omitted when unset |
+| R4 | `SessionContainer` construction | ~~"absent section = decoys not yet provisioned; present = ready"~~ **CORRECTED (U1 R1):** "ready = the credential pair is present **and** `VaultRuntime.capacityExceeded` is clear" | **NO as originally written.** Two falsifiers: a 429 (or a capacity) back-off creates a section that is PRESENT and NOT ready, and an over-capacity `mutate` RETAINS a complete credential pair in the LIVE state that was never scheduled and that `flushBeforeAck` refuses. Absence is still the valid initial state; presence never means ready. |
 | R5 | Capacity guard `VaultRuntime.capacityExceeded` | "encoded state fits `MAX_PAYLOAD_CONTENT_BYTES`" | **Requires sizing proof — see constraints** |
 
 ### THE HAZARD THIS TABLE EXISTS TO CATCH
@@ -318,7 +344,9 @@ break real.
 
 `TAG_DECOY` is written only through `VaultRuntime.mutate`, which re-encodes the entire state under
 one lock and schedules one atomic reseal. There is no multi-write sequence and therefore no partial
-state to reason about: a crash either leaves the previous whole state or the new whole state. The
+state to reason about: a crash either leaves the previous whole state or the new whole state.
+**(U1 R1: atomic ≠ durable. `mutate` guarantees that whatever lands is whole; it does not guarantee
+that anything lands. See §2.3's correction for which writes must additionally flush.)** The
 one ordering constraint that must be enforced in code and pinned by test: **the synthetic account
 must be registered on the relay *before* its credentials are committed to `VaultState`, and a
 commit failure must leave an orphaned relay account rather than a `VaultState` referencing an
@@ -432,7 +460,15 @@ a dummy light, and the copy earns that by naming what it does not cover.
    - **Provision lazily**, on the first session that actually sends a decoy — never eagerly at vault
      creation. A vault that never sends never spends a registration.
    - **Back off and retry across sessions on 429**, never in a tight loop. A 429 is contention with
-     other users worldwide, not a client fault.
+     other users worldwide, not a client fault. **(U1 R1: "across sessions" is a durability claim —
+     the deferral must be FLUSHED, not merely mutated, or a crash inside the coalescing window loses
+     it and the next unlock walks straight back into the bucket. See §2.3's correction.)**
+   - **Back off the same way when the vault cannot STORE the account [U1 R1].** A vault at its
+     capacity boundary registers successfully and then fails to commit; with no durable back-off
+     that is one new relay account per unlock, forever, against this same global bucket —
+     systematic and unbounded rather than the accepted one-off orphan. The failed commit must also
+     be reverted so a cover-traffic write never leaves the vault unable to flush-before-ack a real
+     inbound message.
    - **A failed or deferred provision must degrade silently to "decoys off"** — never block
      onboarding, never surface an error that implies a fault, and never let the 🍋‍🟩 indicator claim
      the mechanism fired when it did not.

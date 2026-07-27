@@ -227,11 +227,12 @@ class VaultDecoySectionTest {
     }
 
     @Test
-    fun `a decode that fails AFTER the decoy section still rejects - decode-failure wipe path`() {
-        // decodeDecoy copies a PRIVATE key out of the section body, then the unknown tag throws;
-        // parsePlaintext's catch must wipe it before rethrowing. From here only the throw is
-        // observable (the wiped array is discarded internally) — asserting it is the contract, and
-        // the wipe itself is read in review against the catch clause.
+    fun `a decode that fails AFTER the decoy section is REJECTED`() {
+        // Scope, stated exactly: this pins the rejection and nothing else. The private key
+        // decodeDecoy copied out of the section body is allocated inside the decoder and is
+        // unreachable from here, so no assertion made through `decode` can observe whether it was
+        // zeroed — a test that implied otherwise would be the non-discriminating kind. The wipe
+        // itself is pinned directly, on arrays a test owns, by the two cases below.
         val plain = realPlaintextWithDecoy()
         assertTrue("the baseline is genuinely valid", VaultStateCodec.decode(deflate(plain)).decoy != null)
 
@@ -241,13 +242,43 @@ class VaultDecoySectionTest {
         }
     }
 
+    @Test
+    fun `the decode-failure cleanup ZEROES the decoy identity key, not just the signal records`() {
+        // The cleanup parsePlaintext's catch delegates to. A throw means no VaultState is ever
+        // constructed, so VaultState.wipe() can never reach these buffers — this is their only
+        // cleanup path, and it must cover the decoy section's private key and not only the record
+        // map that predates it.
+        val identity = IdentityKeyPair.generate().serialize()
+        val record = ByteArray(64) { (it + 1).toByte() }
+        assertTrue("the fixtures really hold bytes", identity.any { it != 0.toByte() })
+
+        val partialSignal = linkedMapOf<String, ByteArray>("session:peer:1" to record)
+        VaultStateCodec.wipePartialDecode(
+            partialSignal,
+            DecoyState(accountId = "acct", identityKeyPair = identity),
+        )
+
+        assertArrayEquals("decoy identity private key zeroed", ByteArray(identity.size), identity)
+        assertArrayEquals("partially decoded signal records zeroed", ByteArray(record.size), record)
+        assertTrue("and the partial map is emptied", partialSignal.isEmpty())
+    }
+
+    @Test
+    fun `the decode-failure cleanup tolerates a decode that got nowhere`() {
+        // The catch runs for a payload that failed before either section was reached.
+        VaultStateCodec.wipePartialDecode(null, null)
+    }
+
     // ── the measured byte budget ──────────────────────────────────────────────────
 
     @Test
-    fun `the decoy section costs less than its declared budget, with headroom to spare`() {
-        // Worst case the section can hold: a 36-char account UUID, a real 68-byte serialized
-        // libsignal identity keypair, a full-length RS256 access JWT, a 43-char refresh token, and
-        // all three integer fields set.
+    fun `the decoy section costs less than its declared budget at a realistic maximum`() {
+        // NOT an adversarial maximum, and the name no longer claims one: the JWT shape is fixed by
+        // the relay (`server/internal/auth/jwt.go` IssueAccessToken) and the refresh token is 32
+        // random bytes, so the only field an attacker could stretch is server-issued. What this
+        // measures is the largest section the RELAY can produce: a 36-char account UUID, a real
+        // serialized libsignal identity keypair, a full-length RS256 access JWT, a 43-char refresh
+        // token, and all three integer fields set to a long that costs full width.
         val worstCase = DecoyState(
             accountId = "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
             identityKeyPair = IdentityKeyPair.generate().serialize(),

@@ -211,7 +211,7 @@ doc records something as impossible, the cost of re-checking is one derivation a
 a capability the project already paid for and then forgot it had. Do NOT treat the residuals section
 of a design doc as settled just because the defects section has been reviewed.
 
-### THE NON-DISCRIMINATING ASSERTION — satisfied by BOTH the correct and the broken behaviour (6 occurrences)
+### THE NON-DISCRIMINATING ASSERTION — satisfied by BOTH the correct and the broken behaviour (6 occurrences + a 7th cluster, 0.10.0 U1)
 Distinct from a vacuous test (asserts nothing) and from a stand-in test (asserts against a copy of the
 logic). This one asserts something REAL about something REAL — it just cannot tell the two apart, so
 it passes against the very defect it exists to catch.
@@ -261,6 +261,36 @@ looks.
 Applies especially to `assertFalse`/`assertNotEquals`/`!= null`: a negative assertion is satisfied by
 enormous numbers of wrong states, so it must name WHICH wrong state it rejects, or pair with a
 positive assertion that fails when the discriminator is removed.
+
+**7th cluster — 0.10.0 U1 decoy provisioning, review round 1 (both lenses, four tests at once).**
+The scenario-level form again, with one new shape worth naming: **a test that asserts the property
+against the wrong OBSERVABLE.** Four cases, all fixed in fix-round 1:
+- *restart-skips-counters* rebuilt `DecoyState(counterHighWater = <the live value>)` in RAM and
+  opened a new session over it. It read the value out of the very state whose durability it claimed
+  to test, so it passed against a reservation that never reached disk. **Reading the live
+  `VaultState` after a `mutate` proves scheduling, never durability** — the whole P1 hid in that
+  gap. Now every durability assertion in the unit decodes the SEALED PAYLOAD the persist sink was
+  handed.
+- *decode-failure wipe* asserted only the throw, and its own comment conceded the wipe was "read in
+  review". Correct diagnosis, wrong response: the fix is not a weaker comment, it is to make the
+  cleanup a function a test can call on arrays it owns, and then to say plainly which single step
+  (the call from the catch) is still unobserved.
+- *"commits the whole set at once"* injected no fault between mutates, so it passed for a two-mutate
+  commit. Fixed by flushing every mutation (zero coalescing ceiling) and decoding EVERY generation
+  the sink was handed.
+- *"worst-case" budget* was a realistic measurement wearing an adversarial name. Renamed; the
+  measurement was fine.
+
+**THE ADDITIONAL RULE: name the observable, not just the assertion.** Before asserting that
+something was recorded, ask *where the value being read comes from* — if it comes from the same
+in-memory object the code just wrote, the assertion cannot distinguish "wrote it" from "made it
+survive". And the counterpart, applied here: **if a property genuinely cannot be observed from a
+test, say so in the test rather than leaving an assertion whose name implies coverage.**
+
+**PROCESS, and it is what caught these:** every replacement test in the U1 fix round was run against
+a deliberately broken implementation and observed to FAIL before the fix was restored — the mutation
+list is recorded in `reviews/decoy-0.10.0/u1-invariant-table.md`. Two tests survived their mutation
+and were re-labelled rather than left implying more than they prove.
 
 ### GOOD HANDLING — demonstrate why a concern is latent; never assert a property the test cannot prove
 Grok's round-4 INFO-3 said `runCatching { afterPublish() }` swallows `CancellationException` while the

@@ -75,9 +75,23 @@ class DecoyAuthStore(
         runtime.mutate {
             // Drop the whole credential set together, mirroring how it was committed: an account
             // id and its identity key are never separated in either direction.
+            //
+            // counterHighWater goes with them, and that is not tidiness. The mark means "every
+            // value below this may already have been issued" — a statement about ONE synthetic
+            // peer. Carry it across a re-provision and the replacement account's very first
+            // envelope arrives at the relay carrying `message_number = 128`, in the clear, on a
+            // brand-new account whose session was just established. A real Double Ratchet with a
+            // new recipient starts at 0, so a nonzero start is a classifier the relay operator gets
+            // for free. A live DecoyCounterReservation holding a block from the old account sees
+            // the mark move and abandons it rather than spending it (its staleness check), so
+            // resetting here cannot produce a reissue.
             it.decoy?.let { current ->
                 current.wipe()
-                it.decoy = current.copy(accountId = null, identityKeyPair = null)
+                it.decoy = current.copy(
+                    accountId = null,
+                    identityKeyPair = null,
+                    counterHighWater = 0L,
+                )
             }
         }
     }

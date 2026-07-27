@@ -473,20 +473,31 @@ object VaultStateCodec {
                 decoy = decoy,
             )
         } catch (t: Throwable) {
-            // A malformed/unknown later section (or a missing-mandatory require) can throw AFTER
-            // decodeSignal already copied raw key material into `signal`. Zero those record bytes
-            // before the throw escapes so a decode failure strands nothing un-wiped in heap.
-            signal?.let { partial ->
-                for (value in partial.values) wipe(value)
-                partial.clear()
-            }
-            // Same obligation for the decoy section's identity keypair: decodeDecoy copies a
-            // PRIVATE key out of the (about-to-be-wiped) body into an array this local owns, and
-            // a throw here means no VaultState is ever constructed, so VaultState.wipe() can
-            // never reach it. Zero it on the failure path too.
-            decoy?.wipe()
+            wipePartialDecode(signal, decoy)
             throw t
         }
+    }
+
+    /**
+     * Zero everything a FAILED [parsePlaintext] decoded before it threw.
+     *
+     * A malformed/unknown later section (or a missing-mandatory `require`) can throw AFTER
+     * [decodeSignal] already copied raw key material into the record map, and after [decodeDecoy]
+     * copied a PRIVATE identity key out of the (about-to-be-wiped) section body into an array the
+     * local owns. A throw means no [VaultState] is ever constructed, so [VaultState.wipe] can never
+     * reach either of them — this is their only cleanup path.
+     *
+     * Split out of the catch clause so it is DIRECTLY testable on arrays a test owns. Observing the
+     * zeroing through `decode` itself is impossible: both buffers are allocated inside the decoder
+     * and are unreachable from the caller, so a test that only decodes a malformed payload can
+     * assert the throw and nothing more.
+     */
+    internal fun wipePartialDecode(signal: MutableMap<String, ByteArray>?, decoy: DecoyState?) {
+        signal?.let { partial ->
+            for (value in partial.values) wipe(value)
+            partial.clear()
+        }
+        decoy?.wipe()
     }
 
     // ── 0x01 signal ─────────────────────────────────────────────────────────────

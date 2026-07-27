@@ -9,6 +9,7 @@
 package com.zitrone.app.decoy
 
 import com.zitrone.app.crypto.vault.DecoyState
+import com.zitrone.app.crypto.vault.VaultCapacityException
 import com.zitrone.app.crypto.vault.VaultRuntime
 import com.zitrone.app.crypto.vault.wipe
 import com.zitrone.app.data.DecoyAuthStore
@@ -24,7 +25,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * ## Ordering, which is the whole correctness argument
  *
  * **The account is registered on the relay BEFORE its credentials are committed to the vault, and
- * the credential set is committed as ONE [VaultRuntime.mutate].** Every interruption therefore
+ * the credential set is committed as ONE [VaultRuntime.mutate] made durable by ONE
+ * [VaultRuntime.flushBeforeAck] before this reports success.** Every interruption therefore
  * lands on one of two acceptable outcomes:
  *
  *  - an **orphaned relay account** — registered, never referenced, never used. Harmless: an
@@ -37,6 +39,22 @@ import java.util.concurrent.atomic.AtomicBoolean
  * staging store rather than the vault (see [ApiClientDecoyRelay]), and why [DecoyAuthStore]'s
  * account-id setter is fail-closed.
  *
+ * ## `mutate` is not durable — `flushBeforeAck` is
+ *
+ * [VaultRuntime.mutate] encodes the state and **schedules** a reseal; the write lands later, when
+ * the coalescing ceiling fires. Everything here whose correctness depends on surviving process
+ * death therefore mutates AND flushes, and **treats the flush's throw as "it never happened"**:
+ *
+ *  - the credential commit — a `true` return means the credentials are on disk, not merely in RAM,
+ *    so a caller that sends cover traffic on the strength of it cannot be using credentials a crash
+ *    is about to erase (which would leave the account orphaned and spend a second registration);
+ *  - the back-off after a 429 or a capacity failure — "back off ACROSS sessions" is a durability
+ *    claim; a scheduled-only deferral is lost by the very crash it must survive, and the next
+ *    unlock walks straight back into the shared global bucket.
+ *
+ * Tokens are the deliberate exception, exactly as [com.zitrone.app.data.VaultAuthStore]'s are: they
+ * are re-mintable from the stored identity key, so a coalesced write is correct for them.
+ *
  * ## Registration is a scarce SHARED GLOBAL resource
  *
  * The relay's registration limiter is keyed on the proxy's socket address, so it is **one bucket
@@ -46,11 +64,18 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  *  1. **Lazy.** Nothing is provisioned at vault creation. [provisionIfNeeded] is called from the
  *     first session that actually needs cover traffic; a vault that never sends never registers.
- *  2. **One attempt per session, ever.** [attempted] is a latch, not a counter — a failure is not
- *     retried inside the session, so no tight loop is expressible.
+ *  2. **One RELAY attempt per session, ever.** [attempted] is a latch, not a counter — a failure is
+ *     not retried inside the session, so no tight loop is expressible. It is taken immediately
+ *     before the relay sequence and never by a purely local refusal: a back-off window that expires
+ *     mid-session must still allow the one attempt, because the latch is one *attempt*, not one
+ *     *check*.
  *  3. **A 429 backs off ACROSS sessions**, durably, for a randomized [MIN_BACKOFF_MS] to
  *     [MIN_BACKOFF_MS] + [BACKOFF_JITTER_MS] window. A 429 is contention with other users, not a
- *     client fault, and jitter keeps deferred clients from retrying in lockstep.
+ *     client fault, and jitter keeps deferred clients from retrying in lockstep. **A vault that
+ *     cannot STORE the account backs off the same way** — otherwise a vault sitting near
+ *     `MAX_PAYLOAD_CONTENT_BYTES` registers a fresh account on every single unlock and discards it,
+ *     which is systematic, unbounded spend against that one bucket rather than an accepted one-off
+ *     orphan.
  *
  * ## Failure degrades SILENTLY to cover-traffic-off
  *
@@ -75,24 +100,46 @@ class DecoyAccountProvisioner(
     private val random: java.util.Random = SecureRandom(),
 ) {
 
-    /** One provisioning attempt per session — see rule 2 in the class kdoc. */
+    /** One RELAY attempt per session — see rule 2 in the class kdoc. */
     private val attempted = AtomicBoolean(false)
 
-    /** Whether this vault already holds a usable synthetic account. */
-    fun isProvisioned(): Boolean = runtime.read { it.decoy?.isProvisioned == true }
+    /**
+     * Whether this vault already holds a usable synthetic account **that was actually recorded**.
+     *
+     * Presence of the credential pair in the LIVE state is not enough. When a `mutate` overflows
+     * the fixed region, [VaultRuntime] retains the mutation in memory, does NOT schedule it, and
+     * sets [VaultRuntime.capacityExceeded]; the live state then shows credentials that no reader
+     * will ever find on disk and that [VaultRuntime.flushBeforeAck] refuses to confirm. Reporting
+     * "provisioned" for those is a readiness lie, so the flag is consulted here.
+     *
+     * The flag is runtime-wide, so a capacity overflow caused by an UNRELATED write also makes this
+     * report false while genuinely durable credentials sit in the section. That is deliberate and
+     * conservative in the right direction: while the flag is set nothing decoy-related can be made
+     * durable anyway (the counter reservation's flush would refuse), so the honest answer for the
+     * session is "no cover traffic", and it becomes true again on the next successful mutate.
+     *
+     * Read AFTER the state read, so a capacity failure that lands concurrently is still seen.
+     */
+    fun isProvisioned(): Boolean =
+        runtime.read { it.decoy?.isProvisioned == true } && !runtime.capacityExceeded
 
     /**
      * Ensure this vault has a synthetic account, registering one if it does not.
      *
-     * Returns true when the vault holds usable credentials after the call. **Never throws** except
-     * to propagate cancellation; every other outcome — offline, 429, a relay error, a proof-of-work
-     * failure, a vault at capacity — returns false and means "no cover traffic this session".
+     * Returns true when the vault holds **durable** usable credentials after the call. **Never
+     * throws** except to propagate cancellation; every other outcome — offline, 429, a relay error,
+     * a proof-of-work failure, a vault at capacity — returns false and means "no cover traffic this
+     * session".
      *
-     * Idempotent and cheap when already provisioned. When not, the attempt is made at most once
-     * per instance, i.e. once per unlocked session.
+     * Idempotent and cheap when already provisioned. When not, at most one RELAY attempt is made
+     * per instance, i.e. once per unlocked session. A purely local refusal (a back-off window still
+     * in force) does not consume that attempt: the latch is one *attempt*, not one *check*, and a
+     * window that expires mid-session must not force the vault to wait for the next unlock.
      */
     suspend fun provisionIfNeeded(): Boolean {
         if (isProvisioned()) return true
+        // Local, no relay contact, no durable write — checked BEFORE the latch so it cannot burn it.
+        if (isDeferred()) return false
         if (!attempted.compareAndSet(false, true)) return false
         return try {
             provision()
@@ -146,9 +193,10 @@ class DecoyAccountProvisioner(
     // ── provisioning ────────────────────────────────────────────────────────────
 
     private suspend fun provision(): Boolean {
-        if (isDeferred()) return false
-
-        val material = DecoyIdentity.generate()
+        val identity = DecoyIdentity.generateIdentity()
+        // The section as it stands BEFORE the commit — what a capacity failure must restore, since
+        // VaultRuntime cannot revert an arbitrary block itself.
+        val previous = runtime.read { it.decoy }
         // Set INSIDE the mutate block, so it is true whenever the live state has taken ownership of
         // the key array — including when the encode AFTER the block throws (VaultRuntime retains an
         // over-capacity mutation in memory). Wiping an array the live state holds would leave the
@@ -159,20 +207,22 @@ class DecoyAccountProvisioner(
             // challenge means the relay has no PoW endpoint, so register without a proof.
             val challengeToken = relay.registrationChallenge()
             val powProof = challengeToken?.let {
-                powSolver.solve(it, DecoyIdentity.publicKeyBytes(material.identityKeyPair))
+                powSolver.solve(it, DecoyIdentity.publicKeyBytes(identity.identityKeyPair))
             }
 
             // ── the relay commit. Everything above this line is local and free to abandon. ──
-            val accountId = relay.register(material, powProof)
+            // The prekey bundle is generated HERE, after the (seconds-long) solve, so its
+            // un-zeroable private halves are resident for the register call and not before it.
+            val accountId = relay.register(DecoyIdentity.generateBundle(identity), powProof)
             val tokens = relay.createSession(accountId) { challenge ->
-                DecoyIdentity.signLoginChallenge(material.identityKeyPair, challenge)
+                DecoyIdentity.signLoginChallenge(identity.identityKeyPair, challenge)
             }
 
             // ── the durable commit: ONE mutate, the whole credential set, never a part of it ──
             runtime.mutate { state ->
                 state.decoy = (state.decoy ?: DecoyState()).copy(
                     accountId = accountId,
-                    identityKeyPair = material.identityKeyPair,
+                    identityKeyPair = identity.identityKeyPair,
                     accessToken = tokens.accessToken,
                     refreshToken = tokens.refreshToken,
                     // A successful provision retires any deferral this vault was carrying.
@@ -180,15 +230,70 @@ class DecoyAccountProvisioner(
                 )
                 handedOff = true
             }
+            // …and ONE flush. `mutate` only scheduled it; a registration was just spent from a
+            // global bucket, so reporting success on bytes that a crash inside the coalescing
+            // window would erase is exactly the readiness lie this must not tell. A throw here
+            // means "not this session": the credentials stay live and scheduled (the identity key
+            // is NOT wiped — the state owns it), a later flush or close still lands them, and the
+            // next session finds them and does not re-register.
+            runtime.flushBeforeAck()
             return true
         } catch (c: CancellationException) {
-            if (!handedOff) wipe(material.identityKeyPair)
+            if (!handedOff) wipe(identity.identityKeyPair)
             throw c
         } catch (t: Throwable) {
-            if (!handedOff) wipe(material.identityKeyPair)
-            if (t is ApiClient.ApiException && t.code == HTTP_TOO_MANY_REQUESTS) deferProvisioning()
+            when {
+                // The credentials do not fit. VaultRuntime has RETAINED them unscheduled and set
+                // capacityExceeded — which fail-closes flushBeforeAck for the WHOLE vault, real
+                // messages included. Put the section back the way it was (that state fits, so the
+                // re-encode clears the flag) and record a durable back-off in the same mutate:
+                // without one, every unlock of a near-capacity vault registers another account
+                // against the shared global bucket and then throws it away.
+                t is VaultCapacityException -> if (revertAndDefer(previous)) handedOff = false
+                t is ApiClient.ApiException && t.code == HTTP_TOO_MANY_REQUESTS -> deferProvisioning()
+            }
+            if (!handedOff) wipe(identity.identityKeyPair)
             return false
         }
+    }
+
+    /**
+     * Restore the decoy section to [previous] and record a durable back-off, after a commit that
+     * could not fit.
+     *
+     * Returns whether the live state was successfully restored — i.e. whether it has let go of the
+     * identity key array, which is what tells the caller it may wipe it.
+     *
+     * Two-step by necessity. The retained over-capacity mutation is still in the live state, so a
+     * deferral written on top of it would re-encode the same over-capacity state and overflow
+     * again; the revert has to be part of the same block. And if even `previous` + a deferral no
+     * longer fits (a vault that was already at the boundary), a bare revert is attempted anyway,
+     * because leaving `capacityExceeded` set would block flush-before-ack for the inbound message
+     * path — a cover-traffic failure must never degrade the real one.
+     */
+    private fun revertAndDefer(previous: DecoyState?): Boolean {
+        val notBefore = backoffDeadline()
+        val restored = try {
+            runtime.mutate { state ->
+                state.decoy = (previous ?: DecoyState()).copy(provisionNotBeforeMs = notBefore)
+            }
+            true
+        } catch (c: CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            try {
+                runtime.mutate { state -> state.decoy = previous }
+                true
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t2: Throwable) {
+                // Silent by requirement. The live state still holds the mutation, so the caller
+                // must NOT wipe the key it references.
+                false
+            }
+        }
+        if (restored) flushBestEffort()
+        return restored
     }
 
     /** True while a durable 429 back-off is still in force. */
@@ -205,13 +310,42 @@ class DecoyAccountProvisioner(
      * Persist the cross-session back-off. Best-effort: a vault that cannot take this write is a
      * vault that will simply try again next session, which is strictly less bad than throwing out
      * of a path whose entire contract is that it stays silent.
+     *
+     * **Mutate then flush.** "Across sessions" is a durability claim, and `mutate` alone only
+     * schedules: a crash inside the coalescing window loses the deferral, and the next unlock
+     * re-hits a bucket that is shared by every client worldwide. The flush is what makes the
+     * back-off mean what it says.
      */
     private fun deferProvisioning() {
-        val notBefore = clock() + MIN_BACKOFF_MS + (random.nextDouble() * BACKOFF_JITTER_MS).toLong()
+        val notBefore = backoffDeadline()
         try {
             runtime.mutate { state ->
                 state.decoy = (state.decoy ?: DecoyState()).copy(provisionNotBeforeMs = notBefore)
             }
+        } catch (c: CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            // Silent by requirement. Nothing was recorded, so there is nothing to flush.
+            return
+        }
+        flushBestEffort()
+    }
+
+    /** A jittered back-off deadline — see [MIN_BACKOFF_MS] / [BACKOFF_JITTER_MS]. */
+    private fun backoffDeadline(): Long =
+        clock() + MIN_BACKOFF_MS + (random.nextDouble() * BACKOFF_JITTER_MS).toLong()
+
+    /**
+     * Make whatever was just scheduled durable, swallowing failure.
+     *
+     * The swallow is correct HERE and nowhere else in this file: the value being flushed is a
+     * back-off, and a lost back-off costs at most one extra registration attempt next session,
+     * whereas throwing would break the never-throws contract. It is not correct for the credential
+     * commit, which reports readiness — that one propagates into a `false` return.
+     */
+    private fun flushBestEffort() {
+        try {
+            runtime.flushBeforeAck()
         } catch (c: CancellationException) {
             throw c
         } catch (t: Throwable) {

@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "lock_id": "lock-20260727T-decoy-u1b",
-  "owner_agent": null,
-  "owner_session": null,
-  "acquired_at": "2026-07-27T09:00:00Z",
-  "expires_at": "2026-07-27T09:30:00Z",
+  "lock_id": "lock-20260727T-decoy-u1-r1fix",
+  "owner_agent": "claude",
+  "owner_session": "session_01UJxDJtqP2Ve5CUzXrUaWoi",
+  "acquired_at": "2026-07-27T12:00:00Z",
+  "expires_at": "2026-07-27T12:30:00Z",
   "ttl_seconds": 1800,
-  "purpose": "0.10.0 decoy U1: post-rebase evidence note",
+  "purpose": "0.10.0 decoy U1: review round-1 fixes (F1-F10) + table/spec corrections",
   "protected_paths": [
     "ledger.md",
     "memory.md",
@@ -18,5 +18,5 @@
     "reviews/",
     "sessions/"
   ],
-  "status": "released"
+  "status": "held"
 }

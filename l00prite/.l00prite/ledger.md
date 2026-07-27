@@ -1819,3 +1819,84 @@ still open. The full suite was then RE-RUN at the rebased head `3a3c68c2`:
 Per the by-head-SHA rule: the ONLY commit after that verification is this ledger note itself,
 which touches no code, no test and no build file — so `3a3c68c2`'s result still covers every
 compiled and executed file on this branch. Nothing was pushed or merged.
+
+---
+
+## 2026-07-27 — 0.10.0 U1, FIX ROUND 1 (of a hard cap of 6): the paired-blind findings F1–F10
+
+Branch `feat/0.10.0-decoy-u1-provisioning`, on top of `64ba97b3`. Adjudication:
+`reviews/decoy-0.10.0/u1-r1-adjudication.md` (Codex 2 P1 / 1 P2 / 1 P3, Grok 0 P1 / 2 P2 / 5 P3,
+architect-verified against source before acceptance). Nothing pushed, merged or version-bumped.
+
+### The root cause, which was one defect wearing three costumes
+
+**`VaultRuntime.mutate` was treated as durable. It is not.** It encodes the state and hands the
+bytes to `VaultSession.update`, which snapshots, marks dirty and returns — *"Non-blocking by session
+contract: it copies + schedules, no I/O here"* (`VaultRuntime.kt:132`). The synchronous durable path
+is `flushBeforeAck()` → `VaultSession.flushNow()`, **and its throw means the value was never issued /
+the state was never recorded.** F1 (counter reservation), F4 (capacity back-off) and F5 (429
+back-off) are the same misconception on the write side; F3 is it on the read side.
+
+The pair is what caught it: **Codex called it a P1 and Grok explicitly listed "durable advance
+before spend" as a NON-finding and marked the invariant *Holds*.** A single reviewer would have
+passed either this or Grok's capacity findings.
+
+The fix is the concept, not the three call sites: every U1 writer was re-audited against "must this
+survive process death?", and the answer is recorded per writer in the invariant table. Tokens stay
+coalesced (re-mintable from the identity key, exactly like `VaultAuthStore`'s).
+
+### What changed
+
+| # | Fix |
+|---|---|
+| F1 | `DecoyCounterReservation.reserveLocked` mutates, **flushes**, and only then advances the RAM cursor. A flush throw issues nothing; the next call re-reserves (a skip). |
+| F2 | Private constructor + `forRuntime(runtime)` returns the ONE allocator per runtime (weak on both sides), so two live allocators are unrepresentable. Plus: every `next()` abandons its block unless the durable mark still equals the block's end, so any future writer of the mark causes a skip rather than a regression. Chosen over a construction guard that throws: a throw turns a caller mistake into a crash on a path whose contract is silent degradation. |
+| F3 | `isProvisioned()` also requires `!capacityExceeded`. Conservative on a runtime-wide flag, deliberately: while it is set nothing decoy-related can be made durable anyway. |
+| F4 | On `VaultCapacityException` the provisioner **reverts** the retained over-capacity mutation and writes a durable back-off in ONE mutate. The revert is not optional — leaving `capacityExceeded` set would block flush-before-ack for the INBOUND message path, i.e. a cover-traffic write degrading the real one. Residual recorded: one registration per 60–90 min for a chronically full vault, not zero. |
+| F5 | The 429 back-off mutates **and** flushes (best-effort; this path may not throw). |
+| F6 | The one-attempt latch is taken immediately before the relay sequence, so a purely local refusal no longer burns it. One *attempt*, not one *check*. |
+| F7 | **Partially fixable, and the rest is stated rather than pretended.** The prekey private halves are never serialized — they live in Rust-owned memory behind a libsignal handle, and `ECPrivateKey` in libsignal-client 0.46.0 has no `close()`/`destroy()`, only `finalize()` (verified with `javap` against the resolved jar). `Native.ECPrivateKey_Destroy` via `unsafeNativeHandleWithoutGuard()` would double-free at finalization: memory corruption traded for a wipe. The same residue applies to every libsignal key the app creates, the real account's identity included. What WAS in reach is residency, so `DecoyIdentity` split into `generateIdentity()` / `generateBundle()` and the 101 keys are created immediately before `register` instead of before the seconds-long PoW solve. |
+| F8 | `clearAccount()` resets `counterHighWater`. Safe against a live allocator because of F2's staleness check. |
+| F9 | Six tests rewritten; every replacement verified BY MUTATION (broken impl → observed FAIL → reverted → green). Two tests survived their mutation and were re-labelled instead of left implying coverage. Full list in the invariant table. |
+| F10 | Invariant table corrected: W3/W5/R2/R4, the missing `DecoyAuthStore` writers, W1c and W6 added, the in-session capacity-retain row added to the crash matrix, and an allocator-uniqueness invariant. |
+
+### Docs corrected, not just code
+
+- **`docs/design/DECOY_TRAFFIC_0.10.0_SPEC.md` §2.3** said the reservation is "persisted" by writing
+  to `VaultState` — the right invariant against the wrong mechanism. Amended in place, marked as the
+  architect's error, and generalized so U2–U6 inherit the corrected rule. §4's W5 row now says
+  "SCHEDULES", a W6 `flushBeforeAck` row was added, R4 was corrected a second time (capacity, not
+  just the 429), and §6.2a gained the capacity back-off requirement.
+- **`u1-invariant-table.md`** corrections are marked `[R1]` with the superseded text struck through
+  rather than deleted — a table that quietly rewrites itself teaches the next unit nothing.
+- **`failures.md`** gains the 7th cluster under the non-discriminating-assertion class, with the new
+  shape named: *asserting the right property against the wrong OBSERVABLE* (reading the live
+  `VaultState` after a `mutate` proves scheduling, never durability — the P1 lived in that gap).
+
+### Evidence
+
+`ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks`
+from `apps/android` → **`GRADLE_EXIT=0`, `BUILD SUCCESSFUL in 1m 5s`, 47/47 tasks executed**,
+**659 tests / 0 failures / 0 errors / 3 skipped** (645 before this round; +14 net).
+Re-measured section budget: worst-case encoded delta **645 B** of a 1024 B budget; a realistic
+populated state with the section **929 B of 262 112 B**.
+
+Intermediate mutation runs (each reverted before the final verification): batch A stripped every
+added flush → 11 tests failed; batch B reverted the logic fixes → 9 tests failed; batch C split the
+credential commit into two mutates → the new every-generation test failed. Exit codes read from
+Gradle, not from `echo`.
+
+### Discrepancy with the fix brief, recorded rather than absorbed
+
+The brief said the spec had been amended with "§2.2/§2.3 rulings, new §4.2, R4/R6/R7". At
+`d44616c5` — the only commit ever to touch that file — **there is no §4.2, no R6/R7 and no mention
+of `flushBeforeAck`.** The amendment described was not in the tree. The corrections above were
+therefore written from scratch against the adjudication's own wording; no §4.2 was invented, so a
+later real amendment cannot collide with a guess.
+
+### Still owed
+
+Round 2 of the paired-blind review, against the WHOLE unit rather than this delta (the 0.9.3
+lesson). Then a maintainer merge decision. U1 remains UNWIRED: nothing in `SessionContainer` or
+`MessagingCoordinator` constructs any of it, so this branch still cannot spend a registration on any
+device.

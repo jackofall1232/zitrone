@@ -148,6 +148,20 @@ class DecoyAuthStoreTest {
     }
 
     @Test
+    fun `clearAccount resets the counter mark so a replacement account starts at zero`() {
+        // The mark describes ONE synthetic peer. Carried across a re-provision, the replacement
+        // account's first envelope would arrive carrying message_number = 128 in the clear on a
+        // brand-new session — something no real Double Ratchet with a new recipient produces, and
+        // therefore a free classifier for the relay operator.
+        val state = provisioned().also { it.decoy = it.decoy!!.copy(counterHighWater = 128L) }
+        val runtime = runtimeOf(state)
+
+        DecoyAuthStore(runtime).clearAccount()
+
+        assertEquals("the counter mark went with the account", 0L, runtime.read { it.decoy?.counterHighWater ?: 0L })
+    }
+
+    @Test
     fun `the staging store holds everything in RAM and writes nothing durable`() {
         val runtime = runtimeOf()
         val staging = StagingAuthStore()
