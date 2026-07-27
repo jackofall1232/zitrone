@@ -21,6 +21,26 @@ services:
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
       TOR_ENABLED: ${TOR_ENABLED:-false}
       ONION_ADDRESS: ${ONION_ADDRESS:-}
+      # 0.9.4 registration proof-of-work — CALIBRATION DEPLOY, ENFORCEMENT OFF.
+      #
+      # The challenge token carries NO parameters: client and relay agree by
+      # configuration alone, so every value below must match the shipped 0.9.4
+      # client exactly or its solutions will never verify. Pinned explicitly
+      # rather than left to config.go's defaults — REGISTRATION_ARGON2_DIFFICULTY_BITS
+      # in particular defaults to 8 while the client ships D=4.
+      #
+      # Argon2id parallelism is NOT here: regpow.Argon2Threads is a compile-time
+      # constant fixed at 1 (cross-platform determinism), which already matches
+      # the client's p=1. There is no env var for it.
+      REGISTRATION_POW_ENABLED: ${REGISTRATION_POW_ENABLED:-false}
+      REGISTRATION_HASHCASH_DIFFICULTY: ${REGISTRATION_HASHCASH_DIFFICULTY:-20}
+      REGISTRATION_ARGON2_DIFFICULTY_BITS: ${REGISTRATION_ARGON2_DIFFICULTY_BITS:-4}
+      REGISTRATION_ARGON2_TIME_COST: ${REGISTRATION_ARGON2_TIME_COST:-1}
+      REGISTRATION_ARGON2_MEMORY_KIB: ${REGISTRATION_ARGON2_MEMORY_KIB:-19456}
+      # Required even with enforcement off: RegistrationChallenge fails closed
+      # with 503 pow_unavailable on an empty secret, and config.Load only
+      # validates this when enforcement is ON. Unset here means no challenge.
+      REGISTRATION_CHALLENGE_SECRET: ${REGISTRATION_CHALLENGE_SECRET:-}
     volumes:
       - ./server/keys:/keys:ro
     ports:
