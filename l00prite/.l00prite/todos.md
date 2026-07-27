@@ -569,8 +569,43 @@ User intent recorded 2026-07-24: "at some point we need to cut 0.9.1 apk and fli
       crypto to force a noisy pack green. Not blocking.
 - [ ] **Website web-overclaim:** the site presents an undeployed web client as available. Correct
       to the platform honesty hierarchy.
-- [ ] **Storage-format stability GATE:** before external testers, either commit to storage-format
-      stability or disclose wipe-on-breaking-change (migrations aren't built).
+- [ ] **🔒 TRIGGER-GATED — client string constants still claim Sealed Sender + continuous cover
+      traffic.** The doc overclaims were corrected in `96982421`, but the same false claims remain
+      in four **code** string constants:
+      - `packages/protocol/src/connection.ts:55` — "Tor routing + single relay hop + Sealed Sender."
+      - `apps/android/app/src/main/java/com/zitrone/app/data/ConnectionMode.kt:48` — same string
+      - `apps/ios/Sources/Networking/ConnectionMode.swift:80` — same string
+      - `apps/web/src/screens/Settings.tsx:152-165` — "Cover traffic" toggle, "Continuous decoy
+        traffic makes a real send indistinguishable from idle"
+
+      **THE TRIGGER (this is the point of the entry — do not soften it to "when convenient"):
+      these MUST be corrected BEFORE the web client deploys, OR before the Android strings ship in
+      a build — whichever comes first.**
+
+      **Why trigger-gated and not open-ended.** Today nothing renders them: `ConnectionMode.kt` has
+      zero consumers on Android, iOS never renders the description, and only
+      `apps/web/src/screens/Settings.tsx:148` renders it — on a client that is not deployed. So the
+      honest status is "false but invisible". **That is exactly the shape of the burn release-note
+      claim**: accurate about intent, false about shipped state, and harmless *only* until something
+      renders it. The moment web deploys or an Android surface reads the enum, a published client
+      asserts sender anonymity it does not have. **A residual with a named trigger gets closed; one
+      tracked open-endedly does not** — which is the whole lesson of the CX23 P1/P2 entry above.
+
+      Substance of the correction: Sealed Sender is NOT implemented for ordinary messaging
+      (`sender_id`/`recipient_id` cleartext; relay binds sender to the authenticated connection at
+      `ws/hub.go:166`); cover traffic is NOT built on Android. See `docs/SECURITY_MODEL.md`
+      (corrected 2026-07-27) for the wording to match. Folds into 0.10.0 U6, or lands earlier.
+- [x] **Storage-format stability GATE — ✅ ANSWERED 2026-07-27, no longer deferred.** Full reasoning
+      in `docs/design/DECOY_TRAFFIC_0.10.0_SPEC.md` §4.1. **The answer is DISCLOSE
+      wipe-on-breaking-change**, and it could not honestly be anything else: migrations are not
+      built, no migration framework exists, and 0.10.0 is itself a second breaking change — a
+      stability promise today would be one the project has no mechanism to keep.
+      **The condition that flips it to a stability commitment, stated so this is a commitment and
+      not an indefinite disclaimer: a migration path exists AND has been exercised across at least
+      one real format change.** Until then every release carrying a format change repeats the
+      disclosure. Disclosure text is drafted in §4.1 and ships WITH 0.10.0 (release notes +
+      `SECURITY_MODEL.md`); it is a precondition for external testers, not for merge.
+      This gate had been deferred twice — it is closed here rather than carried a fourth time.
 
 ## RELAY (CX23) — from the 2026-07-26 429 diagnostic. PRIORITY ORDER IS AS LISTED (user-set)
 
