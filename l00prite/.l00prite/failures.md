@@ -428,6 +428,84 @@ session" as a fresh provisioner over the same live runtime were being carried by
 latch rather than by the property they named. That was found by RUNNING the mutations, not by
 reading the tests. A scope change is also a test-fidelity change.
 
+### THE INVALIDATED-FROM-UNDERNEATH CLAIM — true when written, made false by a later fix (U1, 0.10.0)
+
+**The mirror image of "the claim that was born wrong", and it needs naming separately because the
+detection rule is different.** The maintainer narrowed the §4.1 storage-format disclosure to "a vault
+that has never **generated cover traffic** still opens on 0.9.x". That was **true when written**: the
+codec omits `TAG_DECOY` when the section is empty, so a vault with no cover traffic carried no tag.
+
+Two rounds later, a fix for an unrelated finding (the capacity back-off, G4) started writing a
+durable deferral-only section **before any relay contact**. Nothing about the doc changed. Nothing
+about the codec's omit-when-empty logic changed. The disclosure simply **became false underneath**,
+because its truth had always depended on *when the provisioner first writes to the section* — an
+implementation detail three layers below the sentence.
+
+**A disclosure whose truth depends on an implementation detail is fragile by construction.** The
+born-wrong class is caught by attacking a claim's first appearance hardest. This class is invisible
+to that: the claim was attacked, and it passed, because it was correct. It has no first appearance to
+re-attack.
+
+**DETECTION RULE (binding): when a fix changes WHAT gets written to durable state, or WHEN, re-check
+every doc claim whose truth depends on that behaviour.** Not just the docs the diff touches — the
+diff here touched no docs at all. Ask: "which written promises would become false if this write
+happened earlier, later, or in a case it previously did not?"
+
+**What actually caught it:** both blind reviewers, independently, in the same round. Nothing
+mechanical would have — no test asserted the disclosure's trigger condition, and no doc test exists.
+That is a direct argument for keeping documentation and user-facing claims **in review scope**, not
+just code. Corollary already recorded elsewhere and reinforced here: an **overstated** disclosure is
+its own dishonesty, and an **understated** one is worse; a claim invalidated from underneath will
+usually fail in the understating direction, which is the more dangerous one.
+
+### Guard scope vs resource scope — third recurrence, and the first with a SECURITY consequence (U1)
+
+Recorded already from 0.9.2 PR-3 ("match the guard's scope to the resource's scope"). U1 hit it three
+times in one unit — the counter allocator (round 1), the provisioner's latch and flush flag (round
+3), and the token-refresh path (round 3). **Name the token-refresh one specifically, because it is
+the sharpest and it is not a robustness bug:**
+
+> `refreshTokens()` snapshots the account identity and refresh token, **blocks on the relay for
+> seconds**, then writes the response back. A concurrent `clearAccount()` in that window wipes the
+> account — and the arriving response then **resurrects valid bearer credentials for the cleared
+> account**. The access token works until expiry; the refresh token mints new sessions. The section
+> lock protected each individual write and not the read→network→write **sequence**, which is the
+> whole shape of the defect class.
+
+The other two cost a wasted global registration and a readiness lie. This one hands working
+credentials back to an account the user asked to be gone.
+
+**Reinforced rule:** fix every instance of a recognized shape with the **same** pattern. U1 fixed
+three sites with one registry pattern rather than inventing a third — a third pattern is what makes
+the *fourth* site inconsistent later, and inconsistency is what lets the fifth site be wrong without
+looking wrong.
+
+### CALIBRATION — what reviewer convergence means, and what it does not
+
+Recorded so future rounds are read correctly. U1's paired-blind arc:
+
+| Round | P1s | Reviewer agreement |
+|---|---|---|
+| 1 | 2 | **fully disjoint** — Codex found the durability defect, Grok explicitly listed it as a non-finding; Grok found the capacity/re-registration defects, Codex missed them |
+| 2 | 1 | 2 of 11 convergent |
+| 3 | 0 | **top 3 found independently by both** |
+
+**Reviewers converging is the surface stabilising, not the reviewers tiring.** The distinction
+matters and is easy to get backwards. Read it this way:
+
+- **Disjoint findings early** = the surface is large and unexplored. It is also the strongest
+  possible argument for running two blind reviewers instead of one: at round 1 a single reviewer
+  would have shipped a real P1 **whichever one you picked**.
+- **Convergence later, with P1s falling to zero** = the remaining surface is small enough that two
+  independent searches hit the same things. That is evidence of exhaustion.
+- **Convergence with findings still rising, or with severity flat** would mean the opposite — the
+  reviewers are anchoring on the same salient area and missing the rest. Check for that before
+  reading agreement as good news.
+
+One reviewer being *wrong* is also data, not noise: Grok's round-1 "durable advance before spend" was
+a **false negative on a P1**, resolved against source. A reviewer asserting a property *holds* is a
+claim like any other and gets verified like any other.
+
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
   round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked

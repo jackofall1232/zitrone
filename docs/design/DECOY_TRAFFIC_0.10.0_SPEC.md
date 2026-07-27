@@ -432,7 +432,9 @@ opened by 0.9.x", which is false: the tag is written only once cover traffic has
 generated. Corrected rather than left overbroad — the deliver-then-claim rule cuts both ways, and a
 disclosure that overstates harm is as inaccurate as one that understates it.)*
 
-> **⚠️ ADJUSTED 2026-07-27 AFTER U1 REVIEW ROUND 3 — PENDING MAINTAINER RE-RATIFICATION.** The
+> **✅ ADJUSTED AFTER U1 REVIEW ROUND 3 — RE-RATIFIED BY THE MAINTAINER 2026-07-27. This wording is
+> FINAL.** The parenthetical is load-bearing and deliberate: it closes the gap for a reader who would
+> otherwise have no way to know whether their own vault is affected. The
 > narrowing above was an explicit maintainer ruling, so this change is flagged rather than made
 > quietly. "Generated cover traffic" became **false** in U1: the provisioner records a durable
 > back-off *before* it contacts the relay, so the tag lands when a vault **sets up** cover traffic,
