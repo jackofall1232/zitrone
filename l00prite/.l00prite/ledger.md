@@ -1699,3 +1699,48 @@ Constraints held: nothing pushed, no version bump, flag stays false.
 Remaining before the cut: device smoke of the actual cut build (neither `3b0719ed` UI wiring
 nor `2db67d0b` D=5 is in the tested binary — expect the pitcher visible ~2× longer than the
 test cut); independent review of the whole branch; relay merge/deploy + param pin at flip.
+
+## 2026-07-27 — 0.9.4-beta CUT + website flipped (session: pow-ui-wiring)
+
+Explicit maintainer instruction: "cut it. bump 0.9.4-beta. flip the website." All release
+actions below were individually verified.
+
+- Version bump vc20 / 0.9.4-beta + CHANGELOG on the branch (`fd506eb9`), merged to main
+  (`a103eff3`, --no-ff), pushed. Full suite on merged main: exit 0 before push.
+- Signed release built on-box (keystore.properties path; RELAY_ONION_ADDRESS exported from
+  .env — 62 chars, non-empty). apksigner cert = `6c7f92a7…2753` (continuity anchor, MATCHES);
+  aapt2 badging = versionCode 20 / versionName 0.9.4-beta.
+- **Release live:** https://github.com/jackofall1232/zitrone/releases/tag/v0.9.4-beta
+  (prerelease, target a103eff3). APK sha256
+  `9062c65d0db667fb8b5e790c35a4f74f144a00c9908cc7aa2a326e251e8a1eae`; re-downloaded from
+  GitHub and re-hashed: byte-identical.
+- **Website flipped** (`9d2b128d`): links.ts → v0.9.4-beta + new sha256; onion-site
+  SHA256SUMS updated in the same commit; website build exit 0 before push. Vercel redeploys
+  from main; live-link sweep run after propagation.
+- **Found while staging: local onion-site/ still held zitrone-v0.8.2-beta.apk** — replaced
+  with v0.9.4-beta. NOTE: this box is NOT the mirror; CX23 serves its own checkout's
+  onion-site. The mirror will keep serving whatever CX23 has staged until CX23 pulls main and
+  stages the new APK — sha mismatch vs the flipped website until then. Added to the CX23
+  work list.
+
+**Process record (deliberate, on maintainer authority):** this cut shipped WITHOUT the
+independent paired-blind review of the PoW branch and WITHOUT a device smoke of the final
+binary (the tested `d6b12587` cut lacked the UI wiring `3b0719ed` and the D=5 bump
+`2db67d0b`). Mitigations: enforcement flag off; upgrading installs never run the solve path
+(registration only fires with no account); the exposure is fresh installs, where a solve/UI
+defect would surface as a registration problem, not data loss. RECOMMENDED FIRST ACTION:
+fresh-install v0.9.4-beta on the Revvl and watch the pitcher through one registration.
+Review of the branch remains OWED (0.9.3 lesson: review the whole unit).
+
+CX23 relay work list (needs HoboJoe; CX33 has no SSH):
+1. Confirm the deployed relay branch/SHA — the device's successful challenge+solve proves the
+   challenge endpoint is live, i.e. PoW relay code is already running (flag off).
+2. Merge relay branches to main normally (runbook decision), redeploy with the FOUR-file
+   compose, `-p sublemonable`.
+3. Pull + stage onion-site/zitrone-v0.9.4-beta.apk + SHA256SUMS on CX23 (mirror parity with
+   the website checksum).
+4. At flip time (step 5, ONLY after all test devices on 0.9.4): env pins
+   REGISTRATION_HASHCASH_DIFFICULTY=20, ARGON2_TIME_COST=1, ARGON2_MEMORY_KIB=19456,
+   ARGON2_DIFFICULTY_BITS=5 (default is STILL the D=8 placeholder), REGISTRATION_CHALLENGE_SECRET
+   ≥32B, verify-concurrency semaphore in place (feat/0.9.4-pow-verify-concurrency), rollback =
+   flag off + restart.
