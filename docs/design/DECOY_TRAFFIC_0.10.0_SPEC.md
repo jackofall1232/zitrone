@@ -866,7 +866,37 @@ cover traffic was attempted or could not be produced. The `flushSendRatchet` dur
 its ordering relative to `ws.sendMessage` must be unchanged. **If satisfying any other requirement
 here would violate this one, this one wins and the other is abandoned for that send.**
 
-### R-U3-2 — A covered send is two frames an observer cannot tell apart
+### R-U3-2 — ~~A covered send is two frames an observer cannot tell apart~~ **AMENDED: REAL-FRAME-FIRST, ALWAYS**
+
+> **⚖️ MAINTAINER RULING 2026-07-27 — random ordering is CONCEDED. The real frame always goes first.**
+>
+> **This is a ruling, not a preference, and the exhaustion proof is why.** On a decoy-first send there
+> are exactly **three** places the drawn gap can sit relative to the durability barrier and the atomic
+> `contactExists → ws.sendMessage` tail, and **all three break something**:
+>
+> | Gap position | Breaks |
+> |---|---|
+> | After the barrier | Widens the process-death loss window and the `deleteContact` race that was ~0 ms wide |
+> | Before the barrier | The flush's own duration lands inside the decoy-first interval and nothing else's — the asymmetry already found and removed once, reintroduced larger |
+> | Inside the tail | Ciphertext to a contact deleted during the gap (breaks D2c directly) |
+>
+> There is no fourth position. **Decoy-first has no correct implementation, not merely a worse one.**
+>
+> **Structural beats guarded.** Real-first makes all four R-U3-1 violations *impossible by
+> construction* rather than *prevented by a check* — the real frame is committed to the socket before
+> any cover code runs.
+>
+> **The traded property is near-worthless against the targeted adversary.** Order randomness bought
+> 5–50 ms of correlation ambiguity, and only against an observer watching **both ends** — who already
+> reads `recipient_id` in cleartext on both envelopes. A one-sided observer sees two equal-length
+> frames either way. Recorded as a residual in §2.4, not as a defeat.
+
+**The amended requirement:** a covered send is two frames of the **same serialized length**, the real
+one first, separated by a per-send gap. What must still hold: the two frames are indistinguishable
+*by length*, the gap is drawn per send, and nothing about the pair reveals which conversation the
+real frame belonged to.
+
+### (superseded) R-U3-2 — A covered send is two frames an observer cannot tell apart
 Same serialized length; order not predictable; separated by a small delay drawn per send. Ordering
 must be **uniformly** random — pinned by a statistical test over many sends, not by reading the code.
 Whether a fixed delay distribution is right is **open**: the only stated constraint is that neither
