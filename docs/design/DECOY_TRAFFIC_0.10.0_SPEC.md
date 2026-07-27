@@ -431,7 +431,9 @@ So, shipping **with** 0.10.0, in release notes and in `SECURITY_MODEL.md`:
 > which cover traffic was **never enabled** is guaranteed to be unaffected. If you are unsure, assume
 > the vault is affected.
 
-> **⚠️ SIXTH PASS — THIRD-LENS TIE-BREAK APPLIED, PENDING MAINTAINER RATIFICATION.** The paired
+> **✅ SIXTH PASS — RATIFIED BY THE MAINTAINER 2026-07-27. THIS WORDING IS FINAL.** Arrived at by
+> third-lens tie-break; the reasoning is preserved below because the *process* that produced it is
+> the reusable part. The paired
 > reviewers **disagreed** on version five: one held it still false in the crash window, the other
 > held it sound. The architect resolved it in favour of "sound" — and the maintainer identified the
 > gap in that resolution: the architect had argued the exempting clause did not apply to a vault
