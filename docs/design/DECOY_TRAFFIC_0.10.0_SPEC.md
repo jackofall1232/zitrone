@@ -468,9 +468,12 @@ disclosure that overstates harm is as inaccurate as one that understates it.)*
 > | **Reaches `register`** (including a 429, or a lost response) | **yes** |
 > | Succeeds, never sends a decoy | **yes** |
 >
-> So the trigger is **setup that reaches relay registration** — not a completed send, and not a send
-> *attempt* either. "Tries to send" would have told a user who failed offline that they had lost
-> their downgrade path when they had not. The wording above is accurate on all four rows.
+> So the trigger is **setup that reaches relay registration, plus any interrupted setup that could
+> not retire its own write-ahead deferral** — not a completed send, and not a send *attempt* either.
+> "Tries to send" would have told a user who failed offline that they had lost their downgrade path
+> when they had not. *(Corrected round 6: this note previously said "accurate on all four rows" and
+> omitted the crash row, which is the same residual-restatement failure recorded as round 5's K3 —
+> the correction landed in the table the reviewer cited and this parallel summary survived it.)*
 >
 > **Why it keeps drifting, recorded so the next pass does not repeat it:** the sentence's truth
 > depends on an implementation detail that three rounds of review have each moved. It must be

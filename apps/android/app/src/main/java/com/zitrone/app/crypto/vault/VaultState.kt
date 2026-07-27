@@ -293,15 +293,20 @@ class VaultCapacityException(message: String) : IllegalStateException(message)
  * send and not a send attempt:
  *
  *  - never attempted → no tag;
- *  - failed before `register` (offline, DNS, failed PoW, a local crypto fault) → no tag, so a vault
- *    whose only brush with cover traffic was a failed offline attempt keeps its 0.9.x readability;
+ *  - failed before `register` (offline, DNS, failed PoW, a local crypto fault), **and the
+ *    retirement flushed** → no tag, so a vault whose only brush with cover traffic was a failed
+ *    offline attempt keeps its 0.9.x readability;
+ *  - failed before `register`, but **the process died after the write-ahead flush, or the
+ *    retirement's own flush failed** → **tag**, with the relay never contacted. Nothing can run to
+ *    retire it. *(Row added round 6 — its omission is what made the earlier "no tag before
+ *    `register`" claim false under the crash-at-any-instruction model this project assumes.)*
  *  - reached `register`, including a 429 or a lost response → **tag**, whatever happens next;
  *  - registered and never sent a decoy → **tag**.
  *
- * That is the honest trigger, and it is the one spec §4.1 states. **If a change moves any
- * provisioning failure path across the `register` boundary, §4.1's user-facing sentence changes with
- * it** — it has drifted three times because each pass edited the previous wording instead of
- * re-deriving it from these four rows.
+ * **If a change moves any provisioning failure path across the `register` boundary, §4.1's
+ * user-facing sentence changes with it** — it drifted four times because each pass edited the
+ * previous wording instead of re-deriving it from these rows. §4.1 deliberately no longer states a
+ * precise boundary; the precision is HERE, and this list is what a future pass must re-derive from.
  *
  * COMPRESSION lives INSIDE the sealed, padded plaintext, so the on-disk region stays a
  * constant [SLOT_PAYLOAD_BYTES] regardless of how compressible the state is — zero
