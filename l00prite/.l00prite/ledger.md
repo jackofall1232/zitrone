@@ -1561,3 +1561,141 @@ claim/test, terminal sequence/gate).
 **Still open and tracked, NOT claimed closed:** the BurnPlan-registry follow-ups, notification
 channel reset, a next-launch gate assertion (the gate passes `terminate = {}` and so exercises a
 weaker arrangement than production ships), and the standing pre-tester hygiene items.
+
+---
+
+## 2026-07-26 — 0.9.4 PoW UI: lemon-squeeze pitcher replaces the stub (session: registration-pow-ui-art)
+
+`RegistrationPowScreen.kt` stub art replaced with the real screen against
+`REGISTRATION_POW_UI_CONTRACT.md`, on `feat/0.9.4-registration-pow-client` (`4db92a8a`, local,
+not pushed). Interface unchanged (state enum, UiState, copy object, callbacks, testTags).
+Pitcher fill is a pure function of `fractionOfExpectedWork`; overfull (>1.0) renders as a
+data-driven overflow (spill + puddle grow with the fraction — moves under reduced motion too);
+60s prompt is a non-blocking card below live progress; background→return and arrive-COMPLETE
+render the current frame, no replay.
+
+**Raised for human sign-off, not silently decided:**
+1. Contract §3 lists prompt options lowercase (*keep waiting* / *try later*); the pre-existing
+   constants were capitalized. Constants now match the contract — product owner should confirm.
+2. New unlocked microcopy: `OVERFULL_NOTE` "some lemons are juicier than others"; reworded
+   `BACKGROUNDED_NOTE`.
+3. At COMPLETE the pitcher renders full and the readout drops the percent (completion is a
+   state, not a fraction — an early solve at e.g. 80% of expected must still look finished).
+
+Evidence: `:app:testDebugUnitTest` + `:app:assembleDebug` BUILD SUCCESSFUL exit 0 (2026-07-26).
+Blocker unchanged: Revvl 6x Argon2id floor measurement; `REGISTRATION_POW_ENABLED` stays false.
+Independent review still owed on the PoW client branch before merge.
+
+**Correction (same day, maintainer catch):** the reworded `BACKGROUNDED_NOTE` claimed "the
+notification keeps count while you're away" — but the PoW foreground service is UNBUILT and
+nothing yet guarantees its notification shows progress. Same class as the docs corrections:
+copy claiming behavior the app doesn't back. Softened to "we'll finish in the background"
+(`4a...` follow-up commit on the client branch). When the foreground service IS built, contract
+§6.5 calls the notification "the progress indicator" — build it with a real count, then the
+richer copy can return.
+
+## 2026-07-27 — 0.9.4 PoW: instrumented solve path wired into registration + first-attempt D=4 (session: pow-instrumentation)
+
+Maintainer-directed unit before the 0.9.4 cut, on `feat/0.9.4-registration-pow-client`
+(`d6b12587`, local, not pushed). The calibration harness cannot run here (no device attaches),
+so the Diagnostics screen becomes the measurement channel: one registration attempt on the
+Revvl 6x now returns the real per-stage numbers instead of "worked"/"hung".
+
+- **`diagnostics/RegistrationPowSolveRecorder`** — the app's ONLY front door to
+  `RegistrationPow.solve`. Privacy-safe `pow:` lines into the existing BootDiagnostics file:
+  sha256 pre-stage duration/hash count/difficulty; argon2id duration/evaluations WITH the
+  parameters that produced them (t, m, p, D); total challenge→proof wall time; battery-saver;
+  foreground/backgrounded-mid-solve. Logged on success AND abort/failure (an abort at 60s is a
+  data point; how far it got is the useful part). 6 host tests pin the line contract.
+- **Wiring (this closes "nothing invokes the solve"):** `bootstrapLoop` gained `pow-challenge`/
+  `pow-solve` stages BEFORE the prekey durability barriers — an aborted solve burns no
+  ATTEMPTED marker. Challenge 404 → registers proofless (relay predates the PoW deploy);
+  otherwise the proof rides `api.register`. Solve on `Dispatchers.Default` under
+  `runInterruptible`, so teardown maps to the solver's interrupt contract.
+- **`RegistrationPow.DEFAULT_PARAMS`: D=4** (hashcash 20 = the shipped drop constant;
+  19 MiB/t=1). **A first real-world calibration attempt, NOT a measured value** — replaces
+  reliance on the relay's D=8 placeholder (established far too high). Low end of the D=4–5
+  landing zone so the first cut cannot hang minutes on the floor device.
+  `TODO(pow-calibration)` STANDS until the device number is read back.
+- **Runbook precondition added:** relay env must pin all four PoW params to the client's
+  shipped values — the token carries no parameters, agreement is by configuration, and the
+  relay config default is still D=8; a mismatch silently 403s every proof at flip time.
+
+Evidence: `:app:testDebugUnitTest` 591/0 failures/3 skipped; `:app:assembleDebug` exit 0.
+Constraints held: nothing merged/pushed, no version bump, `REGISTRATION_POW_ENABLED` stays
+false until all test devices are on 0.9.4. Independent review still owed on this branch
+before merge (now includes this unit). NOTE: the lemon UI + foreground service remain
+UNWIRED — a solve during boot shows the normal linking state, not the pitcher; the solve-layer
+UI unit is still pending and is NOT blocked by this one.
+
+## 2026-07-27 — 0.9.4 PoW UI: pitcher wired into the boot solve (session: pow-ui-wiring)
+
+Maintainer-directed: the `test-pow-d6b12587` cut came back device-tested good; this is the
+"animations wired in" unit standing between that and the 0.9.4-beta cut. On
+`feat/0.9.4-registration-pow-client` (`3b0719ed`, local, not pushed).
+
+- **MessagingCoordinator now produces `RegistrationPowUiState`** (`registrationPow`
+  StateFlow) — the solve layer the UI contract reserved. The fraction comes ONLY from the
+  solver's progress sink (actual work counts, §6.1), riding through
+  `RegistrationPowSolveRecorder` via a new pass-through `uiProgress` param so the recorder
+  stays the single front door. A 1s ticker owns elapsed seconds + the 60s prompt +
+  backgrounded detection; the tick decision is a pure host-tested function
+  (`registrationPowTickState`): BACKGROUNDED wins over the prompt, a dismissed prompt never
+  re-raises, an unanswerable foreground probe is NOT claimed as backgrounded.
+- **Terminal-state honesty:** COMPLETE holds the full pitcher through register/session mint
+  and is retired to IDLE the moment boot succeeds; a FAILED attempt after a completed solve
+  (register 4xx, flush) drops the overlay rather than freezing a full pitcher through the
+  backoff (§6.2 "reads as a hang"). "try later" = `stop()` — interruption is the solver's one
+  cancellation mechanism, no durable state left (solve runs before the prekey barriers),
+  next `start()` retries with a fresh challenge. `start()` clears stale terminal state.
+- **SessionUi composes `RegistrationPowScreen`** over the session routes whenever the state
+  is live. Relink and the proofless-404 path never leave IDLE, so the screen appears exactly
+  once, during real account creation.
+- **The PoW foreground service remains UNBUILT** (deliberate scope hold): BACKGROUNDED is
+  process-lifecycle detection only; the solve continues while the process lives, which the
+  already-softened copy ("we'll finish in the background") does not overclaim. Contract
+  §6.5's notification-with-count stays open for when the service is built.
+
+Evidence: `:app:testDebugUnitTest` 598/0 failures/3 skipped (+7: uiProgress pass-through,
+6 tick-state); `:app:assembleDebug` exit 0. Constraints held: nothing pushed, no version
+bump, `REGISTRATION_POW_ENABLED` stays false.
+
+Track state after this unit: solve-layer UI wiring DONE. Before the cut: the tested APK is
+`d6b12587` — this commit is NOT in the tested binary, so the cut build needs at least a
+smoke pass (fresh install → pitcher shows → registration completes) on the device; read the
+Revvl 6x `pow:` calibration lines back into `TODO(pow-calibration)`/D if not yet done;
+independent review of the whole branch still owed; relay params must be pinned at flip.
+
+## 2026-07-27 — 0.9.4 PoW: calibration RESOLVED at D=5 from the Revvl 6x measurement (session: pow-ui-wiring)
+
+The maintainer ran the `test-pow-d6b12587` cut on the Revvl 6x and shared the Diagnostics
+`pow:` lines (photo): **battery_saver=true, foreground=true** — the exact condition the
+instrumentation was built to capture. `2db67d0b` on the client branch.
+
+- **Calibrated on RATES, not the observed total.** The run completed in 982 ms only because
+  it drew ~0.43× the expected work on BOTH geometric stages (455,763 hashes vs 2^20 expected;
+  7 evaluations vs 16). Rates: SHA-256 **0.63 MH/s**, Argon2id **36.7 ms/eval** at 19 MiB/t=1.
+  The maintainer's "~950 ms average" matches normal-mode expectation, not the floor.
+- **The measurement moved the rule's input:** on-device the d=20 pre-stage expects ~1.7 s —
+  over HALF the solve, vs ~2% on CX33 — so the ~3 s floor target applies to the whole solve.
+  **D=5**: expected ~2.8 s in battery saver, ~5% tail ~8 s (far under the 60 s prompt),
+  attacker ~0.85 s/account on a server core. D=4 undershot (~2.3 s, half the deterrence);
+  argon-only application of the old rule would have said D=6 (~4 s) and overshot.
+- **New structural finding recorded in the calibration doc:** the phone pays **16×** the
+  server's SHA-256 cost but only **1.6×** its Argon2id cost — the memory-hard stage travels
+  across hardware as designed, the compute-bound pre-stage taxes exactly the honest floor
+  device finding 2 warned about. Rebalance candidate (d=18 + D+1) recorded for a future
+  release, deliberately NOT taken in this cut (two knobs at once would re-open a closed
+  calibration; d=20 is the production-proven drop constant).
+- `TODO(pow-calibration)` markers replaced with the measurement (RegistrationPow kdoc,
+  recorder kdoc, coordinator, recorder test). Runbook step-5 measurement precondition
+  CHECKED OFF; env pin now `REGISTRATION_ARGON2_DIFFICULTY_BITS=5` (relay default is still
+  the D=8 placeholder — must be set explicitly). Copy watch re-checked: "squeeze a few
+  lemons" reads true at ~1.3 s normal / ~2.8 s battery-saver expected.
+
+Evidence: `:app:testDebugUnitTest` 598/0 failures/3 skipped; `:app:assembleDebug` exit 0.
+Constraints held: nothing pushed, no version bump, flag stays false.
+
+Remaining before the cut: device smoke of the actual cut build (neither `3b0719ed` UI wiring
+nor `2db67d0b` D=5 is in the tested binary — expect the pitcher visible ~2× longer than the
+test cut); independent review of the whole branch; relay merge/deploy + param pin at flip.

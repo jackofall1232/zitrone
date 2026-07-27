@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "lock_id": "lock-20260726T172500Z-094-prestage",
+  "lock_id": "lock-20260727T-094-pow-calibration",
   "owner_agent": null,
   "owner_session": null,
-  "acquired_at": "2026-07-26T17:25:00Z",
-  "expires_at": "2026-07-26T17:55:00Z",
+  "acquired_at": "2026-07-27T01:55:00Z",
+  "expires_at": "2026-07-27T02:25:00Z",
   "ttl_seconds": 1800,
-  "purpose": null,
+  "purpose": "ledger/todos: pow-calibration resolved at D=5 from Revvl 6x measurement",
   "protected_paths": [
     "ledger.md",
     "memory.md",

@@ -6,14 +6,22 @@
 package com.zitrone.app
 
 import android.content.Context
+import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
+import com.goterl.lazysodium.SodiumAndroid
 import com.zitrone.app.crypto.AttachmentCrypto
+import com.zitrone.app.crypto.LibsodiumRegistrationPowDeriver
 import com.zitrone.app.crypto.MessagePadding
+import com.zitrone.app.crypto.RegistrationPow
 import com.zitrone.app.crypto.SignalProtocolManager
 import com.zitrone.app.crypto.vault.VaultCapacityException
 import com.zitrone.app.crypto.vault.VaultImageException
 import com.zitrone.app.diagnostics.BootDiagnostics
+import com.zitrone.app.diagnostics.RegistrationPowSolveRecorder
 import com.zitrone.app.data.AttachmentControlPayload
 import com.zitrone.app.data.AttachmentLoadState
 import com.zitrone.app.data.ControlPayload
@@ -28,12 +36,15 @@ import com.zitrone.app.data.SettingsRepository
 import com.zitrone.app.net.ApiClient
 import com.zitrone.app.net.WsClient
 import com.zitrone.app.notifications.NotificationScheduler
+import com.zitrone.app.ui.components.RegistrationPowState
+import com.zitrone.app.ui.components.RegistrationPowUiState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -41,8 +52,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.signal.libsignal.protocol.DuplicateMessageException
@@ -168,6 +181,55 @@ class MessagingCoordinator(
                     if (linking) Connectivity.CONNECTING else Connectivity.OFFLINE
             }
         }.stateIn(scope, SharingStarted.Eagerly, Connectivity.OFFLINE)
+
+    /**
+     * Registration proof-of-work UI state — drives
+     * [com.zitrone.app.ui.components.RegistrationPowScreen] (the lemon-squeeze pitcher)
+     * during the first-boot solve. IDLE whenever no solve is running: the relink path
+     * (account already registered) and the proofless 404 path never leave IDLE, so the UI
+     * composes the screen only during real account creation. The fraction comes ONLY from
+     * the solver's progress sink (actual work counts); the ticker in [solveRegistrationPow]
+     * owns elapsed time, the 60s prompt, and backgrounded detection — never progress
+     * (contract §6.1).
+     */
+    private val _registrationPow = MutableStateFlow(RegistrationPowUiState())
+    val registrationPow: StateFlow<RegistrationPowUiState> = _registrationPow.asStateFlow()
+
+    /**
+     * "keep waiting" latch — read by the solve ticker so a dismissed 60s prompt stays
+     * dismissed for the remainder of the CURRENT solve (contract §6.3: dismissing changes
+     * nothing about the solve, and it does not re-prompt). Reset per solve.
+     * @Volatile: written on the main thread, read by the ticker on the confined worker.
+     */
+    @Volatile
+    private var powPromptDismissed = false
+
+    /** The 60s prompt's "keep waiting": dismisses the prompt, nothing else (contract §6.3). */
+    fun powKeepWaiting() {
+        powPromptDismissed = true
+        _registrationPow.update { current ->
+            if (current.state == RegistrationPowState.PROMPTED_AT_60S) {
+                current.copy(state = RegistrationPowState.SOLVING)
+            } else {
+                current
+            }
+        }
+    }
+
+    /**
+     * The 60s prompt's "try later": aborts the solve cleanly. The solver's only cancellation
+     * mechanism is thread interruption, delivered by cancelling the boot job ([stop] — the
+     * designed teardown; during registration there is no session or socket to tear down). No
+     * durable state is left behind (the solve runs BEFORE the prekey barriers, the challenge
+     * is stateless server-side), and the next [start] — next unlock or app launch — retries
+     * with a fresh challenge.
+     */
+    fun powTryLater() {
+        stop()
+        // Terminal write AFTER stop() so it wins regardless of where the cancellation lands
+        // in the solve path (which also writes CANCELLED, harmlessly, on its own catch).
+        _registrationPow.value = RegistrationPowUiState(state = RegistrationPowState.CANCELLED)
+    }
 
     /**
      * Set when the server revokes our session — UI returns to the lock gate.
@@ -362,6 +424,9 @@ class MessagingCoordinator(
     @Synchronized
     fun start() {
         if (linkJob?.isActive == true) return
+        // A stale terminal PoW state (CANCELLED from a "try later", COMPLETE from a torn-down
+        // boot) must not leak into this run's UI; the solve path re-raises it when it runs.
+        _registrationPow.value = RegistrationPowUiState()
         _linking.value = true
         acceptingDeliveries = true
         linkJob = scope.launch(confined) { bootstrapLoop() }
@@ -374,7 +439,7 @@ class MessagingCoordinator(
         // register. Identity generation is idempotent and stays inside the loop,
         // so a transient keystore hiccup retries instead of dead-ending the loop
         // with nothing scheduled to recover it.
-        var registration: (suspend () -> Unit)? = null
+        var registration: (suspend (powProof: Map<String, String>?) -> Unit)? = null
         var attempt = 0
         while (coroutineContext.isActive && _linking.value) {
             // Boot-stage marker for the diagnostic log in onFailure below.
@@ -396,18 +461,43 @@ class MessagingCoordinator(
                         // it per-account.
                         val signedPreKey = signal.pendingSignedPreKeyUpload() ?: signal.generateSignedPreKey()
                         val oneTimePreKeys = signal.generateOneTimePreKeys(discardAttempted = true)
-                        registration = suspend {
+                        registration = { powProof ->
                             api.register(
                                 identityKeyBase64 = signal.localIdentityPublicKeyBase64(),
                                 registrationId = signal.localRegistrationId(),
                                 signedPreKey = signedPreKey,
                                 oneTimePreKeys = oneTimePreKeys,
+                                powProof = powProof,
                             )
                             // register() returns the new account id; the loop
                             // only needs its Unit side effect (accountId stored).
                             Unit
                         }
                     }
+                    // 0.9.4 registration PoW: fetch a challenge and solve BEFORE the prekey
+                    // durability barriers below — an aborted or failed solve then leaves no
+                    // durable state behind (the challenge is stateless server-side) and never
+                    // burns the batch's ATTEMPTED marker for an attempt that produced no
+                    // register request. The proof is per-attempt, never cached like the prekey
+                    // closure: challenges expire, and a retry only reaches here when the relay
+                    // was reachable moments ago, so a fresh fetch is cheap. The solve itself
+                    // always runs through the instrumented recorder (Diagnostics screen).
+                    stage = "pow-challenge"
+                    val challengeToken = try {
+                        api.registrationChallenge()
+                    } catch (e: ApiClient.ApiException) {
+                        if (e.code == 404) {
+                            // Relay predates the PoW deploy entirely. Registering proofless is
+                            // the designed behaviour, not a fallback an attacker can reach:
+                            // an ENFORCING relay serves this endpoint by construction.
+                            diag("boot[$attempt]: no PoW challenge endpoint (404) — registering without proof")
+                            null
+                        } else {
+                            throw e
+                        }
+                    }
+                    stage = "pow-solve"
+                    val powProof = challengeToken?.let { solveRegistrationPow(attempt, it) }
                     // NOTE: if the register POST reaches the server but the
                     // response is lost (process death mid-flight), accountId is
                     // never stored and a retry mints a second, orphaned account
@@ -442,7 +532,7 @@ class MessagingCoordinator(
                     }
                     diag("boot[$attempt]: firing POST /api/v1/register")
                     try {
-                        registration?.invoke()
+                        registration?.invoke(powProof?.toJsonMap())
                     } catch (t: Throwable) {
                         // The request MAY have reached the relay (response lost / any ambiguous
                         // failure): drop the cached closure so the retry regenerates its batch
@@ -506,8 +596,17 @@ class MessagingCoordinator(
                     "boot[$attempt]: failed at stage=$stage: " +
                         "${e.javaClass.name}: ${e.message}$bodySuffix",
                 )
+                // A failure AFTER a completed solve (register 4xx, session mint, flush) must
+                // not leave a full pitcher sitting through the backoff — that reads as a hang
+                // (contract §6.2). Drop the screen; the retry's fresh solve raises it again.
+                _registrationPow.update { current ->
+                    if (current.state == RegistrationPowState.COMPLETE) RegistrationPowUiState() else current
+                }
             }.isSuccess
             if (ok) {
+                // Boot reached a live session: registration (if any) is fully done — retire
+                // the full-pitcher COMPLETE frame and hand the UI back to the session routes.
+                _registrationPow.value = RegistrationPowUiState()
                 // ws.connect() only enqueues the socket open; the real
                 // CONNECTED/DISCONNECTED transition (and any /ws handshake
                 // failure) is delivered asynchronously via ws.connectionState,
@@ -571,6 +670,110 @@ class MessagingCoordinator(
         Log.w(TAG, line)
         diagnostics.record(line)
     }
+
+    /** Lazily constructed: libsodium is only touched if a solve actually runs. */
+    private val powDeriver: RegistrationPow.Argon2idDeriver by lazy {
+        LibsodiumRegistrationPowDeriver(SodiumAndroid())
+    }
+
+    /**
+     * Solve the registration PoW through the instrumented recorder so every real solve
+     * writes its calibration numbers to the Diagnostics screen (see the recorder's kdoc —
+     * that channel produced the 0.9.4 device calibration and is how any future difficulty
+     * change gets re-measured).
+     *
+     * Runs on [Dispatchers.Default]: the solve is pure CPU for seconds and must not occupy
+     * the confined boot worker. [runInterruptible] maps coroutine cancellation (stop(),
+     * logout, "try later", teardown) onto the solver's thread-interrupt contract, so an
+     * abandoned boot aborts the solve promptly — and the recorder logs that abort as a
+     * data point.
+     *
+     * Also the producer of [registrationPow] (the pitcher screen's state). Two disjoint
+     * writers while the solve runs, merged with atomic [MutableStateFlow.update]s:
+     *  - the solver's progress sink (solver thread) writes ONLY the fraction — progress
+     *    tracks actual work, never time (contract §6.1);
+     *  - a 1s ticker (this coroutine's scope) writes ONLY elapsed seconds + the
+     *    SOLVING/PROMPTED_AT_60S/BACKGROUNDED distinction ([registrationPowTickState]).
+     * Terminal states are written here after both are stopped: COMPLETE on proof (held
+     * until the boot loop retires it at session-up), CANCELLED on interruption, IDLE on a
+     * real solve failure (the boot loop's backoff owns the retry).
+     */
+    private suspend fun solveRegistrationPow(attempt: Int, challengeToken: String): RegistrationPow.Proof {
+        powPromptDismissed = false
+        val solveStartedAt = SystemClock.elapsedRealtime()
+        fun elapsedSeconds() = (SystemClock.elapsedRealtime() - solveStartedAt) / 1_000
+        _registrationPow.value = RegistrationPowUiState(state = RegistrationPowState.SOLVING)
+        val proof = try {
+            coroutineScope {
+                val ticker = launch {
+                    while (isActive) {
+                        delay(1_000)
+                        _registrationPow.update { current ->
+                            current.copy(
+                                state = registrationPowTickState(
+                                    elapsedSeconds = elapsedSeconds(),
+                                    promptDismissed = powPromptDismissed,
+                                    inForeground = processInForeground(),
+                                ),
+                                elapsedSeconds = elapsedSeconds(),
+                            )
+                        }
+                    }
+                }
+                try {
+                    runInterruptible(Dispatchers.Default) {
+                        RegistrationPowSolveRecorder(
+                            diag = { line -> diag("boot[$attempt]: $line") },
+                            batterySaver = {
+                                runCatching {
+                                    (appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager)
+                                        ?.isPowerSaveMode
+                                }.getOrNull()
+                            },
+                            inForeground = ::processInForeground,
+                            clock = SystemClock::elapsedRealtime,
+                        ).solve(
+                            challengeToken = challengeToken,
+                            identityKey = signal.localIdentityPublicKeyBytes(),
+                            params = RegistrationPow.DEFAULT_PARAMS,
+                            deriver = powDeriver,
+                            uiProgress = { p ->
+                                _registrationPow.update { it.copy(fractionOfExpectedWork = p.fraction) }
+                            },
+                        )
+                    }
+                } finally {
+                    // coroutineScope won't return until the ticker is really gone, so the
+                    // terminal writes below can never be clobbered by a late tick.
+                    ticker.cancel()
+                }
+            }
+        } catch (e: CancellationException) {
+            _registrationPow.update { it.copy(state = RegistrationPowState.CANCELLED) }
+            throw e
+        } catch (t: Throwable) {
+            _registrationPow.value = RegistrationPowUiState()
+            throw t
+        }
+        _registrationPow.update {
+            it.copy(state = RegistrationPowState.COMPLETE, elapsedSeconds = elapsedSeconds())
+        }
+        return proof
+    }
+
+    /**
+     * A plain field read (LifecycleRegistry keeps state in a field; only mutation is
+     * main-thread-enforced), so it is cheap enough for the recorder's per-emission sampling
+     * and the UI ticker alike. Worst case it reads slightly stale — fine for both. Null when
+     * unreadable: the recorder renders that as `unknown`, and the tick state treats it as
+     * not-backgrounded (BACKGROUNDED is a claim about the user having left; don't make it
+     * on a probe that can't answer).
+     */
+    private fun processInForeground(): Boolean? =
+        runCatching {
+            ProcessLifecycleOwner.get().lifecycle.currentState
+                .isAtLeast(Lifecycle.State.STARTED)
+        }.getOrNull()
 
     /**
      * Durable-ack barrier for the inbound path: reseal the ratchet advance ([flushBeforeAck])
@@ -1940,6 +2143,29 @@ internal fun classifyRecvFailure(e: Throwable): RecvFailureAction = when {
  */
 internal class PreKeyFlushNotDurableException :
     Exception("prekey reseal not confirmed durable — publication deferred to the next boot attempt")
+
+/** Wall-clock threshold for the non-blocking "taking longer than expected" prompt (contract §6.3). */
+internal const val REGISTRATION_POW_PROMPT_AT_SECONDS = 60L
+
+/**
+ * Which [RegistrationPowState] a RUNNING solve renders on a ticker tick — extracted so the
+ * precedence is host-testable. BACKGROUNDED wins over the 60s prompt (a prompt is only
+ * meaningful to a user who is looking; on return the very next tick re-raises it if still
+ * due), a dismissed prompt stays dismissed for the remainder of the solve, and an
+ * unanswerable foreground probe (null) is NOT treated as backgrounded — BACKGROUNDED claims
+ * "you left, we're still working", which must not be claimed on no evidence. Terminal states
+ * (COMPLETE/CANCELLED/IDLE) are never produced here; the solve path owns them.
+ */
+internal fun registrationPowTickState(
+    elapsedSeconds: Long,
+    promptDismissed: Boolean,
+    inForeground: Boolean?,
+): RegistrationPowState = when {
+    inForeground == false -> RegistrationPowState.BACKGROUNDED
+    elapsedSeconds >= REGISTRATION_POW_PROMPT_AT_SECONDS && !promptDismissed ->
+        RegistrationPowState.PROMPTED_AT_60S
+    else -> RegistrationPowState.SOLVING
+}
 
 /** Attempts (incl. the first) [flushThenAck] makes at a TRANSIENT durable-flush blip. */
 internal const val FLUSH_MAX_ATTEMPTS = 3

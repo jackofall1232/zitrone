@@ -64,6 +64,8 @@ import com.zitrone.app.i2p.I2pIntegration
 import com.zitrone.app.security.RootDetection
 import com.zitrone.app.tor.TorIntegration
 import com.zitrone.app.ui.components.BurnSetupDialog
+import com.zitrone.app.ui.components.RegistrationPowScreen
+import com.zitrone.app.ui.components.RegistrationPowState
 import com.zitrone.app.ui.components.buildContactExchangePayload
 import com.zitrone.app.ui.screens.AddContactScreen
 import com.zitrone.app.ui.screens.ChatListScreen
@@ -1613,6 +1615,26 @@ private fun SessionUi(
     val typingPeers by session.coordinator.typingPeers.collectAsState()
     val connectivity by session.coordinator.connectivity.collectAsState()
     val accountId by session.apiClient.accountIdFlow.collectAsState()
+    val registrationPow by session.coordinator.registrationPow.collectAsState()
+
+    // First-boot registration proof-of-work: the lemon-squeeze pitcher replaces the session
+    // routes for the solve's lifetime — through COMPLETE's full-pitcher frame, which the boot
+    // loop retires (→ IDLE) the moment the session is up. Only real account creation ever
+    // leaves IDLE (relink and the proofless-404 path never touch it), so this composes
+    // exactly once per account. See REGISTRATION_POW_UI_CONTRACT.md.
+    if (registrationPow.state != RegistrationPowState.IDLE &&
+        registrationPow.state != RegistrationPowState.CANCELLED
+    ) {
+        RegistrationPowScreen(
+            uiState = registrationPow,
+            onKeepWaiting = session.coordinator::powKeepWaiting,
+            onTryLater = session.coordinator::powTryLater,
+            modifier = Modifier
+                .fillMaxSize()
+                .background(BackgroundPrimary),
+        )
+        return
+    }
 
     when (route) {
         Route.ChatList -> ChatListScreen(

@@ -11,7 +11,69 @@
 - [x] Added the `security-review-loop.md` prompt to `l00prite/.l00prite/prompts/` + the prompt index
       (PR #52 `b8eb652` / PR #53, merged). It drove PR-2's paired-blind loop to clean convergence.
 
-## NEXT — 0.9.4-beta: REGISTRATION PROOF-OF-WORK. Spec brief, not started.
+## IN PROGRESS — 0.9.4-beta: REGISTRATION PROOF-OF-WORK.
+
+> **STATUS 2026-07-26 (CX33 session).** Client code landed on LOCAL branch
+> `feat/0.9.4-registration-pow-client` (4 commits, NOTHING PUSHED, no version bump).
+> Suite 585/0 failures, assembleDebug exit 0.
+>
+> **UPDATE 2026-07-27 (`d6b12587`):** the solve is now WIRED into registration through an
+> instrumented recorder — `pow:` lines (per-stage timings, work counts, params used, battery
+> saver, foreground/backgrounded) land in the Diagnostics screen on success AND abort, so one
+> registration attempt on the Revvl 6x returns the real number without adb or the gradle
+> harness. Client ships `DEFAULT_PARAMS` D=4 — a FIRST CALIBRATION ATTEMPT, not a measured
+> value; `TODO(pow-calibration)` stands. Relay env must pin all four params at flip time
+> (runbook step-5 precondition; relay config default is still the D=8 placeholder). Still
+> pending on this track: solve-layer UI wiring (pitcher screen + foreground service are built
+> but unwired), independent review of the whole client branch, then the cut.
+>
+> **UPDATE 2026-07-27 (`3b0719ed`) — solve-layer UI wiring DONE.** The `test-pow-d6b12587`
+> cut came back device-tested good (maintainer), and the pitcher is now wired:
+> MessagingCoordinator produces `RegistrationPowUiState` (fraction from the solver's sink
+> only; 1s ticker owns elapsed/60s-prompt/backgrounded via pure host-tested
+> `registrationPowTickState`); SessionUi composes `RegistrationPowScreen` during real account
+> creation only. "try later" aborts via stop(); COMPLETE retired at session-up; failed
+> attempts drop the overlay instead of freezing a full pitcher. Suite 598/0, assembleDebug
+> exit 0. The PoW FOREGROUND SERVICE stays deliberately unbuilt (BACKGROUNDED is lifecycle
+> detection; the softened copy doesn't overclaim). Before the cut: `3b0719ed` is NOT in the
+> tested binary — the cut build needs a device smoke pass (fresh install → pitcher →
+> registered); read back the Revvl 6x `pow:` lines for calibration; independent review of
+> the whole branch; relay params pinned at flip.
+>
+> **BLOCKER CLEARED 2026-07-27 (`2db67d0b`): the Argon2id constants are MEASURED — D=5.**
+> The maintainer ran the test cut on the Revvl 6x (battery saver + foreground) and the
+> `pow:` lines came back: SHA-256 0.63 MH/s, Argon2id 36.7 ms/eval at 19 MiB/t=1. Calibrated
+> on rates, not the lucky 982 ms draw (~0.43× expected work on both stages). The d=20
+> pre-stage is ~1.7 s on-device (over half the solve), so the ~3 s floor target applies to
+> the WHOLE solve → D=5 (~2.8 s expected in saver, ~5% tail ~8 s, attacker ~0.85 s/account).
+> `TODO(pow-calibration)` resolved everywhere; runbook step-5 pin is now
+> `REGISTRATION_ARGON2_DIFFICULTY_BITS=5` (relay default is STILL the D=8 placeholder — set
+> the env explicitly). Finding recorded: phone pays 16× on SHA-256 vs 1.6× on Argon2id
+> relative to the server core; rebalance (d=18 + D+1) is a future candidate, not this cut.
+>
+> Done: relay-side cost MEASURED across the full m×t sweep (`docs/REGISTRATION_POW_CALIBRATION.md`);
+> client solver + challenge fetch + identity-key binding + debug difficulty override;
+> cross-implementation agreement between libsodium and Go x/crypto/argon2 VERIFIED by pinned
+> vectors (not assumed — a disagreement would silently reject every proof); UI contract +
+> functional stub (`ui/components/REGISTRATION_POW_UI_CONTRACT.md`, written to be read cold by
+> Fable); deployment runbook + CX23 branch-base decision (`docs/DEPLOY_0.9.4_POW.md`).
+>
+> Findings that did NOT need the phone: the shipped placeholder
+> `REGISTRATION_ARGON2_DIFFICULTY_BITS=8` is far too high (256 expected evals = 5.9 s on a
+> 4-core SERVER; likely landing zone D=4–5). The SHA-256 pre-stage does not protect Argon2id
+> from a GPU attacker, so the real DoS defence is rate-limited issuance plus a CONCURRENCY
+> SEMAPHORE on verification **that does not exist yet** — unbounded concurrency at ~19 MiB per
+> verify is an OOM vector. Solve time is geometrically distributed, so UI progress can
+> legitimately exceed 100%.
+>
+> Also on this branch: BurnSetupDialog now qualifies the burn's scope (device-local; the relay
+> account survives), which was the 0.9.3 docs correction's open in-app item.
+>
+> Separate LOCAL branch `docs/four-file-compose-correction` (1 commit): the recorded THREE-file
+> compose invocation was WRONG — production needs FOUR files with `-p sublemonable`, or the
+> relay comes up on an empty `zitrone` DB while looking healthy.
+
+### Original spec brief (below) — decisions 1–8 remain settled.
 
 **PROBLEM.** `/api/v1/register` is rate-limited 5/hour keyed on `c.IP()`, which resolves to Caddy's
 socket address (no `ProxyHeader` configured), so **every clearnet client worldwide shares one global

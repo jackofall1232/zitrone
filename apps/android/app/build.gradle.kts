@@ -55,8 +55,8 @@ android {
         applicationId = "com.zitrone.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 19
-        versionName = "0.9.3-beta"
+        versionCode = 20
+        versionName = "0.9.4-beta"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -91,6 +91,22 @@ android {
             "String",
             "I2P_PROXY_HOST",
             "\"${providers.environmentVariable("I2P_PROXY_HOST").orNull ?: "127.0.0.1"}\""
+        )
+
+        // 0.9.4 registration proof-of-work — DEBUG-ONLY difficulty override.
+        // Burn testing re-registers on every cycle, and paying a full PoW solve
+        // each time makes the burn loop unusable; this lets a debug build ask for
+        // a trivial puzzle instead.
+        //
+        // -1 means "no override, use the relay's parameters". crypto/RegistrationPow.kt
+        // ALSO gates this on BuildConfig.DEBUG, so a release build ignores the value
+        // even if the env var is set at release-build time — two independent guards,
+        // because a weakened PoW in a shipped build is a silent security regression
+        // rather than a visible break.
+        buildConfigField(
+            "int",
+            "REGISTRATION_POW_DEBUG_DIFFICULTY",
+            providers.environmentVariable("REGISTRATION_POW_DEBUG_DIFFICULTY").orNull ?: "-1"
         )
     }
 
