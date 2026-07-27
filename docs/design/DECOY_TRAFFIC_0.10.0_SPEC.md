@@ -425,27 +425,56 @@ So, shipping **with** 0.10.0, in release notes and in `SECURITY_MODEL.md`:
 > and everything in them** — contacts, sessions, settings. There is no migration and no export. Do
 > not keep anything in Zitrone that you cannot afford to lose.
 >
-> **What 0.10.0-beta specifically changes:** once a vault has **set up cover traffic**, it can no
-> longer be opened by 0.9.x; downgrading will present that vault as corrupt. Setup begins the first
-> time a vault sends cover traffic and is complete once its cover-traffic account is registered —
-> and because an interrupted setup can leave the vault marked either way, **if you are unsure
-> whether a vault got that far, assume it did.** A vault that has never used cover traffic is
-> unaffected.
+> **What 0.10.0-beta specifically changes:** any vault on which cover traffic has ever been enabled
+> or attempted — even once, even if the attempt failed, was interrupted, or never completed — **may**
+> no longer be readable by 0.9.x, and downgrading may present that vault as corrupt. Only a vault on
+> which cover traffic was **never enabled** is guaranteed to be unaffected. If you are unsure, assume
+> the vault is affected.
 
-> **⚠️ FOURTH PASS — PENDING MAINTAINER RE-RATIFICATION.** This sentence has now been rewritten four
-> times and **each previous version was found wrong by a later review round, in a different
-> direction each time**: originally too broad ("vaults created by 0.10.0"), then understating ("the
-> first time it sends any", when registration alone installs the tag), then overstating (the
-> architect's proposed "tries to send", when a pre-`register` failure retires the deferral), and
-> most recently false under crash-at-any-instruction — a crash between the write-ahead flush and
-> `register` leaves the tag with the relay never contacted.
+> **⚠️ SIXTH PASS — THIRD-LENS TIE-BREAK APPLIED, PENDING MAINTAINER RATIFICATION.** The paired
+> reviewers **disagreed** on version five: one held it still false in the crash window, the other
+> held it sound. The architect resolved it in favour of "sound" — and the maintainer identified the
+> gap in that resolution: the architect had argued the exempting clause did not apply to a vault
+> whose setup began, but after the H1/H5 fix such a vault leaves **no tag at all**, so the clause
+> *does* apply cleanly. The resolution had picked the reviewer who agreed with the already-written
+> sentence.
 >
-> **This version deliberately stops stating a precise boundary.** Four good-faith attempts to state
-> one failed, because the boundary depends on implementation details that keep moving — exactly the
-> fragility recorded in `failures.md` as *the invalidated-from-underneath claim*. A disclosure's job
-> is to let a reader decide what to do, not to document a state machine. "If you are unsure, assume
-> it did" is honest about the uncertainty, covers the crash case without enumerating it, and stays
-> true if U2/U3 move when the tag is written. **The precision lives in the internal truth table
+> **The third lens was called and ruled for "still false".** Its decisive argument was one neither
+> paired reviewer made: *the hedge does not fail because it is weak, it fails because it addresses
+> the wrong thing.* "If you are unsure, assume it did" answers **epistemic uncertainty** — but the
+> crash-path user is not unsure, they are **certain and wrong**, because the sentence's own
+> definitional clauses ("sends", "used", "set up") placed them in the exempt category. A hedge
+> against doubt does nothing for a reader the text has actively miscategorised. It further held that
+> "has set up" is present-perfect and reads as *completed* action, so a user whose provisioning
+> crashed will truthfully report "I never set up cover traffic".
+>
+> **Version six inverts the structure** to an invariant that does not depend on *when* the marker is
+> written: **no attempt of any kind ⇒ guaranteed unaffected; any attempt ⇒ *may* be affected.** The
+> "may" is doing deliberate work — it avoids overstating, since a cleanly-retired attempt genuinely
+> is unaffected — and a possibility claim on the safe side of a format break is the correct place to
+> be imprecise. This is the first version whose truth does not move if U2/U3 change the write timing.
+>
+> **The full history, kept because the pattern is the lesson.** Six versions, and every one before
+> this was falsified by a later review round, in a different direction each time:
+>
+> 1. *"vaults created by 0.10.0 cannot be opened by 0.9.x"* — **too broad.** The tag is only written
+>    once there is something to record.
+> 2. *"the first time it sends any"* — **understating.** Registration alone installs the tag.
+> 3. *"tries to send"* — **overstating.** The architect's own proposal; a pre-`register` failure
+>    retires the deferral and keeps 0.9.x readability.
+> 4. *"…and is complete once its account is registered"* — **false under crash-at-any-instruction.**
+> 5. *"…if you are unsure, assume it did"* — **still misleading**, per the third-lens ruling above:
+>    it hedges doubt for a reader the text had already miscategorised as exempt.
+> 6. **This version** — inverts to a possibility claim keyed on *any attempt*, which is the first
+>    formulation independent of write timing.
+>
+> Versions 1–5 all shared one root error: **each was edited from the previous wording rather than
+> re-derived from the code's behaviour.** That is the `failures.md` entry *the
+> invalidated-from-underneath claim* in its most concentrated form — and it took a third independent
+> lens to break out of it, because both paired reviewers and the architect were by then reasoning
+> about the sentence instead of about the paths.
+>
+> **The precision lives in the internal truth table
 > below, which is where it belongs.**
 
 *(Narrowed 2026-07-27 after U1. The first draft said flatly that "vaults created by 0.10.0 cannot be

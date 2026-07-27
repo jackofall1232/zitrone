@@ -598,6 +598,64 @@ J3/J4/J5, K1/K2/K3). By round 5 **every remaining finding in the unit was prose 
 zero code defects at any severity** — the documentation surface outlived the implementation surface
 by two full rounds. Budget review attention accordingly on future units: docs are not the cheap part.
 
+### THE TWO-BLIND-REVIEWER RULE PAYING FOR ITS WHOLE COST IN ONE DATA POINT (U1 round 1)
+
+Keep this one. It is the single cleanest justification the practice has produced.
+
+**At round 1, a single reviewer would have shipped a real P1 — whichever one you picked.**
+
+- **Codex** found that `VaultRuntime.mutate` only *schedules* a reseal, so the counter reservation
+  spent values whose high-water mark might never reach disk — a wire-visible counter regression, the
+  exact fingerprint the mechanism exists to prevent.
+- **Grok explicitly certified that same property sound**, listing "durable advance before spend" as a
+  non-finding and marking the counter invariant as *Holds*. A false negative on a P1.
+- **Grok** found that `isProvisioned()` never consulted `capacityExceeded`, so a near-capacity vault
+  registered a **new relay account on every unlock** against a single global bucket shared worldwide.
+- **Codex missed that one entirely.**
+
+Neither reviewer alone was sufficient, and the failure was not that one was weaker — they were
+*differently* wrong. Corollary already recorded and reinforced here: **a reviewer asserting a
+property HOLDS is a claim like any other and gets verified against source like any other.** Grok's
+non-finding was resolved against `VaultRuntime.kt`'s own "no I/O here" comment, not adjudicated by
+reputation.
+
+### BUDGET FOR THE DOC SURFACE — it outlives the code surface (U1, measured)
+
+From round 5 onward, U1 had **zero code defects at any severity from either blind reviewer**, and
+review rounds still produced findings: prose lagging behaviour, every time. The documentation surface
+**outlived the implementation surface by two full rounds.**
+
+Plan for this on the next unit rather than rediscovering it. Concretely: treat contracts, kdoc,
+spec sections and invariant tables as first-class review scope from round 1, not as a tidy-up at the
+end. Findings by round, for calibration: 10 → 11 → 10 → 6 → 3 → 3, with P1s 2 → 1 → 0 → 0 → 0 → 0 and
+**every finding from round 5 on being prose.**
+
+### A SWEEP THAT GREPS THE RULE'S OWN WORDING MISSES THE PARAPHRASES (U1 round 6)
+
+The sharpest form of the grep-every-restatement rule, and it was learned by the rule's own author
+under-applying it **in the same commit that recorded it**.
+
+Round 5 recorded: *when a misconception is corrected, grep for every restatement, especially the
+compressed ones.* Round 6 then found **two more surviving restatements** of exactly the claims round
+5 had corrected:
+
+- the `VaultState` codec kdoc's four-row list and a spec summary note, both still asserting the
+  trigger is "registration" with no crash row — the correction had landed in the two tables the
+  reviewer cited and skipped the parallel prose;
+- `DecoyRelayApi`'s kdoc saying credentials commit in "one **durable mutate**" — round 1's headline
+  misconception, alive in source through **five** fix rounds, because no reviewer cited that file
+  until the final round.
+
+**The refinement: a sweep that greps the rule's own wording will miss restatements that paraphrase
+it.** Searching for "mutate" finds the literal copies; it does not find "committed durably", "written
+to disk", "persisted in one step", or a four-row table that simply omits a row. **Sweep by CLAIM, not
+by phrasing** — enumerate what the corrected claim asserts, then find every place that asserts the
+same thing in any words, including tables whose *omissions* carry the claim implicitly.
+
+And the meta-lesson, worth more than the rule: **writing a rule down does not confer the discipline
+to follow it.** The author of the round-5 rule violated it in the act of recording it. Rules need a
+mechanical check, not just a statement.
+
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
   round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked
