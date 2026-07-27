@@ -369,6 +369,73 @@ class VaultDecoySectionTest {
         assertEquals("a positive mark still round-trips", 7L, ok.decoy?.counterHighWater)
     }
 
+    // ── the register-before-commit invariant, enforced by the FORMAT ──────────────
+
+    @Test
+    fun `the ENCODER refuses a credential half-set - an id without its key, and a key without its id`() {
+        // [R4] The unit's central invariant is that an account id and its identity keypair are
+        // committed together or not at all: a vault referencing an account whose signing key was
+        // never persisted is unauthenticatable, undeletable, and breaks every subsequent decoy send.
+        // Every writer honoured that — and the codec happily encoded the forbidden state anyway, so
+        // "structurally impossible" rested entirely on writers staying careful. isProvisioned then
+        // *hid* the malformed state by answering false, which is concealment, not prevention.
+        val key = IdentityKeyPair.generate().serialize()
+        assertThrows(IllegalArgumentException::class.java) {
+            VaultStateCodec.encode(baseState(DecoyState(accountId = "acct", identityKeyPair = null)))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            VaultStateCodec.encode(baseState(DecoyState(accountId = null, identityKeyPair = key)))
+        }
+        // Tokens belong TO an account: a token-only section is live bearer credentials for an
+        // account this vault does not claim. DecoyAuthStore fails closed on this in both setters;
+        // the format has to say it too, or a crafted image can still assert it.
+        assertThrows(IllegalArgumentException::class.java) {
+            VaultStateCodec.encode(baseState(DecoyState(accessToken = "jwt.a.b", refreshToken = "r")))
+        }
+        // Discriminators, so this is not a blanket refusal of anything partial. The paired set
+        // encodes, and so does the deferral-only section a spent-nothing attempt leaves behind —
+        // which is the shape the whole write-ahead back-off depends on being encodable.
+        val paired = VaultStateCodec.decode(
+            VaultStateCodec.encode(baseState(DecoyState(accountId = "acct", identityKeyPair = key))),
+        )
+        assertTrue("a paired credential set still encodes", paired.decoy?.isProvisioned == true)
+        val deferralOnly = VaultStateCodec.decode(
+            VaultStateCodec.encode(baseState(DecoyState(provisionNotBeforeMs = 1_795_000_123_456L))),
+        )
+        assertEquals(
+            "a deferral-only section still encodes",
+            1_795_000_123_456L,
+            deferralOnly.decoy?.provisionNotBeforeMs,
+        )
+    }
+
+    @Test
+    fun `the DECODER refuses a credential half-set too - strict v1 is symmetric`() {
+        // The encoder can no longer produce these, so they can only arrive crafted or corrupt — and
+        // a decoder that accepts what its encoder refuses hands the running app exactly the dangling
+        // reference the ordering rule exists to rule out, sourced from disk instead of from a
+        // writer. Bodies are hand-built rather than tampered field-by-field because the malformed
+        // shapes change the section's length.
+        val key = IdentityKeyPair.generate().serialize()
+        val idOnly = spliceDecoySection(decoyBody(accountId = "acct", identityKeyPair = null))
+        assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(idOnly)) }
+
+        val keyOnly = spliceDecoySection(decoyBody(accountId = null, identityKeyPair = key))
+        assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(keyOnly)) }
+
+        val tokenOnly = spliceDecoySection(
+            decoyBody(accountId = null, identityKeyPair = null, accessToken = "jwt.a.b"),
+        )
+        assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(tokenOnly)) }
+
+        // Discriminator: the SAME hand-built framing with a paired set decodes, so these failures
+        // are the pairing rule and not a broken body builder.
+        val paired = spliceDecoySection(decoyBody(accountId = "acct", identityKeyPair = key))
+        val decoded = VaultStateCodec.decode(deflate(paired))
+        assertEquals("acct", decoded.decoy?.accountId)
+        assertArrayEquals("the hand-built paired body decodes", key, decoded.decoy?.identityKeyPair)
+    }
+
     // ── the measured byte budget ──────────────────────────────────────────────────
 
     @Test
@@ -435,6 +502,48 @@ class VaultDecoySectionTest {
     /** The real TLV plaintext of a valid, fully-populated state — the base for every corruption. */
     private fun realPlaintextWithDecoy(): ByteArray =
         inflate(VaultStateCodec.encode(baseState(fullDecoy())))
+
+    /**
+     * A hand-built decoy section body in the codec's field order:
+     * `accountId ‖ identityKeyPair ‖ accessToken ‖ refreshToken` (nullable, `len(4 BE)` with -1 for
+     * null) `‖ counterHighWater(8 BE) ‖ deadAir(present ‖ 8) ‖ provisionNotBefore(present ‖ 8)`.
+     *
+     * Needed because the shapes the pairing rule forbids can no longer be produced by the encoder,
+     * and they are not reachable by flipping bytes in a valid body either — dropping a field changes
+     * the section's length.
+     */
+    private fun decoyBody(
+        accountId: String?,
+        identityKeyPair: ByteArray?,
+        accessToken: String? = null,
+        refreshToken: String? = null,
+        counterHighWater: Long = 0L,
+    ): ByteArray {
+        val out = ByteArrayOutputStream()
+        fun i32(v: Int) = out.write(byteArrayOf((v ushr 24).toByte(), (v ushr 16).toByte(), (v ushr 8).toByte(), v.toByte()))
+        fun i64(v: Long) = (7 downTo 0).forEach { out.write(((v ushr (it * 8)) and 0xff).toInt()) }
+        fun blob(bytes: ByteArray?) {
+            if (bytes == null) i32(-1) else { i32(bytes.size); out.write(bytes) }
+        }
+        blob(accountId?.toByteArray(Charsets.UTF_8))
+        blob(identityKeyPair)
+        blob(accessToken?.toByteArray(Charsets.UTF_8))
+        blob(refreshToken?.toByteArray(Charsets.UTF_8))
+        i64(counterHighWater)
+        out.write(0); i64(0L) // deadAirNextFireAtMs absent, canonical
+        out.write(0); i64(0L) // provisionNotBeforeMs absent, canonical
+        return out.toByteArray()
+    }
+
+    /** A valid plaintext with its decoy section replaced by [body], re-framed to the new length. */
+    private fun spliceDecoySection(body: ByteArray): ByteArray {
+        val plain = realPlaintextWithDecoy()
+        val (tagIndex, _) = locateDecoySection(plain)
+        val out = plain.copyOf(tagIndex + 5 + body.size)
+        writeSectionLength(out, tagIndex, body.size)
+        body.copyInto(out, tagIndex + 5)
+        return out
+    }
 
     private companion object {
         /**

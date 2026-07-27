@@ -299,13 +299,14 @@ encrypted image.
 
 | # | Writer | When | What it writes into `TAG_DECOY` | Status |
 |---|---|---|---|---|
-| W1 | `DecoyAccountProvisioner.provision()` | First unlocked session in which decoys are enabled and no synthetic account exists | Account id, identity keypair, initial tokens, and `provisionNotBeforeMs = null` (a success is the only thing that retires the back-off). **The counter reservation is NOT written here** — `counterHighWater` stays 0 until `DecoyCounterReservation.next()` first reserves a block (W3). **Dead-air next-fire is written `null`** — the distribution is U5's to settle (§3.2 re-framed the ping from wall-clock to in-session, so a durable wall-clock next-fire is of questionable meaning). The field exists and round-trips. | **DONE (U1)** |
+| W1 | `DecoyAccountProvisioner.provision()` | First unlocked session in which decoys are enabled and no synthetic account exists | Account id, identity keypair, initial tokens, and `provisionNotBeforeMs = null` — ~~a success is the only thing that retires the back-off~~ **[U1 R3/R4] success is not the only retirement path; see W1d.** It is the only one that retires the deferral *while writing something*, which is why it rides in this same mutate: there is no window where the credentials are durable and the deferral is not. **The counter reservation is NOT written here** — `counterHighWater` stays 0 until `DecoyCounterReservation.next()` first reserves a block (W3). **Dead-air next-fire is written `null`** — the distribution is U5's to settle (§3.2 re-framed the ping from wall-clock to in-session, so a durable wall-clock next-fire is of questionable meaning). The field exists and round-trips. | **DONE (U1)** |
 | W1b | `DecoyAccountProvisioner.reserveBackoff()` — the **write-ahead back-off** | **Before any relay contact**, on every attempt that gets past the deferral check | `provisionNotBeforeMs` only — the cross-session back-off deadline, `mutate` + `flushBeforeAck`. If it cannot be written, **no registration is spent at all** | **DONE (U1 R2)** |
+| W1d | `DecoyAccountProvisioner.clearBackoff()` — the **retirement of a deferral that protected nothing** | An attempt that fails **before** `register` is entered: offline challenge fetch, DNS failure, failed proof-of-work, a local crypto fault, a cancelled scope | `provisionNotBeforeMs` → null, `mutate` + `flushBeforeAck`, **compare-and-clear**: only the deadline *this* attempt wrote is retired, checked under the section lock, so a deferral another writer put there meanwhile is left alone. Emptying the holder is what removes `TAG_DECOY` entirely and restores 0.9.x readability | **DONE (U1 R3)** — **added to this table U1 R4; it was a real durable writer the inventory omitted** |
 | W2 | `DecoyAccountProvisioner.refreshTokens()` | Synthetic session token refresh (7-day refresh-token TTL, `auth/jwt.go:26`) | Tokens only; all other fields untouched | **this unit (U1)** |
 | W3 | `DecoyCounterReservation` | Counter reservation exhausted (once per 64 decoys) | High-water mark only, monotonically increasing | **allocator DONE (U1)**; the `DecoySender` that spends the values is U2 |
 | W4 | `DeadAirPinger.rearm()` | After each dead-air ping fires | Next-fire time only | **this unit (U5)** |
 | W5 | `VaultRuntime.mutate` (existing) | Every write above, without exception | Re-encodes whole `VaultState` under `stateLock` and **SCHEDULES** a reseal — **it is not durable**, see §2.3's correction | existing |
-| W6 | `VaultRuntime.flushBeforeAck` (existing) | W1, W3, and both back-off writes — every value that must survive process death | Forces the scheduled payload to disk synchronously. **A throw means the value was never issued / never recorded** | existing — **added 2026-07-27 (U1 R1)** |
+| W6 | `VaultRuntime.flushBeforeAck` (existing) | W1, W3, and **all three** back-off writes — W1b, W1d, and W1's retirement — every value that must survive process death | Forces the scheduled payload to disk synchronously. **A throw means the value was never issued / never recorded** | existing — **added 2026-07-27 (U1 R1)**; W1d added R4 |
 
 ### READERS, and what each assumes `TAG_DECOY` MEANS
 
@@ -394,13 +395,15 @@ rule on:
 > scaring every user about a break most of them will never hit is not caution, it is inaccuracy in
 > the direction that happens to feel safe.
 >
-> **[U1 round 3] The trigger is "set up", not "generated".** U1 writes a durable back-off *before*
-> contacting the relay, so the section appears the moment provisioning is attempted rather than when
-> the first decoy goes out. The two coincide in practice — U3 provisions lazily, from the first
-> session that actually needs a decoy — but they are not identical: a vault that registers and then
-> never sends still carries the tag. An attempt that fails **before** spending a registration now
-> retires its deferral, which empties the holder and puts the vault back in the omitted case, so a
-> failed offline first attempt does not cost the downgrade path. Wording below adjusted to match.
+> **[U1 round 3, corrected round 4] The trigger is setup that REACHES THE RELAY.** U1 writes a
+> durable back-off *before* contacting the relay, so the section appears earlier than the first sent
+> decoy — but an attempt that fails **before** `register` retires its deferral, which empties the
+> holder and puts the vault back in the omitted case. So the tag is not attached by *attempting*
+> provisioning either (round 3 said "the moment provisioning is attempted", which overstated it);
+> it is attached from `register` onwards, whatever happens next. Three consequences: a vault that
+> registers and never sends **does** carry the tag; a vault whose first attempt failed offline does
+> **not**; and the trigger coincides with the first send only because U3 provisions lazily from the
+> session that needs one. Wording below adjusted to match.
 
 ### 4.1 Storage-format-stability gate — ANSWERED, not deferred a third time
 
@@ -423,28 +426,43 @@ So, shipping **with** 0.10.0, in release notes and in `SECURITY_MODEL.md`:
 > not keep anything in Zitrone that you cannot afford to lose.
 >
 > **What 0.10.0-beta specifically changes:** once a vault has **set up cover traffic** — which
-> happens the first time it sends any — it can no longer be opened by 0.9.x; downgrading will present
-> that vault as corrupt. A vault that has never used cover traffic is unaffected and still opens on
-> 0.9.x.
+> happens the first time it sends any, and is complete as soon as its cover-traffic account is
+> registered — it can no longer be opened by 0.9.x; downgrading will present that vault as corrupt.
+> A vault that has never used cover traffic, or whose setup never reached the relay, is unaffected.
 
 *(Narrowed 2026-07-27 after U1. The first draft said flatly that "vaults created by 0.10.0 cannot be
 opened by 0.9.x", which is false: the tag is written only once cover traffic has actually been
 generated. Corrected rather than left overbroad — the deliver-then-claim rule cuts both ways, and a
 disclosure that overstates harm is as inaccurate as one that understates it.)*
 
-> **✅ ADJUSTED AFTER U1 REVIEW ROUND 3 — RE-RATIFIED BY THE MAINTAINER 2026-07-27. This wording is
-> FINAL.** The parenthetical is load-bearing and deliberate: it closes the gap for a reader who would
-> otherwise have no way to know whether their own vault is affected. The
-> narrowing above was an explicit maintainer ruling, so this change is flagged rather than made
-> quietly. "Generated cover traffic" became **false** in U1: the provisioner records a durable
-> back-off *before* it contacts the relay, so the tag lands when a vault **sets up** cover traffic,
-> which is earlier than its first sent decoy. Round 3 fixed the half of that which was a real defect
-> — an attempt that fails before spending a registration now retires the deferral, and the emptied
-> section is omitted again, so a vault whose only brush with cover traffic was a failed offline
-> attempt keeps its 0.9.x readability. What remains is genuinely broader than the ruled wording: a
-> vault that registers and then never sends still carries the tag. The wording above is the minimal
-> honest widening. **An overstated disclosure is its own dishonesty — which is why the maintainer
-> narrowed it — but an understated one is worse, so this could not simply be left as it stood.**
+> **⚠️ ADJUSTED AGAIN AFTER U1 REVIEW ROUND 4 — PENDING MAINTAINER RE-RATIFICATION. This is the
+> THIRD pass at this sentence, and the maintainer has already ratified it once.** It moved again
+> because the round-3 wording still understated the break, and because the architect's own proposed
+> replacement — "the first time it *tries to* send any" — was rejected in review as **overstating**
+> it. Both errors have the same cause: each pass reasoned from the *previous wording* rather than
+> from what the code does. The code's actual trigger, enumerated:
+>
+> | Path | `TAG_DECOY` on disk? |
+> |---|---|
+> | Never attempts provisioning | no |
+> | Fails **before** `register` (offline, DNS, failed PoW, local crypto fault) — deferral retired | no — the emptied holder is omitted |
+> | **Reaches `register`** (including a 429, or a lost response) | **yes** |
+> | Succeeds, never sends a decoy | **yes** |
+>
+> So the trigger is **setup that reaches relay registration** — not a completed send, and not a send
+> *attempt* either. "Tries to send" would have told a user who failed offline that they had lost
+> their downgrade path when they had not. The wording above is accurate on all four rows.
+>
+> **Why it keeps drifting, recorded so the next pass does not repeat it:** the sentence's truth
+> depends on an implementation detail that three rounds of review have each moved. It must be
+> re-derived from the code on any change to the provisioning failure paths, never edited from its own
+> previous version.
+>
+> **Applied now rather than left standing while it waits**, because an understated format-break
+> disclosure is the more dangerous direction and the previous wording was understated. The
+> narrowing this sentence descends from was an explicit maintainer ruling, so every subsequent
+> movement is flagged rather than made quietly. **An overstated disclosure is its own dishonesty —
+> which is why the maintainer narrowed it — but an understated one is worse.**
 
 **And the condition under which the promise flips**, so this is a commitment and not an indefinite
 disclaimer: **stability is committed to when a migration path exists and has been exercised across
@@ -522,7 +540,7 @@ next begins. No version bump, no push, nothing merged without explicit maintaine
 
 | Unit | Scope | Gate to clear before the next unit |
 |---|---|---|
-| **U1** ✅ | Synthetic account provisioning + `TAG_DECOY` codec section. Lazy registration, credential storage, token refresh, capacity budget, counter-reservation allocator. **Built, deliberately UNWIRED** — nothing constructs it, so the branch cannot spend a registration. | **DONE** on `feat/0.10.0-decoy-u1-provisioning`. 645 tests / 0 failures, `assembleDebug` exit 0, both re-verified independently. Capacity measured: 640–643 B worst case against a 1024 B budget. **Paired-blind review of the WHOLE unit still owed before merge** — review the unit, not the delta. |
+| **U1** ✅ | Synthetic account provisioning + `TAG_DECOY` codec section. Lazy registration, credential storage, token refresh, capacity budget, counter-reservation allocator. **Built, deliberately UNWIRED** — nothing constructs it, so the branch cannot spend a registration. | **DONE** on `feat/0.10.0-decoy-u1-provisioning`. **678 tests / 0 failures** after fix round 4, `assembleDebug` exit 0, re-verified independently each round. Capacity measured: 640–643 B worst case against a 1024 B budget. **Paired-blind review of the WHOLE unit: four rounds complete** (findings 10 → 11 → 10 → 6; P1s 2 → 1 → 0 → 0), fixes applied and mutation-verified each round. **Merge still owed an explicit maintainer decision**, plus re-ratification of §4.1's third-pass wording. |
 | **U2** | Decoy envelope builder. Random-ciphertext blob at a requested block count; field population mirroring the real send path; the one-time X3DH-shaped first envelope. *(Counter reservation moved to U1.)* | Byte-level test asserting a decoy frame is indistinguishable field-for-field from a real frame of the same block count, *including* that no field is a constant where a real message varies. **`prekey_id` drawn from the real path's actual range, verified against source — see the binding constraint in §2.2.** Must **not** call `SessionBuilder.process` (§2.3 ruling). |
 | **U3** | Pairing at the send choke point. Random order (decoy-first / real-first), few-ms stagger, block-count mirroring. Insertion inside `MessagingCoordinator`'s confined worker, above `ws.sendMessage`. | Ordering is uniformly random and stagger is drawn per-send — pinned by a statistical test, not by inspection. Real-send latency and the `flushSendRatchet` durability barrier provably unaffected. |
 | **U4** | Synthetic-side receive: second WS connection for the synthetic account, deliver → ack → burn at ~30 ms, occasional send-back so the exchange is bidirectional. | Decoys never surface in UI, notifications, or unread counts. Notification parity §7 re-verified with decoys active. |
@@ -626,12 +644,27 @@ a dummy light, and the copy earns that by naming what it does not cover.
      encode bare-reverts with **nothing on disk saying it tried**, which is one registration per
      unlock — precisely the defect the R1 rule was added to close, surviving on the boundary.
      Inverting the order removes the edge instead of patching it: **`provisionNotBeforeMs` is
-     written and flushed BEFORE any relay contact, and only a successful commit retires it** (in the
-     same mutate that stores the credentials). If the smallest decoy write the client can make does
-     not fit, no registration is spent at all. Two consequences, both deliberate: *every* failure
-     defers, not only a 429 (a crash between register and commit, an offline challenge fetch, a dead
-     session mint), and a purely local failure therefore costs a 60–90 minute wait. For a background
-     nicety measured against a worldwide bucket, that is the right direction. The failed commit must
+     written and flushed BEFORE any relay contact.** If the smallest decoy write the client can make
+     does not fit, no registration is spent at all.
+   - **RETIREMENT — SUPERSEDES THE ABOVE ON ITS SECOND HALF [U1 R3].** R2 ruled that "only a
+     successful commit retires it", so *every* failure deferred and a purely local failure cost a
+     60–90 minute wait. **That is no longer the rule and must not be restored.** It was wrong in a
+     way R2 could not see from here: the deferral is the *whole content* of `TAG_DECOY` on a failed
+     first attempt, so an offline challenge fetch did not merely cost 60–90 minutes of a background
+     nicety — it cost that vault its 0.9.x downgrade path (§4.1), permanently, for an attempt that
+     protected nothing. The rule now turns on **what was spent, not on whether it succeeded:**
+      - **A failure BEFORE `register` is entered retires the deferral** — offline challenge fetch,
+        DNS failure, failed proof-of-work, a local crypto fault, a cancelled scope. None of them can
+        have touched the shared bucket, the emptied holder is omitted by the codec, and the next
+        session gets its attempt immediately.
+      - **A failure from `register` onwards keeps it**, whatever the cause — a 429, a crash between
+        register and commit, a dead session mint, a capacity failure at commit. A `register` that
+        threw may still have created the account, and "may have spent" counts as spent.
+      - The discriminator is a flag set **between** bundle generation and the `register` call, and
+        it must stay there: **[U1 R4]** it sat one line earlier, above an inlined
+        `generateBundle(...)` argument that Kotlin evaluates after it, so a purely local failure was
+        being charged as a possible spend.
+     The failed commit must
      still be reverted so a cover-traffic write never leaves the vault unable to flush-before-ack a
      real inbound message — and the revert may only restore state read under the **same lock** the
      revert runs under (see the section-lock note in the U1 invariant table), or it clobbers

@@ -177,12 +177,14 @@ class DecoyAccountProvisionerTest {
         relay: DecoyRelayApi,
         now: () -> Long = { FIXED_NOW },
         random: Random = Random(7L),
+        bundleFactory: (DecoyIdentity.Identity) -> DecoyIdentity.Material = DecoyIdentity::generateBundle,
     ) = DecoyAccountProvisioner.forRuntime(
         runtime = runtime,
         relay = relay,
         powSolver = FakeSolver(),
         clock = now,
         random = random,
+        bundleFactory = bundleFactory,
     )
 
     // ── the happy path, and the ordering it must obey ─────────────────────────────
@@ -377,6 +379,41 @@ class DecoyAccountProvisionerTest {
         val online = FakeRelay()
         assertTrue(runBlocking { provisioner(recovered.runtime, online).provisionIfNeeded() })
         assertEquals("the next attempt was allowed to proceed at once", 1, online.registerCalls.get())
+        assertNoDanglingReference(vault.runtime)
+    }
+
+    @Test
+    fun `the LAST LOCAL step before register is still spent-nothing - the flag sits below it`() {
+        // [R4] The seam this needs is the reason it went untested for three rounds: the relay fake
+        // can only throw once `register()` is entered, so nothing in the suite could fail the step
+        // BETWEEN the spent/not-spent flag and the network. That step is real — `generateBundle`
+        // makes 101 keypairs and a signature — and it was inlined as `register`'s argument, which
+        // Kotlin evaluates AFTER the preceding statement. So `registrationSpent` was already true
+        // while the bundle was still being built locally, and an OOM on that batch cost the vault a
+        // 60–90 minute silence plus a durable deferral-only TAG_DECOY (and its 0.9.x break) for an
+        // attempt that sent zero bytes to the relay. The flag means "register may have created the
+        // account"; generating a bundle is not register.
+        val vault = Vault()
+        val relay = FakeRelay()
+
+        assertFalse(
+            runBlocking {
+                provisioner(vault.runtime, relay, bundleFactory = { throw OutOfMemoryError("prekey batch") })
+                    .provisionIfNeeded()
+            },
+        )
+
+        assertEquals("nothing was registered", 0, relay.registerCalls.get())
+        assertEquals("the challenge WAS fetched, so this failed after it", 1, relay.challengeCalls.get())
+        assertNull(
+            "the deferral was retired — this attempt provably spent nothing",
+            vault.runtime.read { it.decoy?.provisionNotBeforeMs },
+        )
+        // …and the downgrade path survives, which is the half that costs the user something: the
+        // deferral is the WHOLE content of TAG_DECOY here, so keeping it would have made a vault
+        // that never reached the relay unopenable by 0.9.x.
+        val persisted = requireNotNull(vault.durableState()) { "the attempt did write, then retired it" }
+        assertNull("no TAG_DECOY survives a failure that never reached the relay", persisted.decoy)
         assertNoDanglingReference(vault.runtime)
     }
 

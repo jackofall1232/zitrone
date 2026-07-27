@@ -107,8 +107,10 @@ import kotlin.concurrent.withLock
  *        the account — the conservative direction is to make that attempt *cost* a back-off window
  *        and let only a success clear it.
  *     **[R3] But a failure BEFORE the registration is retired, not kept.** Round 2 made the write
- *     unconditional *and permanent*, so an offline challenge fetch, a DNS failure or a failed
- *     proof-of-work — none of which spend anything — disabled cover traffic for
+ *     unconditional *and permanent*, so an offline challenge fetch, a DNS failure, a failed
+ *     proof-of-work or a local crypto fault while building the prekey bundle (**[R4]** — that last
+ *     one was charged as a possible spend until round 4; see [provision]) — none of which spend
+ *     anything — disabled cover traffic for
  *     [MIN_BACKOFF_MS]–[MIN_BACKOFF_MS] + [BACKOFF_JITTER_MS] while protecting nothing, and left a
  *     deferral-only `TAG_DECOY` on disk that costs the vault its 0.9.x readability for no gain.
  *     [clearBackoff] retires the deferral on exactly those paths. A crash between the write and
@@ -165,6 +167,14 @@ class DecoyAccountProvisioner private constructor(
     private val powSolver: DecoyPowSolver,
     private val clock: () -> Long,
     private val random: java.util.Random,
+    /**
+     * Builds the registerable prekey bundle. A seam, not a policy knob: production always passes
+     * [DecoyIdentity.generateBundle]. It exists because bundle generation is the last **local** step
+     * before the relay commit — 101 keypairs and a signature, zero bytes on the wire — and round 4
+     * found that nothing in the suite could make that step fail, which is how the flag ordering it
+     * guards (see [provision]) went untested for three rounds.
+     */
+    private val bundleFactory: (DecoyIdentity.Identity) -> DecoyIdentity.Material,
     /** The per-runtime guard state — see "the gate is scoped to the RUNTIME" in the class kdoc. */
     private val gate: Gate,
 ) {
@@ -303,7 +313,9 @@ class DecoyAccountProvisioner private constructor(
         // set BEFORE the register call rather than after it, because a `register` that throws may
         // still have created the account (the relay committed and the response died on the way
         // back) — and "may have spent a global registration" must count as spent. Everything above
-        // it is local or a read-only challenge fetch and provably spends nothing.
+        // it is local or a read-only challenge fetch and provably spends nothing, which is why
+        // [R4] the bundle generation below is a statement ABOVE the flag and not an argument
+        // evaluated after it.
         var registrationSpent = false
         // Set INSIDE the mutate block, so it is true whenever the live state has taken ownership of
         // the key array — including when the encode AFTER the block throws (VaultRuntime retains an
@@ -324,11 +336,24 @@ class DecoyAccountProvisioner private constructor(
                 powSolver.solve(it, DecoyIdentity.publicKeyBytes(identity.identityKeyPair))
             }
 
-            // ── the relay commit. Everything above this line is local and free to abandon. ──
             // The prekey bundle is generated HERE, after the (seconds-long) solve, so its
             // un-zeroable private halves are resident for the register call and not before it.
+            //
+            // ⚠️ **IT IS A SEPARATE STATEMENT, ABOVE THE FLAG, AND THAT IS THE POINT [R4].** It used
+            // to be inlined as the argument to `register` below, which reads as though it were part
+            // of the relay call and is not: Kotlin evaluates arguments AFTER the preceding statement
+            // runs, so `registrationSpent` was already true while 101 local keypairs were still
+            // being generated. A failure there — an OOM on the batch, a crypto-provider fault —
+            // sends zero bytes to the relay and yet was counted as "may have spent a registration",
+            // costing the vault a 60–90 minute silence AND a durable deferral-only `TAG_DECOY`
+            // (with its 0.9.x break) for an attempt that never contacted anything. The flag's whole
+            // meaning is "`register` may have created the account"; generating a bundle is not
+            // `register`.
+            val bundle = bundleFactory(identity)
+
+            // ── the relay commit. Everything above this line is local and free to abandon. ──
             registrationSpent = true
-            val accountId = relay.register(DecoyIdentity.generateBundle(identity), powProof)
+            val accountId = relay.register(bundle, powProof)
             val tokens = relay.createSession(accountId) { challenge ->
                 DecoyIdentity.signLoginChallenge(identity.identityKeyPair, challenge)
             }
@@ -354,8 +379,12 @@ class DecoyAccountProvisioner private constructor(
                             identityKeyPair = identity.identityKeyPair,
                             accessToken = tokens.accessToken,
                             refreshToken = tokens.refreshToken,
-                            // Success is the ONLY thing that retires the write-ahead deferral, and
-                            // it does so in the same mutate that stores the credentials.
+                            // Success retires the write-ahead deferral in the same mutate that
+                            // stores the credentials — no separate write, so there is no window
+                            // where the credentials are durable and the deferral is not. It is not
+                            // the only retirement path: [clearBackoff] retires it on a failure that
+                            // provably spent nothing. It is the only one that retires it while
+                            // WRITING something, which is why it belongs in this copy. **[R3/R4]**
                             provisionNotBeforeMs = null,
                         )
                         handedOff = true
@@ -432,7 +461,12 @@ class DecoyAccountProvisioner private constructor(
 
     /**
      * Retire the write-ahead deferral after an attempt that spent NOTHING — the offline challenge
-     * fetch, the DNS failure, the failed proof-of-work, the cancelled scope. **[R3]**
+     * fetch, the DNS failure, the failed proof-of-work, the local fault while building the prekey
+     * bundle **[R4]**, the cancelled scope. **[R3]**
+     *
+     * The boundary is `registrationSpent` in [provision]: every step ABOVE that assignment lands
+     * here on failure, every step from it onwards leaves the deferral standing. Which is why the
+     * assignment's *position* is load-bearing and not incidental — see the note there.
      *
      * Round 2 made the write-ahead deferral unconditional and permanent, which was right for the
      * half it protects (a registration may have been spent, so do not walk back into the shared
@@ -594,12 +628,15 @@ class DecoyAccountProvisioner private constructor(
             powSolver: DecoyPowSolver,
             clock: () -> Long = System::currentTimeMillis,
             random: java.util.Random = SecureRandom(),
+            bundleFactory: (DecoyIdentity.Identity) -> DecoyIdentity.Material =
+                DecoyIdentity::generateBundle,
         ): DecoyAccountProvisioner = DecoyAccountProvisioner(
             runtime = runtime,
             relay = relay,
             powSolver = powSolver,
             clock = clock,
             random = random,
+            bundleFactory = bundleFactory,
             gate = Gate.forRuntime(runtime),
         )
 

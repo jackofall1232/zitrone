@@ -133,6 +133,12 @@ class VaultState(
  * account and NO section change, never a section referencing an account whose signing key was
  * never persisted.
  *
+ * **[R4] And the codec now REFUSES the half-set rather than relying on that.** Writers being
+ * careful is what makes it unreachable; it is not what makes it inexpressible. `VaultStateCodec`
+ * rejects an id without a key, a key without an id, and tokens without an id, on encode **and** on
+ * decode — so [isProvisioned] answering `false` is a statement about a well-formed state rather
+ * than a predicate quietly concealing a malformed one. See `requireDecoyCredentialsPaired`.
+ *
  * ⚠️ **[counterHighWater] is a RESERVATION, and its meaning is "every value strictly below
  * this may already have been issued".** It is persisted BEFORE any value in the newly reserved
  * block is spent, so an interruption SKIPS counter values (invisible — a real Double Ratchet
@@ -279,13 +285,23 @@ class VaultCapacityException(message: String) : IllegalStateException(message)
  * that option (it cannot rescue builds already in the field), and the mitigation that IS in
  * force is that the section is omitted entirely while there is nothing to record.
  *
- * **[R3] What that mitigation is worth, stated exactly.** The tag appears the moment a vault has
- * anything to record — which, since `DecoyAccountProvisioner` writes its back-off before contacting
- * the relay, is as soon as a vault **sets up cover traffic**, not as late as its first sent decoy.
- * An attempt that fails before spending a registration retires that deferral, and the holder then
- * encodes as empty and is omitted again, so a vault whose only brush with cover traffic was a
- * failed offline attempt keeps its 0.9.x readability. A vault that has never used cover traffic at
- * all never carries the tag. That is the honest trigger, and it is the one spec §4.1 states.
+ * **[R3, sharpened R4] What that mitigation is worth, stated exactly.** The tag appears the moment a
+ * vault has anything to record. `DecoyAccountProvisioner` writes its back-off before contacting the
+ * relay, so that is earlier than the first sent decoy — but an attempt that fails **before**
+ * `register` retires that deferral, and the holder then encodes as empty and is omitted again. The
+ * durable trigger is therefore **provisioning that reaches relay registration**, not a completed
+ * send and not a send attempt:
+ *
+ *  - never attempted → no tag;
+ *  - failed before `register` (offline, DNS, failed PoW, a local crypto fault) → no tag, so a vault
+ *    whose only brush with cover traffic was a failed offline attempt keeps its 0.9.x readability;
+ *  - reached `register`, including a 429 or a lost response → **tag**, whatever happens next;
+ *  - registered and never sent a decoy → **tag**.
+ *
+ * That is the honest trigger, and it is the one spec §4.1 states. **If a change moves any
+ * provisioning failure path across the `register` boundary, §4.1's user-facing sentence changes with
+ * it** — it has drifted three times because each pass edited the previous wording instead of
+ * re-deriving it from these four rows.
  *
  * COMPRESSION lives INSIDE the sealed, padded plaintext, so the on-disk region stays a
  * constant [SLOT_PAYLOAD_BYTES] regardless of how compressible the state is — zero
@@ -676,6 +692,7 @@ object VaultStateCodec {
         // would seal, and the next unlock would fail. Unreachable from any writer in this codebase,
         // which is exactly why it must be an assertion and not a silent clamp. [R3]
         require(d.counterHighWater >= 0L) { "negative counter high-water mark in decoy section" }
+        requireDecoyCredentialsPaired(d)
         val out = WipeableBuffer(128)
         try {
             writeNullableString(out, d.accountId)
@@ -690,6 +707,44 @@ object VaultStateCodec {
             // out held the identity PRIVATE key + the token bytes — zero it. The exact-size
             // result is the decoy section body, wiped by writeSection.
             out.wipe()
+        }
+    }
+
+    /**
+     * **The register-before-commit invariant, enforced by the codec instead of merely asserted by
+     * the writers. [R4]**
+     *
+     * `DecoyState` says a state carrying an account id without its identity keypair "is
+     * unreachable", and the whole staging-store / one-mutate design exists to keep it that way. But
+     * unreachable-by-construction was the only thing stopping it: the codec encoded and decoded
+     * `DecoyState(accountId = "…", identityKeyPair = null)` without complaint, and
+     * [DecoyState.isProvisioned] then *hid* it — answering "not provisioned" for a vault that in
+     * fact holds a dangling reference to a live relay account, which is the exact outcome the
+     * ordering rule was built to make impossible. A predicate that hides a malformed state is not
+     * the same thing as a format that cannot express it.
+     *
+     * Strict v1 refuses to PRODUCE what it refuses to READ, so this runs on both sides — the same
+     * rule the negative high-water mark follows. Three shapes are refused:
+     *
+     *  - **an account id with no identity key** — unauthenticatable and undeletable; the dangling
+     *    reference itself;
+     *  - **an identity key with no account id** — private key material for an account this vault
+     *    cannot name, i.e. durable secret bytes nothing can ever use or retire;
+     *  - **tokens with no account id** — live bearer credentials for an account the vault does not
+     *    claim. `DecoyAuthStore` already fails closed on this in both setters; this is the same rule
+     *    stated where a crafted or corrupt image also has to obey it.
+     *
+     * Every writer already satisfies it (the credential set is committed and cleared as a unit, and
+     * both token setters verify an account id first), so this is unreachable from this codebase —
+     * which is exactly why it is an assertion and not a repair. A silent fix-up here would launder a
+     * corrupt image into a plausible-looking one.
+     */
+    private fun requireDecoyCredentialsPaired(d: DecoyState) {
+        require((d.accountId == null) == (d.identityKeyPair == null)) {
+            "cover-traffic account id and identity key are committed together or not at all"
+        }
+        require(d.accountId != null || (d.accessToken == null && d.refreshToken == null)) {
+            "cover-traffic tokens without an account in decoy section"
         }
     }
 
@@ -720,6 +775,7 @@ object VaultStateCodec {
             require(decoded.counterHighWater >= 0L) {
                 "negative counter high-water mark in decoy section"
             }
+            requireDecoyCredentialsPaired(decoded)
             require(!r.hasRemaining()) { "trailing bytes in decoy section" }
             return decoded
         } catch (t: Throwable) {
