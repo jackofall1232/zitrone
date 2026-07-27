@@ -8,6 +8,7 @@
 
 package com.zitrone.app.data
 
+import com.zitrone.app.crypto.vault.DecoySectionLock
 import com.zitrone.app.crypto.vault.DecoyState
 import com.zitrone.app.crypto.vault.VaultRuntime
 
@@ -19,6 +20,15 @@ import com.zitrone.app.crypto.vault.VaultRuntime
  * a reader never sees a torn account/token pair. Writes are COALESCED (non-forced), matching
  * [VaultAuthStore]: these tokens are recoverable by re-minting a session from the stored
  * identity key, so they never need flush-before-ack.
+ *
+ * ⚠️ EVERY WRITE HERE TAKES [DecoySectionLock] **[R2]**. `stateLock` alone makes each `mutate`
+ * atomic, which is the wrong granularity: [clearAccount] resets `counterHighWater`, and
+ * `DecoyCounterReservation` checks that mark in one call and spends against it in the next. With
+ * only the runtime lock, a clear landing between the check and the spend lets the allocator issue
+ * from a block the mark no longer covers — `1, 0` on the wire, a cleartext counter regression.
+ * Taking the section monitor makes this write exclusive against the allocator's whole sequence and
+ * against the provisioner's read-commit-revert. Reads do NOT take it: `runtime.read` is already
+ * atomic, and a caller acting on a stale single value is the caller's own race.
  *
  * ⚠️ THE [accountId] SETTER IS FAIL-CLOSED, AND THAT IS THE POINT. `ApiClient.register()` writes
  * the new account id into its store the instant the 201 lands, BEFORE anything else about the
@@ -57,41 +67,60 @@ class DecoyAuthStore(
         get() = runtime.read { it.decoy?.refreshToken }
 
     override fun storeTokens(access: String, refresh: String) {
-        runtime.mutate {
-            it.decoy = (it.decoy ?: DecoyState()).copy(accessToken = access, refreshToken = refresh)
+        DecoySectionLock.withSection(runtime) {
+            runtime.mutate {
+                it.decoy = (it.decoy ?: DecoyState()).copy(accessToken = access, refreshToken = refresh)
+            }
         }
     }
 
     override fun clearTokens() {
-        runtime.mutate {
-            // Only rewrite when a holder already exists: clearing tokens on a vault that has no
-            // cover-traffic state must not CREATE the section. An empty section is omitted by the
-            // codec anyway, but not materialising it keeps the intent explicit.
-            it.decoy?.let { current -> it.decoy = current.copy(accessToken = null, refreshToken = null) }
+        DecoySectionLock.withSection(runtime) {
+            runtime.mutate {
+                // Only rewrite when a holder already exists: clearing tokens on a vault that has no
+                // cover-traffic state must not CREATE the section. An empty section is omitted by
+                // the codec anyway, but not materialising it keeps the intent explicit.
+                it.decoy?.let { current ->
+                    it.decoy = current.copy(accessToken = null, refreshToken = null)
+                }
+            }
         }
     }
 
     override fun clearAccount() {
-        runtime.mutate {
-            // Drop the whole credential set together, mirroring how it was committed: an account
-            // id and its identity key are never separated in either direction.
-            //
-            // counterHighWater goes with them, and that is not tidiness. The mark means "every
-            // value below this may already have been issued" — a statement about ONE synthetic
-            // peer. Carry it across a re-provision and the replacement account's very first
-            // envelope arrives at the relay carrying `message_number = 128`, in the clear, on a
-            // brand-new account whose session was just established. A real Double Ratchet with a
-            // new recipient starts at 0, so a nonzero start is a classifier the relay operator gets
-            // for free. A live DecoyCounterReservation holding a block from the old account sees
-            // the mark move and abandons it rather than spending it (its staleness check), so
-            // resetting here cannot produce a reissue.
-            it.decoy?.let { current ->
-                current.wipe()
-                it.decoy = current.copy(
-                    accountId = null,
-                    identityKeyPair = null,
-                    counterHighWater = 0L,
-                )
+        DecoySectionLock.withSection(runtime) {
+            runtime.mutate {
+                // Drop the whole credential set together, mirroring how it was committed: an
+                // account id and its identity key are never separated in either direction.
+                //
+                // ⚠️ THE TOKENS GO TOO **[R2]**. Round 1 left them behind, which made "the account
+                // was cleared" false in the only sense that matters to an attacker: the access JWT
+                // keeps authenticating that account until it expires and the refresh token mints a
+                // whole new session from it. A retired account whose live bearer credentials
+                // survive is not retired. They are nulled in the SAME mutate as the id and the key,
+                // so no generation ever carries a token for an account this vault no longer claims.
+                //
+                // counterHighWater goes with them, and that is not tidiness. The mark means "every
+                // value below this may already have been issued" — a statement about ONE synthetic
+                // peer. Carry it across a re-provision and the replacement account's very first
+                // envelope arrives at the relay carrying `message_number = 128`, in the clear, on a
+                // brand-new account whose session was just established. A real Double Ratchet with
+                // a new recipient starts at 0, so a nonzero start is a classifier the relay
+                // operator gets for free. Resetting it is safe against a live
+                // DecoyCounterReservation because this whole mutate runs under the SECTION lock,
+                // so it cannot land between that allocator's staleness check and its spend — the
+                // allocator therefore always observes the reset before deciding, abandons its stale
+                // block, and reserves fresh.
+                it.decoy?.let { current ->
+                    current.wipe()
+                    it.decoy = current.copy(
+                        accountId = null,
+                        identityKeyPair = null,
+                        accessToken = null,
+                        refreshToken = null,
+                        counterHighWater = 0L,
+                    )
+                }
             }
         }
     }

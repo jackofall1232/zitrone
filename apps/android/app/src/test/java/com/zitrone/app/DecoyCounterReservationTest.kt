@@ -271,6 +271,59 @@ class DecoyCounterReservationTest {
     }
 
     @Test
+    fun `clearAccount cannot land BETWEEN the staleness check and the spend`() {
+        // The staleness check reads the durable mark in one runtime call and spends against it in
+        // the next. Round 1 gave this class a PRIVATE lock, so `clearAccount()` — which resets the
+        // mark — could land between the two: the allocator then issues from a block the reset mark
+        // no longer covers, and its next call detects the staleness and reserves from 0, so the
+        // replacement account emits `1, 0`. A cleartext counter regression, and the exact tell no
+        // real ratchet produces. A check that is not atomic with the spend is not a check.
+        //
+        // What that makes observable from here is one thing: with the allocator and the auth store
+        // sharing the SECTION lock, `clearAccount()` CANNOT complete while a reservation is in
+        // flight. The reservation's own durable flush is the pause point — it happens with the
+        // section lock held, exactly where the round-1 code held nothing the clearer respected.
+        var armed = true
+        val reservationInFlight = CountDownLatch(1)
+        val clearCompleted = CountDownLatch(1)
+        var clearedMidReservation = false
+
+        val vault = Vault(
+            state = VaultState.empty().also {
+                it.decoy = DecoyState(accountId = "acct", identityKeyPair = ByteArray(65) { b -> b.toByte() })
+            },
+            onPersist = {
+                if (armed) {
+                    armed = false
+                    reservationInFlight.countDown()
+                    // Generous, and one-directional: too SHORT a window can only ever let a broken
+                    // implementation slip through, never fail a correct one.
+                    clearedMidReservation = clearCompleted.await(2, TimeUnit.SECONDS)
+                }
+            },
+        )
+        val reservation = DecoyCounterReservation.forRuntime(vault.runtime, blockSize = 4)
+        val clearer = Thread {
+            reservationInFlight.await()
+            DecoyAuthStore(vault.runtime).clearAccount()
+            clearCompleted.countDown()
+        }
+
+        clearer.start()
+        val duringOldAccount = reservation.next()
+        assertTrue("the clearer finished", clearer.join(30_000).let { true })
+
+        assertTrue(
+            "clearAccount reset the counter mark while a value was being issued against it",
+            !clearedMidReservation,
+        )
+        assertEquals("the value issued belonged to the old account's block", 0L, duringOldAccount)
+        // And the new epoch starts where a real ratchet with a new recipient starts.
+        assertEquals("the replacement account starts at zero", 0L, reservation.next())
+        assertEquals(4L, vault.durableHighWater())
+    }
+
+    @Test
     fun `concurrent callers never receive the same value`() {
         // The send path is reachable from pooled dispatcher threads; a duplicated message_number
         // would be exactly the tell the reservation exists to prevent.

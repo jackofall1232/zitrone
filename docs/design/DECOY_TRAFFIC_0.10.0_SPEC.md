@@ -284,9 +284,10 @@ Source-verified against `apps/android/app/src/main/java/com/zitrone/app/crypto/v
 
 A new optional TLV section in the per-vault sealed payload holding: the synthetic account's
 **account id + identity keypair + session tokens**, the **counter reservation high-water mark**, the
-**dead-air schedule next-fire**, and — *added by U1* — a **durable 429 back-off deadline**
-(`provisionNotBeforeMs`), which has no other legal home because cross-session back-off must be
-durable and durable decoy state may not be device-level. It lives inside the vault region
+**dead-air schedule next-fire**, and — *added by U1* — a **durable provisioning back-off deadline**
+(`provisionNotBeforeMs`; originally scoped to 429 only, generalized by U1 R2 to a write-ahead
+deadline covering every attempt), which has no other legal home because cross-session back-off must
+be durable and durable decoy state may not be device-level. It lives inside the vault region
 and nowhere else. Nothing about decoy traffic may be written to device-level storage
 (`SettingsRepository`, `DeviceSettings`, any `SharedPreferences`) — a device-level record of how
 many synthetic accounts exist is a vault-count oracle and destroys the deniability §3 of
@@ -298,8 +299,8 @@ encrypted image.
 
 | # | Writer | When | What it writes into `TAG_DECOY` | Status |
 |---|---|---|---|---|
-| W1 | `DecoyAccountProvisioner.provision()` | First unlocked session in which decoys are enabled and no synthetic account exists | Account id, identity keypair, initial tokens, counter reservation = 64. **Dead-air next-fire is written `null`** — the distribution is U5's to settle (§3.2 re-framed the ping from wall-clock to in-session, so a durable wall-clock next-fire is of questionable meaning). The field exists and round-trips. | **DONE (U1)** |
-| W1b | `DecoyAccountProvisioner` on 429 | Registration rate-limited (shared global bucket) | `provisionNotBeforeMs` only — the cross-session back-off deadline | **DONE (U1)** |
+| W1 | `DecoyAccountProvisioner.provision()` | First unlocked session in which decoys are enabled and no synthetic account exists | Account id, identity keypair, initial tokens, and `provisionNotBeforeMs = null` (a success is the only thing that retires the back-off). **The counter reservation is NOT written here** — `counterHighWater` stays 0 until `DecoyCounterReservation.next()` first reserves a block (W3). **Dead-air next-fire is written `null`** — the distribution is U5's to settle (§3.2 re-framed the ping from wall-clock to in-session, so a durable wall-clock next-fire is of questionable meaning). The field exists and round-trips. | **DONE (U1)** |
+| W1b | `DecoyAccountProvisioner.reserveBackoff()` — the **write-ahead back-off** | **Before any relay contact**, on every attempt that gets past the deferral check | `provisionNotBeforeMs` only — the cross-session back-off deadline, `mutate` + `flushBeforeAck`. If it cannot be written, **no registration is spent at all** | **DONE (U1 R2)** |
 | W2 | `DecoyAccountProvisioner.refreshTokens()` | Synthetic session token refresh (7-day refresh-token TTL, `auth/jwt.go:26`) | Tokens only; all other fields untouched | **this unit (U1)** |
 | W3 | `DecoyCounterReservation` | Counter reservation exhausted (once per 64 decoys) | High-water mark only, monotonically increasing | **allocator DONE (U1)**; the `DecoySender` that spends the values is U2 |
 | W4 | `DeadAirPinger.rearm()` | After each dead-air ping fires | Next-fire time only | **this unit (U5)** |
@@ -313,12 +314,12 @@ encrypted image.
 | R1 | `VaultStateCodec.decode` | "a section tag I recognize; an unrecognized tag is corruption" | **NO for old builds — see hazard below.** YES for builds carrying the tag. |
 | R2 | `DecoySender.send()` | "a provisioned synthetic account exists and these counters have never been issued before" | YES **only with §2.3's correction** — the mark must be FLUSHED, not merely mutated, before any value in the block is spent |
 | R3 | `DeadAirPinger` | "next-fire is in this vault's own timeline, not the device's" | YES — per-vault, torn down at lock |
-| R4 | `SessionContainer` construction | ~~"absent section = decoys not yet provisioned; present = ready"~~ **CORRECTED TWICE (U1, then U1 review round 1):** "ready = the credential pair is present **and** `VaultRuntime.capacityExceeded` is clear" | **NO as originally written. Two independent falsifiers.** (i) A 429 or capacity back-off creates a section that is PRESENT and NOT ready. (ii) An over-capacity `mutate` **RETAINS** a complete credential pair in the LIVE state that was never scheduled and that `flushBeforeAck` refuses. Absence is still the valid initial state; presence never means ready. |
+| R4 | provisioning entry point (`DecoyAccountProvisioner.provisionIfNeeded`) | ~~"absent section = decoys not yet provisioned; present = ready"~~ ~~"ready = credential pair present"~~ ~~"ready = credential pair present **and** `capacityExceeded` clear"~~ **CORRECTED A THIRD TIME (U1 review round 2) — there is no single "ready". TWO predicates:** `hasAccount()` = the credential pair is present, **and nothing else**, which gates REGISTRATION; `canSend()` = `hasAccount()` **and** this session's credential flush confirmed **and** `VaultRuntime.capacityExceeded` clear, which gates COVER TRAFFIC. | **NO as originally written. Three independent falsifiers.** (i) A back-off creates a section that is PRESENT and NOT ready. (ii) An over-capacity `mutate` **RETAINS** a complete credential pair in the LIVE state that was never scheduled and that `flushBeforeAck` refuses. (iii) **The corrected single predicate was itself wrong** — see below. Absence is still the valid initial state; presence never means ready. |
 | R5 | Capacity guard `VaultRuntime.capacityExceeded` | "encoded state fits `MAX_PAYLOAD_CONTENT_BYTES`" | YES — measured by U1: worst-case section delta **645 B** against a 1024 B budget (realistic state 929 B of 262 112 B) |
 | R6 | `VaultState.wipe()` | **NEW (U1):** "every secret in this section is zeroed, not merely dereferenced" | The section carries a **raw private key** — dereferencing leaves it in the heap |
 | R7 | `VaultStateCodec.parsePlaintext` decode-failure catch | **NEW (U1):** "everything decoded so far is wiped on a mid-parse throw" | Previously wiped only the partial signal map; had to extend to the decoy section's keypair |
 
-**R4 FALSIFIED TWICE — and this is the spec-first discipline working, not a spec failure.**
+**R4 FALSIFIED THREE TIMES — and this is the spec-first discipline working, not a spec failure.**
 
 *First falsifier, found by implementation.* U1 needed a durable 429 back-off deadline
 (`provisionNotBeforeMs`), because "back off across sessions" means durable and the no-device-storage
@@ -331,13 +332,32 @@ state does not mean ready: when `mutate` overflows the fixed region it **retains
 unscheduled and sets `capacityExceeded`, so a reader keying on the pair alone reports ready for
 credentials no reader will ever find on disk. Readiness must consult the capacity flag too.
 
+*Third falsifier, found by review round 2 (Grok) — and this one is the ARCHITECT'S, not the
+implementer's.* The correction above is a **send** predicate, and `provisionIfNeeded()` was gating
+**registration** on it. Those are different questions and one predicate cannot answer both. When an
+**unrelated** write overflows the region on a vault that already holds durable synthetic
+credentials, a capacity-aware "ready" returns false, the one-attempt latch is taken, and the
+provisioner **registers a second relay account** — spending a rate-limit bucket shared by every
+client worldwide, and replacing a perfectly good durable account if the overflow clears mid-flight.
+
+Refusing to *send* cover traffic during an overflow is correct. Refusing to *acknowledge an account
+that already exists* is not: it re-enters the one path that spends a shared global resource. The
+implementer documented the capacity-aware readiness as "conservative in the right direction". It was
+not conservative; it was harmful. **So R4 is now two rows in one:**
+
+| Predicate | Reads | Gates | Must NOT read |
+|---|---|---|---|
+| `hasAccount()` | `accountId != null && identityKeyPair != null` | registration | `capacityExceeded`, or any other transient runtime condition |
+| `canSend()` | `hasAccount()` ∧ this session's credential flush confirmed ∧ `!capacityExceeded` | cover traffic | — |
+
 Worth recording plainly, because it is the argument for both gates at once: **the table was wrong,
-and the first error was caught by implementation rather than by review two rounds later — while the
-second was caught by review rather than shipping.** That is the round-12 pattern (changing what a
-durable signal MEANS) surfacing at the two cheapest available moments. R6 and R7 are the same story
-from a third direction: obligations this table simply missed, found by writing code against it. A
-table that survives implementation unchanged has usually not been tested; one that gets corrected
-has done its job.
+the first error was caught by implementation rather than by review two rounds later, the second was
+caught by review rather than shipping — and the third was a correction the architect ratified into
+the spec that review then falsified in turn.** That is the round-12 pattern (changing what a durable
+signal MEANS) surfacing at the cheapest available moments, including once *after* the spec had
+already been "fixed". R6 and R7 are the same story from a third direction: obligations this table
+simply missed, found by writing code against it. A table that survives implementation unchanged has
+usually not been tested; one that gets corrected has done its job.
 
 ### THE HAZARD THIS TABLE EXISTS TO CATCH
 
@@ -577,12 +597,23 @@ a dummy light, and the copy earns that by naming what it does not cover.
      other users worldwide, not a client fault. **(U1 R1: "across sessions" is a durability claim —
      the deferral must be FLUSHED, not merely mutated, or a crash inside the coalescing window loses
      it and the next unlock walks straight back into the bucket. See §2.3's correction.)**
-   - **Back off the same way when the vault cannot STORE the account [U1 R1].** A vault at its
-     capacity boundary registers successfully and then fails to commit; with no durable back-off
-     that is one new relay account per unlock, forever, against this same global bucket —
-     systematic and unbounded rather than the accepted one-off orphan. The failed commit must also
-     be reverted so a cover-traffic write never leaves the vault unable to flush-before-ack a real
-     inbound message.
+   - ~~**Back off the same way when the vault cannot STORE the account [U1 R1].**~~
+     **SUPERSEDED — WRITE THE BACK-OFF FIRST [U1 R2].** Writing the deferral *in response to* a
+     failure leaves an edge with no answer: a vault so full that even `previous + deferral` will not
+     encode bare-reverts with **nothing on disk saying it tried**, which is one registration per
+     unlock — precisely the defect the R1 rule was added to close, surviving on the boundary.
+     Inverting the order removes the edge instead of patching it: **`provisionNotBeforeMs` is
+     written and flushed BEFORE any relay contact, and only a successful commit retires it** (in the
+     same mutate that stores the credentials). If the smallest decoy write the client can make does
+     not fit, no registration is spent at all. Two consequences, both deliberate: *every* failure
+     defers, not only a 429 (a crash between register and commit, an offline challenge fetch, a dead
+     session mint), and a purely local failure therefore costs a 60–90 minute wait. For a background
+     nicety measured against a worldwide bucket, that is the right direction. The failed commit must
+     still be reverted so a cover-traffic write never leaves the vault unable to flush-before-ack a
+     real inbound message — and the revert may only restore state read under the **same lock** the
+     revert runs under (see the section-lock note in the U1 invariant table), or it clobbers
+     whatever the section gained during the seconds of network I/O, up to and including a counter
+     high-water mark.
    - **A failed or deferred provision must degrade silently to "decoys off"** — never block
      onboarding, never surface an error that implies a fault, and never let the 🍋‍🟩 indicator claim
      the mechanism fired when it did not.

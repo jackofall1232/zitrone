@@ -409,17 +409,31 @@ object VaultStateCodec {
         }
     }
 
-    private fun parsePlaintext(plain: ByteArray): VaultState {
+    private fun parsePlaintext(plain: ByteArray): VaultState =
+        parsePlaintext(plain, PartialDecode())
+
+    /**
+     * The decoder proper, with the secrets it has decoded SO FAR held in a caller-supplied
+     * [PartialDecode] rather than in locals.
+     *
+     * That is the whole reason for the seam, and it is not a test hook: it is the only way the
+     * decode-failure wipe can be *observed*. The buffers a failing parse strands are allocated
+     * inside this function and are unreachable from any caller, so a test that merely decodes a
+     * malformed payload can assert the throw and nothing more — which is precisely the
+     * non-discriminating shape that leaves a production cleanup call unpinned (deleting it keeps
+     * every such test green). Handing the accumulator in makes the stranded material the caller's
+     * to inspect, so a test can assert the zeroing through the REAL decoder path instead of by
+     * calling the cleanup directly and hoping production still calls it too.
+     */
+    internal fun parsePlaintext(plain: ByteArray, partial: PartialDecode): VaultState {
         val r = Reader(plain)
         val version = r.u8()
         require(version == VERSION) { "unsupported vault state version: $version" }
 
-        var signal: MutableMap<String, ByteArray>? = null
         var rosterJson: String? = null
         var tombstonesJson: String? = null
         var settings: VaultScopedSettings? = null
         var auth: AuthState? = null
-        var decoy: DecoyState? = null
 
         // v1 emits each tag AT MOST once; a repeat is a noncanonical/malformed payload. Reject it
         // — otherwise the second assignment silently replaces the first decoded value, and for
@@ -439,12 +453,12 @@ object VaultStateCodec {
                         throw IllegalArgumentException("duplicate section tag: $tag")
                     }
                     when (tag) {
-                        TAG_SIGNAL -> signal = decodeSignal(body)
+                        TAG_SIGNAL -> partial.signal = decodeSignal(body)
                         TAG_ROSTER -> rosterJson = String(body, Charsets.UTF_8)
                         TAG_TOMBSTONES -> tombstonesJson = String(body, Charsets.UTF_8)
                         TAG_SETTINGS -> settings = decodeSettings(body)
                         TAG_AUTH -> auth = decodeAuth(body)
-                        TAG_DECOY -> decoy = decodeDecoy(body)
+                        TAG_DECOY -> partial.decoy = decodeDecoy(body)
                         // Strict v1: an unknown tag is corruption / a wrong version, never skipped.
                         else -> throw IllegalArgumentException("unknown vault state section tag: $tag")
                     }
@@ -460,7 +474,7 @@ object VaultStateCodec {
             // partial-default state — reject rather than silently fall back to empty holders.
             // requireNotNull throws IllegalArgumentException INSIDE the try, so the catch below
             // also wipes any partial signal map decoded before the missing section was noticed.
-            val decodedSignal = requireNotNull(signal) { "missing signal section" }
+            val decodedSignal = requireNotNull(partial.signal) { "missing signal section" }
             val decodedSettings = requireNotNull(settings) { "missing settings section" }
             val decodedAuth = requireNotNull(auth) { "missing auth section" }
 
@@ -470,34 +484,38 @@ object VaultStateCodec {
                 tombstonesJson = tombstonesJson,
                 settings = decodedSettings,
                 auth = decodedAuth,
-                decoy = decoy,
+                decoy = partial.decoy,
             )
         } catch (t: Throwable) {
-            wipePartialDecode(signal, decoy)
+            partial.wipe()
             throw t
         }
     }
 
     /**
-     * Zero everything a FAILED [parsePlaintext] decoded before it threw.
+     * The secret-bearing material a [parsePlaintext] has decoded so far, and its cleanup.
      *
      * A malformed/unknown later section (or a missing-mandatory `require`) can throw AFTER
      * [decodeSignal] already copied raw key material into the record map, and after [decodeDecoy]
-     * copied a PRIVATE identity key out of the (about-to-be-wiped) section body into an array the
-     * local owns. A throw means no [VaultState] is ever constructed, so [VaultState.wipe] can never
-     * reach either of them — this is their only cleanup path.
+     * copied a PRIVATE identity key out of the (about-to-be-wiped) section body into an array this
+     * holder owns. A throw means no [VaultState] is ever constructed, so [VaultState.wipe] can
+     * never reach either of them — [wipe] is their only cleanup path.
      *
-     * Split out of the catch clause so it is DIRECTLY testable on arrays a test owns. Observing the
-     * zeroing through `decode` itself is impossible: both buffers are allocated inside the decoder
-     * and are unreachable from the caller, so a test that only decodes a malformed payload can
-     * assert the throw and nothing more.
+     * On the SUCCESS path ownership passes to the returned [VaultState] (the same map and the same
+     * holder, not copies), so this must not be wiped then — only from the failure catch.
      */
-    internal fun wipePartialDecode(signal: MutableMap<String, ByteArray>?, decoy: DecoyState?) {
-        signal?.let { partial ->
-            for (value in partial.values) wipe(value)
-            partial.clear()
+    internal class PartialDecode {
+        var signal: MutableMap<String, ByteArray>? = null
+        var decoy: DecoyState? = null
+
+        /** Zero everything decoded so far. Safe on a decode that got nowhere. */
+        fun wipe() {
+            signal?.let { records ->
+                for (value in records.values) wipe(value)
+                records.clear()
+            }
+            decoy?.wipe()
         }
-        decoy?.wipe()
     }
 
     // ── 0x01 signal ─────────────────────────────────────────────────────────────
@@ -664,6 +682,15 @@ object VaultStateCodec {
                 deadAirNextFireAtMs = readNullableLong(r),
                 provisionNotBeforeMs = readNullableLong(r),
             )
+            // A NEGATIVE mark is not a smaller number, it is a different meaning: the invariant is
+            // "every value strictly below this may already have been issued", and the allocator
+            // reserves `mark + blockSize` and issues from `mark` upward. A negative mark therefore
+            // hands out negative `message_number`s — a value no real ratchet produces, i.e. exactly
+            // the classifier the counter discipline exists to avoid — and it is unreachable from
+            // this encoder, so it can only come from a crafted or corrupt payload.
+            require(decoded.counterHighWater >= 0L) {
+                "negative counter high-water mark in decoy section"
+            }
             require(!r.hasRemaining()) { "trailing bytes in decoy section" }
             return decoded
         } catch (t: Throwable) {
@@ -735,10 +762,24 @@ object VaultStateCodec {
         writeLong(out, value ?: 0L)
     }
 
+    /**
+     * Inverse of [writeNullableLong], and CANONICAL: the presence byte must be exactly 0 or 1, and
+     * an absent value must carry the zero this encoder writes.
+     *
+     * Strict v1 means one payload per state, not merely "one state per payload". Accepting any
+     * nonzero byte as truthy, or arbitrary bytes behind an absent flag, would make decode→encode
+     * change accepted bytes — a second, noncanonical spelling of the same state that a
+     * determinism claim cannot cover and that a byte-level equality test cannot detect.
+     */
     private fun readNullableLong(r: Reader): Long? {
-        val present = r.u8() != 0
+        val present = r.u8()
+        require(present == 0 || present == 1) { "noncanonical nullable-long presence flag: $present" }
         val value = r.i64()
-        return if (present) value else null
+        if (present == 0) {
+            require(value == 0L) { "noncanonical absent nullable-long carries a value" }
+            return null
+        }
+        return value
     }
 
     // ── section framing helpers ──────────────────────────────────────────────────

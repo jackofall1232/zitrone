@@ -9,12 +9,14 @@ import com.goterl.lazysodium.SodiumJava
 import com.zitrone.app.crypto.vault.DecoyState
 import com.zitrone.app.crypto.vault.LibsodiumVaultOps
 import com.zitrone.app.crypto.vault.VAULT_KEY_BYTES
+import com.zitrone.app.crypto.vault.VaultCapacityException
 import com.zitrone.app.crypto.vault.VaultRuntime
 import com.zitrone.app.crypto.vault.VaultSession
 import com.zitrone.app.crypto.vault.VaultState
 import com.zitrone.app.crypto.vault.VaultStateCodec
 import com.zitrone.app.crypto.vault.openPayload
 import com.zitrone.app.decoy.DecoyAccountProvisioner
+import com.zitrone.app.decoy.DecoyCounterReservation
 import com.zitrone.app.decoy.DecoyIdentity
 import com.zitrone.app.decoy.DecoyPowSolver
 import com.zitrone.app.decoy.DecoyRelayApi
@@ -31,10 +33,13 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
 import java.util.Random
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -78,6 +83,12 @@ class DecoyAccountProvisionerTest {
          */
         cooldownMs: Long = 60_000L,
         flushContext: kotlin.coroutines.CoroutineContext = Dispatchers.IO,
+        /**
+         * Runs at the START of every persist, before the generation is recorded, so a test can make
+         * a chosen durable write fail. Throwing here is what a real `flushBeforeAck` failure looks
+         * like from the runtime's side.
+         */
+        private val onPersist: () -> Unit = {},
     ) {
 
         /** Our own copy — [VaultSession] wipes the key it is constructed with. */
@@ -95,7 +106,10 @@ class DecoyAccountProvisionerTest {
             initialPayload = VaultStateCodec.encode(state),
             initialVaultKey = vaultKey.copyOf(),
             slotIndex = 0,
-            persist = { _, sealed -> generations += sealed.copyOf() },
+            persist = { _, sealed ->
+                onPersist()
+                generations += sealed.copyOf()
+            },
             cooldownMs = cooldownMs,
             flushContext = flushContext,
         )
@@ -177,13 +191,15 @@ class DecoyAccountProvisionerTest {
         val vault = Vault()
         // The fake reads the vault at the moment the relay call lands, so "register precedes
         // commit" is observed rather than inferred from the code's shape.
-        val relay = FakeRelay(observeAtRegister = { vault.runtime.read { it.decoy } })
+        val relay = FakeRelay(observeAtRegister = { vault.runtime.read { it.decoy?.isProvisioned == true } })
         val provisioner = provisioner(vault.runtime, relay)
 
         assertTrue(runBlocking { provisioner.provisionIfNeeded() })
 
         assertEquals("registered exactly once", 1, relay.registerCalls.get())
-        assertNull("the vault held NO decoy state when register was called", relay.observedAtRegister)
+        // The section DOES exist by then — it carries the write-ahead back-off — but it references
+        // no account, which is the ordering property this asserts.
+        assertEquals("the vault referenced NO account when register was called", false, relay.observedAtRegister)
         // Read from the sealed region the sink was handed, not the live state: `mutate` alone only
         // schedules, so a commit that merely mutated would show a complete credential set in RAM
         // and NOTHING here — while a registration had already been spent from a global bucket.
@@ -306,68 +322,167 @@ class DecoyAccountProvisionerTest {
 
         assertEquals("the relay DID register an account", 1, relay.registerCalls.get())
         assertNotNull("…which is now an orphan", relay.issuedAccountId)
-        assertNull("the vault carries no decoy state at all", runtime.read { it.decoy })
+        assertNull("the vault references no account", runtime.read { it.decoy?.accountId })
+        assertNull("and holds no identity key", runtime.read { it.decoy?.identityKeyPair })
+        assertNotNull(
+            "the write-ahead back-off stands, so the orphan is not repeated next unlock",
+            runtime.read { it.decoy?.provisionNotBeforeMs },
+        )
         assertNoDanglingReference(runtime)
     }
 
     @Test
-    fun `a failure BEFORE register leaves nothing anywhere`() {
+    fun `a failure BEFORE register leaves no credentials — only the write-ahead back-off`() {
         val runtime = runtimeOf()
         val relay = FakeRelay(failAt = FakeRelay.Stage.CHALLENGE)
 
         assertFalse(runBlocking { provisioner(runtime, relay).provisionIfNeeded() })
 
         assertEquals("nothing was registered", 0, relay.registerCalls.get())
-        assertNull(runtime.read { it.decoy })
+        val decoy = requireNotNull(runtime.read { it.decoy }) {
+            "the attempt was recorded BEFORE the relay was contacted"
+        }
+        assertNull("no account id", decoy.accountId)
+        assertNull("no identity key", decoy.identityKeyPair)
+        assertNotNull("and the back-off stands, because only a success retires it", decoy.provisionNotBeforeMs)
         assertNoDanglingReference(runtime)
     }
 
     @Test
-    fun `a register failure leaves nothing committed`() {
+    fun `a register failure leaves no credentials committed`() {
         val runtime = runtimeOf()
         val relay = FakeRelay(failAt = FakeRelay.Stage.REGISTER)
 
         assertFalse(runBlocking { provisioner(runtime, relay).provisionIfNeeded() })
 
-        assertNull(runtime.read { it.decoy })
+        assertNull("no account id", runtime.read { it.decoy?.accountId })
+        assertNull("no identity key", runtime.read { it.decoy?.identityKeyPair })
         assertNoDanglingReference(runtime)
+    }
+
+    @Test
+    fun `a vault too full to record a back-off never spends a registration at all`() {
+        // The absolute-capacity edge, and the reason the back-off is written FIRST. Round 1 wrote
+        // it in the capacity handler, so a vault with no room for even a deferral bare-reverted and
+        // left NOTHING on disk saying it had tried — one fresh registration against the shared
+        // worldwide bucket on every single unlock, forever. Writing the back-off before any relay
+        // contact makes "cannot record that I tried" mean "do not try": there is no edge left where
+        // nothing can be encoded, because nothing has been spent by then.
+        // Filled to within a few bytes of the region rather than to a guessed size: a fixture that
+        // silently left headroom would turn this scenario into the happy path and pass.
+        val vault = Vault(VaultCapacityFixture(ops).stateFilledToCap())
+        val relay = FakeRelay()
+
+        assertFalse(runBlocking { provisioner(vault.runtime, relay).provisionIfNeeded() })
+
+        assertEquals("no registration was spent", 0, relay.registerCalls.get())
+        assertEquals("not even a challenge was fetched", 0, relay.challengeCalls.get())
+        // …and the vault is handed back usable: an unscheduled over-capacity mutation would
+        // fail-close flushBeforeAck for the WHOLE vault, real inbound messages included.
+        assertFalse("the failed back-off write was reverted", vault.runtime.capacityExceeded)
+        vault.runtime.flushBeforeAck()
+        assertNoDanglingReference(vault.runtime)
+
+        // The next unlock over the SAME image spends nothing either — the property round-1 F4 was
+        // meant to give and did not, on this edge.
+        val next = FakeRelay()
+        val reopened = Vault(VaultCapacityFixture(ops).stateFilledToCap())
+        assertFalse(runBlocking { provisioner(reopened.runtime, next).provisionIfNeeded() })
+        assertEquals("nor does the next session", 0, next.registerCalls.get())
     }
 
     @Test
     fun `a commit that cannot be persisted still never splits the credential set`() {
-        // A vault already so full that adding the section overflows the fixed region:
-        // VaultRuntime RETAINS the mutation in memory, sets capacityExceeded, and rethrows. The
-        // credentials are therefore never durable — but they are also never HALF there.
-        // Filled to within a few bytes of the region rather than to a guessed size: a fixture that
-        // silently left headroom would turn this scenario into the happy path and pass.
-        val runtime = runtimeOf(VaultCapacityFixture(ops).stateFilledToCap())
-        val relay = FakeRelay()
+        // A vault with room for the back-off but not for the credential set: VaultRuntime RETAINS
+        // the mutation in memory, sets capacityExceeded, and rethrows. The credentials are
+        // therefore never durable — but they are also never HALF there.
+        val vault = Vault(VaultCapacityFixture(ops).stateWithSlack(200, 400))
+        val relay = FakeRelay(tokenPadBytes = REALISTIC_TOKEN_BYTES)
 
         assertFalse(
             "a non-durable commit is not a success",
-            runBlocking { provisioner(runtime, relay).provisionIfNeeded() },
+            runBlocking { provisioner(vault.runtime, relay).provisionIfNeeded() },
         )
         assertEquals("the relay account exists (orphaned)", 1, relay.registerCalls.get())
         // Whatever the retained in-memory state says, it is never a half-set.
-        assertNoDanglingReference(runtime)
+        assertNoDanglingReference(vault.runtime)
+        assertNoDanglingReferenceOnDisk(vault)
     }
 
     @Test
-    fun `a failed capacity commit does NOT report the vault as provisioned`() {
-        // The readiness lie: the retained-but-unscheduled mutation leaves a complete credential
-        // pair in the LIVE state, so a readiness check keyed on presence alone answers "ready" for
-        // credentials that flushBeforeAck refuses and that lock/process death discards.
-        val runtime = runtimeOf(VaultCapacityFixture(ops).stateFilledToCap())
+    fun `an unrelated capacity overflow stops SENDING without re-entering registration`() {
+        // The predicate split, and the defect that forced it. Round 1 folded capacityExceeded into
+        // one isProvisioned() and gated BOTH questions on it, so an overflow caused by a completely
+        // unrelated write made a vault that already held durable synthetic credentials answer "not
+        // provisioned" — take the latch, and register a SECOND account against a rate-limit bucket
+        // shared by every client worldwide. Refusing to send is right; refusing to acknowledge an
+        // account that already exists is not.
+        val vault = Vault()
+        assertTrue(runBlocking { provisioner(vault.runtime, FakeRelay()).provisionIfNeeded() })
+        val accountId = requireNotNull(vault.runtime.read { it.decoy?.accountId })
+
+        // A LATER session over the same vault — a fresh instance, so its one-attempt latch is
+        // unburned and nothing but the predicate stands between it and the relay.
         val relay = FakeRelay()
-        val provisioner = provisioner(runtime, relay)
+        val provisioner = provisioner(vault.runtime, relay)
+        assertTrue("the account is durable and sendable", provisioner.canSend())
 
-        assertFalse(runBlocking { provisioner.provisionIfNeeded() })
+        // An UNRELATED write overflows the region: nothing to do with cover traffic.
+        // Random, not patterned: a repeating byte sequence DEFLATEs to nothing and would quietly
+        // turn this scenario into the happy path.
+        val bulk = ByteArray(VaultStateCodec.MAX_PAYLOAD_CONTENT_BYTES).also { Random(3L).nextBytes(it) }
+        assertThrows(VaultCapacityException::class.java) {
+            vault.runtime.mutate { it.signalRecords["bulk"] = bulk }
+        }
+        assertTrue("the fixture really did overflow", vault.runtime.capacityExceeded)
 
-        assertFalse("a non-durable credential set is not provisioned", provisioner.isProvisioned())
-        assertFalse(
-            "and a second call must not report success either",
-            runBlocking { provisioner.provisionIfNeeded() },
+        assertTrue("the account did not stop existing", provisioner.hasAccount())
+        assertFalse("but nothing decoy-related can be made durable, so do not send", provisioner.canSend())
+        assertFalse("and provisionIfNeeded reports the send predicate", runBlocking { provisioner.provisionIfNeeded() })
+
+        // …and now the case that makes this a REGISTRATION defect rather than only a send one:
+        // the flag is runtime-wide and clears on the next successful mutate, so "the flag is set
+        // AND the state would now encode" is a real, reachable window — it is exactly the instant
+        // before whichever write brings the state back under the cap lands. (Reached here by taking
+        // the offending record back out of the live state without a mutate, which is the only way
+        // to hold that window still.) A register predicate keyed on the flag walks straight into it.
+        val stillSet = vault.runtime.read { it.signalRecords.remove("bulk"); it }
+        assertTrue("the live state fits again", VaultStateCodec.encode(stillSet).isNotEmpty())
+        assertTrue("but no mutate has cleared the flag yet", vault.runtime.capacityExceeded)
+
+        // Yet another session, so the one-attempt latch is not what is doing the work here.
+        val later = FakeRelay()
+        assertFalse(runBlocking { provisioner(vault.runtime, later).provisionIfNeeded() })
+        assertEquals(
+            "NOT ONE registration was spent from the shared global bucket",
+            0,
+            later.registerCalls.get(),
         )
+        assertEquals("nor even a challenge", 0, later.challengeCalls.get())
+        assertEquals(
+            "and the durable account was not replaced by a second one",
+            accountId,
+            vault.runtime.read { it.decoy?.accountId },
+        )
+        assertEquals("no registration in the earlier session either", 0, relay.registerCalls.get())
+    }
+
+    @Test
+    fun `a credential commit whose flush THROWS is never reported as ready`() {
+        // "A flush throw means it never happened" held for the call that saw it and not for the
+        // next one: the credentials sat live with capacityExceeded clear, so a second readiness
+        // check answered "ready" on bytes no reader will ever find on disk.
+        // Persist #1 is the write-ahead back-off, which must succeed or nothing is registered at
+        // all; #2 is the credential commit's flush, and that is the one made to throw.
+        var persists = 0
+        val vault = Vault(onPersist = { if (++persists >= 2) throw IOException("disk full") })
+        val relay = FakeRelay()
+        val provisioner = provisioner(vault.runtime, relay)
+
+        assertFalse("the call that saw the throw reports failure", runBlocking { provisioner.provisionIfNeeded() })
+        assertTrue("the account exists — a second registration must NOT be spent", provisioner.hasAccount())
+        assertFalse("but it was never confirmed durable, so it may not be sent on", provisioner.canSend())
+        assertFalse("and the next call must not flip to ready", runBlocking { provisioner.provisionIfNeeded() })
         assertEquals("no second registration was spent", 1, relay.registerCalls.get())
     }
 
@@ -410,6 +525,79 @@ class DecoyAccountProvisionerTest {
 
         assertFalse("the retained mutation was reverted", vault.runtime.capacityExceeded)
         vault.runtime.flushBeforeAck() // would throw if the vault were still over capacity
+    }
+
+    @Test
+    fun `a capacity revert restores what the section held AT COMMIT TIME, not a pre-network snapshot`() {
+        // Round 1 snapshotted the section before the relay sequence and restored that snapshot on a
+        // capacity failure — seconds of proof-of-work and HTTP later. Anything the section gained in
+        // that window was clobbered wholesale, and the worst case is a counter reservation: the mark
+        // goes BACKWARDS, and the allocator hands out values that were already spent. A cleartext
+        // message_number regression is the exact tell the whole counter discipline exists to deny a
+        // relay operator.
+        //
+        // The concurrent write is driven from inside the relay call, which is precisely the window:
+        // the provisioner holds no lock there, by design, because the alternative is stalling the
+        // send path behind a multi-second registration.
+        val vault = Vault(VaultCapacityFixture(ops).stateWithSlack(200, 400))
+        val issued = mutableListOf<Long>()
+        val relay = FakeRelay(
+            tokenPadBytes = REALISTIC_TOKEN_BYTES,
+            duringRegister = {
+                issued += DecoyCounterReservation.forRuntime(vault.runtime, blockSize = 4).next()
+            },
+        )
+
+        assertFalse(runBlocking { provisioner(vault.runtime, relay).provisionIfNeeded() })
+
+        assertEquals("a counter really was issued during the round-trip", listOf(0L), issued)
+        assertEquals(
+            "the reservation the revert had to preserve is still the live mark",
+            4L,
+            vault.runtime.read { it.decoy?.counterHighWater ?: 0L },
+        )
+        // And the wire property itself: the next value must never be one already handed out.
+        val next = DecoyCounterReservation.forRuntime(vault.runtime, blockSize = 4).next()
+        assertTrue("counter $next was already issued — a REGRESSION", next !in issued)
+        assertTrue("and it does not go backwards", next > issued.max())
+    }
+
+    @Test
+    fun `the loser of the one-attempt latch reports the truth, not a flat false`() {
+        // Two callers on one instance: the loser used to return false even after the winner had
+        // provisioned successfully — a silent decoys-off for the rest of that call chain.
+        // The interleaving is made exact through the injected clock: an EXPIRED deferral is the one
+        // state in which isDeferred() consults it, which gives a suspension point between the
+        // loser's deferral check and its compare-and-set.
+        val runtime = runtimeOf(
+            VaultState.empty().also { it.decoy = DecoyState(provisionNotBeforeMs = FIXED_NOW - 1) },
+        )
+        val relay = FakeRelay()
+        val loserThread = java.util.concurrent.atomic.AtomicReference<Thread?>(null)
+        val armed = java.util.concurrent.atomic.AtomicBoolean(true)
+        val loserReachedTheCheck = CountDownLatch(1)
+        val winnerDone = CountDownLatch(1)
+
+        val provisioner = provisioner(runtime, relay, now = {
+            if (Thread.currentThread() === loserThread.get() && armed.compareAndSet(true, false)) {
+                loserReachedTheCheck.countDown()
+                check(winnerDone.await(30, TimeUnit.SECONDS)) { "the winner never finished" }
+            }
+            FIXED_NOW
+        })
+
+        var loserResult: Boolean? = null
+        val loser = Thread { loserResult = runBlocking { provisioner.provisionIfNeeded() } }
+        loserThread.set(loser)
+        loser.start()
+        assertTrue("the loser reached its deferral check", loserReachedTheCheck.await(30, TimeUnit.SECONDS))
+
+        assertTrue("the winner provisions", runBlocking { provisioner.provisionIfNeeded() })
+        winnerDone.countDown()
+        loser.join(30_000)
+
+        assertEquals("exactly one registration between them", 1, relay.registerCalls.get())
+        assertEquals("the loser reports the vault as sendable, because it IS", true, loserResult)
     }
 
     @Test
@@ -634,6 +822,11 @@ class DecoyAccountProvisionerTest {
         private val failure: Throwable = IOException("boom"),
         private val observeAtRegister: (() -> Any?)? = null,
         /**
+         * Runs INSIDE the register call — i.e. inside the window where the provisioner deliberately
+         * holds no lock, so a test can drive a genuinely concurrent decoy write into it.
+         */
+        private val duringRegister: (() -> Unit)? = null,
+        /**
          * Extra random bytes of token, base64'd — the capacity scenarios need a credential set of
          * REALISTIC size (an RS256 access JWT is ~530 chars), because the whole point there is that
          * the whole set does not fit where a lone account id would. Random rather than repeated, so
@@ -674,6 +867,7 @@ class DecoyAccountProvisionerTest {
         override suspend fun register(material: DecoyIdentity.Material, powProof: Map<String, String>?): String {
             observedAtRegister = observeAtRegister?.invoke()
             registerCalls.incrementAndGet()
+            duringRegister?.invoke()
             if (failAt == Stage.REGISTER) throw failure
             submittedProof = powProof
             val id = "22222222-3333-4444-5555-666666666666"

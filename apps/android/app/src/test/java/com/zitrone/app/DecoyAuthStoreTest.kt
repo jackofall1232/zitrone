@@ -148,6 +148,23 @@ class DecoyAuthStoreTest {
     }
 
     @Test
+    fun `clearAccount drops the SESSION TOKENS too, or the account is not cleared at all`() {
+        // Round 1 retained them. A retired account whose live bearer credentials survive is not
+        // retired: the access JWT keeps authenticating it until it expires, and the refresh token
+        // mints a whole new session from it — for an account the caller has just said it wants gone.
+        val runtime = runtimeOf(provisioned())
+        val store = DecoyAuthStore(runtime)
+        assertEquals("the fixture really holds live tokens", "a0", store.accessToken)
+
+        store.clearAccount()
+
+        runtime.read {
+            assertNull("the access token went with the account", it.decoy?.accessToken)
+            assertNull("and so did the refresh token", it.decoy?.refreshToken)
+        }
+    }
+
+    @Test
     fun `clearAccount resets the counter mark so a replacement account starts at zero`() {
         // The mark describes ONE synthetic peer. Carried across a re-provision, the replacement
         // account's first envelope would arrive carrying message_number = 128 in the clear on a

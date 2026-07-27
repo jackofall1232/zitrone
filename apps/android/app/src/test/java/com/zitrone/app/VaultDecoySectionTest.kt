@@ -228,11 +228,6 @@ class VaultDecoySectionTest {
 
     @Test
     fun `a decode that fails AFTER the decoy section is REJECTED`() {
-        // Scope, stated exactly: this pins the rejection and nothing else. The private key
-        // decodeDecoy copied out of the section body is allocated inside the decoder and is
-        // unreachable from here, so no assertion made through `decode` can observe whether it was
-        // zeroed — a test that implied otherwise would be the non-discriminating kind. The wipe
-        // itself is pinned directly, on arrays a test owns, by the two cases below.
         val plain = realPlaintextWithDecoy()
         assertTrue("the baseline is genuinely valid", VaultStateCodec.decode(deflate(plain)).decoy != null)
 
@@ -243,30 +238,98 @@ class VaultDecoySectionTest {
     }
 
     @Test
-    fun `the decode-failure cleanup ZEROES the decoy identity key, not just the signal records`() {
-        // The cleanup parsePlaintext's catch delegates to. A throw means no VaultState is ever
-        // constructed, so VaultState.wipe() can never reach these buffers — this is their only
-        // cleanup path, and it must cover the decoy section's private key and not only the record
-        // map that predates it.
-        val identity = IdentityKeyPair.generate().serialize()
-        val record = ByteArray(64) { (it + 1).toByte() }
-        assertTrue("the fixtures really hold bytes", identity.any { it != 0.toByte() })
+    fun `the REAL decoder path zeroes the decoy identity key when a later section throws`() {
+        // This pins the PRODUCTION cleanup call, not a hand-rolled twin of it. The round-1 pair of
+        // tests could not: one asserted only that a malformed payload throws, the other invoked the
+        // cleanup helper directly on arrays the test owned — so deleting the call from
+        // parsePlaintext's catch left both green while a decoded private key stayed in the heap.
+        //
+        // The decoder now accumulates what it has decoded into a caller-supplied PartialDecode, so
+        // the material a failing parse strands is reachable from here and the zeroing can be
+        // observed through the real decode path itself.
+        val plain = realPlaintextWithDecoy()
+        assertTrue("the baseline is genuinely valid", VaultStateCodec.decode(deflate(plain)).decoy != null)
 
-        val partialSignal = linkedMapOf<String, ByteArray>("session:peer:1" to record)
-        VaultStateCodec.wipePartialDecode(
-            partialSignal,
-            DecoyState(accountId = "acct", identityKeyPair = identity),
+        val partial = VaultStateCodec.PartialDecode()
+        assertThrows(IllegalArgumentException::class.java) {
+            // Fails on the unknown tag AFTER both the signal records and the decoy section decoded.
+            VaultStateCodec.parsePlaintext(plain + byteArrayOf(0x09, 0, 0, 0, 0), partial)
+        }
+
+        val stranded = requireNotNull(partial.decoy) { "the decoy section really was decoded first" }
+        val key = requireNotNull(stranded.identityKeyPair) { "…and it really carried a private key" }
+        assertTrue("the fixture key is a real one, so zeroing it is observable", key.size >= 64)
+        assertArrayEquals("the identity private key the decoder copied out was zeroed", ByteArray(key.size), key)
+        assertTrue(
+            "the partially decoded signal records were zeroed and dropped too",
+            requireNotNull(partial.signal).isEmpty(),
         )
+    }
 
-        assertArrayEquals("decoy identity private key zeroed", ByteArray(identity.size), identity)
-        assertArrayEquals("partially decoded signal records zeroed", ByteArray(record.size), record)
-        assertTrue("and the partial map is emptied", partialSignal.isEmpty())
+    @Test
+    fun `a SUCCESSFUL decode does not wipe what it hands back`() {
+        // The mirror of the case above, and the reason the cleanup lives in the catch and not in a
+        // finally: on success the very same map and holder become the returned VaultState's, so a
+        // wipe there would zero the live keystore the caller is about to use.
+        val plain = realPlaintextWithDecoy()
+        val decoded = VaultStateCodec.parsePlaintext(plain, VaultStateCodec.PartialDecode())
+        val key = requireNotNull(decoded.decoy?.identityKeyPair)
+        assertTrue("the decoded identity key is intact", key.any { it != 0.toByte() })
+        assertTrue("and so are the signal records", decoded.signalRecords.values.any { r -> r.any { it != 0.toByte() } })
     }
 
     @Test
     fun `the decode-failure cleanup tolerates a decode that got nowhere`() {
         // The catch runs for a payload that failed before either section was reached.
-        VaultStateCodec.wipePartialDecode(null, null)
+        VaultStateCodec.PartialDecode().wipe()
+    }
+
+    // ── strict v1 is CANONICAL, not merely parseable ──────────────────────────────
+
+    @Test
+    fun `a noncanonical nullable-long presence flag is rejected`() {
+        // Any nonzero byte used to be truthy, so 0x02 and 0x01 decoded to the same state — a second
+        // spelling of one state that decode→encode silently rewrites, which is exactly what a
+        // determinism claim cannot cover.
+        val plain = realPlaintextWithDecoy()
+        assertTrue("the baseline is genuinely valid", VaultStateCodec.decode(deflate(plain)).decoy != null)
+
+        val tampered = plain.copyOf()
+        tampered[tampered.size - DEAD_AIR_PRESENCE_FROM_END] = 0x02
+        assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(tampered)) }
+    }
+
+    @Test
+    fun `an ABSENT nullable long carrying a value is rejected`() {
+        // present=0 used to ignore the eight bytes behind it, so arbitrary content could ride along
+        // inside a section that round-trips as "absent".
+        val plain = realPlaintextWithDecoy()
+        val tampered = plain.copyOf()
+        // fullDecoy()'s deadAirNextFireAtMs is a real timestamp, so clearing ONLY the presence flag
+        // leaves a nonzero value behind it — the exact noncanonical shape.
+        tampered[tampered.size - DEAD_AIR_PRESENCE_FROM_END] = 0x00
+        assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(tampered)) }
+
+        // Discriminator: zeroing the value too makes it the CANONICAL absent form, which must decode.
+        val canonical = plain.copyOf()
+        canonical[canonical.size - DEAD_AIR_PRESENCE_FROM_END] = 0x00
+        for (i in 1..8) canonical[canonical.size - DEAD_AIR_PRESENCE_FROM_END + i] = 0x00
+        assertNull(
+            "the canonical absent form decodes as absent",
+            VaultStateCodec.decode(deflate(canonical)).decoy?.deadAirNextFireAtMs,
+        )
+    }
+
+    @Test
+    fun `a NEGATIVE counter high-water mark is rejected`() {
+        // The mark means "every value strictly below this may already have been issued", and the
+        // allocator issues upward from it. A negative mark hands out negative message_numbers —
+        // a value no real ratchet produces, i.e. the free classifier the counter discipline exists
+        // to deny the relay. It is unreachable from the encoder, so it can only be crafted.
+        val plain = realPlaintextWithDecoy()
+        val tampered = plain.copyOf()
+        tampered[tampered.size - COUNTER_FROM_END] = 0xFF.toByte()
+        assertThrows(IllegalArgumentException::class.java) { VaultStateCodec.decode(deflate(tampered)) }
     }
 
     // ── the measured byte budget ──────────────────────────────────────────────────
@@ -335,6 +398,17 @@ class VaultDecoySectionTest {
     /** The real TLV plaintext of a valid, fully-populated state — the base for every corruption. */
     private fun realPlaintextWithDecoy(): ByteArray =
         inflate(VaultStateCodec.encode(baseState(fullDecoy())))
+
+    private companion object {
+        /**
+         * The decoy section is emitted LAST and ends the plaintext, and its tail is
+         * `counterHighWater(8) ‖ deadAir(present(1) ‖ 8) ‖ provisionNotBefore(present(1) ‖ 8)` —
+         * 26 bytes. These are offsets BACK from the end of the plaintext, so a hand-edit lands on
+         * exactly one field without needing to re-frame the section.
+         */
+        const val DEAD_AIR_PRESENCE_FROM_END = 18
+        const val COUNTER_FROM_END = 26
+    }
 
     /**
      * Find the decoy section in a TLV plaintext: it is emitted LAST, so its tag is the byte whose

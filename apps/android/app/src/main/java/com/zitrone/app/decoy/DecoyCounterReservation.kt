@@ -8,6 +8,7 @@
 
 package com.zitrone.app.decoy
 
+import com.zitrone.app.crypto.vault.DecoySectionLock
 import com.zitrone.app.crypto.vault.DecoyState
 import com.zitrone.app.crypto.vault.VaultRuntime
 import java.lang.ref.WeakReference
@@ -71,22 +72,31 @@ import kotlin.concurrent.withLock
  *     re-provision after [com.zitrone.app.data.DecoyAuthStore.clearAccount]), the response is a
  *     fresh reservation — a skip — never a spend below the mark.
  *
- * ## Locking
+ * ## Locking — the SECTION lock, not a private one [R2]
  *
- * [lock] is a new OUTERMOST lock, above the runtime's: the order is
- * `reservation lock → runtime.stateLock → session locks → storage lock`. Nothing takes the runtime
- * lock and then this one, and this class is never reachable from a session persist sink, so the
- * order cannot invert. `flushBeforeAck` releases `stateLock` before its disk-bound `flushNow`, so
- * holding [lock] across it adds no new lock nesting — it only serializes reservations against each
- * other, which is exactly what it is for. The cost is one disk-bound flush per 64 envelopes, held
- * against a lock no other subsystem takes.
+ * [lock] is [DecoySectionLock] for this runtime: the SAME monitor `DecoyAuthStore` and
+ * `DecoyAccountProvisioner` take. That is what makes defence 2 sound rather than decorative.
+ * Round 1 shipped this class with a private lock, and review round 2 found the hole: the staleness
+ * check reads the durable mark in one `runtime.read` and spends against it in a later call, so a
+ * `clearAccount()` landing between the two resets the mark BEHIND a check that already passed —
+ * the allocator then issues from a block that is no longer covered and can emit `1, 0`. A check
+ * that is not atomic with the spend is not a check. Sharing the section monitor makes the whole
+ * read-check-reserve-spend sequence exclusive against every other writer of the section.
+ *
+ * The order is `decoy section lock → runtime.stateLock → session locks → storage lock`. Nothing
+ * takes the runtime lock and then this one, and this class is never reachable from a session
+ * persist sink, so the order cannot invert. `flushBeforeAck` releases `stateLock` before its
+ * disk-bound `flushNow`, so holding [lock] across it adds no new lock nesting — it only serializes
+ * decoy-section writers against each other, which is exactly what it is for. The cost is one
+ * disk-bound flush per 64 envelopes, held against a lock no other subsystem takes.
  */
 class DecoyCounterReservation private constructor(
     private val runtime: VaultRuntime,
     private val blockSize: Int,
 ) {
 
-    private val lock = ReentrantLock()
+    /** The SECTION monitor, shared with every other writer of `TAG_DECOY` — see the class kdoc. */
+    private val lock = DecoySectionLock.forRuntime(runtime)
 
     /** Next value to issue. Meaningful only while `next < limit`. */
     private var next: Long = 0L
@@ -113,7 +123,9 @@ class DecoyCounterReservation private constructor(
         //    teardown"); `read` throws once closed.
         //  - staleness — a block whose exclusive end is no longer the durable mark is not ours to
         //    spend (defence 2 in the class kdoc). Abandoning it SKIPS values; spending it could
-        //    regress below a mark some other writer advanced.
+        //    regress below a mark some other writer advanced. [R2] This read and the spend below
+        //    are inside the SECTION lock, so no other writer of the section can move the mark
+        //    between them — which is the whole reason the check means anything.
         // The cost is one uncontended lock acquisition per value, against a full AEAD reseal
         // plus a synchronous flush per 64.
         val durable = runtime.read { it.decoy?.counterHighWater ?: 0L }
