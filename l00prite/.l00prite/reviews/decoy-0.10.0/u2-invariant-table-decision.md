@@ -160,7 +160,23 @@ mode, one block) is unaffected, but the number in the text is not the number on 
 vary by up to 4 bytes on timestamp alone. The decoy uses the same formatter and the same clock, so it
 inherits the variation identically rather than pinning a width — which would itself have been a tell.
 
-## 3. §2.2's "emit well-formed values exactly once, null thereafter" is not what libsignal does — but it is still the right instruction
+## 3. ~~§2.2's "emit well-formed values exactly once, null thereafter" ... is still the right instruction~~ — **STRUCK [R11]**
+
+> **⚠️ [R11] THIS SECTION IS WRONG AND WAS WRITTEN TO RESIST BEING CORRECTED. Read the note, not the
+> section.** It argued that "exactly once, null thereafter" was *"still the right instruction"*, and
+> said so explicitly *"because a future round will otherwise correct it"*. A later round corrected it,
+> rightly: **the builder mirrors every covered envelope**, including repeated prekey-shaped messages,
+> and a real first envelope may carry `ephemeral_key` with **`prekey_id` null** (signed-prekey-only
+> X3DH). `DecoyEnvelopeBuilder` is canonical for construction; this section binds nothing.
+>
+> **Why it survived a supersession header, which is the reusable part.** This file already carried a
+> "superseded" banner. That banner tells a reader the *document* is historical — it does nothing
+> about a binding sentence *inside* it, and it actively suppresses re-reading, because "superseded"
+> reads as "already handled". A sentence that asserts a rule has to be struck **at the sentence**;
+> marking the file is not enough. Worse here: the section's stated purpose was to defend its claim
+> against future revision, so it was engineered to survive exactly the correction it needed.
+
+**Original argument follows, historical only.**
 
 Stated for the record, because a future round will otherwise "correct" it. libsignal emits
 `PREKEY_TYPE` for **every** message until the peer's reply completes the ratchet, not for one. So a
