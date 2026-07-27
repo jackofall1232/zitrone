@@ -943,8 +943,24 @@ order" (M5 here); it is worth writing whenever a timing property is claimed.
 
 U3's whole first implementation — five files, the new class, the 15-test gate, a green
 `:app:testDebugUnitTest` run — was **lost to an external revert of the working tree** partway through
-the unit. The tree came back at `4438cd72` with `git status` clean; nothing was recoverable, because
-the work had never been branched or committed. The instruction for the unit *said* "branch from
+the unit. The tree came back at `4438cd72` with `git status` clean; nothing was recoverable from the
+implementer's side, because the work had never been branched or committed.
+
+> **⚠️ CAUSE IDENTIFIED AFTERWARDS — it was the ARCHITECT, and the record should say so.** The
+> "external revert" was `git stash push -u` run by the architect on the implementer's **live**
+> working tree, while preparing state for an announced server restart that then did not happen. The
+> implementer could not have known that; it correctly reported the symptom. Naming it matters because
+> the lesson doubles:
+>
+> **For the architect — never stash, reset, or check out across a running agent's working tree.** A
+> background agent holds no lock and gives no signal, so the tree looks idle when it is not. If state
+> must be preserved mid-flight, prefer a mechanism that does not mutate the shared tree: let the agent
+> commit, snapshot a copy outside the repo, or simply stop the agent first. Checking `git status`
+> immediately before stashing is not a defence — it is exactly what made the tree look safe.
+>
+> **The saving grace, and the reason the rule below is still right:** the stash was recoverable and
+> the work was rebuilt. Had the implementer branched and committed as instructed, the interruption
+> would have cost nothing at all. Two independent failures had to line up to lose work. The instruction for the unit *said* "branch from
 current `main`", and the branch had not been created: the work was sitting uncommitted on `main`.
 
 Nothing about the loss was subtle, and the cost was the whole implementation window. Two rules:
