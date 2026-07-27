@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "lock_id": "lock-20260727T-decoy-u1-r4fix",
+  "lock_id": "lock-20260727T-decoy-u2-envelope-builder",
   "owner_agent": null,
   "owner_session": null,
-  "acquired_at": "2026-07-27T17:10:00Z",
-  "expires_at": "2026-07-27T18:10:00Z",
-  "ttl_seconds": 3600,
-  "purpose": "0.10.0 decoy U1: review round-4 fixes (J1-J5) + spec/table contract sweep \u2014 DONE",
+  "acquired_at": "2026-07-27T19:30:00Z",
+  "expires_at": "2026-07-27T21:30:00Z",
+  "ttl_seconds": 7200,
+  "purpose": "0.10.0 decoy U2: envelope builder + byte-level indistinguishability gate \u2014 DONE",
   "protected_paths": [
     "ledger.md",
     "memory.md",

@@ -930,13 +930,39 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       synthetic account alongside the real one, or state in `SECURITY_MODEL.md` that it is left and
       why that leaks nothing beyond what §1's threat model already concedes.
 
-- [ ] **U2 must settle §2.2 vs §2.3 for the first envelope.** §2.2 says the decoy rides "a session
-      genuinely established with one X3DH first message at setup"; §2.3 rules the ciphertext is
-      random bytes and nothing ever decrypts it. Both are satisfiable, but U2 must decide whether
-      the sender really runs `SessionBuilder.process` against the synthetic bundle (which writes a
-      durable ratchet session into the REAL vault — a capacity and reseal cost U1's budget does NOT
-      cover) or fabricates the `ephemeral_key`/`prekey_id` fields. U1 registers a genuine bundle
-      either way, but DISCARDS the prekey private halves, since §2.3 rules out ever decrypting.
+- [x] **U2 must settle §2.2 vs §2.3 for the first envelope. — SETTLED, and the ruling was already
+      made before U2 started.** The maintainer's §2.3 ruling governs: **no `SessionBuilder.process`**,
+      §2.2 amended to be a requirement on the OBSERVABLE rather than on the machinery. U2 fabricates
+      the fields and pins the absence with a test (`building cover traffic writes no Signal record`).
+
+- [x] **U2 — decoy envelope builder. BUILT 2026-07-27 on `feat/0.10.0-decoy-u2-envelope-builder`
+      (LOCAL, not pushed, not merged, no version bump). Deliberately UNWIRED.**
+      `decoy/DecoyEnvelopeBuilder.kt` + `DecoyEnvelopeBuilderTest.kt` (14 gate tests);
+      `DecoyIdentity` gained `ONE_TIME_PREKEY_IDS` / `FIRST_ONE_TIME_PREKEY_ID` / `SIGNED_PREKEY_ID`
+      so the prekey batch has ONE declaration that both the generator and the builder read.
+      **691 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0. **16 mutations, 16
+      discriminated.** No invariant table: U2 adds no durable field and no writer — the decision and
+      its justification are in `reviews/decoy-0.10.0/u2-invariant-table-decision.md`.
+      **Independent paired-blind review NOT yet run — that is the next thing U2 owes.**
+
+- [ ] **U3 inherits three things from U2, none of them optional.**
+      1. **Supply `ttl_seconds` and `burn_on_read` by MIRRORING the covered message.** The builder
+         deliberately gives them no defaults, because pinning them is one of the three real
+         distinguishers in the existing web generator. A caller that passes constants recreates it.
+      2. **Supply the sender's own registration id and 33-byte serialized identity key**
+         (`SignalProtocolManager.localRegistrationId()` / `localIdentityPublicKeyBytes()`), not
+         placeholders — both are inside a real first message's ciphertext and both change its length.
+      3. **Mirror the block count exactly**, per §2.2. The measured frames are 829 B (1 block) /
+         1169 B (2 blocks) / 976 B (1-block first message) — the last is +147 B, so a decoy stuck in
+         the first-message shape would identify the real frame of its own pair by size.
+
+- [ ] **U4/U5 inherit the counter residual U2 measured and §2.4 now declares.** A real client resets
+      `message_number` to 0 on every inbound ratchet turn; the reservation is monotonic and never
+      resets. Invisible while the synthetic side only acks and burns; **visible to the relay once U4
+      makes the exchange bidirectional.** Not a reason to abandon monotonicity (a REGRESSING counter
+      is a tell no real ratchet can produce at all), but U6 must not claim coverage it does not have.
+      **U5 also inherits the corrected §3.3 number: the single-block dead-air ping is an 829 B frame,
+      not 821 B.**
 
 - [ ] **U6 owes the DELIVERY of the storage-format disclosure.** The gate itself is answered above
       (line ~598, `a4f118df`) — do not re-answer it here. What is still outstanding is shipping the

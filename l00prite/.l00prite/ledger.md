@@ -2229,3 +2229,112 @@ Round 5 is available (four of six used) but the surface is converging hard — z
 consecutive rounds, findings halved, and both reviewers landing on the same items with the same
 remedies. **A maintainer merge decision is owed either way, and §4.1's third-pass wording needs
 re-ratification.** U1 remains deliberately UNWIRED; nothing merged, nothing pushed, no version bump.
+
+---
+
+## Session — 0.10.0-beta decoy traffic, **U2: the envelope builder** (2026-07-27)
+
+Branched from `main` @ `2cd82a2b` (U1 merged, including its post-cap docs). Branch
+`feat/0.10.0-decoy-u2-envelope-builder`, **LOCAL — nothing pushed, nothing merged, no version bump.**
+
+### What was built
+
+`apps/android/.../decoy/DecoyEnvelopeBuilder.kt` — given a block count, produce a `MessageEnvelope`
+indistinguishable field-for-field from a real `message.send` of the same block count. Plus
+`DecoyIdentity` gaining `ONE_TIME_PREKEY_IDS` / `FIRST_ONE_TIME_PREKEY_ID` / `SIGNED_PREKEY_ID`, so
+the uploaded prekey batch has ONE declaration that the generator iterates and the builder draws from.
+
+**Deliberately UNWIRED**, the same posture U1 shipped in: nothing constructs the builder, so the
+branch cannot emit cover traffic on any device. U3 supplies the call site.
+
+### The invariant table was NOT built, on purpose
+
+U2 adds **no durable field, no writer, and no changed field meaning**. It reads and spends
+`counterHighWater` through U1's allocator (W3, already tabled) and touches nothing else. The rule has
+a precondition and U2 does not meet it; performing the ritual anyway teaches the next unit that the
+ceremony is the point. The decision, the field-by-field justification, and the one derived assumption
+it does add are recorded in `reviews/decoy-0.10.0/u2-invariant-table-decision.md`.
+
+**The one derived assumption:** the X3DH-shaped first envelope is *the one issued counter `0`*. That
+needs no new durable flag — `counterHighWater` already makes "the value 0 has been issued" durable,
+monotonic and unrepeatable, which is exactly reader R2's stated meaning. The rejected alternative was
+a `firstEnvelopeSent` boolean, which WOULD have been a new durable field written on the send path
+inside a fixed-size region. Residual recorded: an interrupted session can skip counter 0, so such a
+vault's synthetic conversation begins mid-chain with no first envelope. Relay-visible only.
+
+### THREE SPEC ERRORS FOUND — and one of them is R7's own error class, one field over
+
+The R7 block told U2 to *measure, not estimate*. Doing so found that the spec was wrong three times.
+
+1. **§2.3's ciphertext formula would have fingerprinted EVERY decoy.** It specified
+   `random(32) ‖ random(12) ‖ random(N·256 + 16)` = 316 bytes for one block. A real libsignal
+   `SignalMessage` is **323**. And the miss is not merely seven bytes: **316 base64s to 424
+   characters ending `==`, 323 to 432 ending `=`.** That is the *identical* defect R7 caught in
+   `ephemeral_key` — a base64-padding tell — in the field immediately next to it, and it would have
+   marked every decoy rather than only first ones. Worse, no fixed formula can be right: **the
+   counter is a protobuf varint, so `message_number` changes the ciphertext LENGTH** (127 → 1 byte,
+   128 → 2, 16 384 → 3) and `message_number` rides in the CLEARTEXT, so a formula-sized decoy is
+   checkably short from its 128th envelope onward.
+2. **§2.1's frame table was low on every row.** Measured through the production
+   `MessageEnvelope.toJson()` + `WsClient.messageSendFrame`: 821→**829**, 1161→**1169**,
+   860→**976**. The first-message row was low by ~4×: R7 predicted that row was wrong; **+147 B is
+   the number**, because the `PreKeySignalMessage` wrapper alone is 81 bytes on the wire. §3.3's
+   dead-air ping inherits it — an 829 B frame, not 821 B.
+3. **§2.2's "exactly once, null thereafter" is not what libsignal does — and is still right.**
+   libsignal emits `PREKEY_TYPE` until the peer's reply, not for one message. The rule survives for a
+   reason the spec does not give: a decoy stuck in the first-message shape is **+147 B over the real
+   message it mirrors**, which identifies the real frame of its own pair by size. Recorded so a later
+   round does not "correct" it back.
+
+A fourth item is now declared in §2.4 rather than left for U4: **the reservation's monotonic counter
+never resets, and a real client resets `message_number` on every inbound ratchet turn.** Invisible
+while the synthetic side only acks and burns; relay-visible once U4 makes the exchange bidirectional.
+Not a reason to abandon monotonicity — a REGRESSING counter is a tell no real ratchet can produce at
+all — but it must be stated, not discovered.
+
+### The binding `prekey_id` question, answered honestly
+
+The brief said: *verify the id set is reachable from what U1 persisted; if it is not, stop and report
+rather than inventing a source.* **The honest answer is "derivable, but NOT persisted."**
+`generateBundle` uploads ids `1..100` unconditionally, so every synthetic account published exactly
+that set — but nothing in `TAG_DECOY` records it. That is reachable enough to act on and not worth a
+durable field, so the cross-file assumption was made **checked** instead of implicit: one declaration
+both sides read, plus a test asserting the generated bundle's ids ARE that range. The emitted id is
+**1**, not a random member — `Store.ConsumeOneTimePrekey` pops `ORDER BY prekey_id LIMIT 1` and the
+account has consumed none, so 1 is what the relay would actually issue. A random draw would be wrong
+99 times in 100 against the query that decides it.
+
+### Mutation evidence — 16 run, 16 discriminated, but ONE needed a new test first
+
+Full table in `reviews/decoy-0.10.0/u2-invariant-table-decision.md`. Two entries matter here:
+
+**M13 (`previous_counter` written as 1) did NOT discriminate, and no guard was carrying it — it was a
+genuine blind spot.** The field is a one-byte varint whatever its value, so no length test can see
+it, and libsignal's Java API exposes `getCounter()` but not `getPreviousCounter()`, so no parse-back
+assertion could reach it either. All twelve tests at that point were length, shape or parse
+assertions and the field is invisible to all three. The fix was not another assertion about that
+field but a test that makes the CLASS unrepresentable: **`the cover ciphertext is byte-identical to a
+real one everywhere it is not random`**, with the random regions derived from the layout rather than
+hand-counted. M13, M14 (wrong version byte) and M15 (wrong field order) all fail against it.
+
+**A methodology failure in the harness itself, recorded because it nearly became a false finding.**
+The full suite failed once afterwards with a signature that was *exactly* M15 — because the harness
+restores the source but never re-runs Gradle, so the compiled classes left behind were the last
+mutation's. Zero reproductions in isolation, zero in a 400-iteration determinism stress, and a clean
+`--rerun-tasks` run green. The lesson is not "it was flaky": **a mutation harness that leaves mutated
+artifacts behind hands the next run a defect that does not exist**, and chasing it costs more than
+the sweep saved.
+
+### Evidence
+
+`ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug` from
+`apps/android` → **`BUILD SUCCESSFUL`, exit code 0** (read from Gradle), **691 tests / 3 skipped /
+0 failures / 0 errors** (678 before this unit; +13). Re-verified with `--rerun-tasks` after the
+mutation sweep, precisely because of the stale-artifact problem above.
+
+### Still owed
+
+**Independent paired-blind review of U2 has NOT been run** — that is the next step, and per the
+carried-forward 0.9.3 lesson it must be scoped to the WHOLE unit, not to a delta. The three spec
+corrections are **applied but marked pending ratification**; §2.1's numbers and §2.3's ciphertext
+paragraph were the architect's ratified text. U2 stays UNWIRED; nothing merged, nothing pushed.

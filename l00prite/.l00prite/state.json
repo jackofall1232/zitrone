@@ -1,8 +1,8 @@
 {
  "schema_version": 2,
  "project_name": "Zitrone",
- "current_goal": "0.10.0-beta decoy traffic \u2014 U1 review round 4 FIXED (J1-J5, 0 P1s, 2 P2s); surface converging, maintainer merge decision owed",
- "current_phase": "0.10.0 U1 on local branch feat/0.10.0-decoy-u1-provisioning: built, paired-blind reviewed FOUR times, fix round 4 of 6 applied. Unwired by design; U2 (envelope builder) not started",
+ "current_goal": "0.10.0-beta decoy traffic — U2 (envelope builder) BUILT and mutation-verified on a local branch; independent paired-blind review of U2 not yet run",
+ "current_phase": "U1 merged to main (2cd82a2b). U2 on local branch feat/0.10.0-decoy-u2-envelope-builder: DecoyEnvelopeBuilder + 14 gate tests, deliberately UNWIRED. Three spec errors found by measurement and applied PENDING RATIFICATION (§2.1 frame table, §2.3 ciphertext formula, §2.4 counter residual). U3 not started",
  "active_agent": null,
  "last_agent": "claude",
  "last_updated": "2026-07-27",
@@ -13,8 +13,8 @@
  "last_event_processed": null,
  "pending_event_count": 0,
  "review_response_required": false,
- "ci_status": "local only \u2014 :app:testDebugUnitTest 678 tests / 3 skipped / 0 failures / 0 errors; :app:assembleDebug exit 0. Nothing pushed, so no CI run.",
+ "ci_status": "local only — :app:testDebugUnitTest 691 tests / 3 skipped / 0 failures / 0 errors; :app:assembleDebug exit 0, re-verified with --rerun-tasks. Nothing pushed, so no CI run.",
  "execution_active": false,
  "execution_stop_reason": null,
- "next_recommended_action": "Take the MAINTAINER DECISION on U1: merge, or spend round 5 (four of six used). The convergence case for stopping is strong \u2014 findings 10 -> 11 -> 10 -> 6, zero P1s for two consecutive rounds, and both blind reviewers independently reaching the same top findings AND the same remedies. Round 4's own shape supports it: three of five findings were stale documentation, not defects in behaviour. If round 5 runs, point it at the two things round 4 changed structurally \u2014 the codec's new credential-pairing rejection (does refusing at DECODE turn a recoverable half-set into a refused unlock for any image that could reach that state?) and the bundleFactory seam. SEPARATELY OWED regardless: maintainer RE-RATIFICATION of the \u00a74.1 disclosure, now on its THIRD pass \u2014 it has been corrected in both directions in consecutive rounds."
+ "next_recommended_action": "Dispatch the INDEPENDENT paired-blind review of U2, scoped to the WHOLE unit rather than a delta (the carried-forward 0.9.3 lesson). Point it at the three places U2 makes a judgement call rather than a measurement: (a) the derivation 'the first envelope is the one issued counter 0', which replaces a durable flag with an inference from counterHighWater and carries a stated skip-counter-0 residual; (b) prekey_id = 1, drawn from a batch that is DERIVABLE from generateBundle's source but is NOT persisted anywhere in TAG_DECOY — the honest gap, made checked rather than closed; (c) whether the byte-diff test's random regions are drawn tightly enough that a real defect cannot hide inside one. SEPARATELY OWED: maintainer ratification of the three spec corrections — §2.1's numbers and §2.3's ciphertext paragraph were previously ratified architect text, and §2.3's formula was actionable-and-wrong in exactly R7's own base64-padding error class."
 }

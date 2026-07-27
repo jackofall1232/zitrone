@@ -98,10 +98,30 @@ Padding is real, correct, and byte-identical across platforms (`packages/crypto/
 
 | Content | Padded block | Full `message.send` frame |
 |---|---|---|
-| Short text or batched read receipt (≤252 B) | 256 | **821 B** |
-| Text 253–508 B | 512 | **1161 B** |
-| Attachment control payload (always 286 B) | 512 | **1161 B** |
-| X3DH first message, short text | 256 | **860 B** (+39 B: `ephemeral_key`, `prekey_id` non-null) |
+| Short text or batched read receipt (≤252 B) | 256 | **829 B** |
+| Text 253–508 B | 512 | **1169 B** |
+| Attachment control payload (always 286 B) | 512 | **1169 B** |
+| X3DH first message, short text | 256 | **976 B** (+147 B over a subsequent one) |
+
+> **⚠️ [U2, MEASURED — applied, pending ratification] The four numbers above were corrected.** They
+> previously read 821 / 1161 / 1161 / 860, the last with the gloss "+39 B: `ephemeral_key`,
+> `prekey_id` non-null". Every one was low, and the first-message row was low by roughly 4×: the
+> `PreKeySignalMessage` **wrapper** costs 81 bytes on the wire (version, pre-key id, a 33-byte base
+> key, a 33-byte identity key, the inner message's own length header, registration id, signed
+> pre-key id) on top of the two JSON fields the old gloss counted — which is exactly what R7's third
+> correction predicted and told U2 to measure. Measured through the production
+> `MessageEnvelope.toJson()` + `WsClient.messageSendFrame`, not computed.
+>
+> Also pre-existing and worth knowing, because it is real behaviour rather than a decoy artefact:
+> `DateTimeFormatter.ISO_INSTANT` trims trailing zeros in the fractional second, so **real frames
+> already vary by up to 4 bytes on the timestamp alone** (a whole-second timestamp makes row 1
+> 825 B). Cover traffic uses the same formatter and inherits the variation identically; pinning a
+> width would itself have been a tell.
+>
+> **§3.3 inherits this:** the dead-air ping's "single 256-byte block (821 B frame)" is an 829 B
+> frame. The design is unaffected — match the mode, one block — but U5 and `SECURITY_MODEL.md` must
+> not carry the old number. Full measurement record:
+> `l00prite/.l00prite/reviews/decoy-0.10.0/u2-invariant-table-decision.md`.
 
 Padding does **not** by itself produce uniformity. Three residual size/structure tells exist
 independently of decoys: block count is visible; the attachment control payload is 286 B so it
@@ -181,9 +201,31 @@ must not be described as more.
 ### 2.3 The ciphertext does not need to be a real ratchet output — and should not be
 
 The synthetic account is our own and the decoy is burned on delivery, so **nothing ever needs to
-decrypt it.** Therefore the decoy ciphertext is `random(32) ‖ random(12) ‖ random(N·256 + 16)` —
-byte-shaped identically to a genuine `ratchet_pub ‖ nonce ‖ AEAD(ct+tag)` blob and
-computationally indistinguishable from one to anybody without the key, which includes everybody.
+decrypt it.** Therefore the decoy ciphertext is **random bytes laid out in libsignal's real
+serialized-message form** — byte-shaped identically to a genuine `SignalMessage` (or, for the first
+envelope, a `PreKeySignalMessage`) and computationally indistinguishable from one to anybody without
+the key, which includes everybody.
+
+> **⚠️ [U2, MEASURED — applied, pending ratification] This paragraph previously specified the blob as
+> `random(32) ‖ random(12) ‖ random(N·256 + 16)`, "byte-shaped identically to a genuine
+> `ratchet_pub ‖ nonce ‖ AEAD(ct+tag)`". That is a generic AEAD framing and NOT what libsignal
+> serializes.** A real one-block `SignalMessage` is **323 bytes**, not the formula's 316 — and the
+> miss is not merely seven bytes: 323 base64s to 432 characters ending `=` while 316 gives 424
+> ending `==`. **It is the identical defect R7 caught in `ephemeral_key`, in the field next to it,
+> and it would have marked every decoy rather than only first ones.**
+>
+> Two further facts the formula cannot express, both measured: **the counter is a protobuf varint, so
+> `message_number` changes the ciphertext LENGTH** (127 costs one byte, 128 two, 16 384 three) — and
+> `message_number` rides in the cleartext, so a decoy sized from any fixed formula is checkably short
+> from its 128th envelope onward. And the `PreKeySignalMessage` wrapper is 81 bytes, per §2.1's
+> corrected table.
+>
+> **⭐ CANONICAL: the wire layout lives in `DecoyEnvelopeBuilder`'s wire-shaping section**, next to
+> the code that emits it and pinned on every test run by a byte-diff against real `SessionCipher`
+> output. **It is deliberately not restated here** — a shape written down in three places has three
+> chances to rot, which is the failure this document has already recorded seven times about a
+> different claim. Measurement record:
+> `l00prite/.l00prite/reviews/decoy-0.10.0/u2-invariant-table-decision.md`.
 
 This is a deliberate rejection of "run a real Double Ratchet with the synthetic peer," for a
 specific and load-bearing reason: **every real ratchet advance is a durable `VaultState` mutation,
@@ -238,6 +280,19 @@ instead of one per decoy.
 trivially separable from any `message.send` (821 B+) by size alone, and **this scheme generates no
 cover for them.** A real conversation also produces inbound receipt traffic from the peer that a
 decoy exchange does not naturally produce.
+
+> **⚠️ [U2] A SECOND declared residual, in a cleartext field, which U4 makes real.** A real client
+> resets `message_number` to 0 on **every inbound ratchet turn**. The counter reservation is
+> monotonic by §2.3's deliberate choice and never resets. While the synthetic side only acks and
+> burns this is invisible. **Once U4 makes the exchange bidirectional, a relay comparing inbound and
+> outbound sees a counter climbing through replies that should have reset it.** Relay-visible only,
+> so §1's threat model already covers it — but it is written down here rather than left for U4 to
+> discover, per the same rule as the paragraph above. It is not a reason to abandon monotonicity: a
+> counter that REGRESSES is a tell no real ratchet can produce at all, which is the worse of the two.
+>
+> *(The protobuf's own `previous_counter` is not part of this and was measured, not reasoned about:
+> libsignal writes the last COUNTER of the previous chain rather than its length, so a client whose
+> one-message first chain was answered emits 0 for its whole next chain — which is what U2 emits.)*
 
 Partial mitigation is in scope (§5, U4): the synthetic side acks and burns, and occasionally sends
 back, so a decoy exchange produces control frames of its own rather than being a conspicuously
@@ -620,7 +675,7 @@ next begins. No version bump, no push, nothing merged without explicit maintaine
 | Unit | Scope | Gate to clear before the next unit |
 |---|---|---|
 | **U1** ✅ | Synthetic account provisioning + `TAG_DECOY` codec section. Lazy registration, credential storage, token refresh, capacity budget, counter-reservation allocator. **Built, deliberately UNWIRED** — nothing constructs it, so the branch cannot spend a registration. | **DONE** on `feat/0.10.0-decoy-u1-provisioning`. **678 tests / 0 failures** after fix round 4, `assembleDebug` exit 0, re-verified independently each round. Capacity measured: 640–643 B worst case against a 1024 B budget. **Paired-blind review of the WHOLE unit: four rounds complete** (findings 10 → 11 → 10 → 6; P1s 2 → 1 → 0 → 0), fixes applied and mutation-verified each round. **Merge still owed an explicit maintainer decision**, plus re-ratification of §4.1's third-pass wording. |
-| **U2** | Decoy envelope builder. Random-ciphertext blob at a requested block count; field population mirroring the real send path; the one-time X3DH-shaped first envelope. *(Counter reservation moved to U1.)* | Byte-level test asserting a decoy frame is indistinguishable field-for-field from a real frame of the same block count, *including* that no field is a constant where a real message varies. **`prekey_id` drawn from the real path's actual range, verified against source — see the binding constraint in §2.2.** Must **not** call `SessionBuilder.process` (§2.3 ruling). |
+| **U2** ✅ | Decoy envelope builder. Random-ciphertext blob at a requested block count; field population mirroring the real send path; the one-time X3DH-shaped first envelope. *(Counter reservation moved to U1.)* | **BUILT on `feat/0.10.0-decoy-u2-envelope-builder`, deliberately UNWIRED** — nothing constructs it, so the branch cannot emit cover traffic. `DecoyEnvelopeBuilder` + 14 gate tests. **691 tests / 0 failures / 3 skipped**, `assembleDebug` exit 0. **16 mutations run, 16 discriminated** (M13 needed a new byte-diff test first — recorded). **No `SessionBuilder.process`, no Signal record written**, pinned by test. `prekey_id` = the id the relay would issue (`ORDER BY prekey_id LIMIT 1`) from the account's own uploaded batch, with the batch declaration made the single source both the generator and the builder read. **Three spec corrections found and applied — §2.1's table, §2.3's ciphertext formula, §2.4's counter residual.** Independent paired-blind review NOT yet run. |
 | **U3** | Pairing at the send choke point. Random order (decoy-first / real-first), few-ms stagger, block-count mirroring. Insertion inside `MessagingCoordinator`'s confined worker, above `ws.sendMessage`. | Ordering is uniformly random and stagger is drawn per-send — pinned by a statistical test, not by inspection. Real-send latency and the `flushSendRatchet` durability barrier provably unaffected. |
 | **U4** | Synthetic-side receive: second WS connection for the synthetic account, deliver → ack → burn at ~30 ms, occasional send-back so the exchange is bidirectional. | Decoys never surface in UI, notifications, or unread counts. Notification parity §7 re-verified with decoys active. |
 | **U5** | Dead-air ping within a session (§3.2), single block, per-vault schedule. | Fires only in a live session; torn down at lock with everything else. |

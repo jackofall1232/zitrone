@@ -656,6 +656,47 @@ And the meta-lesson, worth more than the rule: **writing a rule down does not co
 to follow it.** The author of the round-5 rule violated it in the act of recording it. Rules need a
 mechanical check, not just a statement.
 
+### A FIELD THAT CANNOT CHANGE THE LENGTH AND IS NOT EXPOSED BY THE PARSER IS INVISIBLE TO BOTH KINDS OF TEST (0.10.0 U2)
+
+U2's gate is byte-level indistinguishability, and it was tested three ways: frame/ciphertext LENGTH
+against real libsignal output, envelope field SHAPE, and PARSE-BACK through libsignal's own
+constructors. Sixteen deliberate mutations were run against that suite. Fifteen failed. **One passed,
+and the usual answer — "another guard was carrying it" — was wrong. Nothing was carrying it.**
+
+The mutation set the protobuf's `previous_counter` to 1 instead of the measured 0. It is a one-byte
+varint at either value, so **no length test can see it**; and libsignal's Java `SignalMessage`
+exposes `getCounter()` but **not** `getPreviousCounter()`, so **no parse-back test can reach it**.
+Length tests and parse tests together felt like belt and braces and had one shared blind spot: a
+field that is neither length-bearing nor accessor-exposed.
+
+**The rule:** when the property under test is "these bytes are indistinguishable from those bytes",
+the test must eventually BE a byte comparison. Reach for a structural diff against real output — with
+the genuinely-random regions derived from the layout rather than hand-listed — instead of adding a
+third assertion of the same two kinds. One such test replaced the entire class of miss: the same
+diff also catches a wrong version byte and a wrong field ORDER, neither of which had been thought of.
+
+**Corollary that fired immediately:** such a diff needs a guard that its "fixed" set is not empty, and
+that guard must be set from the actual structure. A subsequent `SignalMessage` has exactly **eleven**
+structural bytes; a round-number threshold of 40 would have silently passed a vacuous comparison on
+the smaller of the two shapes. The guard fired on the first run, which is the only reason the number
+is right.
+
+### A MUTATION HARNESS THAT LEAVES MUTATED ARTIFACTS BEHIND INVENTS A DEFECT FOR THE NEXT RUN (0.10.0 U2)
+
+The harness patched a source file, ran the suite, and restored the file in a `finally`. It never ran
+the build again after the final revert. So the compiled classes left on disk were the **last
+mutation's**, and the next full-suite invocation's up-to-date check did not rebuild them.
+
+The result was a single full-suite failure whose signature exactly matched that last mutation —
+presenting as a **flaky test in the production code**. It reproduced zero times in isolation and zero
+times in a 400-iteration determinism stress of the component; a clean `--rerun-tasks` run was green.
+
+**The lesson is not "it was flaky", it is that the tooling manufactured the evidence.** The natural
+response to a one-off failure in a concurrency-adjacent unit is to hunt a race, and that hunt would
+have cost more than the whole mutation sweep saved. **Any harness that mutates source must force a
+rebuild after its final revert, or run one throwaway build before the evidence run.** And when a
+failure signature matches a mutation you were just running, suspect the harness before the code.
+
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
   round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked
