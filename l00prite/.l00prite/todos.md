@@ -579,7 +579,30 @@ All three need **CX23 access, which CX33 does not have** (see Housekeeping + con
 `handlers.go:48/160`, `cmd/server/main.go` fiber.Config, `docker-compose.tor.yml:32`, plus
 external probes from CX33 (TLS handshake, `GET /healthz` on 443 and 8443, `dig`).
 
-- [ ] **P1 — PORT 8443 IS PUBLICLY REACHABLE OVER PLAIN HTTP. Highest priority, above the limiter.**
+> **⚠️ STATUS CORRECTION 2026-07-27 — P1 and P2-interim were FIXED on 2026-07-26 and this section
+> did not say so for a full day.** Commit `20ade12b` ("fix(cx23): close 8443 to the open internet,
+> widen registerLimit interim") bound the publish to `127.0.0.1:8443` and widened `registerLimit`
+> 5/hr → 300/hr. Maintainer confirms it was rebuilt, redeployed, and verified on CX23; that
+> deployment state is **taken on report, not independently verified** (CX33 has no SSH to CX23, and
+> probing `/api/v1/register` to measure the limiter would consume the very global bucket at issue).
+> The commit lived **only** on `origin/cx23/urgent-8443-and-ratelimit-interim` and was **not on
+> main** — so main still carried both defects and any redeploy from main would have silently
+> reverted them. Merged to main 2026-07-27 (`go build ./...` + `go vet` clean); **push to origin
+> still owed.**
+>
+> **THE PATTERN, recorded because the record is what failed: A FIX RECORDED ONLY IN COMMIT HISTORY
+> IS NOT RECORDED.** The fix was fully described — in a commit message, on an unmerged branch,
+> where nothing that reads this ledger would ever see it. This section, which exists precisely to
+> answer "what is the state of the relay", asserted the opposite. A later session read it, took the
+> 5/hr figure as current, and built a release budget on it. The stale entry did not merely lag; it
+> actively produced a wrong number in downstream design work. **This happened one day after the
+> ledger-cadence rule was added, which is the point: the rule did not fail, the follow-through did.**
+> Closing a finding means updating the record that tracks it in the same session, not the artifact
+> that fixes it. See `failures.md` → "A fix recorded only in commit history is not recorded."
+
+- [x] **P1 — PORT 8443 IS PUBLICLY REACHABLE OVER PLAIN HTTP. Highest priority, above the limiter.**
+      **FIXED `20ade12b` (deployed 2026-07-26, on main 2026-07-27)** — publish bound to
+      `127.0.0.1:8443` so only the host's Caddy can reach it. Original finding follows.
       `http://178.104.19.240:8443/healthz` returned 200 from CX33 over the open internet; the same
       app serves the FULL API there. This defeats TLS, defeats cert pinning for any client induced
       onto it, and hands an attacker their own rate-limit bucket (a direct-to-8443 peer is not
@@ -589,8 +612,31 @@ external probes from CX33 (TLS handshake, `GET /healthz` on 443 and 8443, `dig`)
       firewall 8443 so only Caddy can reach it. NOTE: changing the published port is a compose
       change — three-file invocation required
       (`-f docker-compose.yml -f docker-compose.tor.yml -f docker-compose.i2p.yml`).
-- [ ] **P2 — `registerLimit` is 5/HOUR on a key that collapses to Caddy's socket address.**
-      `handlers.go:48` = `ratelimit.New(5, time.Hour, ...)`, keyed on `c.IP()` at `handlers.go:160`.
+- [ ] **P2 — `registerLimit` collapses to ONE GLOBAL BUCKET keyed on Caddy's socket address.**
+      **INTERIM APPLIED, REAL FIX STILL OPEN — and now UNBLOCKED for design.**
+      - **Interim (`20ade12b`, deployed 2026-07-26, on main 2026-07-27):** widened **5/hr → 300/hr**.
+        `handlers.go` now reads `ratelimit.New(300, time.Hour, ...)`. This is **relief, not a fix** —
+        the key is unchanged, so it is still one bucket shared by every client worldwide. At 5/hr it
+        was a wall at ~2 registrations/hour globally.
+      - **✅ PRECONDITION NOW CLOSED — `ProxyHeader` is CONFIRMED UNSAFE as-is.** The blocker was
+        "read the Caddyfile first; only safe if Caddy OVERWRITES rather than appends
+        `X-Forwarded-For`." Answered: **Caddy's `reverse_proxy` has NO `header_up` override, so it
+        APPENDS.** Trusting the header as-is would let clients spoof their own bucket — strictly
+        worse than the collapse. **Do not set `ProxyHeader` against the current Caddyfile.**
+      - **The real fix, now designable.** Two viable routes, either of which makes per-client keying
+        sound: (i) **`header_up X-Forwarded-For {remote_host}` in the Caddyfile**, so Caddy
+        overwrites rather than appends and the header becomes trustworthy, then enable Fiber's
+        `ProxyHeader`; or (ii) **last-hop parsing server-side** — take only the final XFF element
+        (the one Caddy itself appended) rather than trusting the client-supplied prefix. Note
+        neither route helps Tor/I2P, which collapse via the sidecars regardless — non-IP keying
+        (0.9.4 registration PoW is the per-client cost) remains the answer there.
+      - **Registration volume is a SHARED GLOBAL RESOURCE while this stands.** Anything that adds
+        registrations per onboarding spends everyone's headroom, not its own. 0.10.0 decoy traffic
+        adds one synthetic account per vault (2 → 3 registrations), cutting worldwide onboarding
+        capacity 150 → 100 devices/hour. Sequence non-IP keying before any announcement that grows
+        volume.
+      - Original finding follows, for the diagnostic record.
+      `handlers.go:48` was `ratelimit.New(5, time.Hour, ...)`, keyed on `c.IP()` at `handlers.go:160`.
       **No `ProxyHeader`/`TrustedProxy` is set anywhere in the Go source** (Fiber v2.52.11 →
       `c.IP()` is the raw socket peer), and the relay sits behind Caddy, so **every clearnet user
       worldwide shares ONE bucket of 5 registrations/hour**. Tor/I2P collapse the same way via the

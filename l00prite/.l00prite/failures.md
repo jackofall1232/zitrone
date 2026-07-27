@@ -304,6 +304,46 @@ a thread already running).
 Corollary for reviewers: **new prose is not lower-risk than new code.** Attack a claim's first
 appearance hardest, not its tenth.
 
+### PROCESS FIX (BINDING) — a fix recorded only in commit history is NOT recorded (CX23 P1/P2, 2026-07-27)
+
+**What happened.** The CX23 relay findings P1 (port 8443 publicly reachable, plaintext, full API)
+and P2 (`registerLimit` 5/hr on a collapsed global bucket) were both fixed on 2026-07-26 by
+`20ade12b`. The commit message was *exemplary* — it explained the change, the reasoning, why the
+interim was not a fix, and it even answered the open Caddyfile question that P2 was blocked on.
+None of that reached anything a future session reads. The commit sat on
+`origin/cx23/urgent-8443-and-ratelimit-interim`, unmerged; `todos.md` still carried both findings
+unchecked with the old 5/hr figure; and `main` still carried both defects in source.
+
+**The damage was not hypothetical.** The next session read `todos.md`, took 5/hr as current, and
+built a release budget for 0.10.0 decoy traffic on it — reasoning about registration capacity that
+was wrong by 60×. It was caught only because the maintainer knew the real number and said so. Worse,
+because `main` never received the fix, **any redeploy built from main would have silently reverted
+a live security fix**, reopening the full API over plaintext HTTP past Caddy and TLS.
+
+**Three distinct failures, each independently sufficient:**
+1. The ledger entry that tracks a finding was not updated when the finding was closed.
+2. The fix was left on an unmerged branch, so the source of truth and production disagreed about
+   security posture — which is itself the defect, independent of either state being "right".
+3. A genuinely valuable finding (Caddy appends rather than overwrites `X-Forwarded-For`, so
+   `ProxyHeader` is unsafe) was recorded **only** in prose in a commit message. It unblocked P2's
+   real fix and nobody downstream could have known.
+
+**BINDING RULE.** Closing a finding means updating the record that tracks it **in the same
+session** as the artifact that fixes it. A commit message, a PR description, and a branch name are
+not the record — they are invisible to every future reader who starts from `.l00prite/`. Concretely:
+- Landing a fix ⇒ tick/annotate its `todos.md` entry with the commit SHA and deployment status in
+  the same session. An untouched checkbox asserts "still broken" to everyone who reads it.
+- A fix that is deployed but unmerged ⇒ **say so explicitly and loudly**, because that state is a
+  live regression risk on the next redeploy, not a bookkeeping nicety.
+- A finding discovered *while* fixing something else ⇒ it goes in the ledger, not only the commit
+  message. If it changes what a future decision may assume, commit prose is the wrong home for it.
+- Deployment state that cannot be verified from here (CX23 has no SSH from CX33) ⇒ record it as
+  **taken on report**, naming who reported it. Do not launder a report into a verification.
+
+**Why this one stings.** The ledger-cadence rule had been added one day earlier. The rule did not
+fail — the follow-through did. A process that is written down but not executed produces *more*
+confident wrong answers than having no process at all, because the next reader trusts the record.
+
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
   round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked
