@@ -315,7 +315,11 @@ only where the OS provides it (Android).
 
 - No phone number, email, or name required — discovery is by QR code or direct link
 - Routing uses opaque UUIDs never exposed to other users directly
-- Typing indicators and read receipts are sent as **encrypted signals** — the server can't read them
+- **Read receipts** are sent as **encrypted signals** inside ordinary message envelopes — the server
+  can't read them. **Typing indicators are NOT.** *(Corrected 2026-07-27 — this line previously
+  claimed both were encrypted. Typing indicators are plaintext WebSocket control frames carrying
+  your conversation partner's account UUID in the clear (`typing.start` / `typing.stop`); the relay
+  sees who is typing to whom. Only the read-receipt half of the original claim was ever true.)*
 - Delivery receipts store only a hash of the message ID
 - Account deletion is a full, irreversible purge: prekeys, pending envelopes, account record
 
@@ -394,6 +398,25 @@ the others.
         │ └───────────────────────────────────────────────────────┘   │
         └─────────────────────────────────────────────────────────────┘
 ```
+
+> **⚠️ CORRECTION 2026-07-27 — the diagram above shows the DESIGN, and three of its layers are not
+> built on the shipped client.** It was presented without qualification and read as a description of
+> what protects you today. It is not. Specifically:
+>
+> - **"Sealed Sender" (Layer 3) is not implemented for ordinary messaging.** Every message envelope
+>   carries `sender_id` and `recipient_id` in **cleartext**, and the relay rejects any envelope whose
+>   `sender_id` does not match the authenticated connection — so the relay learns both ends of every
+>   conversation. Sealed-sender code exists but is wired only to dead drops and lemon drops, which
+>   genuinely have no sender column. Do not rely on sender anonymity against the relay.
+> - **"Decoy traffic" (Layer 2) is not built on the shipped Android client.** It is scheduled for
+>   0.10.0-beta. See the Decoy traffic note under "Multi-hop relay" below.
+> - **"3-hop relay" (Layer 2) is not wired to message sends.** Circuit-selection and layer-peeling
+>   code exist on both client and server, but no client routes an ordinary message through it today.
+>
+> The layers that ARE live: TLS 1.3 with cert pinning, Tor transport, no phone/email, UUID routing,
+> QR-only exchange, dead-drop mode, Signal Protocol with Double Ratchet, 256-byte padding,
+> burn-on-read, TTL, zero server logs, and the whole of Layer 5 (storage). This correction is
+> published rather than silently redrawn because the original was live and overclaimed.
 
 ### Plausible deniability (key-slot vaults)
 
@@ -1025,18 +1048,52 @@ selectable (off / low / medium / high) and auto-reduces on low battery.
 
 ### Multi-hop relay
 
-Messages can be onion-routed through three relay nodes. Each layer is a sealed box to one relay's
-Curve25519 key; a relay peels exactly one layer, learning only the next hop — never both ends of the
-path. Path selection forbids two hops in the same Autonomous System and prefers geographic
-diversity; circuits rotate after 100 messages or 10 minutes, and the guard (first) hop rotates only
-weekly. An adversary must compromise all three relays *and* correlate timing — and decoy traffic
-defeats the timing correlation.
+> **⚠️ CORRECTION 2026-07-27 — NOT WIRED TO MESSAGE SENDS. This section described a design as though
+> it were active protection.** The onion-routing code below is real and works as described *as code*
+> — client-side circuit selection and server-side layer-peeling both exist — but **no client routes
+> an ordinary message through it.** `relayHops: 3` in Stealth and Ghost is a configuration value with
+> no consumer on the send path. Messages go direct to the relay today. The sentence "decoy traffic
+> defeats the timing correlation" was **doubly wrong**: it asserted a defense from a mechanism that
+> is not built (see below), against a threat model that assumes a multi-hop path that is not used.
+
+Messages *can be* onion-routed through three relay nodes — **as a design, not as shipped behavior.**
+Each layer is a sealed box to one relay's Curve25519 key; a relay peels exactly one layer, learning
+only the next hop — never both ends of the path. Path selection forbids two hops in the same
+Autonomous System and prefers geographic diversity; circuits rotate after 100 messages or 10
+minutes, and the guard (first) hop rotates only weekly. **When this is wired**, an adversary would
+have to compromise all three relays *and* correlate timing.
+
+### Decoy traffic
+
+> **⚠️ CORRECTION 2026-07-27 — NOT BUILT on the shipped client.** Decoy traffic was listed in the
+> security-onion diagram and in the connection-modes table as though it were an active layer. It is
+> **not** implemented on Android, the security reference client. A decoy generator exists in the web
+> client's shared package, but the web client is not deployed and has no live instance — and that
+> generator's decoys are themselves statistically distinguishable from real messages. **Assume zero
+> cover traffic protects you today.**
+
+Decoy traffic is scheduled for **0.10.0-beta**. When it ships, this section will state what it
+does and does not cover, in these terms:
+
+- **It defends against a passive network observer** — an ISP, a hostile Wi-Fi network, a hostile
+  Tor exit, or traffic analysis at scale. Such an observer sees only TLS frame sizes and timings,
+  and cover traffic makes a real send indistinguishable from an idle client.
+- **It does NOT defend against the relay operator**, and will never be claimed to. `sender_id` and
+  `recipient_id` ride every envelope in cleartext and the relay binds the sender to the
+  authenticated connection, so the relay sees who talks to whom regardless of how much cover
+  traffic surrounds it. Closing that requires sealed sender or onion routing for ordinary sends —
+  both unbuilt (see the two corrections above).
+- **The in-app indicator is a mechanism-status indicator, not proof of unlinkability.** It will
+  report that cover traffic was generated for your last message. That is all it asserts. It does not
+  mean an adversary was defeated, and it must never be read that way.
 
 ### Connection modes
 
-Three user-selectable bundles compose the network layer:
+Three user-selectable bundles compose the network layer. **The "Decoy traffic" and "Relay hops"
+columns describe intent, not shipped behavior** — see the two corrections above. Tor and dead-drop
+mode are real today.
 
-| Mode | Tor | Relay hops | Decoy traffic | Dead drop |
+| Mode | Tor | Relay hops *(design only)* | Decoy traffic *(not built)* | Dead drop |
 | --- | --- | --- | --- | --- |
 | **Standard** | yes | 1 | off | no |
 | **Stealth** | yes | 3 | medium | no |

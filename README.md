@@ -74,8 +74,14 @@ Five layered defenses, each built as if the one beneath it has already failed:
   [docs/VAULT_ARCHITECTURE.md](docs/VAULT_ARCHITECTURE.md) and
   [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md)
 - 🕵‍♂️💼 **Dead-drop mode** — anonymous, account-free message deposit; no metadata links the two parties
-- 🌫️ **Decoy traffic** — continuous cover traffic makes a real send indistinguishable from idle
-- 🧅 **Multi-hop relay** — 3-hop onion routing; no single relay knows both ends
+- 🌫️ **Decoy traffic** — **NOT BUILT YET; scheduled for 0.10.0-beta.** *(Corrected 2026-07-27: this
+  line previously read "continuous cover traffic makes a real send indistinguishable from idle",
+  with no indication it was unshipped. Assume no cover traffic protects you today.)* When it ships
+  it will defend against a passive network observer — **not** against the relay operator, who sees
+  sender and recipient on every message. See [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md)
+- 🧅 **Multi-hop relay** — 3-hop onion routing; no single relay knows both ends. **Design and code
+  exist, but no client routes messages through it yet** — messages go direct to the relay today.
+  *(Corrected 2026-07-27: previously stated without qualification.)*
 - 🤿 **I2P-first** — I2P is the primary transport (still in development — Tor is the active
   fallback today), clearnet only as a flagged last resort
 - 👻 **Standard / Stealth / Ghost** connection modes
