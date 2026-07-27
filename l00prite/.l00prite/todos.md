@@ -27,6 +27,19 @@
 > pending on this track: solve-layer UI wiring (pitcher screen + foreground service are built
 > but unwired), independent review of the whole client branch, then the cut.
 >
+> **UPDATE 2026-07-27 (`3b0719ed`) — solve-layer UI wiring DONE.** The `test-pow-d6b12587`
+> cut came back device-tested good (maintainer), and the pitcher is now wired:
+> MessagingCoordinator produces `RegistrationPowUiState` (fraction from the solver's sink
+> only; 1s ticker owns elapsed/60s-prompt/backgrounded via pure host-tested
+> `registrationPowTickState`); SessionUi composes `RegistrationPowScreen` during real account
+> creation only. "try later" aborts via stop(); COMPLETE retired at session-up; failed
+> attempts drop the overlay instead of freezing a full pitcher. Suite 598/0, assembleDebug
+> exit 0. The PoW FOREGROUND SERVICE stays deliberately unbuilt (BACKGROUNDED is lifecycle
+> detection; the softened copy doesn't overclaim). Before the cut: `3b0719ed` is NOT in the
+> tested binary — the cut build needs a device smoke pass (fresh install → pitcher →
+> registered); read back the Revvl 6x `pow:` lines for calibration; independent review of
+> the whole branch; relay params pinned at flip.
+>
 > **THE ONE BLOCKER: the Argon2id constants are still unmeasured, and step 5 of the deploy
 > cannot happen until they are.** No Android device is attached to CX33 (`adb devices` empty,
 > no emulator images) and the Revvl 6x is with the maintainer, so the floor measurement could

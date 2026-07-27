@@ -1627,3 +1627,41 @@ false until all test devices are on 0.9.4. Independent review still owed on this
 before merge (now includes this unit). NOTE: the lemon UI + foreground service remain
 UNWIRED — a solve during boot shows the normal linking state, not the pitcher; the solve-layer
 UI unit is still pending and is NOT blocked by this one.
+
+## 2026-07-27 — 0.9.4 PoW UI: pitcher wired into the boot solve (session: pow-ui-wiring)
+
+Maintainer-directed: the `test-pow-d6b12587` cut came back device-tested good; this is the
+"animations wired in" unit standing between that and the 0.9.4-beta cut. On
+`feat/0.9.4-registration-pow-client` (`3b0719ed`, local, not pushed).
+
+- **MessagingCoordinator now produces `RegistrationPowUiState`** (`registrationPow`
+  StateFlow) — the solve layer the UI contract reserved. The fraction comes ONLY from the
+  solver's progress sink (actual work counts, §6.1), riding through
+  `RegistrationPowSolveRecorder` via a new pass-through `uiProgress` param so the recorder
+  stays the single front door. A 1s ticker owns elapsed seconds + the 60s prompt +
+  backgrounded detection; the tick decision is a pure host-tested function
+  (`registrationPowTickState`): BACKGROUNDED wins over the prompt, a dismissed prompt never
+  re-raises, an unanswerable foreground probe is NOT claimed as backgrounded.
+- **Terminal-state honesty:** COMPLETE holds the full pitcher through register/session mint
+  and is retired to IDLE the moment boot succeeds; a FAILED attempt after a completed solve
+  (register 4xx, flush) drops the overlay rather than freezing a full pitcher through the
+  backoff (§6.2 "reads as a hang"). "try later" = `stop()` — interruption is the solver's one
+  cancellation mechanism, no durable state left (solve runs before the prekey barriers),
+  next `start()` retries with a fresh challenge. `start()` clears stale terminal state.
+- **SessionUi composes `RegistrationPowScreen`** over the session routes whenever the state
+  is live. Relink and the proofless-404 path never leave IDLE, so the screen appears exactly
+  once, during real account creation.
+- **The PoW foreground service remains UNBUILT** (deliberate scope hold): BACKGROUNDED is
+  process-lifecycle detection only; the solve continues while the process lives, which the
+  already-softened copy ("we'll finish in the background") does not overclaim. Contract
+  §6.5's notification-with-count stays open for when the service is built.
+
+Evidence: `:app:testDebugUnitTest` 598/0 failures/3 skipped (+7: uiProgress pass-through,
+6 tick-state); `:app:assembleDebug` exit 0. Constraints held: nothing pushed, no version
+bump, `REGISTRATION_POW_ENABLED` stays false.
+
+Track state after this unit: solve-layer UI wiring DONE. Before the cut: the tested APK is
+`d6b12587` — this commit is NOT in the tested binary, so the cut build needs at least a
+smoke pass (fresh install → pitcher shows → registration completes) on the device; read the
+Revvl 6x `pow:` calibration lines back into `TODO(pow-calibration)`/D if not yet done;
+independent review of the whole branch still owed; relay params must be pinned at flip.

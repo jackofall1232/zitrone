@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "lock_id": "lock-20260727T-094-pow-instrumentation",
+  "lock_id": "lock-20260727T-094-pow-ui-wiring",
   "owner_agent": null,
   "owner_session": null,
-  "acquired_at": "2026-07-27T00:10:35Z",
-  "expires_at": "2026-07-27T00:40:35Z",
+  "acquired_at": "2026-07-27T01:30:06Z",
+  "expires_at": "2026-07-27T02:00:06Z",
   "ttl_seconds": 1800,
-  "purpose": null,
+  "purpose": "ledger/todos update: 0.9.4 PoW pitcher UI wired into boot solve",
   "protected_paths": [
     "ledger.md",
     "memory.md",
