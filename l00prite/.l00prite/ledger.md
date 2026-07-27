@@ -2770,3 +2770,84 @@ is carried by another guard. Source restored byte-for-byte (`git status` clean) 
 - U4 (synthetic-side receive) does not exist, so cover envelopes rest on the relay until the janitor
   TTL purges them, and the 🍋‍🟩 indicator + honest docs (U6) are not built.
 - No merge, no push, no version bump.
+
+## 2026-07-27 — 0.10.0 U3 **FIX ROUND 1 of 6: STOPPED ON A DESIGN DECISION** (`feat/0.10.0-decoy-u3-pairing`)
+
+Adjudication `reviews/decoy-0.10.0/u3-r1-adjudication.md` (4 P1, 2 P2, 4 P3) reserved one outcome as
+the maintainer's: *if a randomly-ordered pair cannot satisfy R-U3-1, R-U3-1 and R-U3-2 are in genuine
+conflict and R-U3-1 wins.* **The analysis leads there.** Full derivation:
+`reviews/decoy-0.10.0/u3-fix-r1-ordering-decision.md`.
+
+### The finding — decoy-first has no legal position for the gap
+
+There are exactly three places the drawn gap can sit on a decoy-first send, and all three break
+something absolute:
+
+- **after the durability barrier** (today) → U3-A/U3-B: widens the process-death loss window and the
+  `deleteContact` race that pre-U3 was ~0 ms wide;
+- **before the barrier** → U3-E at its worst: the flush's own duration lands inside the decoy-first
+  interval and nothing else's — the exact asymmetry the implementer already found and removed once;
+- **inside the tail** → breaks D2c directly: a suspension between `contactExists` and
+  `ws.sendMessage`, i.e. ciphertext to a contact just deleted.
+
+**U3-B and U3-E are the two horns of one dilemma, not independent findings.** No decoy-first
+implementation satisfies both. Neither reviewer nor the adjudication noticed they contradict.
+
+Independently, a decoy enqueued ahead of a real frame spends its `sendLimit` permit first, and the
+only client-side defence is a headroom policy that is *unsound* — `sendLimit` is a server constant
+the relay never communicates, so a client assuming 100/min against a relay configured lower inverts
+the priority it claims to guarantee.
+
+### The correction to the adjudication — real-first does NOT fix U3-C
+
+U3-C is stated as an ordering defect ("one permit left + decoy-first ⇒ the decoy takes it"), which
+implies real-first closes it. **It does not.** Send N's cover frame is emitted 5–50 ms *after* send
+N's real frame and can take the last permit send N+1's real frame needed. Ordering removes only
+**self**-preemption inside one pair; **cross-send** preemption is inherent to doubling volume on a
+shared per-account budget and survives every ordering choice.
+
+The real shape of U3-C: cover traffic halves the account's effective send capacity, and a
+rate-limited real send is **silently unrecoverable** — `hub.go` sends `rate_limited` with no message
+id and `MessagingCoordinator.onServerError` (`MessagingCoordinator.kt:2120`) is a no-op, so the
+bubble sits in `SENDING` forever. Only a relay-side answer closes it: exempt/raise the per-account
+`message.send` budget, or carry the message id on `rate_limited` so the client can retry. **That is
+a second maintainer decision, and the ordering ruling does not close it.**
+
+### What conceding R-U3-2 is worth, so the trade can be priced
+
+Order randomness defends against neither adversary it appears to: the hostile relay reads
+`recipient_id` in cleartext on both envelopes, and the passive observer sees two equal-length opaque
+frames whose send *event* and timing are identical either way. What it does buy is one narrow thing:
+against an observer watching **both ends**, 5–50 ms of ambiguity in the outbound→inbound correlation.
+
+**Recommended, explicitly not decided: rule real-frame-first.** It makes all four P1s structural
+rather than guarded — the real frame is committed to the socket before any cover code runs, so
+nothing on the cover side *can* preempt it.
+
+### Landed anyway — U3-D, the one fix that is ruling-independent
+
+`paired`'s `finally` is the mechanism that makes "the real publish always escapes" absolute, and
+`emit` rethrows `CancellationException` — the one throwable it does not swallow — **from inside the
+region that guard protects**. On the decoy-first path the cover emitter runs first, so that rethrow
+skipped the real publish. Fixed by making the guard **unconditional** (nested `finally`), per the
+ruling that a broken safety mechanism is repaired, not wrapped in a second one.
+
+### Evidence
+
+- New test `a CancellationException out of the cover frame cannot skip the real publish` drives the
+  path the kdoc advertises (a second send cancelled while WAITING for `window`, so its `finally` is
+  the first place either emitter runs). **Run against the unfixed source it FAILS** —
+  `cover traffic swallowed a real send`, expected 1 got 0, `DecoySendPairingTest.kt:413`, Gradle
+  exit 1. That is the mutation; the fix turns it green. It also demonstrates **U3-G** live in
+  passing: the cancelled waiter emits both frames while another pair holds the window.
+- `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug` from
+  `apps/android` → **BUILD SUCCESSFUL, Gradle exit 0**, **697 tests / 3 skipped / 0 failures /
+  0 errors** (696 → 697), APK produced.
+
+### Not fixed, deliberately
+
+U3-A, U3-B, U3-C, U3-E, U3-F, U3-G, U3-H all have fixes whose *shape* the ordering ruling decides —
+under real-first most of them cease to exist rather than being repaired. Building them twice is the
+waste the stop condition exists to prevent. U3-I is owed in full (one of its four gaps now covered).
+U3-J (synthetic-account delete) unchanged and still the merge gate. No merge, no push, no version
+bump.

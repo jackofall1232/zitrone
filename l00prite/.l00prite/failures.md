@@ -975,3 +975,25 @@ Nothing about the loss was subtle, and the cost was the whole implementation win
 The second rule has a corollary that already exists in this file for a different reason (a harness
 that leaves mutated artifacts behind): **`git status` clean is the harness's real postcondition**, and
 it can only be checked against a commit.
+
+### LESSON (0.10.0 U3, fix round 1) — CHECK THE FINDINGS AGAINST EACH OTHER BEFORE FIXING ANY OF THEM
+
+The U3 round-1 adjudication listed U3-B (a `deleteContact` interleaves in the gap) and U3-E (the
+decoy-first branch measures the real publish tail and the real-first branch does not) as independent
+findings at different severities. **They cannot both be fixed.** Fixing U3-B requires no suspension
+between the durable barrier and the socket write, which forces the gap to sit *before* the barrier;
+that puts the flush's own duration inside the decoy-first interval and nothing else's, which *is*
+U3-E. There is no third position for the gap. Two reviewers and an adjudicator each read both
+findings and none noticed they contradict — because every one of them was checking findings against
+the *code*, and nobody checked them against *each other*.
+
+**The rule:** before implementing a fix round, lay the confirmed findings side by side and ask which
+pairs are mutually exclusive. A fix list is not a checklist until it has been shown to be
+simultaneously satisfiable. When two findings are the two horns of one dilemma, the round's real
+output is naming the dilemma, not shipping half of it — and if the horns sit on different sides of
+an "absolute" requirement, the resolution is a design decision and belongs to the maintainer.
+
+**The tell to look for:** the same structural change (here, "pairing inserted a suspension between
+the durability barrier and the send tail") appearing as the mechanism behind findings that pull in
+opposite directions. One cause, two findings, opposite remedies — that is a dilemma wearing the
+costume of a backlog.
