@@ -542,6 +542,33 @@ was **three of five findings in documentation and two in code**: once the code s
 repeated review, the prose describing it becomes the defect surface, and it is not exercised by any
 test. Sweep every contract describing a changed behaviour, not only the lines a reviewer cited.
 
+### ADJUDICATION LOSS — a multi-part finding compressed into one row loses the parts (U1 round 4)
+
+**The adjudicator is a lossy stage between the reviewers and the fix, and this is the first recorded
+instance of it dropping a real defect.**
+
+Grok's round-4 Finding 4 had **three** parts. The architect's adjudication compressed it into one
+table row (J5) carrying two of them, and the third was lost: *the invariant table still described
+`credentialsUnconfirmed` as instance-scoped* after round 3 had moved it into the per-runtime `Gate`.
+That is not a wording nit — a reader working from the table alone rebuilds the exact
+second-provisioner readiness lie round 3 existed to close. It was recovered only because the
+implementer read the raw reviews alongside the adjudication and noticed the shortfall.
+
+**Why it happened:** the adjudication format is one row per finding, which silently pressures
+multi-part findings into their most quotable part. Severity survives; enumeration does not.
+
+**RULES (binding):**
+1. **A multi-part finding gets one adjudication row per part**, or an explicit sub-list. Never one
+   row for "Finding N" when Finding N contains an enumerated set.
+2. **The fix brief must instruct the implementer to read the raw reviews**, not only the
+   adjudication. It did here, which is the only reason this was caught — keep that instruction.
+3. **Treat the implementer as a check on the adjudicator**, not merely a consumer of it. The
+   pipeline reviewer → adjudicator → implementer has three stages and the middle one was, until
+   now, the only unreviewed link.
+
+Related but distinct from the "verify bot claims before acting" rule: that guards against accepting
+a reviewer's *wrong* finding. This guards against losing a reviewer's *right* one.
+
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
   round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked
