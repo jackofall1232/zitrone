@@ -918,6 +918,32 @@ guessed at.
 > **Lone decoys and pairs split across a TLS boundary by application-controlled transport changes
 > remain prohibited** — those are patterned by construction.
 >
+> ### The correlation bound, stated precisely: DISCLOSURE vs DEGRADATION
+>
+> **Cover must not fail in ways that reveal events an observer cannot ALREADY observe.** That is the
+> test, and it is narrower than "must not correlate with anything" — which would have forbidden the
+> load-shedding R-U3-1 now requires.
+>
+> - **Load-shedding is DEGRADATION, and is fine.** Dropping cover under pressure correlates with
+>   heavy sending — but a burst of frames is *already* visible to anyone watching the connection.
+>   The observer learns nothing new; the candidate set is simply 1 instead of 2 while the user is
+>   busy. Protection thins exactly when the pipe is full, which is the right trade.
+> - **Lock- / teardown- / transport-correlated failure is DISCLOSURE, and is not.** Those name a
+>   client lifecycle event the observer could **not** otherwise see. That is what rounds 3–5 closed,
+>   and it is why they were worth closing.
+>
+> ### Drop tolerance: BE GENEROUS (maintainer ruling)
+>
+> **Err toward dropping cover.** Do not compute exact remaining capacity or try to spend the last
+> safe slot — drop on any signal of pressure (queue depth above a low watermark, a recent send
+> failure, a recent `rate_limited`, a high recent send rate), and stay off for a window rather than
+> stutter. A conservative threshold is simpler, more robust, and costs almost nothing given what this
+> layer is worth.
+>
+> The maintainer's framing, which is the value model this whole section rests on: **it is more
+> important that the user's message actually arrives than that it temporarily keeps a light layer of
+> security. The decoy is not a pillar — it is a head fake.**
+>
 > ### What decoy traffic actually buys, stated plainly
 >
 > It does **not** hide that a message was sent; the TLS frame already shows that. It makes an
