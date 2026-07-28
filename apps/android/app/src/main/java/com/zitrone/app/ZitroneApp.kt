@@ -1578,7 +1578,7 @@ class AppContainer(private val app: Application) {
         live?.wsClient?.updateTransport(httpClient, ws)
         // U4: the synthetic socket dials the same endpoints as the real one. Installed here, under
         // the lock, with the redial itself left to applyTransport — same split as the real socket.
-        live?.decoyWsClient?.updateTransport(httpClient, ws)
+        live?.decoySocket?.updateTransport(httpClient, ws)
         if (state == TransportState.TOR) TorIntegration.requestOrbotStart(app)
         return live
     }
@@ -1702,8 +1702,18 @@ class SessionContainer(
      * relay. Exposed because [ZitroneApp.applyTransportLocked] must re-point it on a transport
      * swap alongside [wsClient] — a synthetic socket left on the old endpoints after a Tor/I2P
      * toggle would keep cover traffic on a transport the user just turned off.
+     *
+     * The type is the wrapper, not a raw [WsClient], and deliberately: the wrapper owns the only
+     * reference to its client, so there is no socket here for anything else to disconnect.
      */
-    val decoyWsClient: WsClient?
+    val decoySocket: WsSyntheticSocket?
+
+    /**
+     * Late-bound so the synthetic socket can report `rate_limited` to a meter that is built after
+     * it (the meter reads the socket's queue, so the socket has to exist first). Assigned exactly
+     * once, in [init], before either object is reachable from outside this container.
+     */
+    private var coverPressureRef: CoverPressure? = null
 
     /**
      * The synthetic side of the cover exchange (0.10.0 U4), or null. Exposed so the transport swap
@@ -1788,12 +1798,22 @@ class SessionContainer(
             // send because it APPEARS mid-session, when provisioning lands.
             // The synthetic account's own socket (0.10.0 U4). Same endpoints and same OkHttp client
             // as the real one — a second connection, not a second network — so a transport swap
-            // redials both through applyTransportLocked/applyTransport. Built BEFORE the pressure
+            // re-points both through applyTransportLocked/applyTransport. Built BEFORE the pressure
             // meter because the meter reads its queue too; see below.
+            //
+            // WsSyntheticSocket CONSTRUCTS its own WsClient rather than being handed one, which is
+            // why nothing here can pass it the real socket by accident or by edit (U4 review round
+            // 3). See that class for the three rounds of lexical guard this replaces.
             val syntheticSocket = decoyRelay?.let {
-                WsClient(wsUrl, httpClient, scope) { line -> bootDiagnostics.record(line) }
+                WsSyntheticSocket(
+                    wsUrl = wsUrl,
+                    httpClient = httpClient,
+                    scope = scope,
+                    onRateLimited = { coverPressureRef?.syntheticRateLimited() },
+                    diag = { line -> bootDiagnostics.record(line) },
+                )
             }
-            decoyWsClient = syntheticSocket
+            decoySocket = syntheticSocket
             // The R-U3-1 yield (0.10.0 U3 fix round 6), hoisted out of the pairing because U4's
             // send-back consults THE SAME INSTANCE (R-U4-4). A second CoverPressure with its own
             // thresholds would be two independent meters, each seeing half the traffic and neither
@@ -1813,13 +1833,18 @@ class SessionContainer(
                     wsClient.outboundQueueBytes() + (syntheticSocket?.outboundQueueBytes() ?: 0L)
                 },
             )
+            // The socket is built before the meter (it feeds the meter's queue limb) and the meter
+            // is what the socket reports rate_limited to, so one of the two references has to be
+            // late-bound. This is that knot, kept to a single assignment rather than resolved by
+            // giving the socket a settable dependency.
+            coverPressureRef = coverPressure
             val inbound = syntheticSocket?.let { syntheticWs ->
                 DecoyInboundSession(
                     scope = scope,
                     syntheticAccountId = { DecoyAuthStore(rt).accountId },
                     realAccountId = { apiClient.accountId },
                     accessToken = { DecoyAuthStore(rt).accessToken },
-                    socket = WsSyntheticSocket(syntheticWs, coverPressure::syntheticRateLimited),
+                    socket = syntheticWs,
                     pressure = coverPressure,
                 )
             }
