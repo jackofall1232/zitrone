@@ -215,6 +215,35 @@ class DecoySendPairingTest {
         }
     }
 
+    /**
+     * A socket whose IDENTITY changes when the transport is swapped, so that "the pair was split
+     * across a TLS teardown and reconnect" is a thing this suite can actually observe rather than
+     * infer. Every frame is recorded with the generation it went out on; a pair whose two frames
+     * carry different generations is the round-4 P1, on the wire.
+     */
+    private class SwappingSocket(private val frames: MutableList<Pair<Int, Any>>) {
+        @Volatile
+        var generation = 1
+            private set
+
+        @Volatile
+        var connected = true
+            private set
+
+        /** A transport swap: the old connection is gone and a new one carries everything after. */
+        fun swap() = synchronized(this) { generation++ }
+
+        fun disconnect() {
+            connected = false
+        }
+
+        fun send(frame: Any): Boolean = synchronized(this) {
+            if (!connected) return false
+            frames.add(generation to frame)
+            true
+        }
+    }
+
     private fun frameLength(envelope: MessageEnvelope): Int =
         WsClient.messageSendFrame(envelope).toString().toByteArray(Charsets.UTF_8).size
 
@@ -455,16 +484,28 @@ class DecoySendPairingTest {
         // CancellationException — the one throwable it deliberately does not swallow — and under the
         // old random ordering that rethrow could run BEFORE the real publish and take it with it.
         // It now cannot: the publish happens at the call site, before the seam is entered at all.
+        //
+        // ROUND 5: the `published` assertion below is VACUOUS on its own — `published++` runs before
+        // `cover()` is entered, so it holds for any cover behaviour whatsoever, including `emit`
+        // SWALLOWING the CancellationException, which is the one throwable its contract forbids it to
+        // swallow and which this test is named for. The second assertion is the named property.
         var published = 0
+        var propagated = false
         val pairing = pairing(mutableListOf(), send = { throw CancellationException("cover frame") })
         try {
             published++
             pairing.cover(textEnvelope())
         } catch (_: CancellationException) {
             // The cover frame's cancellation still propagates; it just arrives too late to matter.
+            propagated = true
         }
 
         assertEquals("cover traffic swallowed a real send", 1, published)
+        assertTrue(
+            "emit swallowed a CancellationException — the one throwable it must rethrow, because " +
+                "swallowing it lets cover work keep running inside a scope that is being cancelled",
+            propagated,
+        )
     }
 
     // ── R-U3-1 edges the round-1 review left uncovered (U3-I) ───────────────────────────────
@@ -819,9 +860,13 @@ class DecoySendPairingTest {
 
     /**
      * The coordinator's `confined` worker, modelled as what it is: ONE thread that every send and
-     * (since fix round 4) every teardown runs on.
+     * (since fix round 4) every teardown runs on. **Named**, because fix round 5's tests do not just
+     * assert that the right things happened — they assert WHICH THREAD they happened on, and a
+     * teardown or a socket swap that ran on the caller instead is precisely the defect.
      */
-    private fun singleWorker() = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private fun singleWorker() = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, CONFINED_WORKER)
+    }
 
     @Test
     fun `teardown serialised on the send worker never strands a pairing between handoff and admission`() {
@@ -1058,22 +1103,28 @@ class DecoySendPairingTest {
         // then walks braces, so a correct multi-line lambda passes and a helper that hides the
         // disconnect behind another function fails — which is the right way round, because a second
         // disconnect owner is exactly the defect.
+        //
+        // ROUND 5 closes two evasions the round-4 reviewer found in this guard: it read only TWO
+        // FILES (a disconnect moved into any third file — a `TransportSwapper` helper — was
+        // invisible, so the claim "a helper that hides the disconnect fails" was true only while the
+        // helper stayed in those two), and it matched the literal `disconnect()`, so `disconnect( )`
+        // walked straight past. It now reads EVERY Kotlin source in the app and normalises token
+        // spacing.
         val allowedOwners = listOf(
             "coverTraffic.stop {",
             "coverTraffic.quiesce {",
             "coordinator.reconnectTransport {",
         )
         val stray = mutableListOf<String>()
-        for ((name, source) in listOf(
-            "MessagingCoordinator.kt" to coordinatorSource(),
-            "ZitroneApp.kt" to appSource("ZitroneApp.kt"),
-        )) {
-            val code = stripComments(source).replace(Regex("\\s+"), " ")
+        for ((name, source) in allMainSources()) {
+            val code = normalised(source)
             var from = 0
             while (true) {
                 val at = code.indexOf("disconnect()", from)
                 if (at < 0) break
                 from = at + 1
+                // WsClient's own declaration is the thing being called, not a call.
+                if (code.substring(0, at).trimEnd().endsWith("fun")) continue
                 val opener = enclosingLambdaOpener(code, at)
                 if (allowedOwners.none { opener.endsWith(it) }) {
                     stray += "$name: disconnect() inside <${opener.takeLast(60)}>"
@@ -1086,15 +1137,13 @@ class DecoySendPairingTest {
             stray,
         )
         // …and the two owners are really wired, so deleting the disconnect entirely does not pass.
-        val coordinator = stripComments(coordinatorSource()).replace(Regex("\\s+"), " ")
         assertTrue(
             "the cover-traffic teardown is not wired to the disconnect at all",
-            "coverTraffic.stop { ws.disconnect() }" in coordinator,
+            "coverTraffic.stop { ws.disconnect() }" in normalised(coordinatorSource()),
         )
         assertTrue(
             "the transport swap does not go through the coordinator's drain",
-            "coordinator.reconnectTransport {" in
-                stripComments(appSource("ZitroneApp.kt")).replace(Regex("\\s+"), " "),
+            "coordinator.reconnectTransport {" in normalised(appSource("ZitroneApp.kt")),
         )
     }
 
@@ -1111,11 +1160,18 @@ class DecoySendPairingTest {
         // What is pinned now is the DEPENDENCE, not the adjacency: every cover call is the body of
         // an `if` on a publish tail's result, and both publish tails return that result from
         // `ws.sendMessage` and from nowhere else.
-        val code = stripComments(coordinatorSource()).replace(Regex("\\s+"), " ")
+        //
+        // ROUND 5: the `total` count used to require exact token adjacency, so a fourth call site
+        // written `coverTraffic . cover(` — legal Kotlin — matched NEITHER count and the suite stayed
+        // green with a live unguarded site. [normalised] now collapses token spacing, and the counts
+        // are taken over every source file rather than this one.
+        val code = normalised(coordinatorSource())
 
-        val guarded = Regex("if \\((publishOutgoing|publishReceipt)\\([^()]*\\)\\) coverTraffic\\.cover\\(")
+        val guarded = Regex("if\\((publishOutgoing|publishReceipt)\\([^()]*\\)\\) coverTraffic\\.cover\\(")
             .findAll(code).count()
-        val total = Regex("coverTraffic\\.cover\\(").findAll(code).count()
+        val total = allMainSources().sumOf { (_, source) ->
+            Regex("coverTraffic\\.cover\\(").findAll(normalised(source)).count()
+        }
         assertEquals("the cover seam is not called from all three send paths", 3, total)
         assertEquals(
             "a cover call that does not depend on the real frame having been handed to the relay — " +
@@ -1142,44 +1198,112 @@ class DecoySendPairingTest {
             assertEquals(
                 "$tail returns true from somewhere other than the ws.sendMessage branch",
                 1,
-                Regex("if \\(ws\\.sendMessage\\(envelope\\)\\) \\{ return true").findAll(body).count(),
+                Regex("if\\(ws\\.sendMessage\\(envelope\\)\\) \\{ return true").findAll(body).count(),
             )
         }
     }
 
     @Test
-    fun `terminal teardown is dispatched onto the send worker, not run beside it`() {
-        // W4's construction, pinned at the one place this suite cannot reach behaviourally. The
-        // serialisation that closes the round-3 residual is not a property of DecoySendPairing — it
-        // is a property of WHERE the coordinator runs the teardown. Running `coverTraffic.stop`
-        // straight off the calling thread again would restore the race silently, with every
-        // behavioural test in this file still green.
-        val code = stripComments(coordinatorSource()).replace(Regex("\\s+"), " ")
+    fun `all three cover-traffic lifecycle paths are wired to the confinement worker`() {
+        // W4's construction, pinned at the one place this suite cannot reach behaviourally: the
+        // BEHAVIOUR of the dispatch primitive is now tested directly (see the production-confinement
+        // section above), so what is left here is the WIRING — that the coordinator reaches cover
+        // traffic through that primitive and by no other route.
+        //
+        // ROUND 5 rewrote this. Round 4's version pinned only the terminal `stop` / delete shape and
+        // NEVER MENTIONED `reconnectTransport`, so deleting the dispatch from the transport-swap path
+        // — restoring the W3 split-pair defect outright — passed every "stricter" tripwire green.
+        // And its `assertEquals(1, "coverTraffic.stop {")` counted one file, so a second stop owner
+        // anywhere else in the app was invisible; the disconnect tripwire even whitelists that opener.
+        val code = normalised(coordinatorSource())
+        val everywhere = allMainSources().joinToString("\n") { (_, source) -> normalised(source) }
 
-        // Exactly one place stops cover traffic, and it is a named method — so there is one thing to
-        // dispatch correctly rather than one per teardown path.
+        // Exactly one place stops cover traffic and exactly one quiesces it, app-wide — so there is
+        // one thing to dispatch correctly per lifecycle event rather than one per call site.
         assertEquals(
             "cover traffic is stopped from more than one place",
             1,
-            Regex("coverTraffic\\.stop \\{").findAll(code).count(),
+            Regex("coverTraffic\\.stop \\{").findAll(everywhere).count(),
         )
+        assertEquals(
+            "the transport swap drains cover traffic from more than one place",
+            1,
+            Regex("coverTraffic\\.quiesce\\(").findAll(everywhere).count(),
+        )
+
+        // The primitive itself: terminal teardown dispatches onto the confinement worker, and the
+        // NON-TERMINAL reconnect dispatches onto it too — with no caller-thread fallback, which is
+        // the round-5 P1. `runTerminalHere` is the only entry point permitted to run on its caller,
+        // and it is the one whose caller is already the worker.
+        val primitive = normalised(appSource("CoverTrafficWorker.kt"))
         assertTrue(
-            "the teardown helper no longer dispatches onto the confinement worker",
+            "terminal teardown no longer dispatches onto the confinement worker",
             "scope.launch(confined + NonCancellable) {" in
-                bodyOf(code, "private fun runTerminalTeardownOnConfinedWorker("),
+                bodyOf(primitive, "fun runTerminalConfined("),
         )
-        // stop() must go through the dispatch; the account-delete path is ALREADY on the worker and
-        // must not (dispatching to the worker from the worker and blocking on it stalls for the
-        // whole quiesce bound before falling back).
+        val reconnectBody = bodyOf(primitive, "fun requestReconnect(")
+        assertTrue(
+            "the transport swap no longer dispatches onto the confinement worker",
+            "scope.launch(confined) {" in reconnectBody,
+        )
+        assertFalse(
+            "the transport swap can run on the calling thread again — quiesce leaves the register " +
+                "OPEN, so a swap off the worker splits any pair whose real frame has already gone",
+            "await(" in reconnectBody || "runTerminalHere" in reconnectBody,
+        )
+        assertEquals(
+            "an unbounded wait is back in the function whose whole rationale is that a vault lock " +
+                "must never hang without wiping keys",
+            0,
+            Regex("await\\(\\)").findAll(primitive).count(),
+        )
+
+        // stop() must go through the dispatching entry point; the account-delete path is ALREADY on
+        // the worker and must use the on-worker one (dispatching to the worker from the worker and
+        // blocking on it stalls for the whole bound before falling back).
         val stopBody = bodyOf(code, "fun stop() {")
         assertTrue(
             "MessagingCoordinator.stop() runs the teardown on the calling thread again",
-            "runTerminalTeardownOnConfinedWorker(::coverTeardown)" in stopBody,
+            "coverWorker.runTerminalConfined(::coverTeardown)" in stopBody,
+        )
+        val deleteBody = bodyOf(code, "fun deleteAccountAndWipe(")
+        assertTrue(
+            "the account-delete teardown does not run on the worker it is already running on",
+            "coverWorker.runTerminalHere(::coverTeardown)" in deleteBody,
         )
         assertTrue(
             "the account-delete teardown dispatches onto the worker it is already running on",
-            "coverTeardown()" in bodyOf(code, "fun deleteAccountAndWipe(") &&
-                "runTerminalTeardownOnConfinedWorker" !in bodyOf(code, "fun deleteAccountAndWipe("),
+            "runTerminalConfined" !in deleteBody,
+        )
+        // …and the transport swap is the third route, which round 4's version of this test forgot.
+        assertTrue(
+            "the transport swap does not go through the confinement worker at all",
+            "= coverWorker.requestReconnect {" in code.substring(code.indexOf("fun reconnectTransport(")).take(120),
+        )
+        assertTrue(
+            "the transport swap no longer drains cover traffic before the socket is replaced",
+            "coverTraffic.quiesce(swapTransport)" in bodyOf(code, "fun reconnectTransport("),
+        )
+
+        // THE LOCK BOUNDARY (round 5). The reconnect can only afford to have no fallback because the
+        // caller no longer holds `transportLock` while it waits for the worker — and it waits for
+        // nothing at all. Holding the lock across it reinstates a verified five-step deadlock
+        // (applyTransport -> confined worker -> deleteAccountAndWipe -> onConfirmed -> lockIf ->
+        // stopSession -> transportLock), which is exactly why round 4 had the timeout.
+        val app = normalised(appSource("ZitroneApp.kt"))
+        val applyBody = bodyOf(app, "private fun applyTransport(")
+        assertTrue(
+            "the transport swap is no longer requested from applyTransport",
+            "reconnectTransport" in applyBody,
+        )
+        assertTrue(
+            "reconnectTransport is called while transportLock is HELD — either it waits for the " +
+                "confinement worker under the lock (deadlock) or it does not wait (split pairs)",
+            "reconnectTransport" !in bodyOf(applyBody, "synchronized(transportLock) {"),
+        )
+        assertTrue(
+            "applyTransportLocked redials the socket itself again, under the lock",
+            "reconnectTransport" !in bodyOf(app, "private fun applyTransportLocked("),
         )
         // And step 1 of R-U3-5 is armed before any of it, on both teardown paths.
         for (path in listOf("fun stop() {", "fun deleteAccountAndWipe(")) {
@@ -1208,12 +1332,363 @@ class DecoySendPairingTest {
         }
     }
 
+    // ── PRODUCTION confinement: the dispatch primitive itself, under test ───────────────────
+    //
+    // ROUND 5, and it is the round's second finding: the tests named for confinement did not test
+    // confinement. Both behavioural teardown tests above build their OWN single-thread executor and
+    // enqueue `pairing.stop` on it by hand; production dispatch was pinned by nothing but source
+    // strings; and the caller-thread fallback — the branch that CARRIED the round-4 P1 — was never
+    // executed by anything at all. A property under no test is how that P1 survived a round that
+    // claimed to establish it.
+    //
+    // So the dispatch is now a production class ([CoverTrafficWorker]) rather than a private method
+    // of a class this suite cannot build, and everything below drives THAT class: the real CAS, the
+    // real latch, the real bounds, the real fallback, the real generation coalescing. What remains
+    // pinned by source strings is only the WIRING — that the coordinator routes stop / delete /
+    // reconnect through it and nobody else — and those tripwires now cover all three routes.
+
+    /** The bare thread name — the coroutine debug agent appends `@coroutine#N` to it. */
+    private fun workerName(thread: Thread?): String? = thread?.name?.substringBefore(" @")
+
+    /** Pay the thread-creation cost before a timing assertion depends on dispatch being prompt. */
+    private fun CoroutineScope.prewarm() = runBlocking { launch { }.join() }
+
+    @Test
+    fun `terminal teardown runs ON the confined worker, not beside it`() {
+        val worker = singleWorker()
+        val dispatcher = worker.asCoroutineDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        try {
+            scope.prewarm()
+            val ranOn = java.util.concurrent.atomic.AtomicReference<Thread>()
+            CoverTrafficWorker(scope, dispatcher).runTerminalConfined {
+                ranOn.set(Thread.currentThread())
+            }
+            assertEquals(
+                "terminal teardown did not run on the confinement worker — it can then land inside " +
+                    "a send's publish-then-admit slice, which is the whole thing confinement buys",
+                CONFINED_WORKER,
+                workerName(ranOn.get()),
+            )
+        } finally {
+            scope.cancel()
+            worker.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `the declared terminal residual, executed - an unpaired REAL frame, never a decoy`() {
+        // THE FALLBACK BRANCH, RUN. Round 4 declared this residual in the spec and in two kdocs and
+        // then never executed it: `MessagingCoordinator.stop()` waits a bounded time for the worker
+        // and, if the worker is blocked (not suspended) for longer, runs teardown on the CALLING
+        // thread so that `UnlockController` can still reach `runtime.close()` and wipe the vault key.
+        //
+        // The trade is deliberate — a vault lock that hangs without wiping keys is worse than any
+        // framing defect — but "what it costs" was an assertion in prose. Here is the cost, measured:
+        // the real frame goes out UNPAIRED. What must NOT happen is the other two shapes: a lone
+        // decoy (a frame the user never generated), or a pair split across the transport change.
+        val worker = singleWorker()
+        val dispatcher = worker.asCoroutineDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val frames = java.util.Collections.synchronizedList(mutableListOf<Pair<Int, Any>>())
+        val socket = SwappingSocket(frames)
+        val buildEntered = CountDownLatch(1)
+        try {
+            scope.prewarm()
+            val pairing = DecoySendPairing(
+                scope = scope,
+                sender = ::sender,
+                recipient = {
+                    buildEntered.countDown()
+                    // The worker is BLOCKED, not suspended — the case the bound exists for.
+                    Thread.sleep(1_500)
+                    syntheticAccountId
+                },
+                send = socket::send,
+                provision = {},
+                sleep = { delay(it) },
+                random = seeded(11),
+                provisionContext = EmptyCoroutineContext,
+            )
+            val sending = scope.launch { if (socket.send(Real)) pairing.cover(textEnvelope()) }
+            assertTrue("the build never started", buildEntered.await(5, TimeUnit.SECONDS))
+
+            val ranOn = java.util.concurrent.atomic.AtomicReference<Thread>()
+            val startedAt = System.nanoTime()
+            CoverTrafficWorker(scope, dispatcher, terminalWaitMs = 150L).runTerminalConfined {
+                ranOn.set(Thread.currentThread())
+                pairing.stop { socket.disconnect() }
+            }
+            val waitedMs = (System.nanoTime() - startedAt) / 1_000_000
+
+            assertTrue("the vault lock waited on a blocked worker for ${waitedMs}ms", waitedMs < 1_000)
+            assertEquals(
+                "teardown did not fall back to the caller — a lock can then hang without wiping keys",
+                Thread.currentThread(),
+                ranOn.get(),
+            )
+            assertFalse("the transport was not invalidated", socket.connected)
+
+            runBlocking { sending.join() }
+            val recorded = frames.map { it.second }
+            assertEquals(
+                "the residual is an unpaired REAL frame; anything else here is a different defect",
+                listOf<Any>(Real),
+                recorded,
+            )
+            assertEquals("a decoy went out with no real frame behind it", 0, decoysIn(recorded).size)
+        } finally {
+            scope.cancel()
+            worker.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `BOTH terminal waits are bounded - a worker that claims teardown and wedges cannot hang the lock`() {
+        // Round 5, and it is a consistency defect rather than a demonstrated hang: round 4 bounded
+        // the first wait and then wrote `else done.await()` — unbounded — in the very function whose
+        // stated rationale is that an unbounded wait is the worst outcome ("a vault lock that can
+        // hang and never wipe its keys is worse than any framing defect"). If the worker claimed the
+        // teardown at the boundary and the teardown then wedged, `stop()` blocked forever holding
+        // `transportLock`, and `runtime.close()` never ran.
+        //
+        // Driven deterministically: the worker is FREE, so it wins the claim immediately; the
+        // teardown then wedges far past both bounds. The caller must still return.
+        val worker = singleWorker()
+        val dispatcher = worker.asCoroutineDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val wedge = CountDownLatch(1)
+        try {
+            scope.prewarm()
+            val runs = java.util.concurrent.atomic.AtomicInteger(0)
+            val ranOn = java.util.concurrent.atomic.AtomicReference<Thread>()
+            val startedAt = System.nanoTime()
+            CoverTrafficWorker(scope, dispatcher, terminalWaitMs = 300L).runTerminalConfined {
+                runs.incrementAndGet()
+                ranOn.set(Thread.currentThread())
+                // runCatching: shutdownNow() in the finally interrupts this thread, and an
+                // InterruptedException escaping a NonCancellable coroutine reaches the JVM's
+                // uncaught handler and fails whichever test happens to be running.
+                runCatching { wedge.await(20, TimeUnit.SECONDS) }
+            }
+            val waitedMs = (System.nanoTime() - startedAt) / 1_000_000
+
+            assertEquals("the worker did not claim the teardown", CONFINED_WORKER, workerName(ranOn.get()))
+            assertTrue(
+                "the second wait is unbounded: the vault lock blocked ${waitedMs}ms on a wedged " +
+                    "teardown, holding transportLock and never reaching runtime.close()",
+                waitedMs < 2_000,
+            )
+            assertEquals("terminal teardown ran twice", 1, runs.get())
+        } finally {
+            wedge.countDown()
+            scope.cancel()
+            worker.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `a transport reconnect NEVER runs on the calling thread, and never waits for the worker`() {
+        // X1, ROUND 5 — the P1 both reviewers converged on, at its root. Round 4 ran the transport
+        // swap through the SAME primitive as terminal teardown, fallback and all. For `stop()` that
+        // fallback is safe: it invalidates the transport, so a send still mid-slice on the worker is
+        // refused admission and emits nothing. `quiesce` deliberately does the opposite — it leaves
+        // the register OPEN, which is what makes pairing resume over the new socket — so a swap that
+        // ran on the caller drained an empty register, replaced the socket, and let the worker emit
+        // that pairing's cover frame on the NEW connection while its real frame had gone out on the
+        // old one. No coroutine suspension was needed for it: the uninterruptible-slice argument
+        // only ever held against teardown running ON the worker, and the fallback had just taken it
+        // off. There is no fallback on this path now, and no wait to have a bound.
+        val worker = singleWorker()
+        val dispatcher = worker.asCoroutineDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val blocked = CountDownLatch(1)
+        val blocking = CountDownLatch(1)
+        try {
+            scope.prewarm()
+            scope.launch { blocking.countDown(); runCatching { blocked.await(20, TimeUnit.SECONDS) } }
+            assertTrue("the worker never became busy", blocking.await(5, TimeUnit.SECONDS))
+
+            val ranOn = java.util.concurrent.atomic.AtomicReference<Thread>()
+            val swapped = CountDownLatch(1)
+            val startedAt = System.nanoTime()
+            // terminalWaitMs is deliberately tiny: if the reconnect path ever consults it again,
+            // this test still fails, because the assertion is "did not run here", not "was quick".
+            CoverTrafficWorker(scope, dispatcher, terminalWaitMs = 50L).requestReconnect {
+                ranOn.set(Thread.currentThread())
+                swapped.countDown()
+            }
+            val waitedMs = (System.nanoTime() - startedAt) / 1_000_000
+
+            assertTrue("a transport swap waited ${waitedMs}ms on the confinement worker", waitedMs < 300)
+            assertEquals(
+                "the transport swap ran while the worker was mid-slice — it can split a pair across " +
+                    "a TLS boundary, which is a STRONGER signal than a missing cover frame",
+                null,
+                ranOn.get(),
+            )
+
+            blocked.countDown()
+            assertTrue("the swap never ran at all", swapped.await(5, TimeUnit.SECONDS))
+            assertEquals("the transport swap did not run on the confinement worker", CONFINED_WORKER, workerName(ranOn.get()))
+        } finally {
+            blocked.countDown()
+            scope.cancel()
+            worker.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `a transport swap requested during a slow build cannot split the pair`() {
+        // X1 END TO END, through the production dispatch primitive and the real pairing class, on a
+        // socket whose IDENTITY changes when it is swapped — so a split pair is observed rather than
+        // argued. This is the exact interleave the round-4 reviewers described: the real frame is
+        // already on the old connection, the worker is inside a slow `buildCover` (a vault read —
+        // blocked, not suspended), and the user toggles their anonymity transport.
+        //
+        // MUTATION THIS DISCRIMINATES: route the request through `runTerminalConfined` instead (the
+        // round-4 code), and the caller-thread fallback swaps the socket mid-build — the cover frame
+        // then lands on generation 2 while its real frame is on generation 1.
+        val worker = singleWorker()
+        val dispatcher = worker.asCoroutineDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val frames = java.util.Collections.synchronizedList(mutableListOf<Pair<Int, Any>>())
+        val socket = SwappingSocket(frames)
+        val buildEntered = CountDownLatch(1)
+        try {
+            scope.prewarm()
+            val pairing = DecoySendPairing(
+                scope = scope,
+                sender = ::sender,
+                recipient = {
+                    buildEntered.countDown()
+                    Thread.sleep(600)
+                    syntheticAccountId
+                },
+                send = socket::send,
+                provision = {},
+                sleep = { delay(it) },
+                random = seeded(12),
+                provisionContext = EmptyCoroutineContext,
+            )
+            val sending = scope.launch { if (socket.send(Real)) pairing.cover(textEnvelope()) }
+            assertTrue("the build never started", buildEntered.await(5, TimeUnit.SECONDS))
+
+            val swapRanOn = java.util.concurrent.atomic.AtomicReference<Thread>()
+            val swapped = CountDownLatch(1)
+            // Production shape after the round-5 lock-boundary fix: ZitroneApp installs the new
+            // endpoints under `transportLock`, RELEASES it, and only then asks for the reconnect.
+            CoverTrafficWorker(scope, dispatcher, terminalWaitMs = 150L).requestReconnect {
+                swapRanOn.set(Thread.currentThread())
+                pairing.quiesce { socket.swap() }
+                swapped.countDown()
+            }
+            assertTrue("the transport swap never ran", swapped.await(10, TimeUnit.SECONDS))
+            runBlocking { sending.join() }
+
+            assertEquals("the swap did not run on the confinement worker", CONFINED_WORKER, workerName(swapRanOn.get()))
+            assertEquals("the transport was not actually swapped", 2, socket.generation)
+            val recorded = frames.toList()
+            assertEquals("the send did not put a PAIR on the wire — got $recorded", 2, recorded.size)
+            assertTrue("the real frame did not go first", recorded.first().second === Real)
+            assertEquals(
+                "THE PAIR WAS SPLIT ACROSS THE TRANSPORT SWAP — got $recorded",
+                recorded[0].first,
+                recorded[1].first,
+            )
+            assertEquals("both frames went out after the swap", 1, recorded[0].first)
+        } finally {
+            scope.cancel()
+            worker.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `a transport reconnect queued behind terminal teardown does not redial a dead session`() {
+        val worker = singleWorker()
+        val dispatcher = worker.asCoroutineDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        try {
+            scope.prewarm()
+            val coverWorker = CoverTrafficWorker(scope, dispatcher, terminalWaitMs = 150L)
+            val reconnected = java.util.concurrent.atomic.AtomicInteger(0)
+            val blocked = CountDownLatch(1)
+            val blocking = CountDownLatch(1)
+            scope.launch { blocking.countDown(); runCatching { blocked.await(20, TimeUnit.SECONDS) } }
+            assertTrue(blocking.await(5, TimeUnit.SECONDS))
+
+            coverWorker.requestReconnect { reconnected.incrementAndGet() }
+            // The account-delete path: terminal teardown ON the worker, ahead of the queued swap.
+            coverWorker.runTerminalHere { }
+            blocked.countDown()
+            runBlocking { scope.launch { }.join() }
+
+            assertEquals(
+                "a torn-down session redialled its socket — nothing decoy-related or transport" +
+                    "-related may outlive the vault (R-U3-5)",
+                0,
+                reconnected.get(),
+            )
+            assertTrue(coverWorker.isTerminal)
+        } finally {
+            scope.cancel()
+            worker.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `several transport changes queued behind a busy worker produce ONE reconnect, the newest`() {
+        val worker = singleWorker()
+        val dispatcher = worker.asCoroutineDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        try {
+            scope.prewarm()
+            val coverWorker = CoverTrafficWorker(scope, dispatcher, terminalWaitMs = 150L)
+            val applied = java.util.Collections.synchronizedList(mutableListOf<Int>())
+            val blocked = CountDownLatch(1)
+            val blocking = CountDownLatch(1)
+            scope.launch { blocking.countDown(); runCatching { blocked.await(20, TimeUnit.SECONDS) } }
+            assertTrue(blocking.await(5, TimeUnit.SECONDS))
+
+            // Tor on, Tor off, I2P — three resolver ticks while the worker is busy.
+            repeat(3) { tick -> coverWorker.requestReconnect { applied.add(tick) } }
+            blocked.countDown()
+            runBlocking { scope.launch { }.join() }
+
+            assertEquals(
+                "every queued transport change tore the socket down and redialled — three TLS " +
+                    "reconnects for one user action, each one a drain the pairings pay for",
+                listOf(2),
+                applied.toList(),
+            )
+        } finally {
+            scope.cancel()
+            worker.shutdownNow()
+        }
+    }
+
     // ── source-tripwire helpers ─────────────────────────────────────────────────────────────
 
     /** Strip `//` line comments and `/* */` blocks so a tripwire cannot be satisfied by a comment. */
     private fun stripComments(source: String): String =
         source.replace(Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL), " ")
             .lines().joinToString("\n") { it.substringBefore("//") }
+
+    /**
+     * Comment-free source with TOKEN SPACING normalised away — round 5.
+     *
+     * Round 4's tripwires normalised runs of whitespace to one space and stopped there, which left
+     * two evasions the reviewer demonstrated: `coverTraffic . cover(` and `disconnect( )` are both
+     * legal Kotlin and both walked past guards that matched exact adjacency. Spacing is not a
+     * property any of these guards is about, so it is removed rather than matched around.
+     */
+    private fun normalised(source: String): String =
+        stripComments(source)
+            .replace(Regex("\\s+"), " ")
+            .replace(Regex(" *\\. *"), ".")
+            .replace(Regex("(?<=[A-Za-z0-9_?>]) +\\("), "(")
+            .replace(Regex("\\( +"), "(")
+            .replace(Regex(" +\\)"), ")")
 
     /** The text immediately before the innermost `{` enclosing [at], in whitespace-normalised code. */
     private fun enclosingLambdaOpener(code: String, at: Int): String {
@@ -1258,14 +1733,40 @@ class DecoySendPairingTest {
 
     private fun coordinatorSource(): String = appSource("MessagingCoordinator.kt")
 
-    private fun appSource(fileName: String): String {
-        val relative = "src/main/java/com/zitrone/app/$fileName"
+    private fun appSource(fileName: String): String =
+        java.io.File(mainSourceRoot(), fileName).let {
+            assertTrue("$fileName not found under ${mainSourceRoot()}", it.isFile)
+            it.readText()
+        }
+
+    /**
+     * EVERY Kotlin source in the app, by file name — round 5.
+     *
+     * The tripwires used to read two named files, so any of them could be evaded by moving the
+     * offending call into a third one (a `TransportSwapper` helper, a second `coverTraffic.stop {`
+     * in `ZitroneApp`). "A second owner of this call exists somewhere" is the defect these guards
+     * are about, so the search space is the whole app.
+     */
+    private fun allMainSources(): List<Pair<String, String>> =
+        mainSourceRoot().walkTopDown()
+            .filter { it.isFile && it.extension == "kt" }
+            .map { it.name to it.readText() }
+            .sortedBy { it.first }
+            .toList()
+
+    private fun mainSourceRoot(): java.io.File {
+        val relative = "src/main/java/com/zitrone/app"
         var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: ".").absoluteFile
         while (dir != null) {
             val candidate = java.io.File(dir, relative)
-            if (candidate.isFile) return candidate.readText()
+            if (candidate.isDirectory) return candidate
             dir = dir.parentFile
         }
-        throw AssertionError("$fileName not found from ${System.getProperty("user.dir")}")
+        throw AssertionError("$relative not found from ${System.getProperty("user.dir")}")
+    }
+
+    private companion object {
+        /** The name this suite gives its single worker — see [singleWorker]. */
+        const val CONFINED_WORKER = "u3-confined-worker"
     }
 }

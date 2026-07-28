@@ -1204,6 +1204,60 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       caller — a scheduling bound, not a cover-work bound, required because `runtime.close()` follows
       `stop()` immediately. **2 of the 6 fix rounds remain. Review round 4 not dispatched.**
 
+- [ ] **U3 FIX ROUND 5 of 6 APPLIED (2026-07-28) — the lock boundary, and one reused primitive.**
+      Round 4's paired-blind review was the **FIRST CONVERGENCE IN SEVEN ROUNDS**: both reviewers
+      landed on the same top finding independently, with severity FALLING — exhaustion, not
+      anchoring, per `failures.md`. Adjudicated 1 P1 / 3 P2 / 5 P3. Full record:
+      `reviews/decoy-0.10.0/u3-fix-r5-lock-boundary.md`.
+      **X1 (P1 on tie-break) — the round-4 fix was made through a REUSED PRIMITIVE.**
+      `reconnectTransport` shared terminal teardown's helper, whose 250 ms **caller-thread fallback**
+      is terminal-safe only for `stop()` (which invalidates the transport and refuses late
+      admissions). `quiesce` deliberately leaves the register OPEN, so when the fallback fired it
+      drained an empty register on the caller, swapped the socket, and let a send still mid-slice on
+      the worker emit its cover frame on the NEW connection while its real frame had gone out on the
+      old — a **split pair across a TLS boundary**, correlated with a transport change. **No
+      coroutine suspension is needed for it:** the uninterruptible-slice argument only ever held
+      against teardown running ON the worker, and the fallback had just taken it off. It did not
+      merely have an unjustified bound — it structurally defeated the argument the round-4 fix rests
+      on, exactly when it fired.
+      **FIXED AT THE LOCK BOUNDARY, not at the fallback**, because lengthening or dropping the bound
+      reinstates a verified five-step deadlock (`applyTransport` holds `transportLock` → blocking
+      reconnect waits on `confined` → `deleteAccountAndWipe` runs there → `onConfirmed` → `lockIf` →
+      `stopSession` takes `transportLock`). `applyTransportLocked` now installs the endpoints and
+      RETURNS the session to redial; `applyTransport` releases the lock and only then requests a
+      reconnect that is confined to the worker, skipped once terminal teardown has begun, coalesced
+      by generation, and has **no fallback and no wait at all**. *(Deviation from the ruling,
+      recorded: the ruling said the reconnect may "wait for confinement without a fallback"; it does
+      not wait — waiting was the fallback's only reason to exist and would relocate the hang.)*
+      **X5 (P2) — the tests named for confinement did not test confinement, which is WHY X1
+      survived.** No test instantiated `MessagingCoordinator`; both behavioural tests built their OWN
+      `Executors.newSingleThreadExecutor()`; the fallback branch was never executed by anything. The
+      dispatch is now production code a JVM test can build — **`CoverTrafficWorker`**, three
+      deliberately different entry points (on-worker terminal / dispatched+bounded terminal /
+      dispatched-only non-terminal) — driven by seven behavioural tests, including an end-to-end one
+      over a socket whose identity changes on a swap, so a split pair is OBSERVED, not argued.
+      **X3/X4** — the dispatch tripwire now pins the swap's confinement and the lock boundary; the
+      declared residual path is executed by a test asserting exactly what it costs (an unpaired REAL
+      frame, never a lone decoy, never a split pair).
+      **X6** both terminal waits are bounded (round 4 left the second unbounded, in the function whose
+      whole rationale is that an unbounded wait is the worst outcome). **X7** the
+      natural-socket-death-mid-gap residual is re-declared in the spec after being struck by accident.
+      **X8** the "35 pairing tests" claim was wrong (34) and is corrected AS AN ERROR. **X9** three
+      tripwire evasions closed — token spacing (`coverTraffic . cover(`, `disconnect( )`) normalised
+      away, and the scans read EVERY app source rather than two named files.
+      **Evidence:** `:app:testDebugUnitTest :app:assembleDebug --rerun-tasks` → BUILD SUCCESSFUL,
+      Gradle exit 0, **three consecutive runs**; **723 tests / 78 classes / 3 skipped / 0 failures**
+      (716 → 723); pairing suite 34 → 41. **12 mutations, 12 discriminated.**
+      **Process failure kept on the record:** the first mutation harness was killed by a timeout and
+      left one mutation applied in an UNTRACKED file, so `git status` hid it and the baseline was red
+      — every mutation would have reported "caught" for free. The re-run asserts a green baseline
+      first, restores in a `finally`, checksums every touched file after each restore, and re-checks
+      the baseline at the end.
+      **New residual declared:** a transport swap now WAITS for the worker instead of pre-empting it.
+      Latency, not framing — the endpoints are already re-pointed, so only the one live socket
+      lingers, and the registration PoW (the only multi-second CPU work) runs on `Dispatchers.Default`.
+      **1 of the 6 fix rounds remains. Review round 5 not dispatched.**
+
 - [ ] **U3 inherits three things from U2, none of them optional.** *(Rewritten at U2 fix round 1 —
       the interface changed, so two of the three old items no longer say the right thing.)*
       1. **Hand `DecoyEnvelopeBuilder.build` THE REAL ENVELOPE**, the one about to go to

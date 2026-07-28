@@ -3059,3 +3059,69 @@ closes the vault runtime the instant `stop()` returns, and a lock that hangs wit
 material is worse than any framing defect. On expiry that one teardown degrades to round-3 behaviour.
 
 No merge, no push, no version bump. **2 of 6 fix rounds remain.**
+
+## 2026-07-28 — U3 FIX ROUND 5 of 6: the lock boundary, and a primitive doing two incompatible jobs
+
+Branch `feat/0.10.0-decoy-u3-pairing`. Round 4's paired-blind review was the **first in seven rounds
+where both reviewers converged on the same top finding**, with severity falling — exhaustion, not
+anchoring. Adjudicated 1 P1 / 3 P2 / 5 P3; full note in
+`reviews/decoy-0.10.0/u3-fix-r5-lock-boundary.md`.
+
+### The P1, and why the obvious repair was refused
+
+`reconnectTransport` reused the terminal-teardown helper, whose 250 ms **caller-thread fallback** is
+terminal-safe only for `stop()` (which invalidates the transport and refuses late admissions).
+`quiesce` deliberately leaves the register OPEN, so when the fallback fired it drained an empty
+register on the calling thread, swapped the socket, and let a send still mid-slice on the worker emit
+its cover frame on the NEW connection while its real frame had gone out on the old one. **No
+coroutine suspension is needed for that interleave** — the uninterruptible-slice argument only holds
+against teardown running ON the worker, and the fallback has just taken it off. The fallback did not
+merely have an unjustified bound; it structurally defeated the argument the whole round-4 fix rests
+on, exactly when it fired.
+
+Lengthening or dropping the bound reinstates a verified five-step deadlock (`applyTransport` holds
+`transportLock` → blocking reconnect waits on `confined` → `deleteAccountAndWipe` runs there →
+`onConfirmed` → `lockIf` → `stopSession` takes `transportLock`). **So the lock boundary was fixed
+instead**: `applyTransportLocked` now installs the endpoints and RETURNS the session to redial;
+`applyTransport` releases `transportLock` and only then requests a reconnect that is confined to the
+worker, skipped once terminal teardown has begun, coalesced by generation, and has **no fallback and
+no wait at all**. Deviation from the ruling, recorded: it does not *wait* for confinement — waiting
+was the fallback's only reason to exist and would relocate the hang to the resolver collector.
+
+### The finding that explains why the P1 survived a round that claimed to close it
+
+**No test instantiated `MessagingCoordinator`.** Both round-4 "confinement" tests built their own
+`Executors.newSingleThreadExecutor()`; production dispatch was pinned only by source strings; the
+fallback branch was never executed by anything. The dispatch is therefore now production code that a
+JVM test CAN build — `CoverTrafficWorker`, three deliberately different entry points (on-worker
+terminal, dispatched+bounded terminal, dispatched-only non-terminal) — driven by seven behavioural
+tests, including an end-to-end one over a socket whose identity changes on a swap, so a split pair is
+observed rather than argued.
+
+Also: both terminal waits are bounded (round 4 left the second unbounded, in the function whose whole
+rationale is that an unbounded wait is the worst outcome); the natural-socket-death-mid-gap residual
+is re-declared in the spec after being struck by accident; the "35 pairing tests" claim was wrong (34)
+and is corrected as an error rather than silently; and three tripwire evasions are closed — token
+spacing (`coverTraffic . cover(`, `disconnect( )`) is normalised away and the scans read EVERY app
+source rather than two named files.
+
+### Evidence
+
+`ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks`
+from `apps/android` → **BUILD SUCCESSFUL, Gradle exit 0**, three consecutive runs. **723 tests / 78
+classes / 3 skipped / 0 failures** (716 → 723); `DecoySendPairingTest` 34 → 41. **12 mutations with a
+rebuild between each, 12 discriminated.**
+
+**Process failure worth keeping:** the first mutation harness was killed by a timeout mid-run and left
+one mutation applied. The file was untracked, so `git status` hid it, the baseline was red, and every
+mutation would have reported "caught" for free. The re-run asserts a green baseline first, restores in
+a `finally`, checksums every touched file after each restore, and re-checks the baseline at the end.
+
+### Residuals declared
+
+Terminal fallback (unpaired real frame, measured by a test, never a lone decoy and never a split
+pair); a transport swap now WAITS for the worker instead of pre-empting it (latency, not framing —
+the endpoints are already re-pointed, so only the live socket lingers); natural socket death mid-gap;
+the confinement contract is a contract, not a type.
+
+No merge, no push, no version bump. **1 of 6 fix rounds remains.**

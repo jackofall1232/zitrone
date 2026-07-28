@@ -1483,9 +1483,7 @@ class AppContainer(private val app: Application) {
     }
 
     private fun onSessionPublished() {
-        synchronized(transportLock) {
-            applyTransportLocked(transportResolver.state.value)
-        }
+        applyTransport(transportResolver.state.value)
         lemonDropVeilController.onUnlocked()
     }
 
@@ -1502,31 +1500,56 @@ class AppContainer(private val app: Application) {
         scope.launch(Dispatchers.IO) { runCatching { reapStaleBiometricAliases() } }
     }
 
-    private fun applyTransport(state: TransportState) =
-        synchronized(transportLock) { applyTransportLocked(state) }
+    /**
+     * Apply a transport state (Tor/I2P toggle, resolver change, session publish).
+     *
+     * **The lock boundary here is load-bearing, and getting it wrong was a P1 (0.10.0 U3 fix round
+     * 5).** Two properties have to hold at once:
+     *
+     *  - the socket swap must be **serialised against every send's publish/admit slice**, i.e. it
+     *    must run on the coordinator's confined worker — otherwise a pairing whose real frame has
+     *    just gone out on the old socket emits its cover frame on the new one, and a SPLIT pair
+     *    straddling a TLS boundary is a stronger signal than a missing cover frame;
+     *  - and `transportLock` must not be **held while waiting for that worker**, because the worker
+     *    can be running `deleteAccountAndWipe`, whose `onConfirmed → lockIf → stopSession` takes
+     *    `transportLock` — a verified five-step lock inversion.
+     *
+     * Round 4 satisfied the first and broke the second, and papered over it with a 250 ms timeout
+     * that ran the swap on THIS thread — which silently un-did the first property exactly when it
+     * fired. So the two are separated instead: **everything that needs the lock happens under it and
+     * nothing else does.** [applyTransportLocked] resolves and installs the new endpoints and hands
+     * back the session that needs its live socket redialled; the lock is released; and only then is
+     * the reconnect requested — asynchronously, confined to the worker, with no fallback.
+     */
+    private fun applyTransport(state: TransportState) {
+        val live = synchronized(transportLock) { applyTransportLocked(state) } ?: return
+        // OUTSIDE transportLock, and it does not wait: this queues the drain-and-swap on the
+        // coordinator's confined worker and returns. The endpoints it will dial were installed
+        // above, under the lock, so a swap that runs later still reaches the current transport.
+        live.coordinator.reconnectTransport {
+            live.wsClient.disconnect()
+            live.apiClient.accessToken?.let(live.wsClient::connect)
+        }
+    }
 
-    private fun applyTransportLocked(state: TransportState) {
-        if (state != transportResolver.state.value) return
+    /**
+     * Install [state]'s endpoints on the live session. @GuardedBy [transportLock].
+     *
+     * @return the session whose live socket must now be redialled over the new endpoints, or null
+     * when there is nothing to redial (no session, or its socket is already down — a down socket
+     * redials itself through `WsClient`'s own backoff, over the endpoints just installed).
+     * **The redial itself is deliberately not done here** — see [applyTransport].
+     */
+    private fun applyTransportLocked(state: TransportState): SessionContainer? {
+        if (state != transportResolver.state.value) return null
         val (client, apiBase, ws) = transportEndpoints(state)
         httpClient = client
         val live = _session.value
         live?.apiClient?.updateTransport(httpClient, apiBase)
         live?.wsClient?.updateTransport(httpClient, ws)
         if (state == TransportState.TOR) TorIntegration.requestOrbotStart(app)
-        if (live != null &&
-            live.wsClient.connectionState.value != WsClient.ConnectionState.DISCONNECTED
-        ) {
-            // 0.10.0 U3 fix round 4 — this used to disconnect and redial directly, which split any
-            // cover pair sleeping in its drawn gap across the TLS teardown and the reconnect. A
-            // split pair is a STRONGER signal than a missing cover frame (third-lens ruling,
-            // round 3): two identical-length frames milliseconds apart, straddling a connection
-            // boundary an observer can see, correlated with the user changing their anonymity
-            // transport. The swap now goes through the coordinator, which drains cover traffic on
-            // its confined worker first and keeps pairing afterwards over the new socket.
-            live.coordinator.reconnectTransport {
-                live.wsClient.disconnect()
-                live.apiClient.accessToken?.let(live.wsClient::connect)
-            }
+        return live?.takeIf {
+            it.wsClient.connectionState.value != WsClient.ConnectionState.DISCONNECTED
         }
     }
 

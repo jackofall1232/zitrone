@@ -10,18 +10,18 @@
   "max_iterations_reached"
  ],
  "human_review_gates": [
-  "MERGE — always, per-action, never lapses (convergence does NOT authorize it)",
+  "MERGE \u2014 always, per-action, never lapses (convergence does NOT authorize it)",
   "version bump / release cut",
   "push beyond the draft-PR exception already recorded",
-  "round-6 cap reached — stop and hand to the human regardless of outcome",
+  "round-6 cap reached \u2014 stop and hand to the human regardless of outcome",
   "before executing destructive operations",
   "before changing architecture or security boundaries",
   "before declaring completion"
  ],
- "last_run_time": "2026-07-27",
+ "last_run_time": "2026-07-28",
  "completion_status": "in_progress",
  "should_continue": false,
- "pause_reason": "U3 fix round 2 complete (the real-frame-first ruling, implemented as a simplification). Stopping at the standing review gate: round 2 of the paired-blind review is owed before anything else, and merge/push/version remain human-only.",
+ "pause_reason": "U3 fix round 5 of 6 complete (the lock boundary + CoverTrafficWorker extraction). Stopping at the standing review gate: paired-blind review round 5 of the WHOLE unit is owed before anything else, and merge/push/version remain human-only. ONE fix round remains \u2014 round 6 is the hard cap and the loop stops there regardless of outcome.",
  "execution": {
   "enabled": false,
   "preflight_confirmed": false,
@@ -45,6 +45,6 @@
    "stop_signal"
   ]
  },
- "active_unit": "0.10.0-beta U3 (pairing at the send choke point) on feat/0.10.0-decoy-u3-pairing. FIX ROUND 2 of 6 used. R-U3-1 is now paid for by ONE statement — publish() first, outside every try, no suspension in front of it. U3-A/U3-B/U3-D + U3-C self-preemption impossible by construction; U3-E/U3-G/U3-H gone; U3-F repaired and demoted; U3-I discharged (15 -> 20 tests). Pairing Mutex deleted. 701 tests / 3 skipped / 0 failures, assembleDebug exit 0, 15/15 mutations discriminated.",
- "loop": "Fix round 2 applied -> DISPATCH PAIRED-BLIND REVIEW ROUND 2 of the WHOLE unit (0.9.3 lesson: not the delta — the class was rewritten) -> adjudicate -> fix round 3 if needed. Out of scope for that review: U3-C cross-send sendLimit (relay-side/CX23) and the empty onServerError. U2's own review round 3 still owed. U3-J closed as a merge gate; one doc line owed to U6. No merge, no push, no version bump. 4 of 6 fix rounds remain."
+ "active_unit": "0.10.0-beta U3 (pairing at the send choke point) on feat/0.10.0-decoy-u3-pairing. FIX ROUND 5 of 6 used. Round 4's review was the FIRST reviewer convergence in seven rounds with severity falling (exhaustion signal). X1 (P1): the transport swap reused terminal teardown's primitive, whose 250 ms caller-thread fallback re-opened the split-pair class because quiesce leaves the register open. Fixed at the LOCK BOUNDARY \u2014 ZitroneApp installs endpoints and captures the session under transportLock, releases it, then requests a confined, fallback-free, wait-free reconnect. X5 (P2): nothing tested production confinement, which is why X1 survived; the dispatch is now CoverTrafficWorker, driven by seven behavioural tests. 723 tests / 3 skipped / 0 failures across 78 classes, assembleDebug exit 0 on three consecutive --rerun-tasks runs, 12/12 mutations discriminated.",
+ "loop": "Fix round 5 applied -> DISPATCH PAIRED-BLIND REVIEW ROUND 5 of the WHOLE unit (not the delta) -> adjudicate -> fix round 6 if needed, which is the HARD CAP. Attack the new mechanism hardest: CoverTrafficWorker's three entry points, the captured SessionContainer outside transportLock, generation coalescing across DIFFERENT transport states, and whether the now-asynchronous swap breaks any caller that assumed completion on return. Out of scope: U3-C cross-send sendLimit (relay-side/CX23) and the empty onServerError. No merge, no push, no version bump. 1 of 6 fix rounds remains."
 }

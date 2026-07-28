@@ -65,9 +65,6 @@ import java.time.Instant
 import java.time.format.DateTimeFormatter
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.coroutineContext
 import kotlin.math.min
 
@@ -177,8 +174,11 @@ class MessagingCoordinator(
      *
      * Teardown runs through [CoverTraffic.stop], which is handed `ws.disconnect` — see
      * [coverTeardown] — and a live transport SWAP runs through [CoverTraffic.quiesce], see
-     * [reconnectTransport]. Both are dispatched onto the [confined] worker so they cannot interleave
-     * with a send's publish-then-pair slice.
+     * [reconnectTransport]. Both run on the [confined] worker, through [CoverTrafficWorker], so they
+     * cannot interleave with a send's publish-then-pair slice. **They reach it by different routes,
+     * and that difference is a fix (round 5):** terminal teardown may fall back to the caller after a
+     * bound, because a vault lock that hangs without wiping keys is worse; a transport swap may
+     * NEVER, because `quiesce` leaves the register open and a swap off the worker splits pairs.
      */
     private val coverTraffic: CoverTraffic = CoverTraffic.NONE,
 ) : WsClient.Listener {
@@ -778,12 +778,12 @@ class MessagingCoordinator(
         acceptingSends = false
         linkJob?.cancel()
         // Steps 2–4, ON THE CONFINED WORKER and blocking until they have run — see
-        // [runTerminalTeardownOnConfinedWorker] for why the dispatch is the whole point. Skipped
-        // when it has already happened, because [deleteAccountAndWipe] tears cover traffic down on
-        // the worker and only THEN calls back into a lock() that lands here — dispatching onto the
-        // worker from a caller the worker is itself waiting on would stall for the whole quiesce
-        // bound before falling back.
-        if (!terminalTeardownDone) runTerminalTeardownOnConfinedWorker(::coverTeardown)
+        // [CoverTrafficWorker] for why the dispatch is the whole point. The helper skips the
+        // dispatch when teardown has already happened, because [deleteAccountAndWipe] tears cover
+        // traffic down on the worker and only THEN calls back into a lock() that lands here —
+        // dispatching onto the worker from a caller the worker is itself waiting on would stall for
+        // the whole bound before falling back.
+        coverWorker.runTerminalConfined(::coverTeardown)
         // Teardown hook: drop all pending re-fire jobs + fire state so nothing
         // carries across an identity switch (see NotificationScheduler).
         notificationScheduler.cancelAll()
@@ -805,82 +805,33 @@ class MessagingCoordinator(
      * (R-U3-3). [CoverTraffic.stop] stops admitting pairings, stops provisioning, drains the
      * pairings it already admitted while the socket is still live, and only then runs this lambda.
      *
-     * **Must be called ON the confined worker** — either directly from a coroutine already running
-     * there ([deleteAccountAndWipe]) or through [runTerminalTeardownOnConfinedWorker] ([stop]).
-     *
-     * Idempotent, and it has to be: a session can reach terminal teardown twice (an account delete
-     * tears down and then locks; a revoke can race a lock). [transportInvalid] inside cover traffic
-     * is already terminal, so a second run would be harmless — the flag exists so the *dispatch* can
-     * be skipped, not the drain.
+     * **Must be called ON the confined worker**, and only through [coverWorker] — either
+     * [CoverTrafficWorker.runTerminalHere] from a coroutine already running there
+     * ([deleteAccountAndWipe]) or [CoverTrafficWorker.runTerminalConfined] ([stop]). The helper owns
+     * the exactly-once latch, so this method has none of its own: a session can reach terminal
+     * teardown twice (an account delete tears down and then locks; a revoke can race a lock) and the
+     * second arrival must not re-drain, re-disconnect, or — worse — dispatch onto a worker that is
+     * itself waiting on the caller.
      */
     private fun coverTeardown() {
-        if (terminalTeardownDone) return
-        terminalTeardownDone = true
         coverTraffic.stop { ws.disconnect() }
     }
 
-    /** Whether [coverTeardown] has run. @Volatile: set on the worker, read on the teardown thread. */
-    @Volatile
-    private var terminalTeardownDone = false
-
     /**
-     * Run terminal teardown on the confinement worker and block until it has — **the construction
-     * that closes the round-3 residual, and it is worth spelling out why it is not just tidiness.**
-     *
-     * Round 3 declared a residual: between `ws.sendMessage` returning and the pairing registering
-     * itself with cover traffic there are a handful of instructions, and a concurrent `stop()` could
-     * land in them, leaving an unpaired real frame correlated with teardown. It argued the window
-     * was *forced* — that closing it needed the pairing registered before the publish, i.e. cover
-     * work and a lock in front of a real send, which R-U3-1 forbids absolutely.
-     *
-     * That argument was refuted with a construction and this is it. Teardown does not need to be
-     * atomic with the handoff; it needs to be **serialised against it**, and this coordinator
-     * already owns a serialisation point that every send goes through — [confined], a single worker.
-     * Enqueueing teardown there puts it *behind the sends already running*, and because there is no
-     * suspension point between a send's `ws.sendMessage` and the pairing's admission, teardown
-     * cannot land inside that span: it runs strictly before the send's slice (and the send's own
-     * publish tail then hits an already-dead socket and is marked FAILED, uncovered and unpaired
-     * because there is nothing on the wire to pair) or strictly after it (and the pairing is
-     * admitted, built, and drained). **No cover-side instruction and no lock was added in front of
-     * any real send to get this.**
-     *
-     * **Why it blocks.** `UnlockController` calls `stop()` and then closes the vault runtime in a
-     * `finally` — the final reseal and key-material wipe. Cover traffic reads that runtime to build
-     * frames, so returning before the drain has run would let the wipe race a build; and a session
-     * whose socket outlives its own lock is worse than any framing defect.
-     *
-     * **The bound, stated honestly.** [TEARDOWN_QUIESCE_MS] does not bound any cover-side work —
-     * there is none left to bound, the drain has no wait in it. It bounds only *how long we wait for
-     * the single worker to become free*, and it exists because the alternative to a bound here is a
-     * vault lock that can hang and never wipe its keys. If it expires (a worker blocked, not
-     * suspended, for that long — the coordinator's blocking work is millisecond-scale disk commits)
-     * teardown falls back to the calling thread, which is exactly the round-3 behaviour: correct,
-     * with the round-3 race back for that one teardown. Exactly one of the two paths runs it.
+     * Where cover-traffic teardown and transport swaps run: the [confined] worker, always. See
+     * [CoverTrafficWorker] — it is a separate class because U3 fix round 5 found that the property
+     * it carries (production dispatch, the bounded terminal fallback, and the **absence** of a
+     * fallback on the non-terminal path) was pinned by nothing but source-string tripwires, and a
+     * property under no test is how the round-4 P1 survived a round that claimed to establish it.
      */
-    private fun runTerminalTeardownOnConfinedWorker(terminal: () -> Unit) {
-        val ran = AtomicBoolean(false)
-        val done = CountDownLatch(1)
-        // NonCancellable, and deliberately: the session scope is cancelled immediately after this
-        // returns, and a teardown that never ran is a socket that never closed.
-        scope.launch(confined + NonCancellable) {
-            try {
-                if (ran.compareAndSet(false, true)) terminal()
-            } finally {
-                done.countDown()
-            }
-        }
-        if (done.await(TEARDOWN_QUIESCE_MS, TimeUnit.MILLISECONDS)) return
-        // Either we take it over, or the worker claimed it in the same instant — in which case wait
-        // for it, because what it is running is now bounded work with no wait of its own.
-        if (ran.compareAndSet(false, true)) terminal() else done.await()
-    }
+    private val coverWorker = CoverTrafficWorker(scope, confined)
 
     /**
      * A transport SWAP under a live session (Tor/I2P toggle): drain cover traffic, then run
      * [swapTransport], then carry on pairing over the new socket. **Non-terminal** — the session
      * survives and [CoverTraffic.quiesce] leaves the register open.
      *
-     * Called by `ZitroneApp.applyTransportLocked`, which used to disconnect and redial the socket
+     * Called by `ZitroneApp.applyTransport`, which used to disconnect and redial the socket
      * directly. That left any pairing sleeping in its drawn gap **split across a TLS teardown and
      * reconnect** — ruled P1 by the third lens in round 3 on a distinction neither reviewer made: a
      * split pair is a *stronger* signal than a missing cover frame, because it lets an observer link
@@ -888,12 +839,17 @@ class MessagingCoordinator(
      * observable infrastructure event, and correlates them with the user changing their anonymity
      * transport.
      *
-     * Serialised on the confined worker for the same reason as
-     * [runTerminalTeardownOnConfinedWorker], and blocking for a narrower one: the caller holds the
-     * app's transport lock and re-points the clients the moment this returns.
+     * **Asynchronous, and that is the round-5 fix.** Round 4 ran this through the same helper as
+     * terminal teardown, which fell back to the CALLING thread after 250 ms — and since `quiesce`
+     * leaves the register open, that fallback re-opened the very split-pair class it was built to
+     * close. It could not simply be removed while the caller held the app's transport lock (a
+     * verified lock inversion, see [CoverTrafficWorker]). So the caller releases that lock first and
+     * this no longer waits at all: it queues the drain-and-swap on the worker, where it cannot
+     * interleave with any publish/admit slice, and returns. The endpoints the new socket will dial
+     * were already installed by the caller under the lock.
      */
     fun reconnectTransport(swapTransport: () -> Unit) =
-        runTerminalTeardownOnConfinedWorker { coverTraffic.quiesce(swapTransport) }
+        coverWorker.requestReconnect { coverTraffic.quiesce(swapTransport) }
 
     /**
      * Emit one privacy-safe boot-diagnostic line to BOTH logcat (when `adb` is
@@ -1878,11 +1834,11 @@ class MessagingCoordinator(
             linkJob?.cancel()
             // The SAME cover-traffic-then-transport teardown as [stop] (U3 fix round 3): the account
             // delete is a teardown too, and a pairing left mid-gap here would leave the same
-            // teardown-correlated unpaired real frame on the wire. Called DIRECTLY rather than
-            // through [runTerminalTeardownOnConfinedWorker] because this coroutine is already ON the
+            // teardown-correlated unpaired real frame on the wire. Run through the ON-WORKER entry
+            // point rather than the dispatching one, because this coroutine is already ON the
             // confined worker — dispatching to it from itself and then blocking on the result would
-            // deadlock the worker against its own queue.
-            coverTeardown()
+            // stall the worker against its own queue for the whole bound.
+            coverWorker.runTerminalHere(::coverTeardown)
             messages.clearAll()
             conversations.clearAll()
             // Teardown hook: no re-fire job or fire state survives the wipe.
@@ -2329,15 +2285,6 @@ class MessagingCoordinator(
         const val BASE_BACKOFF_MS = 1_000L
         const val MAX_BACKOFF_MS = 60_000L
         const val MAX_BACKOFF_SHIFT = 6
-
-        /**
-         * How long [runTerminalTeardownOnConfinedWorker] waits for the confinement worker to become
-         * free. **It bounds scheduling, not cover-side work** — see that method's kdoc. Teardown
-         * runs on a user-visible path (vault lock, under the app's transport lock), so it is kept
-         * short enough that the worst case is not a visible stall, and its expiry degrades to the
-         * previous behaviour rather than to a lost socket.
-         */
-        const val TEARDOWN_QUIESCE_MS = 250L
     }
 }
 

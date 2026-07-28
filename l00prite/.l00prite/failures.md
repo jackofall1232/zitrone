@@ -997,3 +997,31 @@ an "absolute" requirement, the resolution is a design decision and belongs to th
 the durability barrier and the send tail") appearing as the mechanism behind findings that pull in
 opposite directions. One cause, two findings, opposite remedies — that is a dilemma wearing the
 costume of a backlog.
+
+### LESSON (0.10.0 U3, fix round 5) — A RED BASELINE MAKES EVERY MUTATION "CAUGHT" FOR FREE
+
+The first round-5 mutation harness was killed by a tool timeout mid-run and left one mutation applied
+in `CoverTrafficWorker.kt`. That file was **new and therefore untracked**, so `git status --short`
+showed it as `??` and nothing else — the corruption was invisible to the check that exists to catch
+exactly this. The harness was restarted, ran to completion, and reported **8 of 8 mutations caught**.
+
+Every one of those results was worthless. The stale mutation removed the terminal fallback, which
+makes the suite RED, and a red baseline means every mutation "fails the suite" whether or not any
+guard discriminates it. A mutation sweep measures the *difference* between baseline and mutant; with
+a broken baseline there is no difference to measure and the sweep silently degrades into a
+tautology that looks like a perfect score.
+
+**The rules, and they are cheap:**
+1. **Assert the baseline is green as the harness's first action**, and abort loudly if it is not. A
+   sweep that cannot state its baseline has no result.
+2. **Restore in a `finally`, then verify with a checksum** of every file the sweep can touch —
+   comparing against a fingerprint taken before the first mutation. `git status` is not sufficient
+   while any touched file is untracked.
+3. **Re-check the baseline after the last mutation.** If it is not green, the restore failed and the
+   whole run is void.
+4. A perfect score is a reason for suspicion, not celebration — especially one that arrives right
+   after a harness was interrupted.
+
+The existing rule in this file ("commit as soon as the unit compiles") would have converted this into
+`git checkout`; it did not fire because the file was new, and `git add` had not happened. **New files
+are the blind spot: `git status` reports their existence, not their content.**
