@@ -3185,3 +3185,919 @@ apps/android/app/src/main/java/com/zitrone/app/ZitroneApp.kt:1820:              
    226	    }
    227	}
 
+exec
+/bin/bash -lc "nl -ba apps/android/app/src/main/java/com/zitrone/app/net/WsClient.kt | sed -n '225,305p'; nl -ba apps/android/app/src/main/java/com/zitrone/app/decoy/DecoySendPairing.kt | sed -n '650,770p'; nl -ba apps/android/app/src/test/java/com/zitrone/app/DecoyInboundSessionTest.kt | sed -n '100,520p'; nl -ba apps/android/app/src/test/java/com/zitrone/app/DecoyReplyBuilderTest.kt | sed -n '1,240p'" in /root/zitrone
+ succeeded in 0ms:
+   225	    private fun openSocket() {
+   226	        val token = currentToken ?: return
+   227	        // Abandon any previous socket: drop our reference FIRST so its late
+   228	        // terminal callbacks are recognized as stale (see the identity check in
+   229	        // socketListener) and can't clobber the new socket's state or trigger a
+   230	        // churn loop, then close it.
+   231	        val previous = webSocket
+   232	        webSocket = null
+   233	        previous?.close(CLOSE_NORMAL, null)
+   234	        _connectionState.value = ConnectionState.CONNECTING
+   235	        diag("ws[$reconnectAttempts]: firing WS /ws handshake")
+   236	        // One snapshot: dial this URL with the client that matches it.
+   237	        val t = transport
+   238	        val request = Request.Builder()
+   239	            .url(t.wsUrl)
+   240	            // The server's /ws middleware authenticates from THIS header (or a
+   241	            // ?token= query param) — NOT Authorization, which it never reads.
+   242	            .header("Sec-WebSocket-Protocol", token)
+   243	            .build()
+   244	        webSocket = t.client.newWebSocket(request, socketListener)
+   245	    }
+   246	
+   247	    // The listener is shared across sockets. Every callback first checks it came
+   248	    // from the CURRENT socket — an abandoned socket's late onClosed/onFailure
+   249	    // must not flip state or schedule a reconnect (that would flap forever).
+   250	    private val socketListener = object : WebSocketListener() {
+   251	        override fun onOpen(webSocket: WebSocket, response: Response) {
+   252	            if (webSocket !== this@WsClient.webSocket) return
+   253	            reconnectAttempts = 0
+   254	            diag("ws: connected")
+   255	            _connectionState.value = ConnectionState.CONNECTED
+   256	        }
+   257	
+   258	        override fun onMessage(webSocket: WebSocket, text: String) {
+   259	            if (webSocket !== this@WsClient.webSocket) return
+   260	            dispatchFrame(text)
+   261	        }
+   262	
+   263	        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+   264	            if (webSocket !== this@WsClient.webSocket) return
+   265	            // Close code only — a close reason is server/proxy-controlled text.
+   266	            diag("ws: closed code=$code")
+   267	            _connectionState.value = ConnectionState.DISCONNECTED
+   268	            scheduleReconnect()
+   269	        }
+   270	
+   271	        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+   272	            if (webSocket !== this@WsClient.webSocket) return
+   273	            _connectionState.value = ConnectionState.DISCONNECTED
+   274	            // Deliberate teardown (disconnect/logout/delete) must never re-enter
+   275	            // reconnect or re-auth — and an expected teardown isn't a failure
+   276	            // worth a diagnostic line.
+   277	            if (intentionallyClosed) return
+   278	            // Exception class + message + HTTP status only (same discrimination
+   279	            // logic as the boot loop: pin failure vs TLS vs unreachable vs a
+   280	            // handshake the server rejected) — never the token, URL, or body.
+   281	            val status = response?.code?.let { " http_status=$it" }.orEmpty()
+   282	            diag("ws: handshake/stream failed: ${t.javaClass.name}: ${t.message}$status")
+   283	            // A rejected token (JWTs live 15 min) would make every socket-level
+   284	            // retry a fresh 401 forever. Hand back to the coordinator to
+   285	            // re-authenticate instead of scheduling a doomed reconnect.
+   286	            if (response?.code == 401 || response?.code == 403) {
+   287	                diag("ws: token rejected — handing off to re-auth")
+   288	                intentionallyClosed = true
+   289	                listener?.onAuthExpired()
+   290	            } else {
+   291	                scheduleReconnect()
+   292	            }
+   293	        }
+   294	    }
+   295	
+   296	    /**
+   297	     * Parse one server frame and dispatch to [listener]. Fields sit flat next
+   298	     * to "type" (see class kdoc). Frames carry only ciphertext envelopes and
+   299	     * routing metadata; they are parsed and dispatched — NEVER logged.
+   300	     * Internal (not private) so the frame contract is unit-testable.
+   301	     */
+   302	    internal fun dispatchFrame(text: String) {
+   303	        val frame = runCatching { JSONObject(text) }.getOrNull() ?: return
+   304	        val l = listener ?: return
+   305	        when (frame.optString("type")) {
+   650	            emit(pending.decoy)
+   651	        }
+   652	    }
+   653	
+   654	    /**
+   655	     * Retire one pairing: emit its cover frame unless a drain already claimed it, or unless the
+   656	     * transport is gone (in which case teardown has been and the socket would refuse it anyway).
+   657	     */
+   658	    private fun finish(pending: Pending) = teardown.withLock {
+   659	        if (inFlight.remove(pending) && !transportInvalid) emit(pending.decoy)
+   660	    }
+   661	
+   662	    // ── the cover frame ─────────────────────────────────────────────────────────────────────
+   663	
+   664	    /**
+   665	     * The cover envelope for one send, or null for "this send goes uncovered".
+   666	     *
+   667	     * **Total by construction** — it catches everything but cancellation. The real send has *already
+   668	     * happened* when this runs, so a throw escaping here would propagate into
+   669	     * `MessagingCoordinator`'s `runCatching` and mark a delivered message FAILED. Cover traffic would
+   670	     * then have corrupted the state of a send it could not otherwise touch.
+   671	     *
+   672	     * **Non-suspending on purpose**, and after fix round 4 that is what the whole teardown argument
+   673	     * rests on: because there is no suspension point between the caller's `ws.sendMessage` and this
+   674	     * frame reaching the register, the confinement worker cannot be handed to teardown in between,
+   675	     * so a build is never interrupted and the register never holds an unbuilt pairing. (Round 3 read
+   676	     * this as "the drain's wait can only stand behind CPU work, so a bounded wait is safe". That was
+   677	     * the P1: non-suspending bounds *suspension*, not *time*. The property is worth having for the
+   678	     * reason above, not for that one.)
+   679	     */
+   680	    private fun buildCover(real: MessageEnvelope): MessageEnvelope? = try {
+   681	        val syntheticAccountId = recipient()
+   682	        if (syntheticAccountId == null) {
+   683	            ensureProvisioning()
+   684	            null
+   685	        } else {
+   686	            // A throw here is R-U3-4: the real send already went, uncovered. See the class kdoc —
+   687	            // reaching it is a defect to report, not a case to swallow quietly.
+   688	            sender()?.let { from -> builder.build(from, syntheticAccountId, real) }
+   689	        }
+   690	    } catch (c: CancellationException) {
+   691	        throw c
+   692	    } catch (t: Throwable) {
+   693	        null
+   694	    }
+   695	
+   696	    /** Uniform over the closed interval — see the delay-distribution answer in the class kdoc. */
+   697	    private fun gapMs(): Long = (GAP_MIN_MS + random.nextInt(GAP_MAX_MS - GAP_MIN_MS + 1)).toLong()
+   698	
+   699	    /**
+   700	     * Hand one cover frame to the socket. A `false` return is the ordinary dead-socket answer and a
+   701	     * throw is contained: the real frame is already gone and nothing here may change what happened
+   702	     * to it.
+   703	     */
+   704	    private fun emit(decoy: MessageEnvelope) {
+   705	        try {
+   706	            // A cover frame the socket TOOK is charged to the same per-account budget the real frames
+   707	            // draw on, so the meter counts it. One the socket refused never reached the relay and is
+   708	            // not counted — the meter measures consumption, not intent.
+   709	            if (send(decoy)) pressure.recordFrame()
+   710	        } catch (c: CancellationException) {
+   711	            throw c
+   712	        } catch (t: Throwable) {
+   713	            // Silent by requirement — no logging, no diagnostics sink (R-U3-5).
+   714	        }
+   715	    }
+   716	
+   717	    /**
+   718	     * Start a provisioning attempt if none is running.
+   719	     *
+   720	     * The [AtomicBoolean] bounds the number of CONCURRENT jobs to one — it keeps a hundred sends
+   721	     * from launching a hundred coroutines that would each read the vault and return. It is
+   722	     * **released when the job completes**, so a later send in the same session can try again; see
+   723	     * the provisioning section of the class kdoc for why that is a requirement and not a
+   724	     * relaxation. The number of relay REGISTRATIONS is bounded by [DecoyAccountProvisioner]'s
+   725	     * runtime-scoped latch, which is the guard that actually protects the shared worldwide bucket.
+   726	     *
+   727	     * **The whole method runs under [teardown]** (fix round 4), and that is the fix for a real race,
+   728	     * not tidiness. Round 3 checked `transportInvalid` under the lock, released it, then won the CAS
+   729	     * and assigned [provisionJob] — so a `stop()` landing in between saw a null handle, cancelled
+   730	     * nothing, invalidated the transport and returned, and the job then started **after teardown**:
+   731	     * a coroutine outliving its session, able to spend a scarce registration from the shared
+   732	     * worldwide bucket and to touch a closing vault runtime. Holding the lock across
+   733	     * check → CAS → assign makes the two orders the only two possible ones: either `stop()` gets the
+   734	     * lock first and this returns without launching, or this assigns first and `stop()` cancels what
+   735	     * it finds. `job.start()` on a LAZY job only dispatches, so nothing runs under the lock.
+   736	     */
+   737	    private fun ensureProvisioning() = teardown.withLock {
+   738	        // Nothing decoy-related may start after teardown (R-U3-5).
+   739	        if (transportInvalid) return@withLock
+   740	        if (!provisioning.compareAndSet(false, true)) return@withLock
+   741	        // LAZY so [provisionJob] is assigned before the body can run: stop() must never find a null
+   742	        // handle for a job that is already provisioning.
+   743	        val job = scope.launch(provisionContext, start = CoroutineStart.LAZY) {
+   744	            try {
+   745	                provision()
+   746	            } catch (c: CancellationException) {
+   747	                throw c
+   748	            } catch (t: Throwable) {
+   749	                // Silent degradation to cover-traffic-off (§6.2a) — never surfaced, never recorded.
+   750	            } finally {
+   751	                provisioning.set(false)
+   752	            }
+   753	        }
+   754	        provisionJob = job
+   755	        job.start()
+   756	    }
+   757	
+   758	    companion object {
+   759	        /**
+   760	         * Floor of the drawn gap, in milliseconds. Best effort, not a guarantee: it separates the
+   761	         * two `WsClient.sendMessage` CALLS, and OkHttp's writer thread owns the socket writes. See
+   762	         * the delay-distribution section for what a coalesced pair actually costs.
+   763	         */
+   764	        const val GAP_MIN_MS: Int = 5
+   765	
+   766	        /**
+   767	         * Ceiling of the drawn gap, in milliseconds. It bounds no real send's latency — the real
+   768	         * frame is already on the socket — it bounds how much work [stop]'s drain has to do while a
+   769	         * user is locking their vault. See the class kdoc.
+   770	         */
+   100	        queuedBytes: () -> Long = { 0L },
+   101	        alwaysReply: Boolean = true,
+   102	    ): DecoyInboundSession = DecoyInboundSession(
+   103	        scope = scope,
+   104	        syntheticAccountId = { synthetic },
+   105	        realAccountId = { real },
+   106	        accessToken = { token },
+   107	        socket = socket,
+   108	        pressure = CoverPressure(queuedBytes = queuedBytes, nowMs = { scheduler.currentTime }),
+   109	        random = if (alwaysReply) AlwaysZeroRandom() else NeverZeroRandom(),
+   110	    )
+   111	
+   112	    /** `nextInt(n)` = 0, so `shouldReply()` is true and every drawn delay is its minimum. */
+   113	    private class AlwaysZeroRandom : SecureRandom() {
+   114	        override fun nextInt(bound: Int): Int = 0
+   115	    }
+   116	
+   117	    /** `nextInt(n)` = n-1, so `shouldReply()` is false for any denominator above 1. */
+   118	    private class NeverZeroRandom : SecureRandom() {
+   119	        override fun nextInt(bound: Int): Int = bound - 1
+   120	    }
+   121	
+   122	    // -- R-U4-2 / delivery ----------------------------------------------------------------------
+   123	
+   124	    @Test
+   125	    fun `acks a delivered cover envelope immediately, before any delay elapses`() = runTest {
+   126	        val socket = FakeSocket()
+   127	        val session = session(socket, testScheduler, this)
+   128	        session.start()
+   129	
+   130	        socket.onDeliver!!.invoke(envelope(id = "cover-9"))
+   131	
+   132	        // No advanceUntilIdle: the ack must already have happened on the callback itself. An ack
+   133	        // deferred behind a delay is one the relay is still retrying delivery for.
+   134	        assertEquals(listOf("cover-9"), socket.acks)
+   135	        assertTrue("the burn is scheduled, not immediate", socket.burns.isEmpty())
+   136	    }
+   137	
+   138	    @Test
+   139	    fun `burns the envelope after the drawn delay, naming the sender as the peer`() = runTest {
+   140	        val socket = FakeSocket()
+   141	        val session = session(socket, testScheduler, this)
+   142	        session.start()
+   143	
+   144	        socket.onDeliver!!.invoke(envelope(id = "cover-9", senderId = REAL))
+   145	        advanceUntilIdle()
+   146	
+   147	        assertEquals(listOf("cover-9" to REAL), socket.burns)
+   148	    }
+   149	
+   150	    @Test
+   151	    fun `never decrypts, stores or parses — it reads only the id and the sender`() = runTest {
+   152	        // The envelope's ciphertext is deliberately not valid base64-of-anything-meaningful. If this
+   153	        // class ever grows a parse step, this test starts failing rather than silently succeeding.
+   154	        val socket = FakeSocket()
+   155	        val session = session(socket, testScheduler, this)
+   156	        session.start()
+   157	
+   158	        val junk = envelope(id = "cover-x").copy(ciphertext = "!!!not-base64!!!")
+   159	        socket.onDeliver!!.invoke(junk)
+   160	        advanceUntilIdle()
+   161	
+   162	        assertEquals(listOf("cover-x"), socket.acks)
+   163	        assertEquals(listOf("cover-x" to REAL), socket.burns)
+   164	    }
+   165	
+   166	    // -- R-U4-4: the send-back yields, the ack and burn do not ----------------------------------
+   167	
+   168	    @Test
+   169	    fun `sends back an established-session reply addressed to the real account`() = runTest {
+   170	        val socket = FakeSocket()
+   171	        val session = session(socket, testScheduler, this)
+   172	        session.start()
+   173	
+   174	        socket.onDeliver!!.invoke(envelope())
+   175	        advanceUntilIdle()
+   176	
+   177	        assertEquals(1, socket.sends.size)
+   178	        val reply = socket.sends.single()
+   179	        assertEquals("the reply is issued BY the synthetic account", SYNTHETIC, reply.senderId)
+   180	        assertEquals("the reply is addressed TO the real account", REAL, reply.recipientId)
+   181	        assertNull("a reply is never a first message — R-U4-3", reply.ephemeralKey)
+   182	        assertNull("a reply consumes no one-time prekey — R-U4-3", reply.preKeyId)
+   183	    }
+   184	
+   185	    @Test
+   186	    fun `the send-back yields under pressure while the ack and burn still fire`() = runTest {
+   187	        val socket = FakeSocket()
+   188	        // Past CoverPressure's outbound-queue watermark: the meter is tripped for the whole window.
+   189	        val session = session(socket, testScheduler, this, queuedBytes = { 1L shl 20 })
+   190	        session.start()
+   191	
+   192	        socket.onDeliver!!.invoke(envelope(id = "cover-9"))
+   193	        advanceUntilIdle()
+   194	
+   195	        assertTrue("the send-back is the half that yields", socket.sends.isEmpty())
+   196	        assertEquals("shedding an ack would leave the relay retrying — it is exempt", listOf("cover-9"), socket.acks)
+   197	        assertEquals("the burn is exempt for the same reason", listOf("cover-9" to REAL), socket.burns)
+   198	    }
+   199	
+   200	    @Test
+   201	    fun `no send-back when the vault has no usable real account to address it to`() = runTest {
+   202	        val socket = FakeSocket()
+   203	        val session = session(socket, testScheduler, this, real = null)
+   204	        session.start()
+   205	
+   206	        socket.onDeliver!!.invoke(envelope())
+   207	        advanceUntilIdle()
+   208	
+   209	        assertTrue(socket.sends.isEmpty())
+   210	        assertEquals("delivery handling is unaffected", 1, socket.acks.size)
+   211	    }
+   212	
+   213	    @Test
+   214	    fun `send-backs advance the synthetic account's own sending-chain counter`() = runTest {
+   215	        val socket = FakeSocket()
+   216	        val session = session(socket, testScheduler, this)
+   217	        session.start()
+   218	
+   219	        socket.onDeliver!!.invoke(envelope(id = "a"))
+   220	        advanceUntilIdle()
+   221	        socket.onDeliver!!.invoke(envelope(id = "b"))
+   222	        advanceUntilIdle()
+   223	
+   224	        assertEquals(listOf(0, 1), socket.sends.map { it.messageNumber })
+   225	    }
+   226	
+   227	    @Test
+   228	    fun `a delivery that draws no reply still acks and burns`() = runTest {
+   229	        val socket = FakeSocket()
+   230	        val session = session(socket, testScheduler, this, alwaysReply = false)
+   231	        session.start()
+   232	
+   233	        socket.onDeliver!!.invoke(envelope(id = "cover-9"))
+   234	        advanceUntilIdle()
+   235	
+   236	        assertTrue(socket.sends.isEmpty())
+   237	        assertEquals(listOf("cover-9"), socket.acks)
+   238	        assertEquals(listOf("cover-9" to REAL), socket.burns)
+   239	    }
+   240	
+   241	    // -- R-U4-6: silence, and the socket never outliving the session ----------------------------
+   242	
+   243	    @Test
+   244	    fun `stop cancels a pending burn so no frame outlives the session`() = runTest {
+   245	        val socket = FakeSocket()
+   246	        val session = session(socket, testScheduler, this)
+   247	        session.start()
+   248	
+   249	        socket.onDeliver!!.invoke(envelope(id = "cover-9"))
+   250	        // The ack has already gone; the burn is still parked behind its drawn delay.
+   251	        assertEquals(listOf("cover-9"), socket.acks)
+   252	        session.stop()
+   253	        advanceUntilIdle()
+   254	
+   255	        assertTrue("a burn must not fire after teardown", socket.burns.isEmpty())
+   256	        assertTrue("nor a send-back", socket.sends.isEmpty())
+   257	        assertEquals(1, socket.disconnects)
+   258	    }
+   259	
+   260	    @Test
+   261	    fun `stop leaves no outstanding work parked on a delay`() = runTest {
+   262	        // Distinct from the test above, and the distinction is what a mutation sweep found: every
+   263	        // job body ALSO re-checks `stopped`, so deleting stop()'s cancellation still emits nothing
+   264	        // and that test stays green. What cancellation buys is that teardown leaves NOTHING
+   265	        // RUNNING — jobs are not left parked on a drawn delay to discover the flag later — and that
+   266	        // is only visible here.
+   267	        val socket = FakeSocket()
+   268	        val session = session(socket, testScheduler, this)
+   269	        session.start()
+   270	
+   271	        socket.onDeliver!!.invoke(envelope(id = "cover-9"))
+   272	        assertEquals("a burn and a send-back are pending", 2, session.outstandingWork())
+   273	        session.stop()
+   274	
+   275	        assertEquals("teardown must cancel them, not merely out-wait them", 0, session.outstandingWork())
+   276	    }
+   277	
+   278	    @Test
+   279	    fun `a delivery arriving after stop is ignored entirely`() = runTest {
+   280	        val socket = FakeSocket()
+   281	        val session = session(socket, testScheduler, this)
+   282	        session.start()
+   283	        val deliver = socket.onDeliver
+   284	        session.stop()
+   285	
+   286	        deliver!!.invoke(envelope(id = "late"))
+   287	        advanceUntilIdle()
+   288	
+   289	        assertTrue(socket.acks.isEmpty())
+   290	        assertTrue(socket.burns.isEmpty())
+   291	        assertTrue(socket.sends.isEmpty())
+   292	    }
+   293	
+   294	    @Test
+   295	    fun `stop detaches the delivery callback`() = runTest {
+   296	        val socket = FakeSocket()
+   297	        val session = session(socket, testScheduler, this)
+   298	        session.start()
+   299	        assertNotNull(socket.onDeliver)
+   300	
+   301	        session.stop()
+   302	
+   303	        assertNull("a stopped session must not still be wired to its socket", socket.onDeliver)
+   304	    }
+   305	
+   306	    @Test
+   307	    fun `a socket that refuses every frame is silent rather than throwing`() = runTest {
+   308	        val socket = FakeSocket(sendSucceeds = false)
+   309	        val session = session(socket, testScheduler, this)
+   310	        session.start()
+   311	
+   312	        socket.onDeliver!!.invoke(envelope())
+   313	        advanceUntilIdle()
+   314	
+   315	        // The point is that nothing above threw and nothing was retried.
+   316	        assertEquals(1, socket.sends.size)
+   317	    }
+   318	
+   319	    // -- start / reconnect ----------------------------------------------------------------------
+   320	
+   321	    @Test
+   322	    fun `start is idempotent — the second call does not open a second socket`() = runTest {
+   323	        val socket = FakeSocket()
+   324	        val session = session(socket, testScheduler, this)
+   325	
+   326	        session.start()
+   327	        session.start()
+   328	        session.start()
+   329	
+   330	        assertEquals(1, socket.connects.size)
+   331	    }
+   332	
+   333	    @Test
+   334	    fun `start does nothing until the vault has a synthetic account`() = runTest {
+   335	        val socket = FakeSocket()
+   336	        val session = session(socket, testScheduler, this, synthetic = null)
+   337	
+   338	        session.start()
+   339	
+   340	        assertTrue("provisioning is lazy — no account means no socket", socket.connects.isEmpty())
+   341	        assertNull(socket.onDeliver)
+   342	    }
+   343	
+   344	    @Test
+   345	    fun `a start with no token releases its latch so a later start can retry`() = runTest {
+   346	        val socket = FakeSocket()
+   347	        var token: String? = null
+   348	        val session = DecoyInboundSession(
+   349	            scope = this,
+   350	            syntheticAccountId = { SYNTHETIC },
+   351	            realAccountId = { REAL },
+   352	            accessToken = { token },
+   353	            socket = socket,
+   354	            pressure = CoverPressure(queuedBytes = { 0L }, nowMs = { testScheduler.currentTime }),
+   355	        )
+   356	
+   357	        session.start()
+   358	        assertTrue(socket.connects.isEmpty())
+   359	        token = "token-later"
+   360	        session.start()
+   361	
+   362	        assertEquals("a tokenless attempt must not latch the session off forever", 1, socket.connects.size)
+   363	    }
+   364	
+   365	    @Test
+   366	    fun `a connect that throws releases the latch too`() = runTest {
+   367	        val socket = FakeSocket(connectSucceeds = false)
+   368	        val session = session(socket, testScheduler, this)
+   369	
+   370	        session.start()
+   371	        socket.connectSucceeds = true
+   372	        session.start()
+   373	
+   374	        assertEquals(1, socket.connects.size)
+   375	    }
+   376	
+   377	    @Test
+   378	    fun `reconnect drops the old socket and dials again`() = runTest {
+   379	        val socket = FakeSocket()
+   380	        val session = session(socket, testScheduler, this)
+   381	        session.start()
+   382	
+   383	        session.reconnect()
+   384	
+   385	        assertEquals(1, socket.disconnects)
+   386	        assertEquals("the redial must actually happen — start alone would no-op", 2, socket.connects.size)
+   387	    }
+   388	
+   389	    @Test
+   390	    fun `reconnect is non-terminal — the session keeps working afterwards`() = runTest {
+   391	        val socket = FakeSocket()
+   392	        val session = session(socket, testScheduler, this)
+   393	        session.start()
+   394	        session.reconnect()
+   395	
+   396	        socket.onDeliver!!.invoke(envelope(id = "after-swap"))
+   397	        advanceUntilIdle()
+   398	
+   399	        assertEquals(listOf("after-swap"), socket.acks)
+   400	        assertEquals(1, socket.sends.size)
+   401	    }
+   402	
+   403	    @Test
+   404	    fun `reconnect after stop does nothing — teardown is terminal`() = runTest {
+   405	        val socket = FakeSocket()
+   406	        val session = session(socket, testScheduler, this)
+   407	        session.start()
+   408	        session.stop()
+   409	
+   410	        session.reconnect()
+   411	
+   412	        assertEquals("stop's disconnect only", 1, socket.disconnects)
+   413	        assertEquals("no redial after a terminal stop", 1, socket.connects.size)
+   414	    }
+   415	
+   416	    // -- bindTo: teardown ordering --------------------------------------------------------------
+   417	
+   418	    @Test
+   419	    fun `bindTo stops the synthetic side BEFORE the send pairing drains`() = runTest {
+   420	        val order = mutableListOf<String>()
+   421	        val socket = FakeSocket(journal = order)
+   422	        val session = session(socket, testScheduler, this)
+   423	        session.start()
+   424	        val delegate = object : com.zitrone.app.decoy.CoverTraffic {
+   425	            override suspend fun cover(real: MessageEnvelope) = Unit
+   426	            override fun onRelayRateLimited() = Unit
+   427	            override fun stop(invalidateTransport: () -> Unit) {
+   428	                order += "delegate.stop"
+   429	                invalidateTransport()
+   430	            }
+   431	            override fun quiesce(swapTransport: () -> Unit) {
+   432	                order += "delegate.quiesce"
+   433	                swapTransport()
+   434	            }
+   435	        }
+   436	        val bound = session.bindTo(delegate)
+   437	
+   438	        bound.stop { order += "invalidate" }
+   439	
+   440	        assertEquals(
+   441	            "the synthetic socket must go down BEFORE the pairing drains: a drain emits cover " +
+   442	                "frames, and a synthetic side still acking them would put its control frames on " +
+   443	                "the wire after the real socket's last real frame",
+   444	            listOf("synthetic.disconnect", "delegate.stop", "invalidate"),
+   445	            order,
+   446	        )
+   447	        assertEquals(1, socket.disconnects)
+   448	        assertNull("and is detached before the drain runs", socket.onDeliver)
+   449	    }
+   450	
+   451	    @Test
+   452	    fun `bindTo does NOT tear the synthetic side down on a non-terminal quiesce`() = runTest {
+   453	        val socket = FakeSocket()
+   454	        val session = session(socket, testScheduler, this)
+   455	        session.start()
+   456	        val delegate = object : com.zitrone.app.decoy.CoverTraffic {
+   457	            override suspend fun cover(real: MessageEnvelope) = Unit
+   458	            override fun onRelayRateLimited() = Unit
+   459	            override fun stop(invalidateTransport: () -> Unit) = invalidateTransport()
+   460	            override fun quiesce(swapTransport: () -> Unit) = swapTransport()
+   461	        }
+   462	
+   463	        session.bindTo(delegate).quiesce {}
+   464	
+   465	        assertEquals("a transport toggle must not permanently kill cover traffic", 0, socket.disconnects)
+   466	        assertNotNull(socket.onDeliver)
+   467	        // And the session is still live: a delivery after the swap is still handled.
+   468	        socket.onDeliver!!.invoke(envelope(id = "still-live"))
+   469	        assertEquals(listOf("still-live"), socket.acks)
+   470	    }
+   471	
+   472	    @Test
+   473	    fun `bindTo forwards cover and rate-limit signals unchanged`() = runTest {
+   474	        val socket = FakeSocket()
+   475	        val session = session(socket, testScheduler, this)
+   476	        val seen = mutableListOf<String>()
+   477	        val delegate = object : com.zitrone.app.decoy.CoverTraffic {
+   478	            override suspend fun cover(real: MessageEnvelope) { seen += "cover:${real.id}" }
+   479	            override fun onRelayRateLimited() { seen += "rate" }
+   480	            override fun stop(invalidateTransport: () -> Unit) = invalidateTransport()
+   481	            override fun quiesce(swapTransport: () -> Unit) = swapTransport()
+   482	        }
+   483	        val bound = session.bindTo(delegate)
+   484	
+   485	        bound.cover(envelope(id = "real-1"))
+   486	        bound.onRelayRateLimited()
+   487	
+   488	        assertEquals(listOf("cover:real-1", "rate"), seen)
+   489	        assertFalse("wrapping must not start the synthetic socket", socket.connects.isNotEmpty())
+   490	    }
+   491	
+   492	    private companion object {
+   493	        const val SYNTHETIC = "acct-synthetic-0001"
+   494	        const val REAL = "acct-real-00000001"
+   495	    }
+   496	}
+     1	// Zitrone — Copyright (C) 2026 Zitrone contributors
+     2	// Licensed under the GNU Affero General Public License v3.0 or later.
+     3	// See the LICENSE file in the repository root for full license text.
+     4	// SPDX-License-Identifier: AGPL-3.0-only
+     5	
+     6	package com.zitrone.app
+     7	
+     8	import com.zitrone.app.data.MessageEnvelope
+     9	import com.zitrone.app.decoy.DecoyEnvelopeBuilder
+    10	import java.util.Base64
+    11	import org.junit.Assert.assertEquals
+    12	import org.junit.Assert.assertNull
+    13	import org.junit.Assert.assertThrows
+    14	import org.junit.Assert.assertTrue
+    15	import org.junit.Test
+    16	
+    17	/**
+    18	 * `DecoyEnvelopeBuilder.buildReply` — the U4 send-back.
+    19	 *
+    20	 * The property that matters most here is the one R-U4-3 turns on: **a reply is always
+    21	 * established-session shape.** That is not a convenience. A prekey-shaped reply would have to carry
+    22	 * the synthetic account's `registration_id` inside the blob, which `DecoyState` does not persist —
+    23	 * so producing one would mean a new durable field, a `TAG_DECOY` format change and a §4.1
+    24	 * storage-format question. It is also what X3DH actually does: B answers A with a plain
+    25	 * `SignalMessage`, because B has the session by then.
+    26	 */
+    27	class DecoyReplyBuilderTest {
+    28	
+    29	    private val builder = DecoyEnvelopeBuilder()
+    30	
+    31	    private fun received(
+    32	        ciphertextBytes: Int = 400,
+    33	        ephemeralKey: String? = null,
+    34	        preKeyId: Int? = null,
+    35	        timestamp: String = "2026-07-28T10:00:00.123Z",
+    36	        ttlSeconds: Int = 86_400,
+    37	        burnOnRead: Boolean = false,
+    38	        mediaType: String = "text",
+    39	        version: String = "1",
+    40	    ) = MessageEnvelope(
+    41	        id = "cover-1",
+    42	        senderId = REAL,
+    43	        recipientId = SYNTHETIC,
+    44	        ciphertext = Base64.getEncoder().encodeToString(ByteArray(ciphertextBytes)),
+    45	        ephemeralKey = ephemeralKey,
+    46	        preKeyId = preKeyId,
+    47	        messageNumber = 7,
+    48	        previousChainLength = 3,
+    49	        timestamp = timestamp,
+    50	        ttlSeconds = ttlSeconds,
+    51	        burnOnRead = burnOnRead,
+    52	        mediaType = mediaType,
+    53	        version = version,
+    54	    )
+    55	
+    56	    private fun reply(
+    57	        received: MessageEnvelope = received(),
+    58	        counter: Int = 0,
+    59	        from: String = SYNTHETIC,
+    60	        to: String = REAL,
+    61	    ) = builder.buildReply(
+    62	        replyingAccountId = from,
+    63	        recipientAccountId = to,
+    64	        received = received,
+    65	        counter = counter,
+    66	    )
+    67	
+    68	    @Test
+    69	    fun `a reply is established-session shape even when the message it answers was a first message`() {
+    70	        // A prekey-shaped cover envelope: the real send it mirrored opened a session.
+    71	        val prekeyShaped = received(
+    72	            ciphertextBytes = 400,
+    73	            ephemeralKey = Base64.getEncoder().encodeToString(ByteArray(33).also { it[0] = 5 }),
+    74	            preKeyId = 42,
+    75	        )
+    76	
+    77	        val reply = reply(prekeyShaped)
+    78	
+    79	        assertNull("a reply never carries an ephemeral key", reply.ephemeralKey)
+    80	        assertNull("nor a consumed one-time prekey id", reply.preKeyId)
+    81	    }
+    82	
+    83	    @Test
+    84	    fun `the reply's ciphertext is exactly as long as the one it answers`() {
+    85	        for (size in listOf(330, 592, 848, 1_106)) {
+    86	            val answered = received(ciphertextBytes = size)
+    87	            val decoded = Base64.getDecoder().decode(reply(answered).ciphertext)
+    88	            assertEquals("reply size must match for a $size B ciphertext", size, decoded.size)
+    89	        }
+    90	    }
+    91	
+    92	    @Test
+    93	    fun `the reply is addressed from the synthetic account to the real one`() {
+    94	        val reply = reply()
+    95	
+    96	        assertEquals(SYNTHETIC, reply.senderId)
+    97	        assertEquals(REAL, reply.recipientId)
+    98	    }
+    99	
+   100	    @Test
+   101	    fun `the reply mirrors ttl, burn, media type and version`() {
+   102	        val answered = received(ttlSeconds = 3_600, burnOnRead = true, mediaType = "file", version = "2")
+   103	
+   104	        val reply = reply(answered)
+   105	
+   106	        assertEquals(3_600, reply.ttlSeconds)
+   107	        assertEquals(true, reply.burnOnRead)
+   108	        assertEquals("file", reply.mediaType)
+   109	        assertEquals("2", reply.version)
+   110	    }
+   111	
+   112	    @Test
+   113	    fun `the reply's timestamp is the same width as the one it answers`() {
+   114	        // 0, 3, 6 or 9 fractional digits — the only widths ISO_INSTANT renders, which is what a
+   115	        // real envelope's timestamp can be. The builder refuses anything else rather than guessing.
+   116	        for (stamp in listOf(
+   117	            "2026-07-28T10:00:00Z",
+   118	            "2026-07-28T10:00:00.123Z",
+   119	            "2026-07-28T10:00:00.123456789Z",
+   120	        )) {
+   121	            val reply = reply(received(timestamp = stamp))
+   122	            assertEquals("width must match for $stamp", stamp.length, reply.timestamp.length)
+   123	        }
+   124	    }
+   125	
+   126	    @Test
+   127	    fun `the reply carries the counter it was given`() {
+   128	        assertEquals(0, reply(counter = 0).messageNumber)
+   129	        assertEquals(5, reply(counter = 5).messageNumber)
+   130	    }
+   131	
+   132	    @Test
+   133	    fun `each reply gets its own message id`() {
+   134	        assertTrue(reply().id != reply().id)
+   135	    }
+   136	
+   137	    @Test
+   138	    fun `it refuses to reply on behalf of an account the envelope was not addressed to`() {
+   139	        val e = assertThrows(IllegalArgumentException::class.java) {
+   140	            reply(from = "acct-somebody-else")
+   141	        }
+   142	        assertTrue(e.message!!.contains("addressed to"))
+   143	    }
+   144	
+   145	    @Test
+   146	    fun `it refuses empty account ids and a negative counter`() {
+   147	        assertThrows(IllegalArgumentException::class.java) { reply(from = "") }
+   148	        assertThrows(IllegalArgumentException::class.java) { reply(to = "") }
+   149	        assertThrows(IllegalArgumentException::class.java) { reply(counter = -1) }
+   150	    }
+   151	
+   152	    @Test
+   153	    fun `it fails closed on a ciphertext too short to carry a padded block`() {
+   154	        // Rather than emitting a differently-shaped frame — the defect the builder exists to prevent.
+   155	        assertThrows(IllegalArgumentException::class.java) { reply(received(ciphertextBytes = 32)) }
+   156	    }
+   157	
+   158	    private companion object {
+   159	        const val SYNTHETIC = "acct-synthetic-0001"
+   160	        const val REAL = "acct-real-00000001"
+   161	    }
+   162	}
+
+codex
+# FINDINGS
+
+## U4-R1 — P1 — Synthetic socket can remain active on the disabled transport
+
+File: `apps/android/app/src/main/java/com/zitrone/app/ZitroneApp.kt:1568`
+
+Sequence:
+
+1. The real `WsClient` is temporarily `DISCONNECTED`, while the synthetic socket remains connected.
+2. The user changes transport, e.g. clearnet → Tor.
+3. `applyTransportLocked` updates both clients’ future endpoints.
+4. Its return predicate checks only the real socket and returns `null`.
+5. `applyTransport` returns at line 1528, so neither reconnect is requested.
+6. The already-open synthetic connection continues over the old transport and can send acks, burns, and replies.
+
+Outcome: synthetic traffic remains attributable to the device on a transport the user disabled. Unlike quiet cover degradation, this reveals traffic on an otherwise-unused path and is P1 under the stated disclosure calibration.
+
+Why tests miss it: `DecoyU4SourceTripwireTest:124-135` merely searches for endpoint-update and reconnect source strings. It never exercises the asymmetric state “real disconnected, synthetic connected” or the early return.
+
+## U4-R2 — P2 — `start()` and `reconnect()` can perform two redials for one transport change
+
+File: `apps/android/app/src/main/java/com/zitrone/app/decoy/DecoyInboundSession.kt:133`, `:159`
+
+Sequence:
+
+1. Lazy provisioning calls `start()`, sets `starting=true`, then suspends in `accessToken()`.
+2. A transport update concurrently calls `reconnect()`.
+3. `reconnect()` disconnects and unconditionally resets `starting=false`.
+4. Its nested `start()` claims the latch and begins another token read.
+5. Both token reads resume and both call `socket.connect(token)`.
+
+`WsClient.openSocket()` abandons the first handshake when the second starts, preventing a permanent duplicate socket, but one transport change produces multiple handshakes and needless connection churn. That degrades and makes the synthetic mechanism less plausible.
+
+Why tests miss it: `DecoyInboundSessionTest:321-414` tests sequential start/reconnect only; its token supplier never suspends across the race.
+
+## U4-R3 — P3 — The receiver-typed disconnect tripwire can still hide a real-socket disconnect
+
+File: `apps/android/app/src/test/java/com/zitrone/app/DecoyU4SourceTripwireTest.kt:148`; `DecoySendPairingTest.kt:1364`
+
+Concrete mutation:
+
+1. Keep the lambda parameter `syntheticWs`, but introduce a same-named/local alias resolving to the real `wsClient`.
+2. Preserve the construction text `WsSyntheticSocket(syntheticWs)`.
+3. The construction assertion still sees exactly `ZitroneApp.kt: syntheticWs`.
+4. The U3 ownership scan exempts `ws.disconnect()` inside `WsSyntheticSocket` solely from its receiver spelling.
+5. `reconnect()` can consequently disconnect the real socket outside `CoverTraffic.stop/quiesce`.
+
+Outcome: the guard claimed to pin the exemption’s safety but pins an identifier spelling, not that identifier’s origin. A future miswire can strand or split a real U3 pairing while all relevant tripwires remain green.
+
+Why tests miss it: neither test follows data flow from `decoyWsClient` allocation to the wrapper; both are lexical source checks.
+
+# CONFIRM-OR-REFUTE
+
+1. **CONFIRM, with lifecycle qualification.** The guard at `MessagingCoordinator.kt:1901` precedes all decrypt/store/roster/unread/notification work. It reads the ID per delivery. A closed runtime makes the outer `runCatching` drop the callback rather than decrypt. A null ID does not suppress real messages, and provisioning cannot produce replies before committing an ID and connecting. Relay account IDs must be unique, so a real contact cannot independently own the synthetic ID. Bare ack is appropriate because a positively identified synthetic reply is intentionally disposable; durable ack would add unnecessary vault coupling.
+
+2. **REFUTE.** Current production wiring gives `WsSyntheticSocket` the decoy client, but the changed disconnect guard does not structurally pin that fact; finding U4-R3. The pressure instance is currently genuinely shared and reads the real socket’s OkHttp queue. I found no current pressure miswire, though its source tests remain lexical.
+
+3. **REFUTE in part.** Send-backs correctly consult the shared pressure meter. Ack and burn intentionally bypass it. However, inbound deliveries create immediate ack work and tracked burn/reply jobs without an admission bound (`DecoyInboundSession.kt:191-200`). A relay flood can therefore impose CPU, memory, and uplink contention. The specification explicitly exempts these operations, so this is principally a weakness in R-U4-4 rather than a violation of its literal wording. I did not elevate it to a separate finding because the conceded relay can already deny service directly.
+
+4. **REFUTE.** Bound teardown prevents the synthetic session from surviving a normal vault lock, and stale reconnects observe `stopped`. Transport lifecycle is defective in the asymmetric socket state described in U4-R1; concurrent provisioning and reconnect also cause U4-R2.
+
+5. **CONFIRM.** `DecoyInboundSession` depends only on lambdas, `SyntheticSocket`, `CoverPressure`, the builder, randomness, and coroutine machinery. Neither U4 core file has a decryptor, Signal store, vault mutation API, durable writer, or ratchet operation. `buildReply` is synthetic byte construction, not cryptography or protocol-state advancement.
+
+6. **CONFIRM.** `buildReply` validates account direction, nonnegative counters, maximum and minimum ciphertext size, emits established-session shape, and exactly matches decoded ciphertext length. Omitting prekey fields makes the overall frame shorter in the same way as a real post-X3DH reply. Restarting the counter at zero is consistent with an apparent ratchet turn, although repeated process restarts remain part of the broader repeating-counter residual.
+
+7. **REFUTE.** I found the transport-state bug, start/reconnect race, and tripwire weakness above. `pending` deregisters completed jobs and teardown cancels them, so I found no ordinary-session leak or lock-order deadlock in U4 itself.
+
+# MISSING CONTEXT
+
+I could not verify relay-side guarantees that authenticated sockets receive only envelopes addressed to their account, or that account IDs are globally unique, without expanding into the relay implementation. Those properties would settle the remaining assumptions behind R-U4-1 and synthetic delivery validation.
+
+Tests were not executed because the review was explicitly read-only and Gradle would write build state.
+
+VERDICT: FINDINGS (1 P1, 1 P2, 1 P3)
+tokens used
+78,424
+# FINDINGS
+
+## U4-R1 — P1 — Synthetic socket can remain active on the disabled transport
+
+File: `apps/android/app/src/main/java/com/zitrone/app/ZitroneApp.kt:1568`
+
+Sequence:
+
+1. The real `WsClient` is temporarily `DISCONNECTED`, while the synthetic socket remains connected.
+2. The user changes transport, e.g. clearnet → Tor.
+3. `applyTransportLocked` updates both clients’ future endpoints.
+4. Its return predicate checks only the real socket and returns `null`.
+5. `applyTransport` returns at line 1528, so neither reconnect is requested.
+6. The already-open synthetic connection continues over the old transport and can send acks, burns, and replies.
+
+Outcome: synthetic traffic remains attributable to the device on a transport the user disabled. Unlike quiet cover degradation, this reveals traffic on an otherwise-unused path and is P1 under the stated disclosure calibration.
+
+Why tests miss it: `DecoyU4SourceTripwireTest:124-135` merely searches for endpoint-update and reconnect source strings. It never exercises the asymmetric state “real disconnected, synthetic connected” or the early return.
+
+## U4-R2 — P2 — `start()` and `reconnect()` can perform two redials for one transport change
+
+File: `apps/android/app/src/main/java/com/zitrone/app/decoy/DecoyInboundSession.kt:133`, `:159`
+
+Sequence:
+
+1. Lazy provisioning calls `start()`, sets `starting=true`, then suspends in `accessToken()`.
+2. A transport update concurrently calls `reconnect()`.
+3. `reconnect()` disconnects and unconditionally resets `starting=false`.
+4. Its nested `start()` claims the latch and begins another token read.
+5. Both token reads resume and both call `socket.connect(token)`.
+
+`WsClient.openSocket()` abandons the first handshake when the second starts, preventing a permanent duplicate socket, but one transport change produces multiple handshakes and needless connection churn. That degrades and makes the synthetic mechanism less plausible.
+
+Why tests miss it: `DecoyInboundSessionTest:321-414` tests sequential start/reconnect only; its token supplier never suspends across the race.
+
+## U4-R3 — P3 — The receiver-typed disconnect tripwire can still hide a real-socket disconnect
+
+File: `apps/android/app/src/test/java/com/zitrone/app/DecoyU4SourceTripwireTest.kt:148`; `DecoySendPairingTest.kt:1364`
+
+Concrete mutation:
+
+1. Keep the lambda parameter `syntheticWs`, but introduce a same-named/local alias resolving to the real `wsClient`.
+2. Preserve the construction text `WsSyntheticSocket(syntheticWs)`.
+3. The construction assertion still sees exactly `ZitroneApp.kt: syntheticWs`.
+4. The U3 ownership scan exempts `ws.disconnect()` inside `WsSyntheticSocket` solely from its receiver spelling.
+5. `reconnect()` can consequently disconnect the real socket outside `CoverTraffic.stop/quiesce`.
+
+Outcome: the guard claimed to pin the exemption’s safety but pins an identifier spelling, not that identifier’s origin. A future miswire can strand or split a real U3 pairing while all relevant tripwires remain green.
+
+Why tests miss it: neither test follows data flow from `decoyWsClient` allocation to the wrapper; both are lexical source checks.
+
+# CONFIRM-OR-REFUTE
+
+1. **CONFIRM, with lifecycle qualification.** The guard at `MessagingCoordinator.kt:1901` precedes all decrypt/store/roster/unread/notification work. It reads the ID per delivery. A closed runtime makes the outer `runCatching` drop the callback rather than decrypt. A null ID does not suppress real messages, and provisioning cannot produce replies before committing an ID and connecting. Relay account IDs must be unique, so a real contact cannot independently own the synthetic ID. Bare ack is appropriate because a positively identified synthetic reply is intentionally disposable; durable ack would add unnecessary vault coupling.
+
+2. **REFUTE.** Current production wiring gives `WsSyntheticSocket` the decoy client, but the changed disconnect guard does not structurally pin that fact; finding U4-R3. The pressure instance is currently genuinely shared and reads the real socket’s OkHttp queue. I found no current pressure miswire, though its source tests remain lexical.
+
+3. **REFUTE in part.** Send-backs correctly consult the shared pressure meter. Ack and burn intentionally bypass it. However, inbound deliveries create immediate ack work and tracked burn/reply jobs without an admission bound (`DecoyInboundSession.kt:191-200`). A relay flood can therefore impose CPU, memory, and uplink contention. The specification explicitly exempts these operations, so this is principally a weakness in R-U4-4 rather than a violation of its literal wording. I did not elevate it to a separate finding because the conceded relay can already deny service directly.
+
+4. **REFUTE.** Bound teardown prevents the synthetic session from surviving a normal vault lock, and stale reconnects observe `stopped`. Transport lifecycle is defective in the asymmetric socket state described in U4-R1; concurrent provisioning and reconnect also cause U4-R2.
+
+5. **CONFIRM.** `DecoyInboundSession` depends only on lambdas, `SyntheticSocket`, `CoverPressure`, the builder, randomness, and coroutine machinery. Neither U4 core file has a decryptor, Signal store, vault mutation API, durable writer, or ratchet operation. `buildReply` is synthetic byte construction, not cryptography or protocol-state advancement.
+
+6. **CONFIRM.** `buildReply` validates account direction, nonnegative counters, maximum and minimum ciphertext size, emits established-session shape, and exactly matches decoded ciphertext length. Omitting prekey fields makes the overall frame shorter in the same way as a real post-X3DH reply. Restarting the counter at zero is consistent with an apparent ratchet turn, although repeated process restarts remain part of the broader repeating-counter residual.
+
+7. **REFUTE.** I found the transport-state bug, start/reconnect race, and tripwire weakness above. `pending` deregisters completed jobs and teardown cancels them, so I found no ordinary-session leak or lock-order deadlock in U4 itself.
+
+# MISSING CONTEXT
+
+I could not verify relay-side guarantees that authenticated sockets receive only envelopes addressed to their account, or that account IDs are globally unique, without expanding into the relay implementation. Those properties would settle the remaining assumptions behind R-U4-1 and synthetic delivery validation.
+
+Tests were not executed because the review was explicitly read-only and Gradle would write build state.
+
+VERDICT: FINDINGS (1 P1, 1 P2, 1 P3)

@@ -12,6 +12,9 @@ import java.security.SecureRandom
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -48,11 +51,12 @@ class DecoyInboundSessionTest {
         override fun connect(accessToken: String) {
             if (!connectSucceeds) throw IllegalStateException("connect refused")
             connects += accessToken
+            journal += "connect"
         }
 
         override fun disconnect() {
             disconnects++
-            journal += "synthetic.disconnect"
+            journal += "disconnect"
         }
 
         override fun ack(messageId: String): Boolean = acks.add(messageId)
@@ -413,6 +417,158 @@ class DecoyInboundSessionTest {
         assertEquals("no redial after a terminal stop", 1, socket.connects.size)
     }
 
+    @Test
+    fun `a concurrent start and reconnect do not both dial the socket`() = runTest {
+        // U4 review round 1, Codex P2. The first version latched with an AtomicBoolean, which cannot
+        // hold across the suspending token read: a start parked in accessToken() held the latch, a
+        // concurrent reconnect cleared it unconditionally, its nested start claimed it and dialled,
+        // and the parked one then dialled again. One transport change, two handshakes.
+        val socket = FakeSocket()
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var firstRead = true
+        val session = DecoyInboundSession(
+            scope = this,
+            syntheticAccountId = { SYNTHETIC },
+            realAccountId = { REAL },
+            accessToken = {
+                // Park ONLY the first token read, inside start()'s critical section.
+                if (firstRead) { firstRead = false; gate.await() }
+                "token-1"
+            },
+            socket = socket,
+            pressure = CoverPressure(queuedBytes = { 0L }, nowMs = { testScheduler.currentTime }),
+        )
+
+        val starting = launch { session.start() }
+        runCurrent()
+        val reconnecting = launch { session.reconnect() }
+        runCurrent()
+        gate.complete(Unit)
+        starting.join()
+        reconnecting.join()
+
+        // COUNTS CANNOT DISCRIMINATE THIS, and asserting them was the first version's mistake —
+        // a mutation removing the mutex kept 2 dials and 1 disconnect and stayed green. What the
+        // mutex actually buys is ORDER: the parked start finishes its dial before the reconnect
+        // begins, so a disconnect always separates the two dials. Without it the reconnect's own
+        // start dials first and the parked one then dials again, back to back, on a socket nothing
+        // closed in between.
+        assertEquals(
+            "the socket must never be dialled twice without a disconnect between",
+            listOf("connect", "disconnect", "connect"),
+            socket.journal.filter { it == "connect" || it == "disconnect" },
+        )
+    }
+
+    @Test
+    fun `a stop concurrent with the dial itself must leave the socket closed`() {
+        // U4 review round 1, Grok F2/P1 — and this one CANNOT be written on the test scheduler.
+        // The window is between start()'s stopped-check and its dial, and neither suspends, so a
+        // single-threaded dispatcher can never interleave there: the first version of this test
+        // passed with the fix mutated out. Real threads, with the dial itself held open, are what
+        // make the two versions distinguishable.
+        //
+        // With the fix, stop() blocks on the monitor the dial is holding, so it disconnects AFTER
+        // the dial completes and the socket ends closed. Without it, stop() runs to completion
+        // first and the dial then reopens the socket behind teardown's back.
+        val inConnect = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val dialDone = java.util.concurrent.CountDownLatch(1)
+        val socket = object : DecoyInboundSession.SyntheticSocket {
+            override var onDeliver: ((MessageEnvelope) -> Unit)? = null
+
+            @Volatile
+            var open = false
+
+            override fun connect(accessToken: String) {
+                inConnect.countDown()
+                release.await()
+                open = true
+                dialDone.countDown()
+            }
+
+            @Volatile
+            var disconnects = 0
+
+            override fun disconnect() {
+                open = false
+                disconnects++
+            }
+
+            override fun ack(messageId: String) = true
+            override fun burn(messageId: String, peerId: String) = true
+            override fun send(envelope: MessageEnvelope) = true
+        }
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO)
+        try {
+            val session = DecoyInboundSession(
+                scope = scope,
+                syntheticAccountId = { SYNTHETIC },
+                realAccountId = { REAL },
+                accessToken = { "token-1" },
+                socket = socket,
+                pressure = CoverPressure(queuedBytes = { 0L }),
+            )
+            scope.launch { session.start() }
+            assertTrue("the dial was never reached", inConnect.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            // The vault locks while the dial is in flight.
+            val stopper = Thread { session.stop() }
+            stopper.start()
+            // WAIT FOR stop() TO EITHER LAND OR BLOCK before releasing the dial — releasing
+            // immediately was the first version's defect: the stopper had not necessarily run yet,
+            // so the dial completed, THEN stop() disconnected, and the assertion passed for the
+            // wrong reason with the fix mutated out.
+            //
+            // With the fix, stop() cannot reach its disconnect at all: it is blocked on the monitor
+            // the dial holds, so this poll times out and that is the expected path. Without the
+            // fix, stop() runs straight through and the disconnect is visible almost immediately —
+            // which is what lets the dial afterwards reopen the socket and fail the assertion.
+            val deadline = System.nanoTime() + 500_000_000L
+            while (socket.disconnects == 0 && System.nanoTime() < deadline) Thread.sleep(5)
+            release.countDown()
+            // BOTH must finish before the state is read. Joining only the stopper was the second
+            // version's defect: the dial sets `open` after it is released, so the assertion could
+            // run before that write and pass with the fix mutated out. The dialer is the one whose
+            // completion the assertion actually depends on.
+            assertTrue("the dial never completed", dialDone.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            stopper.join(5_000)
+
+            assertFalse(
+                "a synthetic socket still up after teardown discloses the vault lock by contrast — " +
+                    "it would be the one flow that did not stop",
+                socket.open,
+            )
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `outstanding cover work is bounded, and the ack still fires past the cap`() = runTest {
+        // Nothing upstream limits how fast the relay may deliver. Unbounded burn and reply jobs
+        // would let cover work compete with the real send path for memory and CPU, which is the one
+        // thing cover traffic must never do. Past the cap the work is simply not scheduled.
+        val socket = FakeSocket()
+        val session = session(socket, testScheduler, this, alwaysReply = false)
+        session.start()
+
+        repeat(DecoyInboundSession.MAX_OUTSTANDING_WORK + 20) { i ->
+            socket.onDeliver!!.invoke(envelope(id = "cover-" + i))
+        }
+
+        assertEquals(
+            "outstanding work must not grow past the cap",
+            DecoyInboundSession.MAX_OUTSTANDING_WORK,
+            session.outstandingWork(),
+        )
+        assertEquals(
+            "every delivery is still acked — shedding acks would leave the relay retrying and " +
+                "make load disclosable",
+            DecoyInboundSession.MAX_OUTSTANDING_WORK + 20,
+            socket.acks.size,
+        )
+    }
+
     // -- bindTo: teardown ordering --------------------------------------------------------------
 
     @Test
@@ -441,8 +597,8 @@ class DecoyInboundSessionTest {
             "the synthetic socket must go down BEFORE the pairing drains: a drain emits cover " +
                 "frames, and a synthetic side still acking them would put its control frames on " +
                 "the wire after the real socket's last real frame",
-            listOf("synthetic.disconnect", "delegate.stop", "invalidate"),
-            order,
+            listOf("disconnect", "delegate.stop", "invalidate"),
+            order.filter { it != "connect" },
         )
         assertEquals(1, socket.disconnects)
         assertNull("and is detached before the drain runs", socket.onDeliver)

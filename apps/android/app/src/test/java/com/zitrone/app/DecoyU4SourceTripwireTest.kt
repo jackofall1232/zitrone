@@ -151,7 +151,9 @@ class DecoyU4SourceTripwireTest {
             // …other than the class's own declaration, which is the thing being constructed.
             if (name == "WsSyntheticSocket.kt") continue
             Regex("WsSyntheticSocket\\(([^)]*)\\)").findAll(codeOf(source)).forEach {
-                constructions += "$name: ${it.groupValues[1].trim()}"
+                // The FIRST argument is the socket; later ones (the rate-limit hook) do not bear
+                // on which WsClient is wrapped.
+                constructions += "$name: ${it.groupValues[1].split(",").first().trim()}"
             }
         }
         assertEquals(
@@ -164,6 +166,59 @@ class DecoyU4SourceTripwireTest {
                 "disconnect of the real socket from U3's ownership guard.",
             "ZitroneApp.kt: syntheticWs",
             constructions.single(),
+        )
+        // …AND that name must come from the decoy client, not merely BE that name (U4 review round
+        // 1, Codex P3). The assertion above pins an identifier SPELLING: rebinding `syntheticWs` to
+        // the real `wsClient` anywhere in scope would keep it green while `WsSyntheticSocket` — and
+        // so its exemption from U3's disconnect-ownership guard — silently wrapped the real socket.
+        // Pinning the binding closes the gap between "is called syntheticWs" and "is the decoy
+        // socket". Still lexical, and the honest limit of that is stated in the class kdoc.
+        val app = codeOf(read("ZitroneApp.kt"))
+        assertTrue(
+            "`syntheticWs` must be bound by the decoy client's own let-block",
+            app.contains("decoyWsClient?.let { syntheticWs ->"),
+        )
+        assertEquals(
+            "`syntheticWs` is bound in exactly one place; a second binding could shadow it with " +
+                "the real socket and both assertions above would still pass",
+            1,
+            Regex("syntheticWs\\s*->").findAll(app).count(),
+        )
+    }
+
+    @Test
+    fun `the synthetic redial is not gated on the real socket's connection state`() {
+        // U4 review round 1, Codex P1. applyTransportLocked used to return null when the REAL
+        // socket was DISCONNECTED, and applyTransport bailed out on that null — so a session whose
+        // real socket happened to be down never redialled the SYNTHETIC one, leaving it connected
+        // on the endpoints the user had just switched away from. The two sockets now decide
+        // separately.
+        val app = codeOf(read("ZitroneApp.kt"))
+        assertTrue(
+            "applyTransportLocked must return the live session regardless of the real socket's " +
+                "state; the per-socket decision belongs to applyTransport",
+            !app.contains("it.wsClient.connectionState.value != WsClient.ConnectionState.DISCONNECTED\n        }"),
+        )
+        val redial = app.indexOf("live.decoyInbound?.let { session -> scope.launch { session.reconnect() } }")
+        val realGate = app.indexOf("if (live.wsClient.connectionState.value != WsClient.ConnectionState.DISCONNECTED) {")
+        assertTrue("the real socket's redial must be the gated one", realGate > 0)
+        assertTrue("the synthetic redial must exist", redial > 0)
+        assertTrue(
+            "the synthetic redial must sit OUTSIDE the real socket's state gate",
+            redial > app.indexOf("}", app.indexOf("live.apiClient.accessToken?.let(live.wsClient::connect)")),
+        )
+    }
+
+    @Test
+    fun `the synthetic socket's own rate_limited is routed into the shared meter`() {
+        // U4 review round 1, Grok F4. WsSyntheticSocketTest proves the ADAPTER routes it; this
+        // proves production actually hands it somewhere. Without the wiring the meter sees only the
+        // real socket's rate_limited, so the relay can be throttling the account that exists solely
+        // to carry cover traffic while this side keeps emitting into the refusal.
+        val app = codeOf(read("ZitroneApp.kt"))
+        assertTrue(
+            "the synthetic socket must report rate_limited to the SHARED CoverPressure",
+            app.contains("WsSyntheticSocket(syntheticWs, coverPressure::relayRateLimited)"),
         )
     }
 

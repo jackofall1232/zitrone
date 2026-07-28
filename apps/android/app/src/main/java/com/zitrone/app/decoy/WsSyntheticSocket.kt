@@ -25,7 +25,20 @@ import com.zitrone.app.net.WsClient
  * which R-U4-6 permits — it is not disclosure, because a client whose cover account has no live
  * socket looks exactly like one that never provisioned.
  */
-class WsSyntheticSocket(private val ws: WsClient) : DecoyInboundSession.SyntheticSocket {
+class WsSyntheticSocket(
+    private val ws: WsClient,
+    /**
+     * The relay refused a frame on the SYNTHETIC account for volume.
+     *
+     * Routed into the shared [com.zitrone.app.decoy.CoverPressure] (U4 review round 1, Grok F4).
+     * Without it the meter saw only the *real* socket's `rate_limited`, so the relay could be
+     * throttling the synthetic account specifically — the account that exists solely to carry cover
+     * traffic — while this side kept emitting into the refusal. `rate_limited` is the only statement
+     * the relay makes about the budget, and ignoring it on the socket it most directly concerns
+     * left the yield half-blind.
+     */
+    private val onRateLimited: () -> Unit = {},
+) : DecoyInboundSession.SyntheticSocket {
 
     override var onDeliver: ((MessageEnvelope) -> Unit)? = null
 
@@ -42,7 +55,9 @@ class WsSyntheticSocket(private val ws: WsClient) : DecoyInboundSession.Syntheti
             override fun onPreKeyLow(remaining: Int) = Unit
             override fun onSessionRevoked() = Unit
             override fun onAuthExpired() = Unit
-            override fun onServerError(code: String, message: String) = Unit
+            override fun onServerError(code: String, message: String) {
+                if (code == RATE_LIMITED) onRateLimited()
+            }
         }
     }
 
@@ -55,4 +70,9 @@ class WsSyntheticSocket(private val ws: WsClient) : DecoyInboundSession.Syntheti
     override fun burn(messageId: String, peerId: String): Boolean = ws.burnMessage(messageId, peerId)
 
     override fun send(envelope: MessageEnvelope): Boolean = ws.sendMessage(envelope)
+
+    private companion object {
+        /** Matches `MessagingCoordinator.ERROR_RATE_LIMITED`; the relay's own code. */
+        const val RATE_LIMITED = "rate_limited"
+    }
 }

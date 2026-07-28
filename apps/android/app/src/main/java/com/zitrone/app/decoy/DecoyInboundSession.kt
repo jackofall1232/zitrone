@@ -2,13 +2,14 @@ package com.zitrone.app.decoy
 
 import com.zitrone.app.data.MessageEnvelope
 import java.security.SecureRandom
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * U4 — the synthetic side of the cover exchange.
@@ -69,8 +70,17 @@ class DecoyInboundSession(
      */
     private val realAccountId: () -> String?,
     /**
-     * A usable access token for the synthetic account, or null. Suspends because it may have to
-     * refresh; a null return simply means no synthetic socket this time.
+     * A usable access token for the synthetic account, or null — a null simply means no synthetic
+     * socket this time.
+     *
+     * `suspend` because reading it may have to touch the vault, **not because production refreshes
+     * it.** It does not: `ZitroneApp` supplies `DecoyAuthStore(rt).accessToken`, a plain read, and
+     * [WsSyntheticSocket] drops `onAuthExpired`. An expired synthetic JWT therefore takes the
+     * synthetic side quiet until the session is rebuilt. That is a declared residual under R-U4-6 —
+     * cover that goes quiet is degradation, and a client whose cover account has no live socket
+     * looks exactly like one that never provisioned — but the earlier wording here said "may have
+     * to refresh", which described a capability that has never existed (U4 review round 1, Grok
+     * F5). The signature is a seam for tests, and stating that plainly is the accurate version.
      */
     private val accessToken: suspend () -> String?,
     /** The synthetic account's own socket. A seam so tests need no OkHttp and no relay. */
@@ -98,8 +108,20 @@ class DecoyInboundSession(
     @Volatile
     private var stopped = false
 
-    /** Claimed by the [start] that reaches [SyntheticSocket.connect]; see that method's kdoc. */
-    private val starting = AtomicBoolean(false)
+    /**
+     * Serialises [start] against [reconnect] and against another [start].
+     *
+     * **A MUTEX AND NOT A FLAG, AND THAT IS A FIX (U4 review round 1, Codex P2).** The first version
+     * used an [AtomicBoolean] latch, which cannot hold across the suspending token read: a [start]
+     * parked in `accessToken()` held the latch, a concurrent [reconnect] cleared it unconditionally,
+     * its own nested [start] claimed it and dialled, and then the first one resumed and dialled
+     * again. One transport change, two handshakes. A mutex makes the second caller *wait* for the
+     * first to finish rather than race it, and [connected] then makes the wait a no-op.
+     */
+    private val connecting = Mutex()
+
+    /** True while a socket is believed open. Guarded by [connecting]. */
+    private var connected = false
 
     /** Pending burns and send-backs, so [stop] can cancel work that must not outlive the session. */
     private val pending = mutableSetOf<Job>()
@@ -126,31 +148,36 @@ class DecoyInboundSession(
      * is lazy (§6.2a: a vault that never sends never spends a registration), so at session start
      * there may be no synthetic account yet and this returns having done nothing; the provisioning
      * path calls it again when an account appears. A returning vault that already has one connects
-     * on the first call and the second is a no-op. The latch is claimed **before** the suspending
-     * token read so two concurrent callers cannot both reach [SyntheticSocket.connect]; it is
-     * released again if the attempt does not get as far as connecting, so a later call can retry.
+     * on the first call and the second is a no-op. An attempt that does not get as far as
+     * connecting — no token, a refused dial — leaves [connected] false, so a later call retries.
      */
     suspend fun start() {
         if (stopped || syntheticAccountId() == null) return
-        if (!starting.compareAndSet(false, true)) return
-        var connected = false
-        try {
+        connecting.withLock {
+            if (stopped || connected) return
             val token = runCatching { accessToken() }.getOrNull() ?: return
-            if (stopped) return
-            socket.onDeliver = ::onCoverDelivered
-            runCatching { socket.connect(token) }.onSuccess { connected = true }
-        } finally {
-            if (!connected) starting.set(false)
+            // ATOMIC AGAINST [stop], and it has to be (U4 review round 1, Grok F1/P1). Re-reading
+            // the flag here and then dialling is NOT enough on its own: [stop] is not a suspending
+            // function and cannot take [connecting], so it can run in full — flag set, callback
+            // detached, socket disconnected — in the window between that read and the dial, and the
+            // socket comes back up AFTER teardown. A synthetic flow still up across a vault lock
+            // while the real flow is down is the "disclose the lock by contrast" case R-U4-6 names,
+            // and it is the one failure mode this class exists to avoid. So the check and the dial
+            // happen under the same monitor [stop] uses for its disconnect.
+            synchronized(lock) {
+                if (stopped) return
+                socket.onDeliver = ::onCoverDelivered
+                runCatching { socket.connect(token) }.onSuccess { connected = true }
+            }
         }
     }
 
     /**
      * Re-dial after a transport swap: drop the socket on the old endpoints and open one on the new.
      *
-     * This exists because [start]'s latch is held for as long as the socket is up, so calling it
-     * again would be a no-op — the latch is what makes double-start safe, and clearing it is what
-     * makes a redial possible. The two operations are here, in one place, rather than left to a
-     * caller to sequence.
+     * This exists because [start] is a no-op while a socket is believed open — that is what makes
+     * double-start safe — so a redial has to drop the old socket first. The two operations are here,
+     * in one place, rather than left to a caller to sequence.
      *
      * Non-terminal by construction: it does not set [stopped] and does not cancel pending burns,
      * because the session survives a transport toggle. A burn whose frame is drawn mid-swap simply
@@ -158,8 +185,10 @@ class DecoyInboundSession(
      */
     suspend fun reconnect() {
         if (stopped) return
-        runCatching { socket.disconnect() }
-        starting.set(false)
+        connecting.withLock {
+            runCatching { socket.disconnect() }
+            connected = false
+        }
         start()
     }
 
@@ -177,8 +206,13 @@ class DecoyInboundSession(
         // which is exactly how a mutation of this line survived once. Cancelled jobs deregister
         // themselves through their completion handler.
         synchronized(lock) { pending.toList() }.forEach { it.cancel() }
-        socket.onDeliver = null
-        runCatching { socket.disconnect() }
+        // Under the same monitor [start] dials beneath, so a concurrent start cannot reopen the
+        // socket after this returns. Cancellation stays OUTSIDE it: a job's completion handler
+        // takes this monitor to deregister itself.
+        synchronized(lock) {
+            socket.onDeliver = null
+            runCatching { socket.disconnect() }
+        }
     }
 
     /**
@@ -236,6 +270,18 @@ class DecoyInboundSession(
      * in the set and cancels it, or this method sees the flag and cancels it here.
      */
     private fun launchTracked(block: suspend () -> Unit) {
+        // BOUNDED, and the bound is the point (U4 review round 1, Codex's third confirm-or-refute).
+        // Acks are immediate and untracked, but every delivery also schedules a burn and sometimes a
+        // reply, each parked on a drawn delay. Nothing upstream limits how fast the relay may
+        // deliver, so an unbounded inbound stream would let cover work accumulate without limit and
+        // compete with the real send path for memory and CPU — the one thing cover traffic must
+        // never do. Past the cap the work is simply not scheduled: an unburned cover envelope waits
+        // out its own TTL on the relay, which is degradation, not disclosure.
+        //
+        // The relay is conceded in the threat model and can deny service directly, so this is not a
+        // defence against it. It is a bound on what OUR code will spend when handed more input than
+        // it expects, which is a different property and worth having on its own.
+        if (synchronized(lock) { pending.size } >= MAX_OUTSTANDING_WORK) return
         val job = scope.launch {
             try {
                 block()
@@ -323,5 +369,12 @@ class DecoyInboundSession(
 
         /** One delivery in this many draws a send-back. */
         internal const val REPLY_DENOMINATOR = 4
+
+        /**
+         * The ceiling on burns and send-backs in flight at once. Generous against real traffic —
+         * cover is paired to real sends, so reaching it means an inbound rate no ordinary session
+         * produces — and small enough that a flood cannot grow this without limit.
+         */
+        internal const val MAX_OUTSTANDING_WORK = 64
     }
 }

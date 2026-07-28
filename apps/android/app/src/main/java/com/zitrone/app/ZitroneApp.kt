@@ -1526,12 +1526,23 @@ class AppContainer(private val app: Application) {
      */
     private fun applyTransport(state: TransportState) {
         val live = synchronized(transportLock) { applyTransportLocked(state) } ?: return
-        // OUTSIDE transportLock, and it does not wait: this queues the drain-and-swap on the
-        // coordinator's confined worker and returns. The endpoints it will dial were installed
-        // above, under the lock, so a swap that runs later still reaches the current transport.
-        live.coordinator.reconnectTransport {
-            live.wsClient.disconnect()
-            live.apiClient.accessToken?.let(live.wsClient::connect)
+        // WHICH SOCKETS NEED A REDIAL IS DECIDED PER SOCKET, and that is a fix (U4 review round 1,
+        // Codex P1). This used to be one decision, taken inside applyTransportLocked, on the REAL
+        // socket's connection state alone: a session whose real socket happened to be DISCONNECTED
+        // returned null and applyTransport bailed out entirely. A down real socket redials itself
+        // through WsClient's backoff, so that was right for the real socket — but the SYNTHETIC
+        // socket may be up at that moment, and it was then left connected on the endpoints the user
+        // had just switched away from. Cover traffic kept flowing over a transport the user
+        // believes is off, which is the disclosure the U4 wiring exists to prevent and which the
+        // comment below already claimed it did.
+        if (live.wsClient.connectionState.value != WsClient.ConnectionState.DISCONNECTED) {
+            // OUTSIDE transportLock, and it does not wait: this queues the drain-and-swap on the
+            // coordinator's confined worker and returns. The endpoints it will dial were installed
+            // above, under the lock, so a swap that runs later still reaches the current transport.
+            live.coordinator.reconnectTransport {
+                live.wsClient.disconnect()
+                live.apiClient.accessToken?.let(live.wsClient::connect)
+            }
         }
         // U4: the synthetic socket moves with the real one. Left on the old endpoints it would keep
         // cover traffic flowing over the transport the user just switched away from — worse than no
@@ -1565,9 +1576,7 @@ class AppContainer(private val app: Application) {
         // the lock, with the redial itself left to applyTransport — same split as the real socket.
         live?.decoyWsClient?.updateTransport(httpClient, ws)
         if (state == TransportState.TOR) TorIntegration.requestOrbotStart(app)
-        return live?.takeIf {
-            it.wsClient.connectionState.value != WsClient.ConnectionState.DISCONNECTED
-        }
+        return live
     }
 
     companion object {
@@ -1792,7 +1801,7 @@ class SessionContainer(
                     syntheticAccountId = { DecoyAuthStore(rt).accountId },
                     realAccountId = { apiClient.accountId },
                     accessToken = { DecoyAuthStore(rt).accessToken },
-                    socket = WsSyntheticSocket(syntheticWs),
+                    socket = WsSyntheticSocket(syntheticWs, coverPressure::relayRateLimited),
                     pressure = coverPressure,
                 )
             }
