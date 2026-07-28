@@ -54,6 +54,7 @@ import com.zitrone.app.data.VaultRosterStore
 import com.zitrone.app.data.DecoyAuthStore
 import com.zitrone.app.data.VaultSettingsStore
 import com.zitrone.app.decoy.ApiClientDecoyRelay
+import com.zitrone.app.decoy.CoverPressure
 import com.zitrone.app.decoy.CoverTraffic
 import com.zitrone.app.decoy.DecoyAccountProvisioner
 import com.zitrone.app.decoy.DecoyEnvelopeBuilder
@@ -1755,6 +1756,10 @@ class SessionContainer(
                     },
                     recipient = { DecoyAuthStore(rt).accountId },
                     send = wsClient::sendMessage,
+                    // The R-U3-1 yield (0.10.0 U3 fix round 6). The queue reading MUST be the live
+                    // socket's own: a supplier that always answers 0 leaves cover free to fill the
+                    // outbound buffer a real frame needs, which is the defect this closes.
+                    pressure = CoverPressure(queuedBytes = wsClient::outboundQueueBytes),
                     provision = {
                         DecoyAccountProvisioner.forRuntime(
                             runtime = rt,

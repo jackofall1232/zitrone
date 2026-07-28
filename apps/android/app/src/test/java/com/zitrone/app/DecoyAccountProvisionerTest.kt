@@ -17,6 +17,7 @@ import com.zitrone.app.crypto.vault.VaultState
 import com.zitrone.app.crypto.vault.VaultStateCodec
 import com.zitrone.app.crypto.vault.openPayload
 import com.zitrone.app.data.DecoyAuthStore
+import com.zitrone.app.decoy.CoverPressure
 import com.zitrone.app.decoy.DecoyAccountProvisioner
 import com.zitrone.app.decoy.DecoyEnvelopeBuilder
 import com.zitrone.app.decoy.DecoyIdentity
@@ -900,6 +901,9 @@ class DecoyAccountProvisionerTest {
             },
             recipient = { DecoyAuthStore(reopened.runtime).accountId },
             send = { emitted.incrementAndGet(); true },
+            // The real R-U3-1 yield policy with nothing to trip it — an empty outbound queue and a
+            // handful of frames. This test is about the provisioning latch, not about load-shedding.
+            pressure = CoverPressure(queuedBytes = { 0L }),
             provision = { attempts.put(wired.provisionIfNeeded()) },
             sleep = {},
         )

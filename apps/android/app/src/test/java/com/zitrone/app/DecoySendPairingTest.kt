@@ -6,6 +6,7 @@
 package com.zitrone.app
 
 import com.zitrone.app.data.MessageEnvelope
+import com.zitrone.app.decoy.CoverPressure
 import com.zitrone.app.decoy.CoverTraffic
 import com.zitrone.app.decoy.DecoyEnvelopeBuilder
 import com.zitrone.app.decoy.DecoySendPairing
@@ -152,6 +153,34 @@ class DecoySendPairingTest {
 
     private fun decoysIn(frames: List<Any>) = frames.filterIsInstance<MessageEnvelope>()
 
+    /**
+     * A monotonic clock the SUBORDINATION tests drive by hand, so they can move through an
+     * off-window without sleeping. Only [driven] reads it.
+     */
+    private var nowMs = 1_000_000L
+
+    /** What the fake transport claims is sitting unwritten in its outbound queue. See [driven]. */
+    private var queuedBytes = 0L
+
+    /** The R-U3-1 yield, wired to [nowMs] and [queuedBytes] — for the tests that are ABOUT it. */
+    private fun driven() = CoverPressure(queuedBytes = { queuedBytes }, nowMs = { nowMs })
+
+    private var idleClock = 0L
+
+    /**
+     * A yield policy that cannot trip, for every test that is about something else — ordering,
+     * teardown, drains, provisioning.
+     *
+     * Deliberately not a fake `CoverTraffic`: it is the real [CoverPressure], with an empty queue and
+     * a clock that jumps a whole rate window per reading, so the sliding meter can never fill. The
+     * behaviour it suppresses is driven for real by `CoverPressureTest` and by the subordination
+     * tests below; what this buys is that an ordering test cannot go green because cover was shed.
+     */
+    private fun neverTrips() = CoverPressure(
+        queuedBytes = { 0L },
+        nowMs = { idleClock += CoverPressure.RATE_WINDOW_MS * 2; idleClock },
+    )
+
     private fun CoroutineScope.pairing(
         frames: MutableList<Any>,
         random: SecureRandom = seeded(1),
@@ -160,11 +189,13 @@ class DecoySendPairingTest {
         send: (MessageEnvelope) -> Boolean = { frames.add(it); true },
         provision: suspend () -> Unit = {},
         sleep: suspend (Long) -> Unit = {},
+        pressure: CoverPressure = neverTrips(),
     ) = DecoySendPairing(
         scope = this,
         sender = sender,
         recipient = recipient,
         send = send,
+        pressure = pressure,
         provision = provision,
         random = random,
         sleep = sleep,
@@ -318,6 +349,7 @@ class DecoySendPairingTest {
                 sender = ::sender,
                 recipient = { syntheticAccountId },
                 send = { frames.add(it); true },
+                pressure = neverTrips(),
                 provision = {},
                 sleep = { gaps.add(it) },
             )
@@ -548,6 +580,10 @@ class DecoySendPairingTest {
                 "handed; a real send among them is the round-2 defect returning under a new type.",
             listOf(
                 "cover(com.zitrone.app.data.MessageEnvelope)",
+                // The R-U3-1 yield's reactive half (fix round 6): the relay's `rate_limited` reaching
+                // the seam. It takes NO parameter on purpose — the relay sends no message id with it,
+                // and a seam that accepted one would be claiming an attribution it cannot make.
+                "onRelayRateLimited()",
                 "quiesce(kotlin.jvm.functions.Function0)",
                 "stop(kotlin.jvm.functions.Function0)",
             ),
@@ -617,8 +653,10 @@ class DecoySendPairingTest {
         // or retry. Real-first makes that impossible within a pair — modelled here as a socket that
         // accepts exactly one more frame.
         //
-        // NOT covered here, deliberately: CROSS-send preemption (pair N's cover frame taking the
-        // permit pair N+1's real frame needed) survives every ordering and is a relay-side item.
+        // CROSS-send preemption (pair N's cover frame taking the permit pair N+1's real frame needed)
+        // survives every ordering and is NOT closed by this test. It used to be recorded here as a
+        // relay-side item no client-side defence could address; that is no longer true, and the two
+        // tests below are the fix.
         var permits = 1
         val accepted = mutableListOf<Any>()
         fun spend(frame: Any): Boolean =
@@ -635,13 +673,193 @@ class DecoySendPairingTest {
         )
     }
 
+    // ── R-U3-1 SUBORDINATION: where a resource is contended, cover YIELDS ────────────────────
+
+    @Test
+    fun `cover stops spending the shared send budget before a real frame can lose a permit`() =
+        runTest {
+            // ROUND-7 MECHANISM: cover doubles consumption of the relay's per-account budget, so an
+            // account nominally good for 100 message.send per minute ran out at 50 real sends and
+            // the 51st REAL frame was rejected. That is a failed real send caused by cover traffic —
+            // an R-U3-1 defect under the rewritten requirement, not a residual.
+            //
+            // Modelled with the relay's real numbers: a socket holding exactly `sendLimit` permits
+            // for one bucket, and a user sending hard inside it. Cover must take itself out before
+            // it can cost a real frame a permit.
+            //
+            // WHY THIS IS SOUND, given the earlier ruling that it could not be. That ruling was that
+            // `sendLimit` is a server constant the relay never communicates, so a client assuming
+            // 100/min against a relay configured lower inverts the priority it claims to guarantee.
+            // True — of a HEADROOM policy, which has to predict the limit. Nothing here predicts
+            // anything: the seam yields on its OWN recent frame rate, so the 100 below is the
+            // fixture's number, not the implementation's. The implementation never sees it.
+            var permits = 100
+            val real = mutableListOf<Any>()
+            val cover = mutableListOf<Any>()
+            fun spend(frame: Any): Boolean =
+                if (permits > 0) { permits--; true } else false
+
+            val pairing = pairing(
+                mutableListOf(),
+                send = { if (spend(it)) { cover.add(it); true } else false },
+                pressure = driven(),
+            )
+            var refusedReal = 0
+            repeat(80) {
+                if (spend(Real)) real.add(Real) else refusedReal++
+                pairing.cover(textEnvelope(counter = it))
+            }
+
+            assertEquals(
+                "a REAL frame was refused a permit a cover frame had taken — cover competed",
+                0,
+                refusedReal,
+            )
+            assertEquals("the real sends did not all go out", 80, real.size)
+            assertTrue(
+                "cover kept charging the shared budget after the account was clearly sending hard " +
+                    "(${cover.size} cover frames)",
+                cover.size <= CoverPressure.RATE_FRAMES / 2,
+            )
+            assertTrue("cover never fired at all — the test proves nothing", cover.isNotEmpty())
+        }
+
+    @Test
+    fun `a backed-up outbound queue takes cover off rather than filling it`() = runTest {
+        // ROUND-7 MECHANISM: `WsClient.sendMessage` hands the frame to OkHttp's asynchronous writer,
+        // which buffers it, refuses once the buffer would pass 16 MiB, and CLOSES the connection when
+        // it refuses. With a stalled writer a decoy takes the capacity the next real frame needed and
+        // that real send returns false. Cover yields on the queue reading instead.
+        val frames = mutableListOf<Any>()
+        val pairing = pairing(frames, pressure = driven())
+
+        queuedBytes = CoverPressure.QUEUE_WATERMARK_BYTES + 1
+        pairing.record(textEnvelope(), frames)
+        assertEquals(
+            "cover added a frame to an outbound queue that is already backing up",
+            emptyList<MessageEnvelope>(),
+            decoysIn(frames),
+        )
+        assertEquals("the real frame did not go out", listOf<Any>(Real), frames.toList())
+    }
+
+    @Test
+    fun `cover stays off for the WHOLE window after a pressure event, not for one send`() = runTest {
+        // R-U3-3: a condition that prevents cover must produce a consistent state for as long as it
+        // lasts rather than a stutter. One over-watermark reading takes cover off even though the
+        // queue drains immediately afterwards.
+        val frames = mutableListOf<Any>()
+        val pairing = pairing(frames, pressure = driven())
+
+        queuedBytes = CoverPressure.QUEUE_WATERMARK_BYTES + 1
+        pairing.record(textEnvelope(), frames)
+        queuedBytes = 0
+
+        repeat(20) {
+            nowMs += CoverPressure.OFF_WINDOW_MS / 40
+            pairing.record(textEnvelope(counter = it), frames)
+        }
+        assertEquals(
+            "cover stuttered back on inside the off-window",
+            emptyList<MessageEnvelope>(),
+            decoysIn(frames),
+        )
+
+        // …and it does come back, so the shedding is a window and not a latch.
+        nowMs += CoverPressure.OFF_WINDOW_MS
+        pairing.record(textEnvelope(), frames)
+        assertEquals("cover never resumed once the pressure was gone", 1, decoysIn(frames).size)
+    }
+
+    @Test
+    fun `a relay rate_limited takes cover off, with no message id and no knowledge of the limit`() =
+        runTest {
+            val frames = mutableListOf<Any>()
+            val pairing = pairing(frames, pressure = driven())
+
+            pairing.record(textEnvelope(), frames)
+            assertEquals("cover was off before any pressure at all", 1, decoysIn(frames).size)
+
+            pairing.onRelayRateLimited()
+            repeat(5) { pairing.record(textEnvelope(counter = it), frames) }
+            assertEquals(
+                "cover kept spending a budget the relay has just said is exhausted",
+                1,
+                decoysIn(frames).size,
+            )
+        }
+
+    @Test
+    fun `a yielded send does no cover work at all - no vault read, no build, no provisioning`() =
+        runTest {
+            // A yield that still did the work would still be competing: for the confinement worker
+            // the next real send needs, and for the vault read the identity lookup performs. So the
+            // check sits at the very top of `cover`, ahead of everything including the provisioning
+            // trigger.
+            var recipientReads = 0
+            var senderReads = 0
+            var provisions = 0
+            val frames = mutableListOf<Any>()
+            val pairing = pairing(
+                frames,
+                recipient = { recipientReads++; null },
+                sender = { senderReads++; sender() },
+                provision = { provisions++ },
+                pressure = driven(),
+            )
+
+            queuedBytes = CoverPressure.QUEUE_WATERMARK_BYTES + 1
+            repeat(5) { pairing.record(textEnvelope(counter = it), frames) }
+            advanceUntilIdle()
+
+            assertEquals("a yielded send still read the vault for a recipient", 0, recipientReads)
+            assertEquals("a yielded send still read the local identity", 0, senderReads)
+            assertEquals("a yielded send still launched provisioning", 0, provisions)
+        }
+
+    @Test
+    fun `the drain does NOT consult pressure - a lock must never be the reason a frame is missing`() =
+        runTest {
+            // THE DISCLOSURE/DEGRADATION LINE, as code. Shedding cover under load is DEGRADATION and
+            // is permitted: a burst of frames is already visible to anyone watching the connection,
+            // so the observer learns nothing new. A cover frame missing because the vault LOCKED is
+            // DISCLOSURE — it names a client lifecycle event the observer could not otherwise see —
+            // and that is the class rounds 3-5 closed. Letting pressure reach the drain reopens it.
+            //
+            // So: a pairing admitted while the socket was healthy must be drained by teardown even if
+            // the transport is drowning by the time the lock arrives.
+            val frames = mutableListOf<Any>()
+            val socket = DyingSocket(frames)
+            val pairing = pairing(frames, send = socket::send, sleep = { delay(it) }, pressure = driven())
+
+            val send = launch { socket.send(Real); pairing.cover(textEnvelope()) }
+            runCurrent()
+            assertEquals("the pairing was never admitted", 1, frames.size)
+
+            // The queue backs up while the pairing sleeps its gap, and then the vault locks.
+            queuedBytes = CoverPressure.QUEUE_WATERMARK_BYTES * 1_000
+            pairing.stop { socket.disconnect() }
+            send.cancelAndJoin()
+
+            assertEquals(
+                "the drain dropped an admitted cover frame under pressure, marking the real frame " +
+                    "with a gap that names the vault lock",
+                1,
+                decoysIn(frames).size,
+            )
+        }
+
     @Test
     fun `an in-flight pairing neither delays nor reorders a concurrent real send`() = runTest {
         // U3-H. The class used to hold a mutex across the pair and claim "a concurrent send waits at
         // most GAP_MAX_MS" — false under multiple waiters, where the bound was per-hop, not total.
         // Real-first needs no lock, so the honest bound is ZERO: no virtual time passes between the
-        // two real frames even though the first pairing is mid-gap. Restoring any lock around the
-        // pair fails this, which is the mutation it exists to catch — and it now also covers the
+        // two real frames even though the first pairing is mid-gap. **Mid-GAP is the scope of that
+        // claim** (round 6): `sleep` suspends and a suspended coroutine holds no worker, so a pairing
+        // inside its gap delays nothing. A pairing inside its BUILD does occupy the confined worker
+        // for the build's duration — deliberately, because that is what makes admission atomic
+        // against teardown — and the class kdoc's "not small, it is none" was corrected to say so.
+        // Restoring any lock around the pair fails this, which is the mutation it exists to catch — and it now also covers the
         // teardown lock the class DOES hold: taking it anywhere before a publish, or holding it
         // across the gap, would put a real send behind another pair again.
         val worker = StandardTestDispatcher(testScheduler)
@@ -894,6 +1112,7 @@ class DecoySendPairingTest {
                     sender = ::sender,
                     recipient = { syntheticAccountId },
                     send = socket::send,
+                    pressure = neverTrips(),
                     provision = {},
                     // A real gap, so teardown genuinely lands mid-pair rather than after it.
                     sleep = { delay(it) },
@@ -952,6 +1171,7 @@ class DecoySendPairingTest {
                     syntheticAccountId
                 },
                 send = socket::send,
+                pressure = neverTrips(),
                 provision = {},
                 sleep = { delay(it) },
                 random = seeded(9),
@@ -1006,6 +1226,7 @@ class DecoySendPairingTest {
                 sender = ::sender,
                 recipient = { null },
                 send = { frames.add(it); true },
+                pressure = neverTrips(),
                 provision = { delay(60_000); provisionCompleted = true },
                 random = seeded(1),
                 provisionContext = gate,
@@ -1201,6 +1422,66 @@ class DecoySendPairingTest {
                 Regex("if\\(ws\\.sendMessage\\(envelope\\)\\) \\{ return true").findAll(body).count(),
             )
         }
+    }
+
+    @Test
+    fun `the R-U3-1 yield is wired to the REAL socket and the REAL relay error`() {
+        // The behaviour of the yield is driven directly by CoverPressureTest and through the seam by
+        // the subordination tests above. What neither can reach is the WIRING, and the wiring is
+        // where this defence dies quietly: a `CoverPressure` whose queue reading is a lambda
+        // returning 0, or a `rate_limited` that never reaches the seam, leaves every one of those
+        // tests green with the mechanism disabled in production. That is the round-5 failure mode
+        // — a defence pinned only by the code that could not observe it — and it is the reason
+        // `pressure` has no default value in the constructor.
+        val app = normalised(appSource("ZitroneApp.kt"))
+        assertTrue(
+            "cover pressure is not wired to the live socket's own outbound queue — a reading that " +
+                "is always 0 lets cover fill the buffer the next real frame needs",
+            "pressure = CoverPressure(queuedBytes = wsClient::outboundQueueBytes)" in app,
+        )
+        assertEquals(
+            "more than one place builds the pressure policy, so one of them can be wired wrong",
+            1,
+            allMainSources()
+                // …other than the class's own declaration.
+                .filter { (name, _) -> name != "CoverPressure.kt" }
+                .sumOf { (_, source) -> Regex("CoverPressure\\(").findAll(normalised(source)).count() },
+        )
+
+        // …and the queue reading is OkHttp's own, not a field the app maintains and could forget to
+        // update.
+        assertTrue(
+            "WsClient no longer reports OkHttp's actual outbound buffer",
+            "webSocket?.queueSize() ?: 0L" in normalised(appSource("net/WsClient.kt")),
+        )
+
+        // The relay's only statement about the shared send budget must reach the seam. `rate_limited`
+        // is a wire constant of the server (server/internal/ws/hub.go), so it is pinned literally.
+        val code = normalised(coordinatorSource())
+        assertTrue(
+            "the relay's rate_limited no longer reaches cover traffic, so the one reactive signal " +
+                "about the per-account send budget is dropped on the floor again",
+            "if(code == ERROR_RATE_LIMITED) coverTraffic.onRelayRateLimited()" in
+                bodyOf(code, "override fun onServerError("),
+        )
+        assertTrue(
+            "the rate_limited wire code drifted from the server's",
+            "const val ERROR_RATE_LIMITED = \"rate_limited\"" in code,
+        )
+
+        // The yield must be the FIRST thing the seam does, and the drain must never see it.
+        val pairing = normalised(appSource("decoy/DecoySendPairing.kt"))
+        val coverBody = bodyOf(pairing, "override suspend fun cover(")
+        assertTrue(
+            "the seam does cover-side work before deciding whether to yield",
+            coverBody.indexOf("if(pressure.yielding()) return") in 0..coverBody.indexOf("buildCover("),
+        )
+        assertFalse(
+            "the drain consults pressure — a vault lock or a transport swap can now be the reason " +
+                "a cover frame is missing, which is DISCLOSURE and not the load-shedding R-U3-1 asks " +
+                "for",
+            "pressure" in bodyOf(pairing, "private fun drainLocked()"),
+        )
     }
 
     @Test
@@ -1405,6 +1686,7 @@ class DecoySendPairingTest {
                     syntheticAccountId
                 },
                 send = socket::send,
+                pressure = neverTrips(),
                 provision = {},
                 sleep = { delay(it) },
                 random = seeded(11),
@@ -1566,6 +1848,7 @@ class DecoySendPairingTest {
                     syntheticAccountId
                 },
                 send = socket::send,
+                pressure = neverTrips(),
                 provision = {},
                 sleep = { delay(it) },
                 random = seeded(12),

@@ -46,18 +46,28 @@ exactly this shape of claim once already.
 Grouped deliberately: each needs the same access and CX33 has none, so batch them rather than paying
 the access cost four times.
 
-- [ ] **(a) `onServerError` is EMPTY — a LIVE DEFECT IN SHIPPED CODE, not a decoy concern.**
-      `MessagingCoordinator.kt:2120-2123` is an empty method. **Every server rejection is silently
-      swallowed today.** A rate-limited or otherwise-rejected send leaves the message displayed as
+- [ ] **(a) `onServerError` SURFACES NOTHING TO THE USER — a LIVE DEFECT IN SHIPPED CODE, not a decoy
+      concern.** *(Wording corrected 2026-07-28: the method is no longer literally empty — U3 fix
+      round 6 routes `rate_limited` to the cover-traffic yield — but **not one thing here is fixed by
+      that**. It is a cover-traffic signal, not error handling, and the user-facing half below is
+      untouched and still needs the relay.)*
+      **Every server rejection is still silently swallowed.** A rate-limited or otherwise-rejected send leaves the message displayed as
       `SENDING` forever: not marked failed, not retried, no error surfaced. **Users currently have no
       way to know a send failed.** This predates decoy traffic and is worth fixing on its own merits.
       **Fix:** carry the message id on `rate_limited` (and other per-message rejections) so the client
       can attribute and retry. Relay + client.
 - [ ] **(b) Cover traffic halves the account's send budget** — decoy-scoped, unlike (a). `sendLimit`
       is charged to the authenticated account, so a covered send costs two permits. **Exempt or raise
-      the budget for cover frames.** Client-side defence was shown UNSOUND: `sendLimit` is a server
-      constant the relay never communicates, so a client assuming 100/min against a relay configured
-      lower inverts the priority it claims to guarantee. **Trails U3's review; does not block it.**
+      the budget for cover frames.**
+      **⚠️ NO LONGER THE ONLY FIX, and the "UNSOUND" ruling is WITHDRAWN (U3 fix round 6,
+      2026-07-28).** The client side is now defended: `CoverPressure` sheds cover on the relay's own
+      `rate_limited` (routed through `MessagingCoordinator.onServerError`, which used to be empty) and
+      on the session's own recent frame rate, so cover contributes at most ~20 frames to any minute
+      and at least 60 of the nominal 100 stay free for real sends. The old ruling — *a client assuming
+      100/min against a relay configured lower inverts the priority it claims to guarantee* — is
+      correct **of a headroom policy**, which must predict the limit; it does not touch a **reactive**
+      one, which needs no number at all. This item is now an improvement (cover frames should not cost
+      the user's budget at all), not a defect gate. **Does not block U3.**
 - [ ] **(c) Onion mirror staging** — the next artefact the onion serves is 0.10.0 (0.9.4 never will;
       see RELEASE STRATEGY). Forward check at publish time, not a stale-APK defect any more.
 - [ ] **(d) CX23 P2 — non-IP registration keying. NOW UNBLOCKED.** The precondition is answered:
@@ -1139,9 +1149,15 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       Real shape: cover halves the account's effective send capacity, and a rate-limited real send is
       **silently unrecoverable** — `hub.go` sends `rate_limited` with no message id and
       `MessagingCoordinator.onServerError` (`MessagingCoordinator.kt:2120`) is a no-op, so the bubble
-      sits in `SENDING` forever with nothing to retry. **Only a relay-side answer closes it:** exempt
-      or raise the per-account `message.send` budget, or carry the message id on `rate_limited` so
-      the client can mark and retry — the second is worth doing independently of decoy traffic.
+      sits in `SENDING` forever with nothing to retry. ~~**Only a relay-side answer closes it:**~~
+      **⚠️ HALF WRONG, corrected 2026-07-28 (U3 fix round 6).** *"Only a relay-side answer"* conflated
+      two separable problems. **Cover competing for the budget is now closed client-side** —
+      `CoverPressure` yields on `rate_limited` and on the session's own frame rate, which needs no
+      message id and no knowledge of the limit, so the "unsound" ruling applied only to a *headroom*
+      policy. **The silently-unrecoverable real send is NOT closed** and still needs the relay to
+      carry the message id; that half stays exactly as stated, under CX23 item (a). Exempting or
+      raising the per-account `message.send` budget for cover frames remains worth doing, as an
+      improvement rather than the fix.
 
 - [ ] **U3 FIX ROUND 2 of 6 APPLIED (2026-07-27) — the ruling implemented as a SIMPLIFICATION.**
       Record: `reviews/decoy-0.10.0/u3-fix-r2-real-first.md`. `paired` is now `publish()` — first

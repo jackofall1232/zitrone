@@ -1,9 +1,10 @@
 # Zitrone run ledger (CX33 / ubuntu-4gb-hel1-3)
 
-## 0.10.0-beta U3 (send pairing) — 7 review rounds, 5 fix rounds, and the requirement was the defect
+## 0.10.0-beta U3 (send pairing) — 7 review rounds, 6 fix rounds, and the requirement was the defect
 
-**Status 2026-07-28: code on `feat/0.10.0-decoy-u3-pairing` @ `7ae06e8f`, 723 tests / 0 failures /
-exit 0, UNMERGED. One fix round owed (the yield), then merge.**
+**Status 2026-07-28: code on `feat/0.10.0-decoy-u3-pairing`, UNMERGED. FIX ROUND 6 (the yield) IS
+APPLIED — `:app:testDebugUnitTest :app:assembleDebug` exit 0, 742 tests / 0 failures, 12/12 mutations
+discriminated. Review round 8 of the whole unit is the remaining gate before merge.**
 
 **The arc.** R1 4 P1 → design contradiction, maintainer ruled real-frame-first. R2 2 P1. R3 4 P1
 (severity UP; two introduced by R2's own fix). R4 1 P1 — **first reviewer convergence in seven
@@ -31,8 +32,54 @@ adversarial reasoning ground against a premise that should never have been writt
 - **Value model recorded**: the decoy is the **sugar in the lemonade** — it makes the candidate set 2
   instead of 1 and imposes cost, compounding with I2P/Tor. Skin, not core.
 
-**Dispositions.** Mechanisms 1 & 3 → the yield fix (owed). 2 → accepted trade (an unpaired frame
-beats skipping a key wipe). 4 → accepted uncorrelated residual.
+**Dispositions.** Mechanisms 1 & 3 → **the yield fix, APPLIED 2026-07-28 (fix round 6)**. 2 →
+accepted trade (an unpaired frame beats skipping a key wipe). 4 → accepted uncorrelated residual.
+
+### Fix round 6 — `CoverPressure`, the R-U3-1 yield
+
+**What it is.** A production yield policy the seam consults at the top of every send, before the
+build and before provisioning. Three pressure signals, each chosen because it is *observable without
+knowing any limit*: outbound queue depth over an 8 KiB watermark (OkHttp's own `WebSocket.queueSize`,
+newly exposed as `WsClient.outboundQueueBytes`); the relay's `rate_limited` (newly routed from
+`MessagingCoordinator.onServerError`, which was an empty method); and this session's own recent frame
+rate — 40 frames, both halves of every pair counted, in a sliding trailing minute. Any trip turns
+cover off for a **60 s window**, one width of the relay's own bucket, so a pressure event produces one
+consistent gap rather than a stutter (R-U3-3).
+
+**THE RULING THIS REVERSES.** "A client-side budget defence is unsound because `sendLimit` is a server
+constant the relay never communicates" — carried since fix round 1, in the spec, both todos, the
+kdoc and the test suite. It is **correct of a headroom policy**, which must predict the limit, and
+**does not touch a reactive one**. Nothing in `CoverPressure` knows or assumes a number. The relay-side
+item (message id on `rate_limited`; exempting cover frames from the budget) stays worth doing and
+stays grouped for CX23, but it is no longer the only route — and the *user-facing* half of the
+`onServerError` defect is untouched and still needs the relay.
+
+**The disclosure line is where the yield stops.** `stop()` and `quiesce()` drain unconditionally; the
+drain does not consult pressure, and a tripwire fails if it starts to. Shedding under load is
+degradation (the burst is already visible); a cover frame missing at a vault lock is disclosure.
+
+**Claims swept, not phrasings.** Three separate statements of the same wrong idea were struck where
+they lived: *"a human sender will not approach `sendLimit`"* (spec §6.3, kdoc), *"cross-send
+preemption is a relay-side item no client-side defence can address"* (kdoc, test, todos, ledger), and
+the R-U3-3 section's *"the only condition consulted per send is…"*, which a second per-send condition
+had just falsified. **A fourth was found by the sweep rather than by the task:** the kdoc's *"the
+delay cover traffic adds to a real send is not small, it is none"* is true of this class's lock and
+false of the confined worker — a real send dispatched during a cover BUILD waits for it. Corrected in
+place and priced in the spec; **not** fixed, because the build is on that worker precisely to keep
+admission atomic against teardown, and moving it would reinstate rounds 4–5's P1s.
+
+**Evidence.** `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug` from
+`apps/android` — exit 0 before the first mutation and after the last. 48 pairing + 12 pressure + 33
+provisioner tests. **12 mutations applied one at a time with a full rebuild between each; 12
+discriminated, 0 survived** (seam ignores the yield; watermark disabled; seam drops `rate_limited`;
+coordinator drops `rate_limited`; cover frames unmetered; real frames unmetered; off-window removed;
+rate window narrowed; `WsClient` queue reading constant; yield fails open on throw; drain consults
+pressure; `ZitroneApp` wires a constant-0 queue).
+
+**What still lets cover compete, stated rather than buried.** (1) The ~20 cover frames at the *onset*
+of a burst, before the meter trips — closing that needs a limit the relay never states. (2) The
+confined worker, for the build's duration — a priced, structurally required trade. (3) The 5–50 ms
+between the yield check and the emit, in which the queue would have to cross 16 MiB. Nothing else.
 
 **Also this session:** the idle/dead-air ping was **CUT** (`c65d9a3e`) — an unpaired ping must invent
 a schedule, which is the fingerprint §8 chose pairing to avoid; U5 gone, `DecoyCounterReservation`

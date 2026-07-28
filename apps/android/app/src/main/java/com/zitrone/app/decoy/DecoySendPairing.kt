@@ -101,6 +101,27 @@ interface CoverTraffic {
     suspend fun cover(real: MessageEnvelope)
 
     /**
+     * The relay refused a `message.send` with `rate_limited` — **the one signal it gives us that the
+     * shared per-account send budget is contended.**
+     *
+     * R-U3-1 makes cover traffic the half that yields when a resource is contended, so this exists to
+     * take cover off. It is deliberately **not** an error-handling hook: the relay's `rate_limited`
+     * carries no message id, so nothing here can attribute the rejection to a message, retry it, or
+     * surface it — that is a separate, pre-existing defect in shipped code (`onServerError` has always
+     * been empty) which needs a relay-side change and is tracked on its own.
+     *
+     * **This is why the client-side budget defence is sound after all.** It was ruled unsound on the
+     * reasoning that `sendLimit` is a server constant the relay never communicates — true, and it
+     * would defeat any *headroom* policy, which has to predict the limit. Yielding reactively does
+     * not predict anything: it needs no number, only the event.
+     *
+     * Called from the transport's inbound callback thread, not from the confinement worker, so an
+     * implementation must be safe there — and must not block, because it runs on the socket's own
+     * dispatch path.
+     */
+    fun onRelayRateLimited()
+
+    /**
      * TERMINAL session teardown (R-U3-5) — and **the transport's own invalidation is handed to this
      * method rather than performed beside it.**
      *
@@ -147,6 +168,7 @@ interface CoverTraffic {
         /** Cover traffic off: the real send path, unchanged, and teardown in its original order. */
         val NONE: CoverTraffic = object : CoverTraffic {
             override suspend fun cover(real: MessageEnvelope) = Unit
+            override fun onRelayRateLimited() = Unit
             override fun stop(invalidateTransport: () -> Unit) = invalidateTransport()
             override fun quiesce(swapTransport: () -> Unit) = swapTransport()
         }
@@ -183,11 +205,9 @@ interface CoverTraffic {
  *    coordinator and the compiler enforces it.
  *  - **A cover frame taking the last `sendLimit` permit from the real frame it covers.** The real
  *    frame is enqueued first, so within a pair the cover frame can only ever get the permit the real
- *    one did not need. (**Cross-send** preemption — pair N's cover frame taking the permit pair N+1's
- *    real frame wanted — survives every ordering, is inherent to doubling the volume on a shared
- *    per-account budget, and is a **relay-side** item: `sendLimit` is a server constant the relay
- *    never communicates, so no client-side headroom policy is sound. It is not defended against
- *    here, deliberately.)
+ *    one did not need. **Cross-send** preemption — pair N's cover frame taking the permit pair N+1's
+ *    real frame wanted — survives every ordering and is not fixed by it; it is fixed by [pressure],
+ *    see the subordination section below.
  *  - **A cover-side throwable suppressing the real publish.** There is no longer any construction in
  *    which cover code could run before the publish, so there is nothing left for it to skip.
  *
@@ -195,6 +215,49 @@ interface CoverTraffic {
  * of the network no longer gets 5–50 ms of ambiguity about which of the two frames was real. It
  * reads `recipient_id` in cleartext on both envelopes regardless, so the loss is close to nil; a
  * one-sided observer sees two equal-length frames either way. Spec §2.4 carries it as a residual.
+ *
+ * ## SUBORDINATION: WHERE A RESOURCE IS CONTENDED, COVER YIELDS (R-U3-1, rewritten 2026-07-28)
+ *
+ * Real-frame-first settles ordering *within* a pair. It settles nothing **between** pairs, and two
+ * shared resources are consumed by both halves:
+ *
+ *  1. **The transport's outbound queue.** `WsClient.sendMessage` hands the frame to OkHttp's
+ *     asynchronous writer and returns; OkHttp buffers it, refuses once the buffer would pass 16 MiB,
+ *     and closes the connection when it refuses. A cover frame sitting in that buffer is capacity the
+ *     *next* real frame may need.
+ *  2. **The relay's per-account send budget.** `sendLimit` is charged to the AUTHENTICATED account
+ *     and the cover frame rides the same socket, so a covered send costs two permits, not one.
+ *
+ * Both were reported as R-U3-1 violations in review round 7, and under the rewritten requirement
+ * they are **defects, not residuals**: *"cover traffic must never compete with a real send for any
+ * resource. Where a shared resource is contended, cover yields — dropped, not queued ahead of, not
+ * charged against, the real frame."* [pressure] is that yield, and [CoverPressure] is canonical for
+ * how it decides; nothing about the thresholds is restated here.
+ *
+ * **What changed in the reasoning, because it had been ruled the other way.** A client-side budget
+ * defence was previously ruled *unsound* — `sendLimit` is a server constant the relay never
+ * communicates, so a client assuming 100/min against a relay configured lower inverts the priority it
+ * claims to guarantee. That is correct, and it kills a **headroom** policy, which must predict the
+ * limit. It does not touch a **reactive** one: yielding on a signal of pressure needs no knowledge of
+ * any limit. The signals are the queue depth, the relay's own `rate_limited`
+ * ([onRelayRateLimited]) and this session's recent frame rate.
+ *
+ * **The check is at the very top of [cover], before the build and before provisioning**, and the
+ * whole send goes uncovered when it trips — that is the *point*: a yield that still did the work
+ * would still be competing, for the worker and for the vault read if not for the socket.
+ *
+ * **The drain does NOT consult it, and that is load-bearing.** [stop] and [quiesce] emit every
+ * admitted pairing unconditionally. Pressure-shedding is *degradation* and permitted (a burst of
+ * frames is already visible to anyone watching the connection, so the observer learns nothing new).
+ * A cover frame missing because the vault locked or the transport changed is *disclosure* and is
+ * not — it names a client lifecycle event the observer could not otherwise see, which is the class
+ * rounds 3–5 closed. Letting pressure reach the drain would reopen it.
+ *
+ * **Decided once per send, not re-checked before the emit.** After the gap the frame is built,
+ * admitted and owed to the register, and re-checking there would either have to run inside the drain
+ * (reopening the paragraph above) or fork the two paths. The window it leaves is the 5–50 ms gap, in
+ * which the queue would have to go from under 8 KiB to over 16 MiB — some sixteen thousand frames
+ * this app has no way to produce — before a single ~1 KB cover frame could displace anything.
  *
  * ## TEARDOWN OWNS THE PAIRINGS IT ADMITTED (R-U3-3, R-U3-5)
  *
@@ -264,13 +327,29 @@ interface CoverTraffic {
  * happen against this relay), and a local identity the vault cannot produce (impossible on a path
  * that has just encrypted a message with it).
  *
- * ## Failure is UNIFORM, never per-envelope (R-U3-3)
+ * ## Failure is bounded by DISCLOSURE, not by rate (R-U3-3, rewritten 2026-07-28)
  *
- * The only condition consulted per send is **"does this vault have a synthetic account id"**
- * ([recipient]). That predicate is durable, and within a session it flips at most once — from absent
- * to present, when provisioning lands. It never flaps. So cover traffic is off for a prefix of the
- * session and on for the rest, which is the "persistent cause → uniformly-off cover" degradation
- * R-U3-3 accepts, not the stutter it forbids.
+ * The requirement used to read *"failure is uniform, never intermittent"*, on the rationale that
+ * intermittent cover is worse than no cover. That rationale is false as stated and was withdrawn: an
+ * unpaired send costs exactly one thing — for that message the adversary's candidate set is 1 instead
+ * of 2 — and reveals no content, identity, contact or vault existence, all of which are held by
+ * layers that never depended on cover. **The bound is that cover must not fail in ways that reveal
+ * events an observer cannot ALREADY observe.**
+ *
+ * Two conditions are consulted per send, and they sit on opposite sides of that line:
+ *
+ *  - **"Does this vault have a synthetic account id"** ([recipient]) is durable and flips at most
+ *    once per session, from absent to present, when provisioning lands. It never flaps: cover is off
+ *    for a prefix of the session and on for the rest.
+ *  - **[pressure]** sheds cover under load. It correlates with heavy sending — which is DEGRADATION,
+ *    not disclosure, because a burst of frames is already visible to anyone watching the connection.
+ *    The observer's candidate set is 1 instead of 2 while the user is busy, and protection thins
+ *    exactly when the pipe is full, which is the right trade. It is a window rather than a per-send
+ *    verdict precisely so it does not stutter.
+ *
+ * What stays prohibited is unchanged and is enforced elsewhere in this class: a lone decoy, a pair
+ * split across a transport change, and any cover gap that names a vault lock, a teardown or a
+ * backgrounding. Those name a client lifecycle event the observer could not otherwise see.
  *
  * **`DecoyAccountProvisioner.canSend()` is deliberately NOT the predicate here.** It folds in
  * `VaultRuntime.capacityExceeded`, which is transient — exactly the shape R-U3-3 rules out. It is
@@ -293,8 +372,10 @@ interface CoverTraffic {
  * R-U3-3's marked-frame problem in its purest form.
  *
  * **Observable consequence, stated rather than left implicit:** outbound `message.send` volume
- * doubles for every envelope class, receipts included (`sendLimit` is 100/min per account — spec
- * §6.3 — which no human sender approaches), and the synthetic conversation receives cover frames
+ * doubles for every envelope class, receipts included — **up to the point where [pressure] takes
+ * cover off**, which is what keeps the doubling from reaching the relay's per-account budget (see the
+ * subordination section; the earlier gloss here, "which no human sender approaches", was the claim
+ * review round 7 refuted), and the synthetic conversation receives cover frames
  * shaped like receipts and attachment controls as well as like messages. It does **not** interact
  * with the uncovered plaintext control channel declared in §2.4 (`typing.*`, `message.ack`,
  * `message.burn`, `message.received`): those frames are an order of magnitude smaller and separable
@@ -343,8 +424,21 @@ interface CoverTraffic {
  * ## Locks, and the one this class does hold
  *
  * There is **no lock on the path a real send takes**, and that is unchanged: the coordinator
- * publishes before this class is entered, so no real frame can queue behind anything here. The delay
- * cover traffic adds to a real send is not small, it is none.
+ * publishes before this class is entered, so no real frame can queue behind a lock of this class's.
+ *
+ * > **⚠️ CORRECTED (fix round 6). This paragraph used to end "the delay cover traffic adds to a real
+ * > send is not small, it is none", which was true of the LOCK and false of the WORKER.** Under the
+ * > confinement contract [cover] runs on the same single dispatcher every real send runs on, so a
+ * > real send dispatched while [buildCover] is in progress waits for that build — milliseconds of
+ * > CPU and one vault read, and [pressure] removes it entirely under load, but not *none*. The drawn
+ * > gap does not add to it: `sleep` suspends, and a suspended coroutine holds no worker.
+ * >
+ * > **The occupancy is deliberate and must not be "fixed".** The build sits on that worker with no
+ * > suspension point in it precisely because that is what makes a pairing's admission atomic against
+ * > teardown — which is what retired the drain's 100 ms deadline and closed the split-pair class in
+ * > rounds 4 and 5. Moving it off the worker to save a few milliseconds of scheduling would reinstate
+ * > two P1s. Spec §4.3 carries it as a priced trade, and this correction is what the honest version
+ * > of the claim says.
  *
  * [teardown] is a different lock with a different job: it serialises *cover* work against *teardown*
  * only. It is taken after the real frame is already gone, it is never held across a suspension, and
@@ -396,6 +490,12 @@ class DecoySendPairing(
     private val recipient: () -> String?,
     /** `WsClient.sendMessage`. A false return (dead socket) is not an error here — see [emit]. */
     private val send: (MessageEnvelope) -> Boolean,
+    /**
+     * The R-U3-1 yield: whether a shared resource is under pressure, in which case cover is dropped
+     * rather than allowed to compete. **No default** — a `CoverPressure` wired to a queue reading
+     * that is always 0 is a disabled defence that looks live, which is the round-5 failure mode.
+     */
+    private val pressure: CoverPressure,
     /** `DecoyAccountProvisioner.provisionIfNeeded` — see the provisioning section. */
     private val provision: suspend () -> Unit,
     private val builder: DecoyEnvelopeBuilder = DecoyEnvelopeBuilder(),
@@ -447,6 +547,16 @@ class DecoySendPairing(
     private class Pending(val decoy: MessageEnvelope)
 
     override suspend fun cover(real: MessageEnvelope) {
+        // The real frame is already on the socket and has already been charged to every shared
+        // resource this class can see, so it is counted whatever happens next. Recording it BEFORE
+        // the yield below is what lets a session that is shedding cover keep measuring its own send
+        // rate — otherwise the meter would empty itself the moment it worked.
+        pressure.recordFrame()
+        // R-U3-1 SUBORDINATION, and the FIRST thing after that: where a shared resource is contended,
+        // cover yields — no build, no vault read, no provisioning launch, no frame. Ahead of the
+        // teardown check because it is the cheaper of the two and neither can be wrong here: both
+        // answers are "this send goes uncovered", and the real frame has already gone either way.
+        if (pressure.yielding()) return
         // BUILD FIRST, ADMIT SECOND — the reverse of round 3, and safe for the reason set out in the
         // class kdoc: teardown runs on this same worker, so this whole prologue (the caller's
         // publish tail, this build, the admission below) is ONE uninterrupted slice with no
@@ -480,6 +590,15 @@ class DecoySendPairing(
             finish(pending)
         }
     }
+
+    /**
+     * The relay is throttling this account, so cover stops spending its budget (R-U3-1).
+     *
+     * Deliberately takes no lock and touches nothing else in this class: it arrives on the socket's
+     * inbound callback thread, not on the confinement worker, and it must not be able to block that
+     * thread or to contend with [teardown] against a send. [CoverPressure] is a `@Volatile` write.
+     */
+    override fun onRelayRateLimited() = pressure.relayRateLimited()
 
     override fun stop(invalidateTransport: () -> Unit) = teardown.withLock {
         try {
@@ -584,7 +703,10 @@ class DecoySendPairing(
      */
     private fun emit(decoy: MessageEnvelope) {
         try {
-            send(decoy)
+            // A cover frame the socket TOOK is charged to the same per-account budget the real frames
+            // draw on, so the meter counts it. One the socket refused never reached the relay and is
+            // not counted — the meter measures consumption, not intent.
+            if (send(decoy)) pressure.recordFrame()
         } catch (c: CancellationException) {
             throw c
         } catch (t: Throwable) {

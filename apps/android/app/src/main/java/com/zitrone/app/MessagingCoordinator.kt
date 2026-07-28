@@ -2276,11 +2276,26 @@ class MessagingCoordinator(
     override fun onServerError(code: String, message: String) {
         // Server error codes carry no user data; v1 surfaces them only as
         // connection state, never as raw strings.
+        //
+        // `rate_limited` is the relay refusing a `message.send` for volume, and it is the ONE signal
+        // the relay gives about the shared per-account send budget. Spec §4.3 R-U3-1 makes cover
+        // traffic the half that yields when a resource is contended, so it goes straight to the cover
+        // seam. No message id is needed for that: cover does not have to know WHICH frame was
+        // refused, or what the limit is, only that it must stop competing for it.
+        //
+        // This is NOT the user-facing half of the defect. Attributing a rejection to the message it
+        // rejected — so the send can be marked failed and retried instead of showing SENDING forever
+        // — needs the relay to carry the message id on the error, which it does not; that is tracked
+        // separately and is a pre-existing bug in shipped code, not a decoy-traffic one.
+        if (code == ERROR_RATE_LIMITED) coverTraffic.onRelayRateLimited()
     }
 
     private companion object {
         /** Logcat tag for boot-stage transport diagnostics — see class kdoc. */
         const val TAG = "ZitroneBoot"
+
+        /** The relay's `message.send` throttle code (`server/internal/ws/hub.go`). */
+        const val ERROR_RATE_LIMITED = "rate_limited"
 
         const val BASE_BACKOFF_MS = 1_000L
         const val MAX_BACKOFF_MS = 60_000L
