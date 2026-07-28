@@ -35,6 +35,8 @@ class DecoyInboundSessionTest {
     private class FakeSocket(
         var connectSucceeds: Boolean = true,
         var sendSucceeds: Boolean = true,
+        /** Shared with a delegate under test, so teardown ORDER across the two is observable. */
+        val journal: MutableList<String> = mutableListOf(),
     ) : DecoyInboundSession.SyntheticSocket {
         override var onDeliver: ((MessageEnvelope) -> Unit)? = null
         val connects = CopyOnWriteArrayList<String>()
@@ -50,6 +52,7 @@ class DecoyInboundSessionTest {
 
         override fun disconnect() {
             disconnects++
+            journal += "synthetic.disconnect"
         }
 
         override fun ack(messageId: String): Boolean = acks.add(messageId)
@@ -255,6 +258,24 @@ class DecoyInboundSessionTest {
     }
 
     @Test
+    fun `stop leaves no outstanding work parked on a delay`() = runTest {
+        // Distinct from the test above, and the distinction is what a mutation sweep found: every
+        // job body ALSO re-checks `stopped`, so deleting stop()'s cancellation still emits nothing
+        // and that test stays green. What cancellation buys is that teardown leaves NOTHING
+        // RUNNING — jobs are not left parked on a drawn delay to discover the flag later — and that
+        // is only visible here.
+        val socket = FakeSocket()
+        val session = session(socket, testScheduler, this)
+        session.start()
+
+        socket.onDeliver!!.invoke(envelope(id = "cover-9"))
+        assertEquals("a burn and a send-back are pending", 2, session.outstandingWork())
+        session.stop()
+
+        assertEquals("teardown must cancel them, not merely out-wait them", 0, session.outstandingWork())
+    }
+
+    @Test
     fun `a delivery arriving after stop is ignored entirely`() = runTest {
         val socket = FakeSocket()
         val session = session(socket, testScheduler, this)
@@ -396,10 +417,10 @@ class DecoyInboundSessionTest {
 
     @Test
     fun `bindTo stops the synthetic side BEFORE the send pairing drains`() = runTest {
-        val socket = FakeSocket()
+        val order = mutableListOf<String>()
+        val socket = FakeSocket(journal = order)
         val session = session(socket, testScheduler, this)
         session.start()
-        val order = mutableListOf<String>()
         val delegate = object : com.zitrone.app.decoy.CoverTraffic {
             override suspend fun cover(real: MessageEnvelope) = Unit
             override fun onRelayRateLimited() = Unit
@@ -416,8 +437,14 @@ class DecoyInboundSessionTest {
 
         bound.stop { order += "invalidate" }
 
-        assertEquals(listOf("delegate.stop", "invalidate"), order)
-        assertEquals("the synthetic socket goes down first", 1, socket.disconnects)
+        assertEquals(
+            "the synthetic socket must go down BEFORE the pairing drains: a drain emits cover " +
+                "frames, and a synthetic side still acking them would put its control frames on " +
+                "the wire after the real socket's last real frame",
+            listOf("synthetic.disconnect", "delegate.stop", "invalidate"),
+            order,
+        )
+        assertEquals(1, socket.disconnects)
         assertNull("and is detached before the drain runs", socket.onDeliver)
     }
 

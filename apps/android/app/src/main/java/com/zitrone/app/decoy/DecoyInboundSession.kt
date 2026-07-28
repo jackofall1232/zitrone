@@ -107,6 +107,17 @@ class DecoyInboundSession(
     private val lock = Any()
 
     /**
+     * How many burns and send-backs are still outstanding.
+     *
+     * A test seam, and it exists because of a specific hole a mutation sweep found: every job body
+     * ALSO re-checks [stopped] before touching the socket, so deleting [stop]'s cancellation left
+     * the behavioural tests green — the frames still never went out. The cancellation is what makes
+     * teardown leave *nothing running*, rather than leaving jobs parked on a delay to discover the
+     * flag later, and that is not observable through the socket. It is observable here.
+     */
+    internal fun outstandingWork(): Int = synchronized(lock) { pending.count { it.isActive } }
+
+    /**
      * Open the synthetic socket if this vault has an account and a token. Silent: no account, no
      * token, or an already-stopped session all return without an error, because "cover traffic is
      * off" is a normal state and never a failure the user hears about.
@@ -161,8 +172,11 @@ class DecoyInboundSession(
      */
     fun stop() {
         stopped = true
-        val cancelling = synchronized(lock) { pending.toList().also { pending.clear() } }
-        cancelling.forEach { it.cancel() }
+        // The set is NOT cleared here, and that is deliberate: clearing it would make the
+        // "nothing is left running" check below true whether or not the cancellation actually ran,
+        // which is exactly how a mutation of this line survived once. Cancelled jobs deregister
+        // themselves through their completion handler.
+        synchronized(lock) { pending.toList() }.forEach { it.cancel() }
         socket.onDeliver = null
         runCatching { socket.disconnect() }
     }
