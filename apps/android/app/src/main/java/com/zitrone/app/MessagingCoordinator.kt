@@ -1898,8 +1898,21 @@ class MessagingCoordinator(
                 // immediately is the outcome we want, not a risk we are taking. A crash before the
                 // decoy section is durable loses the synthetic account id — and the envelope with
                 // it, since the relay no longer holds one to redeliver.
+                //
+                // AND IT IS SILENT. There is no diag() here, deliberately, and that is a fix (U4
+                // review round 4, Codex). The first version logged "cover-account envelope —
+                // dropped before decrypt", which BootDiagnostics.record writes to
+                // boot-diagnostics.log on disk and surfaces in Settings → Diagnostics. That is a
+                // durable, timestamped, user-copyable record that THIS DEVICE received cover
+                // traffic — which is evidence that a vault with a provisioned synthetic account
+                // exists here, and it survives the process that wrote it. Plausible deniability is
+                // the product, so a log line distinguishing "uses cover traffic" from "never did"
+                // is a leak of exactly the kind the vault exists to prevent.
+                //
+                // Every other decoy surface already holds this discipline — the pairing, the
+                // builder and the provisioner take no logger at all and fail silent — and this
+                // guard was the one place in U4 that broke it.
                 if (isSyntheticSender(envelope.senderId)) {
-                    diag("recv: cover-account envelope — dropped before decrypt")
                     ws.ackMessage(envelope.id)
                     return@runCatching
                 }

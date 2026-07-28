@@ -1373,6 +1373,21 @@ class DecoySendPairingTest {
             emptyList<String>(),
             stray,
         )
+        // CALLABLE REFERENCES TOO (U4 review round 4, Codex). The scan above matches the token
+        // `disconnect()`, so `val d = ws::disconnect; d()` walked straight past it and could close
+        // the real socket mid-gap with every guard green — a guard that does not guard what it
+        // claims. There is no legitimate use of `::disconnect` anywhere in the app today, so the
+        // honest rule is that there are none at all rather than a second ownership model to keep
+        // in step with the first.
+        val references = allMainSources()
+            .filter { (_, source) -> "::disconnect" in normalised(source) }
+            .map { (name, _) -> name }
+        assertEquals(
+            "a disconnect taken as a callable reference escapes the ownership scan above; if one " +
+                "is ever genuinely needed, it has to be added to the scan, not just to the code",
+            emptyList<String>(),
+            references,
+        )
         // …and the two owners are really wired, so deleting the disconnect entirely does not pass.
         assertTrue(
             "the cover-traffic teardown is not wired to the disconnect at all",

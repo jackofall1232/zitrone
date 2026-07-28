@@ -91,6 +91,33 @@ class DecoyU4SourceTripwireTest {
     }
 
     @Test
+    fun `no U4 surface writes a durable diagnostic about cover traffic`() {
+        // U4 review round 4, Codex. The R-U4-1 guard used to diag() when it dropped a cover-account
+        // envelope; BootDiagnostics.record writes that to boot-diagnostics.log and shows it in
+        // Settings → Diagnostics. A timestamped on-disk line proving THIS DEVICE received cover
+        // traffic is evidence a vault with a provisioned synthetic account exists here — and
+        // plausible deniability is the product. The rest of the decoy code already takes no logger
+        // at all; this pins that the guard cannot reacquire one.
+        val guard = codeOf(read("MessagingCoordinator.kt")).let {
+            val at = it.indexOf("if (isSyntheticSender(envelope.senderId)) {")
+            assertTrue("the R-U4-1 guard is missing", at > 0)
+            it.substring(at, it.indexOf("if (isDeletedContact(", at))
+        }
+        for (sink in listOf("diag(", "Log.", "println", "BootDiagnostics")) {
+            assertTrue(
+                "the cover-account drop must be SILENT; found `$sink` in the guard",
+                !guard.contains(sink),
+            )
+        }
+        for (file in U4_FILES) {
+            val source = codeOf(read(file))
+            for (sink in listOf("diag(", "Log.", "println", "BootDiagnostics")) {
+                assertTrue("$file must not log: found `$sink`", !source.contains(sink))
+            }
+        }
+    }
+
+    @Test
     fun `the send-back is built through the reply entry point, never the covering one`() {
         val source = codeOf(read("decoy/DecoyInboundSession.kt"))
         assertTrue("the send-back must use buildReply", source.contains("builder.buildReply("))
@@ -132,6 +159,33 @@ class DecoyU4SourceTripwireTest {
         assertTrue(
             "and must actually be redialled onto them",
             app.contains("live.decoyInbound?.let { session -> scope.launch { session.reconnect() } }"),
+        )
+    }
+
+    @Test
+    fun `the synthetic redial is not gated on the real socket's connection state`() {
+        // U4 review round 1, Codex P1 / Grok F1: applyTransportLocked returned null whenever the
+        // REAL socket was DISCONNECTED and applyTransport bailed on that null, so the SYNTHETIC
+        // socket was never redialled — left connected on the endpoints the user had just left.
+        //
+        // RESTORED at round 4 (Grok). My round-3 edit deleted this test along with the one beside
+        // it; the mutation sweep caught the OTHER deletion and I restored only that, then recorded
+        // the loss as closed. It was not. Position is the property here, so a substring check that
+        // both calls merely APPEAR cannot see the defect: re-nesting the synthetic redial inside
+        // the real socket's gate keeps every token present and reinstates the P1.
+        val app = codeOf(read("ZitroneApp.kt"))
+        val realGate = app.indexOf("if (live.wsClient.connectionState.value != WsClient.ConnectionState.DISCONNECTED) {")
+        assertTrue("the real socket's redial gate is missing", realGate > 0)
+        val redial = app.indexOf("live.decoyInbound?.let { session -> scope.launch { session.reconnect() } }")
+        assertTrue("the synthetic redial is missing", redial > 0)
+        // The gate's closing brace: the synthetic redial must come after it, not inside it.
+        val gateEnd = app.indexOf("\n        }", app.indexOf("live.apiClient.accessToken?.let(live.wsClient::connect)"))
+        assertTrue("could not locate the end of the real socket's gate", gateEnd > realGate)
+        assertTrue(
+            "the synthetic redial must sit OUTSIDE the real socket's connection-state gate — a " +
+                "down real socket redials itself through WsClient's backoff, but a live synthetic " +
+                "socket left on the old transport keeps cover flowing where the user turned it off",
+            redial > gateEnd,
         )
     }
 
@@ -181,6 +235,17 @@ class DecoyU4SourceTripwireTest {
                 "class of evasion three review rounds spent on it: whatever a test asserts about " +
                 "the argument, some binding upstream can be made to name the real socket.",
             !Regex(":\\s*WsClient(?![.\\w])").containsMatchIn(header),
+        )
+        // …and NOWHERE ELSE IN THE FILE EITHER (U4 review round 4, Grok). Checking only the class
+        // header left a same-file helper — `internal fun disconnectClient(ws: WsClient) =
+        // ws.disconnect()` — which any caller could invoke on the REAL socket: the call site has no
+        // `disconnect()` token, and the only one that exists sits inside the exempted file. The
+        // wrapper builds its own client and never needs a WsClient-typed anything, so the honest
+        // rule is zero. (`WsClient.Listener` is a nested type, not a client, and is not matched.)
+        assertTrue(
+            "no WsClient-typed declaration may appear anywhere in WsSyntheticSocket — a helper " +
+                "taking one inherits this file's disconnect-ownership exemption",
+            !Regex(":\\s*WsClient(?![.\\w])").containsMatchIn(wrapper),
         )
         assertTrue(
             "and it must build its own, so the socket it disconnects is one it owns",
