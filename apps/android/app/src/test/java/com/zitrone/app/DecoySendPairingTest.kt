@@ -1450,10 +1450,19 @@ class DecoySendPairingTest {
         // — a defence pinned only by the code that could not observe it — and it is the reason
         // `pressure` has no default value in the constructor.
         val app = normalised(appSource("ZitroneApp.kt"))
-        assertTrue(
-            "cover pressure is not wired to the live socket's own outbound queue — a reading that " +
-                "is always 0 lets cover fill the buffer the next real frame needs",
-            "CoverPressure(queuedBytes = wsClient::outboundQueueBytes)" in app,
+        // THE WHOLE LAMBDA BODY, not two substring checks (U4 review round 2, Grok F1). Asserting
+        // that both readings merely APPEAR left the guard open to a body that calls them and then
+        // answers with something else — `{ wsClient.outboundQueueBytes(); synthetic…(); 0L }` has
+        // both tokens present and reports an empty queue forever, which is precisely the
+        // always-0 supplier this tripwire was invented to catch in U3 round 5. Pinning the body
+        // exactly means the sum must BE the answer.
+        val open = app.indexOf("queuedBytes = {")
+        assertTrue("the pressure meter's queue supplier was not found", open > 0)
+        val body = app.substring(open + "queuedBytes = {".length, app.indexOf("}", open))
+        assertEquals(
+            "the queue supplier must be exactly the sum of both live sockets' outbound queues",
+            "wsClient.outboundQueueBytes() + (syntheticSocket?.outboundQueueBytes() ?: 0L)",
+            body.replace(Regex("\\s+"), " ").trim(),
         )
         // U4 hoisted the meter into a local so the synthetic side can consult THE SAME instance
         // (R-U4-4), which moved the construction out of the argument list this used to match. The

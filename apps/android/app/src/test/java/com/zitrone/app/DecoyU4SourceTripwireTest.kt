@@ -175,14 +175,38 @@ class DecoyU4SourceTripwireTest {
         // socket". Still lexical, and the honest limit of that is stated in the class kdoc.
         val app = codeOf(read("ZitroneApp.kt"))
         assertTrue(
-            "`syntheticWs` must be bound by the decoy client's own let-block",
-            app.contains("decoyWsClient?.let { syntheticWs ->"),
+            "`syntheticWs` must be bound by the synthetic socket's own let-block",
+            app.contains("syntheticSocket?.let { syntheticWs ->"),
         )
         assertEquals(
             "`syntheticWs` is bound in exactly one place; a second binding could shadow it with " +
                 "the real socket and both assertions above would still pass",
             1,
             Regex("syntheticWs\\s*->").findAll(app).count(),
+        )
+        // …and inside the wrapper, `ws` must have exactly ONE binding (U4 review round 2, Codex
+        // P3). U3's disconnect-ownership guard exempts every `ws.disconnect()` in that file on the
+        // strength of a receiver SPELLING; code that obtained the real client and aliased it to a
+        // second local `ws` would inherit the exemption and could disconnect the real socket
+        // outside cover traffic's ownership with every guard green. One binding, and it is the
+        // constructor property, closes that specific evasion.
+        val wrapper = codeOf(read("decoy/WsSyntheticSocket.kt"))
+        assertEquals(
+            "`ws` must be bound exactly once in WsSyntheticSocket, as the constructor property",
+            1,
+            Regex("\\b(?:val|var)\\s+ws\\b").findAll(wrapper).count(),
+        )
+        assertTrue(
+            "and that one binding is the constructor property",
+            wrapper.contains("private val ws: WsClient"),
+        )
+        assertEquals(
+            "WsSyntheticSocket must declare exactly one thing OF TYPE WsClient — that property. A " +
+                "second WsClient-typed binding here is a second candidate receiver for the " +
+                "disconnect exemption. (`WsClient.Listener` is a nested type, not a receiver, and " +
+                "is deliberately not matched.)",
+            1,
+            Regex(": WsClient(?![.\\w])").findAll(wrapper).count(),
         )
     }
 
@@ -210,15 +234,21 @@ class DecoyU4SourceTripwireTest {
     }
 
     @Test
-    fun `the synthetic socket's own rate_limited is routed into the shared meter`() {
+    fun `the synthetic socket's rate_limited arms the SYNTHETIC channel, not the shared one`() {
         // U4 review round 1, Grok F4. WsSyntheticSocketTest proves the ADAPTER routes it; this
         // proves production actually hands it somewhere. Without the wiring the meter sees only the
         // real socket's rate_limited, so the relay can be throttling the account that exists solely
         // to carry cover traffic while this side keeps emitting into the refusal.
         val app = codeOf(read("ZitroneApp.kt"))
         assertTrue(
-            "the synthetic socket must report rate_limited to the SHARED CoverPressure",
-            app.contains("WsSyntheticSocket(syntheticWs, coverPressure::relayRateLimited)"),
+            "the synthetic socket must report rate_limited to the meter's SYNTHETIC channel",
+            app.contains("WsSyntheticSocket(syntheticWs, coverPressure::syntheticRateLimited)"),
+        )
+        assertTrue(
+            "routing it to relayRateLimited hands a relay a lever on the REAL send path's cover: " +
+                "one frame on the synthetic connection would black out cover for every genuine " +
+                "send for a full off-window, with the real account nowhere near its limit",
+            !app.contains("WsSyntheticSocket(syntheticWs, coverPressure::relayRateLimited)"),
         )
     }
 

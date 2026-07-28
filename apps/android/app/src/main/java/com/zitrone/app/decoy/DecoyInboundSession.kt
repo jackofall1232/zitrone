@@ -243,7 +243,7 @@ class DecoyInboundSession(
      */
     private suspend fun sendBack(received: MessageEnvelope) {
         sleep(replyDelayMs())
-        if (stopped || pressure.yielding()) return
+        if (stopped || pressure.yieldingSendBack()) return
         val from = syntheticAccountId() ?: return
         val to = realAccountId() ?: return
         // buildReply refuses rather than emitting a mis-shaped frame (a received ciphertext too
@@ -258,7 +258,12 @@ class DecoyInboundSession(
             )
         }.getOrNull() ?: return
         if (stopped) return
-        runCatching { socket.send(reply) }
+        // RECORDED, like the pairing records its own halves (U4 review round 2, Codex P2) — but on
+        // the SYNTHETIC account's ring, not the real one (Grok F2). A send-back charges the
+        // synthetic relay bucket, so counting it against the real account's budget would let a relay
+        // induce ~40 send-backs and black out cover for every genuine send for a full minute. Only
+        // an ACCEPTED frame is recorded: a refused one was never spent.
+        if (runCatching { socket.send(reply) }.getOrDefault(false)) pressure.recordSyntheticFrame()
     }
 
     /**

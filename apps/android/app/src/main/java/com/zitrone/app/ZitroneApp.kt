@@ -1560,9 +1560,13 @@ class AppContainer(private val app: Application) {
     /**
      * Install [state]'s endpoints on the live session. @GuardedBy [transportLock].
      *
-     * @return the session whose live socket must now be redialled over the new endpoints, or null
-     * when there is nothing to redial (no session, or its socket is already down — a down socket
-     * redials itself through `WsClient`'s own backoff, over the endpoints just installed).
+     * @return the live session with both sockets' endpoints installed, or null when there is no
+     * session at all. **Which sockets need redialling is NOT decided here, and no longer decided
+     * once for both** (U4 review round 1): this used to return null when the REAL socket was
+     * already down, on the reasoning that such a socket redials itself through `WsClient`'s own
+     * backoff — true of the real socket, but it also skipped the SYNTHETIC one, which could be up
+     * and was then left on the endpoints the user had just left. [applyTransport] now takes that
+     * decision per socket, and the real socket's down-means-leave-it rule lives there.
      * **The redial itself is deliberately not done here** — see [applyTransport].
      */
     private fun applyTransportLocked(state: TransportState): SessionContainer? {
@@ -1782,26 +1786,40 @@ class SessionContainer(
             // ApiClient, so "the send-pairing path writes nothing durable" is a fact about its type
             // — the discipline DecoyEnvelopeBuilder documents. The synthetic account id is read per
             // send because it APPEARS mid-session, when provisioning lands.
-            // The R-U3-1 yield (0.10.0 U3 fix round 6), hoisted out of the pairing because U4's
-            // send-back consults THE SAME INSTANCE (R-U4-4). A second CoverPressure with its own
-            // thresholds would be two independent meters over one socket, each seeing half the
-            // traffic and neither tripping when the pair of them should. The queue reading MUST be
-            // the live socket's own: a supplier that always answers 0 leaves cover free to fill the
-            // outbound buffer a real frame needs, which is the defect this closes.
-            val coverPressure = CoverPressure(queuedBytes = wsClient::outboundQueueBytes)
             // The synthetic account's own socket (0.10.0 U4). Same endpoints and same OkHttp client
             // as the real one — a second connection, not a second network — so a transport swap
-            // redials both through applyTransportLocked/applyTransport.
-            decoyWsClient = decoyRelay?.let {
+            // redials both through applyTransportLocked/applyTransport. Built BEFORE the pressure
+            // meter because the meter reads its queue too; see below.
+            val syntheticSocket = decoyRelay?.let {
                 WsClient(wsUrl, httpClient, scope) { line -> bootDiagnostics.record(line) }
             }
-            val inbound = decoyWsClient?.let { syntheticWs ->
+            decoyWsClient = syntheticSocket
+            // The R-U3-1 yield (0.10.0 U3 fix round 6), hoisted out of the pairing because U4's
+            // send-back consults THE SAME INSTANCE (R-U4-4). A second CoverPressure with its own
+            // thresholds would be two independent meters, each seeing half the traffic and neither
+            // tripping when the pair of them should. The queue reading MUST be the live socket's
+            // own: a supplier that always answers 0 leaves cover free to fill the outbound buffer a
+            // real frame needs, which is the defect this closes.
+            //
+            // BOTH SOCKETS' QUEUES ARE SUMMED (U4 review round 2, Codex P2). Reading only the real
+            // socket left the meter blind to the one U4 actually emits on: a synthetic queue could
+            // back up without limit while `yielding()` stayed false, so R-U4-4's "yields on every
+            // signal of contention available to it" was not true as literally written. They share a
+            // device uplink, so the honest aggregate is the sum. Suppressing the pairing's cover
+            // because the SYNTHETIC socket is congested is acceptable in the direction that
+            // matters: cover is the discardable half, and no yield can ever delay a real frame.
+            val coverPressure = CoverPressure(
+                queuedBytes = {
+                    wsClient.outboundQueueBytes() + (syntheticSocket?.outboundQueueBytes() ?: 0L)
+                },
+            )
+            val inbound = syntheticSocket?.let { syntheticWs ->
                 DecoyInboundSession(
                     scope = scope,
                     syntheticAccountId = { DecoyAuthStore(rt).accountId },
                     realAccountId = { apiClient.accountId },
                     accessToken = { DecoyAuthStore(rt).accessToken },
-                    socket = WsSyntheticSocket(syntheticWs, coverPressure::relayRateLimited),
+                    socket = WsSyntheticSocket(syntheticWs, coverPressure::syntheticRateLimited),
                     pressure = coverPressure,
                 )
             }

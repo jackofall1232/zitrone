@@ -202,6 +202,101 @@ class DecoyInboundSessionTest {
     }
 
     @Test
+    fun `send-backs charge the SYNTHETIC budget and never black out the real path's cover`() = runTest {
+        // The round-2 finding both lenses reached from opposite directions. Codex: send-backs were
+        // recorded nowhere, so the meter under-reported the traffic U4 adds. Grok: recording them
+        // against the REAL account's ring is worse than not recording them, because a relay can
+        // induce send-backs by delivering cover-shaped envelopes and thereby switch off cover for
+        // every genuine send for a full off-window — with the real socket quiet throughout.
+        //
+        // Both are satisfied by charging the synthetic account's own ring. This test pins the
+        // asymmetry that makes it correct, which is the part neither a wiring tripwire nor a
+        // presence check can see.
+        val socket = FakeSocket()
+        val pressure = CoverPressure(queuedBytes = { 0L }, nowMs = { testScheduler.currentTime })
+        val session = DecoyInboundSession(
+            scope = this,
+            syntheticAccountId = { SYNTHETIC },
+            realAccountId = { REAL },
+            accessToken = { "token-1" },
+            socket = socket,
+            pressure = pressure,
+            random = AlwaysZeroRandom(),
+        )
+        session.start()
+        assertFalse("the meter starts clear", pressure.yieldingSendBack())
+
+        repeat(CoverPressure.RATE_FRAMES) {
+            socket.onDeliver!!.invoke(envelope(id = "cover-" + it))
+            advanceUntilIdle()
+        }
+
+        assertTrue(
+            "enough accepted send-backs must take FURTHER send-backs off — they are budget spent",
+            pressure.yieldingSendBack(),
+        )
+        assertFalse(
+            "…but they must NOT gate the send pairing's cover. That budget belongs to the real " +
+                "account, which has sent nothing here.",
+            pressure.yielding(),
+        )
+    }
+
+    @Test
+    fun `a REFUSED send-back is not recorded — a frame that never went was never spent`() = runTest {
+        val socket = FakeSocket(sendSucceeds = false)
+        val pressure = CoverPressure(queuedBytes = { 0L }, nowMs = { testScheduler.currentTime })
+        val session = DecoyInboundSession(
+            scope = this,
+            syntheticAccountId = { SYNTHETIC },
+            realAccountId = { REAL },
+            accessToken = { "token-1" },
+            socket = socket,
+            pressure = pressure,
+            random = AlwaysZeroRandom(),
+        )
+        session.start()
+
+        repeat(CoverPressure.RATE_FRAMES) {
+            socket.onDeliver!!.invoke(envelope(id = "cover-" + it))
+            advanceUntilIdle()
+        }
+
+        assertFalse("a refused frame consumed no budget", pressure.yieldingSendBack())
+        assertFalse(pressure.yielding())
+    }
+
+    @Test
+    fun `the session yields its send-back on the SYNTHETIC channel, not only the shared one`() = runTest {
+        // The previous test pins the meter's asymmetry by calling it directly; this one pins that
+        // the SESSION asks the right question. A mutation swapping yieldingSendBack() for
+        // yielding() survived without it: with the real path quiet, yielding() is false, so the
+        // send-back went out into a synthetic budget the relay had just refused.
+        val socket = FakeSocket()
+        val pressure = CoverPressure(queuedBytes = { 0L }, nowMs = { testScheduler.currentTime })
+        val session = DecoyInboundSession(
+            scope = this,
+            syntheticAccountId = { SYNTHETIC },
+            realAccountId = { REAL },
+            accessToken = { "token-1" },
+            socket = socket,
+            pressure = pressure,
+            random = AlwaysZeroRandom(),
+        )
+        session.start()
+        // The relay pushed back on the SYNTHETIC connection only. The real path is untouched.
+        pressure.syntheticRateLimited()
+        assertFalse("precondition: the pairing's cover is unaffected", pressure.yielding())
+
+        socket.onDeliver!!.invoke(envelope(id = "cover-9"))
+        advanceUntilIdle()
+
+        assertTrue("the send-back must yield to the synthetic account's own budget", socket.sends.isEmpty())
+        assertEquals("the ack is still exempt", listOf("cover-9"), socket.acks)
+        assertEquals("and so is the burn", listOf("cover-9" to REAL), socket.burns)
+    }
+
+    @Test
     fun `no send-back when the vault has no usable real account to address it to`() = runTest {
         val socket = FakeSocket()
         val session = session(socket, testScheduler, this, real = null)
