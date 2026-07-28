@@ -3221,3 +3221,40 @@ the endpoints are already re-pointed, so only the live socket lingers); natural 
 the confinement contract is a contract, not a type.
 
 No merge, no push, no version bump. **1 of 6 fix rounds remains.**
+
+---
+
+## 2026-07-28 — U3 MERGED to `main` (`4061f145`) — 0.10.0 decoy traffic is WIRED
+
+Merged on explicit maintainer instruction ("go ahead and ship if green"), build green.
+
+**What this changes about the product:** U1 and U2 shipped deliberately unwired. **After this merge a
+device emits real cover traffic and can spend a relay registration.** That is the first behavioural
+change of 0.10.0.
+
+**Evidence:** `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug
+--rerun-tasks` from `apps/android` → **BUILD SUCCESSFUL, Gradle exit 0, 742 tests / 0 failures /
+0 errors / 3 skipped.** 12 mutations applied with a rebuild between each, **12 discriminated.**
+
+**Cost:** 7 review rounds, 6 fix rounds, 4 independent lenses (Grok, Codex, Kimi K3, Gemini).
+
+**The root cause was mine, not the code's.** R-U3-1/R-U3-3 were written as guarantees about
+OUTCOMES the network can always falsify; three of four lenses concluded the feature was unshippable,
+reasoning faithfully from a premise that should not have been written. Rewriting them as rules about
+our own behaviour turned two round-7 "residuals" into real defects (cover consuming OkHttp queue
+capacity and doubling `sendLimit` consumption — both *failed real sends caused by cover traffic*),
+which `CoverPressure` now fixes by yielding. **This reversed the earlier ruling that a client-side
+budget defence is unsound:** that reasoning assumed the client must predict `sendLimit`; yielding
+reactively predicts nothing.
+
+**⚠️ OWED, tracked as a RELEASE gate (not a merge gate):** the final delta — `74d1e574`
+(`CoverPressure` + `WsClient.outboundQueueBytes` + `onServerError` routing) and `2078fd73` (the
+R-U3-1 wording correction) — **has had no paired-blind round.** It is new production code in the
+send path. Round 8 must run before the 0.10.0 cut.
+
+**Accepted residuals, named in the spec rather than denied:** ~20 cover frames at burst onset before
+the meter trips; the confined worker's occupancy during a cover build (cannot move without
+reinstating the rounds 4–5 P1s); the 5–50 ms between pressure check and emit; an unpaired frame at
+terminal teardown (which beats a vault lock that skips its key wipe); natural socket death mid-gap.
+
+No version bump. U4 and U6 remain before 0.10.0 can be cut.
