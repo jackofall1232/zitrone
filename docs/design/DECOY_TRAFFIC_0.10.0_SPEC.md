@@ -874,7 +874,65 @@ mechanism.** Where a construction detail matters, the canonical artefact owns it
 (`DecoyEnvelopeBuilder`), and where a choice is genuinely open, it is named as open rather than
 guessed at.
 
-### R-U3-1 — A real send is never harmed by cover traffic. **Absolute.**
+> ## ⚖️ REQUIREMENTS REWRITTEN 2026-07-28 — the word "absolute" was a category error
+>
+> **Maintainer ruling: there are no absolutes in security. Security is layers.** That is the
+> project's own model — the lemon: zest, pith, flesh, pulp, and only then the juice. A requirement
+> that demands perfection from one layer misdescribes how the whole thing is meant to work.
+>
+> **What went wrong.** R-U3-1 and R-U3-3 were written as guarantees about **outcomes** — *"a real
+> send is never made less durable"*, *"failure must be uniform, never intermittent"*. Outcomes depend
+> on the network, and the network drops packets. Seven review rounds and four independent lenses then
+> correctly found reachable counterexamples, because reachable counterexamples to an outcome
+> guarantee always exist. Three of four concluded the feature was unshippable. **They were reasoning
+> correctly from a requirement that should never have been written that way.**
+>
+> **The fix is to state rules about OUR OWN BEHAVIOUR, which we can hold absolutely**, and to state
+> outcomes as what they are — best-effort, layered, and honestly bounded.
+>
+> ### R-U3-1 (rewritten) — COVER TRAFFIC IS SUBORDINATE. This rule is absolute; the outcome is not.
+>
+> **No cover-specific work may precede a real frame's transport handoff, and cover traffic must never
+> compete with a real send for any resource.** Where a shared resource is contended — the transport's
+> outbound queue, the relay's send budget — **cover yields**: it is dropped, not queued ahead of, not
+> charged against, the real frame. Cover is the discardable half of the pair by construction.
+>
+> *This is a rule about our code and it holds without exception.* It does **not** promise that a real
+> send always succeeds: the network can fail with or without cover traffic. It promises that **cover
+> traffic is never the cause.**
+>
+> ### R-U3-3 (rewritten) — PAIRING IS BEST-EFFORT, AND THE BOUND IS CORRELATION, NOT RATE
+>
+> **A missing cover frame is acceptable. A *patterned* missing cover frame is not.** Cover must not
+> fail in ways that correlate with user or client events an observer can name — vault lock,
+> backgrounding, a transport change, teardown. Uncorrelated failures (a socket dying mid-gap) are an
+> accepted residual.
+>
+> **Why rate is the wrong axis.** The earlier rationale — *"intermittent cover is worse than no
+> cover"* — is false as stated. An unpaired send costs exactly this: for that one message, the
+> adversary's candidate set is 1 instead of 2. It reveals no content, no identity, no contact, and
+> nothing about vault existence — those are held by layers that never depended on cover traffic. Only
+> a **correlated** gap leaks something new, because the pattern names the event. Persistent inability
+> to cover must therefore turn cover **uniformly off** rather than stutter.
+>
+> **Lone decoys and pairs split across a TLS boundary by application-controlled transport changes
+> remain prohibited** — those are patterned by construction.
+>
+> ### What decoy traffic actually buys, stated plainly
+>
+> It does **not** hide that a message was sent; the TLS frame already shows that. It makes an
+> observer's candidate set **2 instead of 1**, so they must intercept and attempt both to learn which
+> carried the payload — compounding with I2P or Tor, which make interception itself expensive.
+> **It is the skin, not the core.** Signal Protocol holds the content; the vault holds deniability;
+> the transports hold anonymity. An occasional missing decoy is an umbrella turning inside out while
+> the raincoat stays on.
+>
+> **Owed to U6 (user-facing):** *"There will be times when cover traffic does not fire — a dropped
+> connection, a device under load. When that happens your message is still end-to-end encrypted and
+> still carried over your chosen anonymous transport; what you lose is one layer of ambiguity, not
+> your protection."*
+
+### (superseded 2026-07-28) R-U3-1 — A real send is never harmed by cover traffic. **Absolute.**
 No real send may be blocked, failed, materially delayed, reordered, or made less durable because
 cover traffic was attempted or could not be produced. The `flushSendRatchet` durability barrier and
 its ordering relative to `ws.sendMessage` must be unchanged. **If satisfying any other requirement
