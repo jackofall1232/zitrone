@@ -58,9 +58,11 @@ import com.zitrone.app.decoy.CoverPressure
 import com.zitrone.app.decoy.CoverTraffic
 import com.zitrone.app.decoy.DecoyAccountProvisioner
 import com.zitrone.app.decoy.DecoyEnvelopeBuilder
+import com.zitrone.app.decoy.DecoyInboundSession
 import com.zitrone.app.decoy.DecoyRelayApi
 import com.zitrone.app.decoy.DecoySendPairing
 import com.zitrone.app.decoy.RegistrationPowSolver
+import com.zitrone.app.decoy.WsSyntheticSocket
 import com.zitrone.app.diagnostics.BootDiagnostics
 import com.zitrone.app.i2p.I2pIntegration
 import com.zitrone.app.net.ApiClient
@@ -1531,6 +1533,17 @@ class AppContainer(private val app: Application) {
             live.wsClient.disconnect()
             live.apiClient.accessToken?.let(live.wsClient::connect)
         }
+        // U4: the synthetic socket moves with the real one. Left on the old endpoints it would keep
+        // cover traffic flowing over the transport the user just switched away from — worse than no
+        // cover at all, because those frames are attributable to this device on a transport the
+        // user believes is off.
+        //
+        // Deliberately NOT inside the confined swap above, and the difference from the real socket
+        // is the point: the confinement exists so a pairing cannot emit its cover frame on a
+        // different socket than its real frame. The synthetic side has no pairing — its acks and
+        // burns answer envelopes that have already arrived — so there is nothing to split, and the
+        // redial needs a token read that may suspend, which the confined lambda cannot do.
+        live.decoyInbound?.let { session -> scope.launch { session.reconnect() } }
     }
 
     /**
@@ -1548,6 +1561,9 @@ class AppContainer(private val app: Application) {
         val live = _session.value
         live?.apiClient?.updateTransport(httpClient, apiBase)
         live?.wsClient?.updateTransport(httpClient, ws)
+        // U4: the synthetic socket dials the same endpoints as the real one. Installed here, under
+        // the lock, with the redial itself left to applyTransport — same split as the real socket.
+        live?.decoyWsClient?.updateTransport(httpClient, ws)
         if (state == TransportState.TOR) TorIntegration.requestOrbotStart(app)
         return live?.takeIf {
             it.wsClient.connectionState.value != WsClient.ConnectionState.DISCONNECTED
@@ -1667,6 +1683,21 @@ class SessionContainer(
      * is constructed before the coordinator that owns its teardown; nothing else reads it.
      */
     private val coverTraffic: CoverTraffic
+
+    /**
+     * The synthetic cover account's own socket (0.10.0 U4), or null when this build has no decoy
+     * relay. Exposed because [ZitroneApp.applyTransportLocked] must re-point it on a transport
+     * swap alongside [wsClient] — a synthetic socket left on the old endpoints after a Tor/I2P
+     * toggle would keep cover traffic on a transport the user just turned off.
+     */
+    val decoyWsClient: WsClient?
+
+    /**
+     * The synthetic side of the cover exchange (0.10.0 U4), or null. Exposed so the transport swap
+     * can redial it; its TEARDOWN is not called from outside — it is bound to the send pairing's
+     * (see `DecoyInboundSession.bindTo`) so the ordering cannot be broken by a later edit.
+     */
+    val decoyInbound: DecoyInboundSession?
     val coordinator: MessagingCoordinator
 
     init {
@@ -1742,7 +1773,31 @@ class SessionContainer(
             // ApiClient, so "the send-pairing path writes nothing durable" is a fact about its type
             // — the discipline DecoyEnvelopeBuilder documents. The synthetic account id is read per
             // send because it APPEARS mid-session, when provisioning lands.
-            coverTraffic = decoyRelay?.let { relayFactory ->
+            // The R-U3-1 yield (0.10.0 U3 fix round 6), hoisted out of the pairing because U4's
+            // send-back consults THE SAME INSTANCE (R-U4-4). A second CoverPressure with its own
+            // thresholds would be two independent meters over one socket, each seeing half the
+            // traffic and neither tripping when the pair of them should. The queue reading MUST be
+            // the live socket's own: a supplier that always answers 0 leaves cover free to fill the
+            // outbound buffer a real frame needs, which is the defect this closes.
+            val coverPressure = CoverPressure(queuedBytes = wsClient::outboundQueueBytes)
+            // The synthetic account's own socket (0.10.0 U4). Same endpoints and same OkHttp client
+            // as the real one — a second connection, not a second network — so a transport swap
+            // redials both through applyTransportLocked/applyTransport.
+            decoyWsClient = decoyRelay?.let {
+                WsClient(wsUrl, httpClient, scope) { line -> bootDiagnostics.record(line) }
+            }
+            val inbound = decoyWsClient?.let { syntheticWs ->
+                DecoyInboundSession(
+                    scope = scope,
+                    syntheticAccountId = { DecoyAuthStore(rt).accountId },
+                    realAccountId = { apiClient.accountId },
+                    accessToken = { DecoyAuthStore(rt).accessToken },
+                    socket = WsSyntheticSocket(syntheticWs),
+                    pressure = coverPressure,
+                )
+            }
+            decoyInbound = inbound
+            val pairing = decoyRelay?.let { relayFactory ->
                 DecoySendPairing(
                     scope = scope,
                     sender = {
@@ -1756,19 +1811,23 @@ class SessionContainer(
                     },
                     recipient = { DecoyAuthStore(rt).accountId },
                     send = wsClient::sendMessage,
-                    // The R-U3-1 yield (0.10.0 U3 fix round 6). The queue reading MUST be the live
-                    // socket's own: a supplier that always answers 0 leaves cover free to fill the
-                    // outbound buffer a real frame needs, which is the defect this closes.
-                    pressure = CoverPressure(queuedBytes = wsClient::outboundQueueBytes),
+                    pressure = coverPressure,
                     provision = {
                         DecoyAccountProvisioner.forRuntime(
                             runtime = rt,
                             relay = relayFactory(),
                             powSolver = RegistrationPowSolver(),
                         ).provisionIfNeeded()
+                        // Provisioning is lazy, so the synthetic account can APPEAR mid-session —
+                        // this is the call that opens its socket the first time. Idempotent; the
+                        // start below covers a vault that already had an account at unlock.
+                        inbound?.start()
                     },
                 )
             } ?: CoverTraffic.NONE
+            // U4's teardown is bound to U3's rather than left to two call sites to remember: the
+            // synthetic socket must not outlive the real session. See DecoyInboundSession.bindTo.
+            coverTraffic = inbound?.bindTo(pairing) ?: pairing
             coordinator = MessagingCoordinator(
                 appContext = app,
                 scope = scope,
@@ -1792,7 +1851,18 @@ class SessionContainer(
                 // U3: wraps the publish tail of every outbound envelope. MessagingCoordinator.stop()
                 // is what tears it down, which is why the coordinator owns the reference.
                 coverTraffic = coverTraffic,
+                // U4 / R-U4-1: the synthetic side replies occasionally, so the real client can now
+                // receive an envelope that must never become a message. Read per envelope, not
+                // captured — the synthetic account APPEARS mid-session when provisioning lands, and
+                // a captured null would leave the guard permanently open on exactly the vaults that
+                // go on to generate cover traffic. Null id answers false for every sender.
+                isSyntheticSender = { senderId ->
+                    DecoyAuthStore(rt).accountId?.let { it == senderId } == true
+                },
             )
+            // A vault that ALREADY had a synthetic account at unlock: open its socket now. A vault
+            // that does not returns immediately and is covered by the provisioning path instead.
+            inbound?.let { session -> scope.launch { session.start() } }
         } catch (t: Throwable) {
             runCatching { rt.close() }
             throw t

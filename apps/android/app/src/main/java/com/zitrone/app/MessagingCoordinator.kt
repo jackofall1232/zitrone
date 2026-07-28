@@ -181,6 +181,25 @@ class MessagingCoordinator(
      * NEVER, because `quiesce` leaves the register open and a swap off the worker splits pairs.
      */
     private val coverTraffic: CoverTraffic = CoverTraffic.NONE,
+    /**
+     * Cover traffic (0.10.0 U4) — **R-U4-1**: whether an inbound envelope's `sender_id` is this
+     * vault's synthetic cover account. U4 lets the synthetic side occasionally reply, so the real
+     * client can now receive an envelope that must never become a message. True means drop it
+     * before decrypt. Default false: every non-vault construction and every pre-U4 test is
+     * unaffected, and a vault with no synthetic account answers false for every sender.
+     *
+     * **Why the guard is here and not after decrypt.** "A cover blob is random bytes, so decryption
+     * will fail anyway" is an outcome claim, and a false one: [onMessageDeliver] selects the
+     * decrypt path on `ephemeralKey != null`, and libsignal's PreKey path **TOFU-establishes a
+     * session and a remote identity inside `decrypt`, before any MAC check can reject the blob** —
+     * so the failure lands after the crypto state is written. This is the same reason the
+     * deleted-contact tombstone is checked before decrypt, and this guard sits beside it.
+     *
+     * **Trust assumption, recorded rather than assumed:** `sender_id` is set by the relay, so a
+     * hostile relay could suppress a real message by labelling it with the synthetic account id.
+     * That grants it no new power — a relay that wants a message dropped can simply drop it.
+     */
+    private val isSyntheticSender: (String) -> Boolean = { false },
 ) : WsClient.Listener {
 
     private val _typingPeers = MutableStateFlow<Set<String>>(emptySet())
@@ -1865,6 +1884,25 @@ class MessagingCoordinator(
                 // drop. Keyed on the deletion tombstone, NOT roster absence — a
                 // first-time inbound sender is legitimately absent and must still
                 // create an "Unknown contact" below (see isDeletedContact).
+                // R-U4-1 — a cover frame never becomes a message. The synthetic cover account
+                // replies occasionally (U4), and its reply must not reach decryption, the message
+                // store, the roster, the unread count or the notification scheduler. Checked FIRST
+                // and BEFORE decrypt: see [isSyntheticSender] for why "it would fail to decrypt
+                // anyway" is not a defence.
+                //
+                // Acked BARE, unlike the tombstone branch below, and the difference is deliberate.
+                // That branch needs ackDurable because the tombstone it keys on may still be
+                // RAM-only, and acking early could let the relay discard a REAL message while a
+                // crash restored the pre-delete vault. Here there is no real message to lose: the
+                // envelope is cover traffic that must never surface, so dropping the relay's copy
+                // immediately is the outcome we want, not a risk we are taking. A crash before the
+                // decoy section is durable loses the synthetic account id — and the envelope with
+                // it, since the relay no longer holds one to redeliver.
+                if (isSyntheticSender(envelope.senderId)) {
+                    diag("recv: cover-account envelope — dropped before decrypt")
+                    ws.ackMessage(envelope.id)
+                    return@runCatching
+                }
                 if (isDeletedContact(envelope.senderId)) {
                     diag("recv: message for deleted contact — dropped before decrypt")
                     // The drop happens BEFORE decrypt, so THIS branch mutates nothing — but the

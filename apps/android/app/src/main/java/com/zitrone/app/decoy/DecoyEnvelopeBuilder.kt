@@ -334,6 +334,83 @@ class DecoyEnvelopeBuilder(
         return decoy
     }
 
+    /**
+     * One send-back: the synthetic account replying to a cover envelope it just received (U4,
+     * R-U4-3). Addressed to [recipientAccountId] — the real account — and mirroring [received]'s
+     * ciphertext byte length, timestamp width, TTL, burn flag, media type and version.
+     *
+     * ## Why a reply is ALWAYS established-session shape, and why that is not a shortcut
+     *
+     * A reply carries no `ephemeral_key` and no `prekey_id`. That is what the protocol does: in
+     * X3DH, A opens with a `PreKeySignalMessage` and B answers with a plain `SignalMessage`,
+     * because B has the session by then. A send-back carrying `ephemeral_key` would be the *less*
+     * plausible frame — it would assert that the synthetic account had never heard from a peer it
+     * is visibly replying to.
+     *
+     * It also decides a durable-state question in U4's favour, which is recorded here because the
+     * two reasons coincide and a later reader might otherwise "fix" the shape. A prekey-shaped
+     * reply must put the sender's `registration_id` inside the blob; `DecoyState` does **not**
+     * persist the synthetic account's, so producing one would mean a new persisted field, a
+     * `TAG_DECOY` format change and a §4.1 storage-format question. The established-session branch
+     * needs neither a registration id nor an identity key, so **U4 adds no durable writer at all**.
+     * That is why this function takes no [Sender]: it cannot use one, and accepting one would
+     * invite exactly the change this paragraph exists to prevent.
+     *
+     * ## Size
+     *
+     * The reply's ciphertext is exactly as long as the received one's. That is a *choice*, not a
+     * derivation, and the honest statement of it is: any reply size is a guess about a distribution
+     * we have not measured, and matching the message being answered is the only one that needs no
+     * such guess. The resulting *frame* is shorter than the received frame, because the reply omits
+     * the `ephemeral_key` and `prekey_id` fields — correct, and true of real replies too.
+     *
+     * §2.3 residual 1 applies here unchanged: the body absorbs a varint-width difference, so it is
+     * not always a padded-block multiple.
+     *
+     * @param counter this reply's `message_number` in the synthetic account's own sending chain.
+     *   The caller owns it; it is never persisted, so it restarts at 0 with the process — which is
+     *   what a real client emits after a ratchet turn.
+     */
+    fun buildReply(
+        replyingAccountId: String,
+        recipientAccountId: String,
+        received: MessageEnvelope,
+        counter: Int,
+    ): MessageEnvelope {
+        require(replyingAccountId.isNotEmpty()) { "the replying account id must not be empty" }
+        require(recipientAccountId.isNotEmpty()) { "the reply recipient account id must not be empty" }
+        require(replyingAccountId == received.recipientId) {
+            "a send-back is issued by the account the covered envelope was addressed to"
+        }
+        require(counter >= 0) { "message_number is never negative" }
+
+        val target = base64DecodedLength(received.ciphertext)
+        require(target <= MAX_CIPHERTEXT_BYTES) {
+            "received ciphertext is $target B, past the $MAX_CIPHERTEXT_BYTES B ceiling"
+        }
+        val blob = signalMessageBytes(counter, bodyLengthFor(target, counter))
+        check(blob.size == target) {
+            "reply ciphertext is ${blob.size} B where the received one is $target B"
+        }
+
+        return MessageEnvelope(
+            id = newMessageId(),
+            senderId = replyingAccountId,
+            recipientId = recipientAccountId,
+            ciphertext = encode(blob),
+            // Established-session shape. Both null is the whole point — see the kdoc.
+            ephemeralKey = null,
+            preKeyId = null,
+            messageNumber = counter,
+            previousChainLength = PREVIOUS_COUNTER,
+            timestamp = timestampAsWideAs(received.timestamp),
+            ttlSeconds = received.ttlSeconds,
+            burnOnRead = received.burnOnRead,
+            mediaType = received.mediaType,
+            version = received.version,
+        )
+    }
+
     // -- sizing ------------------------------------------------------------------------------
 
     /**
