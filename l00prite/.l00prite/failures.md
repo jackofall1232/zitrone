@@ -818,6 +818,89 @@ instruction the spec had no business giving. Specs should state observable **req
 ("indistinguishable from a real envelope of the same shape") and let the implementation own the
 construction, because the implementation is testable against reality and prose is not.
 
+### ⭐⭐ THE COSTLIEST ERROR OF THE 0.10.0 ARC — "absolute" on a requirement about OUTCOMES
+
+**Seven review rounds and four independent lenses ground correctly against a premise that should
+never have been written. The review process was not at fault; it worked exactly as designed, which
+is precisely why it kept producing findings.**
+
+R-U3-1 and R-U3-3 were written as guarantees about **outcomes** — *"a real send is never made less
+durable"*, *"failure must be uniform, never intermittent"* — each with a supremacy clause. Outcomes
+depend on the network. **Networks drop packets.** So reachable counterexamples always exist, and four
+lenses duly found them: a full transport queue, an exhausted relay budget, a blocked worker, a socket
+dying between two writes. Three of four concluded the feature was unshippable. They were right,
+*given the requirement*.
+
+**THE RULE. State requirements as rules about YOUR OWN BEHAVIOUR, which you can hold absolutely.
+Never as guarantees about outcomes you do not control.**
+
+- ❌ *"A real send is never made less durable."* — a claim about the world.
+- ✅ *"Cover traffic never competes with a real send for any resource; it yields."* — a claim about
+  our code, holdable without exception, and **it dissolved the two most severe findings**, which
+  existed only because cover was permitted to compete.
+
+This is the U1/U2 lesson one level up. That one was *"a spec that tells the implementer HOW to
+construct something is a second implementation."* This one is: **a spec that promises an outcome it
+does not control is a second reality.** Recognise the shape: if a requirement can be falsified by the
+network misbehaving, it is describing the world, not your program.
+
+### ⭐ WRITE THE VALUE MODEL BEFORE THE REQUIREMENTS
+
+Nothing in the spec ever said **what this layer was worth relative to the others.** There was a
+threat model (§1) — that is not the same thing. Without a value model, "absolute" looked reasonable
+when written, and every downstream lens inherited the assumption that cover traffic was a primary
+guarantee.
+
+What one paragraph would have said, and what it prevented for seven rounds:
+
+> Cover traffic does **not** hide that a message was sent — the TLS frame already shows that. It makes
+> an observer's candidate set **2 instead of 1** and forces them to pay interception and decryption
+> cost on both, compounding with I2P/Tor which make interception itself expensive. **It is the skin,
+> not the core** — Signal Protocol holds the content, the vault holds deniability, the transports hold
+> anonymity. In the project's own metaphor: **the decoy is the sugar in the lemonade. It sweetens the
+> juice; it is not the juice.** A missing decoy is an umbrella turning inside out while the raincoat
+> stays on.
+
+**RULE: every unit gets a value model — what this layer buys, what it does NOT buy, and what it is
+worth relative to the layers around it — written BEFORE its requirements, and reviewed adversarially
+like anything else.** The expensive errors in this feature were not in the code and not in the review
+loop; they were in the layer above both, which nothing was pointed at.
+
+### THE ONE-DIRECTIONAL HONESTY SWEEP — overclaims found, underclaims invisible
+
+On 2026-07-27 a full sweep corrected four published **overclaims** (sealed sender, typing indicators,
+decoy traffic, 3-hop relay). It walked past a line saying I2P was *"still in development"* with Tor as
+merely *"the active fallback today"* — **four separate times, in the same files, sometimes in adjacent
+paragraphs.** Both transports work. Tor is fast and preferred in practice; I2P's first-connect tunnel
+build is normal behaviour, not a fault.
+
+**An underclaim is also a false statement, and this one's user harm is sharper than some of the
+overclaims':** a reader who believes a shipped privacy transport is unfinished leaves it off and stays
+on clearnet — the exact opposite of the feature's purpose. Overclaims risk unearned confidence;
+underclaims cause people to decline protection they already have.
+
+**The detection methods are different, which is why one sweep missed the other class.** Overclaims are
+found by attacking a claim's evidence: *does the code support this?* Underclaims are found by the
+converse: **what does the code do that the docs fail to mention, or describe as weaker than it is?**
+Run both directions, or you will only ever find one.
+
+### DISCLOSURE vs DEGRADATION — the correlation bound most people would state too broadly
+
+"Cover must not fail in ways that correlate with anything observable" is the natural phrasing and it
+is **wrong** — it forbids load-shedding, which the subordination rule above *requires*.
+
+The correct test: **cover must not fail in ways that reveal events an observer cannot ALREADY
+observe.**
+
+- **Load-shedding = DEGRADATION, acceptable.** Dropping cover under pressure correlates with heavy
+  sending — but a burst of frames is already visible. Nothing new is revealed; the candidate set is
+  1 instead of 2 while the user is busy.
+- **Lock / teardown / transport-change correlation = DISCLOSURE, prohibited.** Those name a client
+  lifecycle event the observer could not otherwise see. That is what rounds 3–5 closed.
+
+Generalises past this feature: when writing a non-leakage constraint, ask **what the observer already
+has**, not merely what correlates.
+
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
   round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked

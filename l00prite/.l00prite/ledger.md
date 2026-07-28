@@ -1,5 +1,54 @@
 # Zitrone run ledger (CX33 / ubuntu-4gb-hel1-3)
 
+## 0.10.0-beta U3 (send pairing) — 7 review rounds, 5 fix rounds, and the requirement was the defect
+
+**Status 2026-07-28: code on `feat/0.10.0-decoy-u3-pairing` @ `7ae06e8f`, 723 tests / 0 failures /
+exit 0, UNMERGED. One fix round owed (the yield), then merge.**
+
+**The arc.** R1 4 P1 → design contradiction, maintainer ruled real-frame-first. R2 2 P1. R3 4 P1
+(severity UP; two introduced by R2's own fix). R4 1 P1 — **first reviewer convergence in seven
+rounds**. R5 the lock-boundary fix. R6 **hard cap**: Grok `CLEAN` vs Codex 4 P1 — maximal divergence,
+but not a factual disagreement. R7 (past cap, maintainer-authorised) added Gemini as a fourth lens.
+
+**R7 was unanimous 4/4 on the meta-rule:** a declared, tested residual cannot satisfy a requirement
+declared absolute. Kimi then refuted the dissent on *facts* — two of the four mechanisms were not
+"merely unpaired frames" but **failed real sends** (queue saturation, budget exhaustion), an R-U3-1
+delivery failure rather than an R-U3-3 marking one.
+
+**THE ROOT CAUSE WAS THE ARCHITECT'S REQUIREMENT, NOT THE CODE.** Both requirements were written as
+guarantees about **outcomes**, which the network can always falsify. Seven rounds of correct
+adversarial reasoning ground against a premise that should never have been written. Rewritten
+2026-07-28 (`78fd0f89`, `bed38595`):
+
+- **R-U3-1 → subordination.** No cover work precedes the real handoff; **cover never competes for a
+  contended resource — it yields.** Absolute as a rule about our code; promises nothing about the
+  network. **This dissolves the two worst findings**, which existed only because cover could compete.
+- **R-U3-3 → best-effort with a correlation bound**, and the bound is **disclosure, not rate**: cover
+  must not fail in ways revealing events an observer *cannot already observe*. Load-shedding is
+  degradation (fine); lock/teardown/transport correlation is disclosure (prohibited — closed in
+  R3–R5). **Drop tolerance ruled GENEROUS**: err toward dropping, stay off for a window, never
+  stutter.
+- **Value model recorded**: the decoy is the **sugar in the lemonade** — it makes the candidate set 2
+  instead of 1 and imposes cost, compounding with I2P/Tor. Skin, not core.
+
+**Dispositions.** Mechanisms 1 & 3 → the yield fix (owed). 2 → accepted trade (an unpaired frame
+beats skipping a key wipe). 4 → accepted uncorrelated residual.
+
+**Also this session:** the idle/dead-air ping was **CUT** (`c65d9a3e`) — an unpaired ping must invent
+a schedule, which is the fingerprint §8 chose pairing to avoid; U5 gone, `DecoyCounterReservation`
+removed with it, 0.10.0 is five units. The synthetic-account-survives-burn gate was **closed**
+(dominated by the real account, which already survives and is disclosed; and post-burn it is
+*unaddressable*). The **I2P/Tor underclaim was corrected** (`9f583821`) — both transports work.
+
+**Owed to U6:** the dead-air disclosure, and *"when cover traffic does not fire, your message is still
+end-to-end encrypted and still on your anonymous transport — what you lose is one layer of ambiguity,
+not your protection."*
+
+**Reviewer roster (maintainer, 2026-07-28):** Kimi K3 + Grok main, Codex tie-breaker, Gemini
+available. Kimi completes only in the interactive CLI (plan mode + `/yolo`); `kimi -p` does not finish
+— see `/root/.claude/CLAUDE.md`. Prompting guidance in `reviews/KIMI-PROMPTING.md`.
+
+
 Now at `l00prite/.l00prite/ledger.md` (TRACKED in-repo, new nested layout). Append entries; do not overwrite prior runs.
 
 ---
