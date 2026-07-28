@@ -1144,3 +1144,59 @@ reviewer is handed.
 and spends nothing after one.* Absolute, about our own code, and satisfied by the implementation.
 The three places cover still consumes a resource are now NAMED in the requirement rather than
 denied by it. See [[the one-directional honesty sweep]] and the outcomes-vs-behaviour entry above.
+
+## 2026-07-28 — a mutation sweep cannot see a guard that no longer exists
+
+**What happened.** A U4 round-3 edit replaced one tripwire test by cutting a region between two
+anchors. The region contained **two** tests, and the second was collateral. The suite stayed green,
+the test count moved by one, and nothing flagged it. The mutation sweep then reported a survivor —
+but only because the *other* deleted test happened to guard something on my mutation list. I
+restored that one, wrote the loss up in the adjudication as caught-and-closed, and moved on. **A
+later review round found the second deletion by reading the unit.**
+
+**The technique's blind spot, stated precisely.** A mutation sweep answers "are the mutations I wrote
+detected?" A deleted guard has nothing left to mutate, so it is invisible to the sweep *by
+construction*. The sweep found this one only by luck of adjacency. It is the one class of test
+regression that the strongest tool in this repo is structurally unable to detect.
+
+**Why the write-up was worse than the deletion.** The deletion was an accident. Recording it as
+closed was a claim, and it was false — it turned a recoverable slip into a wrong entry in the
+project's own record, which the next person would have trusted. **Restoring what an error revealed
+is not the same as repairing the error:** I fixed the instance the tool pointed at and generalised
+nothing, when "what else did that edit remove?" was one `git diff --stat` away.
+
+**Rules.**
+1. **Test names and test COUNT are part of the diff to review.** A shrinking count with a green
+   suite is a defect until explained. `git diff --stat` on test files before every commit.
+2. Never cut a source region by anchor without reading everything between the anchors.
+3. When a tool reveals a mistake, ask what else the same action did — the tool showed you one
+   instance, not the extent.
+4. An adjudication that says a problem is closed is a **claim about the tree**, held to the same
+   standard as a claim about the code. Verify before writing it.
+
+See [[the one-directional honesty sweep]] — same shape: a check run in one direction, and the
+conclusion written as though it had been run in both.
+
+## 2026-07-28 — the guard was silent everywhere except the one place I added
+
+**What happened.** U4's R-U4-1 guard drops an inbound cover-account envelope before decrypt. I gave
+it a `diag()` line, as most branches on that path have. `BootDiagnostics.record` does
+`file.writeText`: every dropped cover envelope wrote a timestamped line to `boot-diagnostics.log`,
+surfaced in Settings → Diagnostics and surviving the process. **Durable, user-copyable evidence that
+this device ran cover traffic** — hence that a vault with a provisioned synthetic account exists —
+in a product whose feature *is* plausible deniability.
+
+**The tell I walked past.** Every other decoy surface takes no logger at all: the pairing, the
+builder and the provisioner are all constructed without one and fail silent, and each says so in its
+kdoc. **The discipline was already written down, in the files I had been editing all day.** I did not
+notice I was the only place breaking it, because I was matching the *surrounding* code — the
+coordinator, which logs freely — instead of the *feature's* code, which does not.
+
+**Rule.** When a new branch joins an existing function, it inherits two contexts: the function's
+conventions and the feature's invariants. **Where they conflict, the feature's win**, and the
+conflict is exactly where a defect hides — the code looks locally idiomatic. Ask "what does the rest
+of THIS FEATURE do here?" before "what does the rest of this file do here?"
+
+**Also:** the requirement did not catch it either. R-U4-3 said "adds no durable-state writer",
+meaning vault sections; a diagnostics log is durable state by any honest reading. A requirement
+scoped to the mechanism you were thinking about will not cover the one you were not.

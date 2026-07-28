@@ -1,0 +1,1 @@
+I'll conduct a full-unit adversarial review of U4 (read-only): start with §4.4 requirements and the round-4 fixes, then walk the implementation and tests end-to-end.Next I'll inspect the R-U4-1 guard, transport wiring, pressure/yield policy, and the tripwire tests that encode the round-4 fixes.
