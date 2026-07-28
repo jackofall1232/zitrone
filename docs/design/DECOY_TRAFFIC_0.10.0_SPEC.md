@@ -1262,6 +1262,138 @@ completed, and queued swaps are coalesced by generation so one user action produ
   messages. Receipts and attachment control payloads also traverse it. **Name the choice and its
   observable consequence; do not assume the answer.**
 
+### 4.4 U4 — the synthetic side. REQUIREMENTS, written before the code and falsified here.
+
+**Why this subsection exists at all.** U3 cost seven review rounds and four lenses because R-U3-1
+and R-U3-3 were written as guarantees about OUTCOMES, and every lens correctly falsified them. The
+rewrite then over-reached a second time in miniature (see `failures.md`, 2026-07-28). So U4's
+requirements are written first, as rules about **our own code's behaviour**, and each one is
+**falsified in place** — the counterexample is constructed here, in this document, before the
+implementation exists. If a requirement is stated as absolute, the counterexample must be
+*impossible*, not merely rare, not merely "handled elsewhere."
+
+#### What U4 is for, stated narrowly
+
+§2.4 declares an uncovered channel: control frames (`message.ack`, `message.burn`,
+`message.received`, `typing.*`) are plaintext, an order of magnitude smaller than any
+`message.send`, and this scheme generates **no cover for them**. Worse, a cover exchange without U4
+is *conspicuously one-directional*: envelopes flow to the synthetic account and nothing ever comes
+back, which no real conversation does.
+
+U4 is the **partial** mitigation §2.4 already promised: the synthetic side acks, burns, and
+occasionally replies, so the cover exchange produces control traffic of its own and the synthetic
+conversation is bidirectional. **It does not close the control channel and must never be described
+as doing so.** Full coverage stays out of scope for 0.10.0 and stays a declared residual.
+
+#### R-U4-1 — a cover frame never becomes a message
+
+> **No envelope whose `sender_id` is this vault's synthetic account may reach decryption, the
+> message store, the roster, the unread count, or the notification scheduler.** The guard sits
+> **before `signal.decrypt`**, is keyed on the synthetic account id read from the vault, and drops
+> unconditionally.
+
+**Falsification — constructed, not asserted.** Suppose the guard sat *after* decrypt, or relied on
+"a cover blob is random bytes, so decryption will fail anyway." Trace it: `MessagingCoordinator`
+selects the decrypt path on `isPreKeyMessage = envelope.ephemeralKey != null`, and a send-back
+mirroring a prekey-shaped cover carries `ephemeral_key`. libsignal's PreKey path **TOFU-establishes
+a session and a remote identity inside `decrypt`, before any MAC check can reject the blob.** So
+"it won't decrypt" is an outcome claim, and a false one: the failure happens *after* the crypto
+state is written. This is the identical reasoning the deleted-contact branch already carries at
+`MessagingCoordinator.kt:1858-1867`, and U4 reuses its placement rather than inventing one.
+
+Placement before decrypt makes the requirement **structural**: there is no path from the guard to
+`messages`, `conversations`, or `notificationScheduler`, because the function returns first. That
+is why R-U4-1 may be stated absolutely — the counterexample is unreachable, not unlikely.
+
+**Residual, named:** `sender_id` is set by the relay, so a hostile relay can suppress a real message
+by labelling it with the synthetic account id. This grants it **no new power** — a relay that wants
+a message dropped can simply drop it — and it is recorded so the guard's trust assumption is
+explicit rather than assumed.
+
+#### R-U4-2 — the synthetic side runs no crypto and writes no crypto state
+
+> **The synthetic side never decrypts, never establishes a session, never writes a Signal record,
+> and never advances a ratchet.** It acks and burns on the envelope's relay-assigned id alone.
+
+**Falsification.** The only way to violate this is to route the synthetic connection through
+`SignalProtocolManager`. It is not wired to one: `DecoyInboundSession` has no reference to it and no
+vault store access beyond the credentials read U1 already owns. The requirement is enforced by the
+type's dependencies, checkable by reading its constructor.
+
+#### R-U4-3 — U4 adds no durable-state writer
+
+> **U4 introduces no new persisted field and no new writer to `TAG_DECOY` or any other section.**
+
+This is why the send-back is built in **established-session shape** (`ephemeral_key` absent). A
+prekey-shaped reply would need the synthetic account's `registration_id` inside the blob, which
+`DecoyState` does not persist — and persisting it would be a new durable writer, a `TAG_DECOY`
+format change, and a §4.1 storage-format question, all to make a *reply* look like a first message.
+
+**It is also what the protocol actually does.** In X3DH, A opens with a `PreKeySignalMessage`; B
+replies with a plain `SignalMessage`, because B now has the session. A reply that carried
+`ephemeral_key` would be the *less* plausible frame. The cheap option and the correct one coincide,
+which is worth stating explicitly so a later reader does not "fix" it.
+
+Consequently the WRITER/READER invariant table of §4 is **unchanged by U4**, and that is a claim to
+be checked at review, not taken on trust: the check is that no U4 file calls `runtime.mutate`,
+`DecoySectionLock.withSection`, or `storeTokensForAccount`.
+
+#### R-U4-4 — subordination, inherited from U3 rather than restated
+
+> **The synthetic connection and its send-backs yield on every signal of contention available to
+> them, and spend nothing after one** — the same `CoverPressure` instance the send pairing consults,
+> not a second copy with its own thresholds.
+
+**Falsification of the tempting weaker version.** "The synthetic socket is a *separate* connection,
+so it does not compete with the real send." False on two counts, both measurable: both sockets share
+the device's uplink and the relay's per-account budget is per-*account*, but the **send-back is
+addressed to the real account**, so it consumes the real account's inbound path and the relay's
+routing for it. A second connection is not a second network.
+
+**The ack and the burn are deliberately exempt**, and this is the R-U3 disclosure-vs-degradation
+rule applied unchanged: a cover frame missing under load is *degradation*; an ack that never fires
+leaves the relay holding a cover envelope and **retrying delivery**, which is a durable, observable
+artefact of the yield. Shedding acks would make load *disclosable*. Only the **send-back** — the
+purely optional half — yields.
+
+#### R-U4-5 — the burn timing is a behaviour, not a guarantee
+
+> **The synthetic side acks on receipt and burns after a short randomised delay.** The delay is
+> drawn per envelope; the requirement is that our code draws and waits, not that the relay observes
+> any particular interval.
+
+**Falsification of the outcome form.** "The burn happens ~30 ms after delivery" is falsifiable by
+scheduler pressure, a dead socket, or process death — exactly the class of claim that cost U3 seven
+rounds. The behaviour form is not. §8 of `VAULT_ARCHITECTURE.md` says "burn-on-delivery ~30 ms" and
+that figure is a **design intent for the drawn interval**, not an assertion about the wire.
+
+#### R-U4-6 — failure is silent, and bounded by disclosure rather than by rate
+
+> **A failed ack, burn, send-back, or connection is dropped silently.** It is never surfaced, never
+> retried in a way that distinguishes it from an idle client, and never allowed to fail the real
+> session. The bound is the R-U3-3 one: **the synthetic side must not fail in ways that reveal
+> events an observer cannot already observe.**
+
+**Falsification — the one case that nearly violates it.** The synthetic socket's credentials live in
+the vault, so it must disconnect when the vault locks. Does that disclose the lock? Trace what an
+observer already sees: the **real** socket also disconnects at lock, and it is the larger, more
+distinctive flow. The synthetic disconnect is therefore correlated with an event **already
+observable on the same link at the same instant**, and discloses nothing new. It passes — but it
+passes by argument about a specific observable, which is the only way this test can be passed, and
+the argument is recorded rather than assumed.
+
+**The converse failure, which the implementation must avoid:** the synthetic socket must **not**
+outlive the real session, because a connection that stayed up across a lock would disclose the lock
+by *contrast* — the one flow that does not stop.
+
+#### What U4 deliberately does NOT claim
+
+- It does not cover the control channel. It adds traffic to it. §2.4's residual stands verbatim.
+- It does not make the synthetic conversation indistinguishable from a real one. Residuals 1–4 of
+  §2.3 are unaffected; residual 2 (the repeating `message_number`) is made *less* visible by
+  send-backs, which is a reduction and not a fix.
+- It does not make cover traffic continuous. The synthetic side is silent when the real side is.
+
 ## 5. Implementation units — Rule of 6, hard cap at 6
 
 Each unit is independently reviewable, adversarially reviewed to convergence, and merged before the
