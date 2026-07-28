@@ -54,11 +54,44 @@ import kotlin.coroutines.CoroutineContext
  * [NONE] remains the whole "cover traffic off" implementation: a coordinator built without cover
  * traffic runs the identical publish tail and then one non-inlined call that returns, so there is no
  * `if (decoysEnabled)` anywhere on the real send path to get wrong.
+ *
+ * ## THE CONFINEMENT CONTRACT (fix round 4) — the only thing an implementation may assume
+ *
+ * **[cover], [stop] and [quiesce] are all called on ONE single-threaded worker** —
+ * `MessagingCoordinator`'s `confined` dispatcher, which is where every send already runs. This is
+ * not a convenience: it is what makes "cover is subordinate to the real send" hold under
+ * *concurrency* rather than only in program order.
+ *
+ * Round 3 declared a residual it believed was forced: between `ws.sendMessage` returning and the
+ * pairing registering itself with teardown, a concurrent `stop()` could slip past, and closing that
+ * window seemed to require a lock (or cover work) in front of the handoff, which R-U3-1 forbids
+ * absolutely. **That argument was refuted with a construction, and the construction is this one:**
+ * terminal teardown is *enqueued on the worker the sends already run on*, so it cannot interleave
+ * with a send at all — it runs strictly before or strictly after, never inside. The publish tail and
+ * the pairing's admission sit in the same uninterrupted slice of that worker (there is no suspension
+ * point between them), so there is nothing left to interleave *with*. **No lock and no cover-side
+ * instruction was added in front of any real send to get it.**
+ *
+ * Two things follow, and both were P1s before:
+ *
+ *  - **Admission cannot lose a race with teardown**, so the R-U3-1 residual is retired rather than
+ *    accepted.
+ *  - **The drain never waits**, so it needs no wall clock. A pairing is admitted only once its cover
+ *    frame exists, and the build cannot be interrupted by teardown, so every admitted pairing is
+ *    always ready to emit the moment teardown looks at the register. The 100 ms drain deadline that
+ *    used to abandon a slow build — bounding *suspension* while claiming to bound *time* — is gone
+ *    because there is no longer anything for it to bound.
  */
 interface CoverTraffic {
 
     /**
-     * Emit cover traffic for [real] — **an envelope the caller has ALREADY handed to the socket.**
+     * Emit cover traffic for [real] — **an envelope the caller has ALREADY handed to the socket, and
+     * which the socket ACCEPTED.**
+     *
+     * Called only on a genuine handoff (fix round 4): a send whose envelope was discarded (contact
+     * deleted mid-send) or refused (socket down) must not reach this method, because a decoy with no
+     * real frame behind it is a frame the user never generated — the same marked-pair defect as an
+     * unpaired real frame, in the other direction.
      *
      * Implementations may suspend for as long as they like: nothing they do can reach the real send,
      * because the real send is over. They must not throw: a throw here would propagate into
@@ -68,8 +101,8 @@ interface CoverTraffic {
     suspend fun cover(real: MessageEnvelope)
 
     /**
-     * Session teardown (R-U3-5) — and **the transport's own invalidation is handed to this method
-     * rather than performed beside it.**
+     * TERMINAL session teardown (R-U3-5) — and **the transport's own invalidation is handed to this
+     * method rather than performed beside it.**
      *
      * Round 2's teardown disconnected the socket first (`ws.disconnect()`) and stopped cover second,
      * which put a lone real frame followed by a TLS close on the wire every time a vault locked
@@ -79,21 +112,43 @@ interface CoverTraffic {
      * the provisioning job does not own the pairings already admitted. So the ordering is expressed
      * as a *dependency* instead of as a convention: an implementation must
      *
-     *  1. stop admitting new pairings,
+     *  1. stop admitting new pairings (the caller owns the other half of R-U3-5 step 1 — refusing
+     *     new REAL sends — because only the caller has a send path to refuse),
      *  2. stop provisioning,
      *  3. cancel, complete or drain every pairing it has already admitted,
      *  4. and only then run [invalidateTransport].
      *
      * [invalidateTransport] runs exactly once, and the caller must not invalidate the transport
-     * itself — that is the point of passing it.
+     * itself — that is the point of passing it. **Called on the confinement worker** (see the
+     * confinement contract above), which is what makes step 3 a drain rather than a race.
      */
     fun stop(invalidateTransport: () -> Unit)
+
+    /**
+     * NON-TERMINAL quiesce: drain the admitted pairings, run [swapTransport], **and keep going.**
+     *
+     * The session survives; only the socket underneath it is replaced. `ZitroneApp` swaps transports
+     * in place when the user toggles Tor/I2P, which tears down a live TLS connection and immediately
+     * dials a new one. Round 3 left that path undrained and declared it a residual; the third lens
+     * ruled it P1 with a distinction neither reviewer had made — **a SPLIT pair is a stronger signal
+     * than a missing cover frame.** A missing frame is one low-grade anomaly plausibly attributable
+     * to jitter; a split pair is two identical-length frames milliseconds apart straddling a TLS
+     * teardown and reconnect, which lets an observer link frames *across connection boundaries*
+     * (defeating the unlinkability the padding exists to provide), binds the marked frame to an
+     * independently observable infrastructure event, and correlates it with "the user just changed
+     * their anonymity transport".
+     *
+     * So the same drain runs here, with the one difference that matters: **the transport is not
+     * invalidated.** New pairings are still admitted afterwards, over the new socket.
+     */
+    fun quiesce(swapTransport: () -> Unit)
 
     companion object {
         /** Cover traffic off: the real send path, unchanged, and teardown in its original order. */
         val NONE: CoverTraffic = object : CoverTraffic {
             override suspend fun cover(real: MessageEnvelope) = Unit
             override fun stop(invalidateTransport: () -> Unit) = invalidateTransport()
+            override fun quiesce(swapTransport: () -> Unit) = swapTransport()
         }
     }
 }
@@ -152,27 +207,47 @@ interface CoverTraffic {
  * So this class keeps a register of **admitted pairings**, and [stop] drains it before the transport
  * is invalidated:
  *
- *  - [cover] admits a pairing (a [Pending] in [inFlight]) as its first action, then builds, then
+ *  - [cover] **builds the cover frame first and admits the built frame second** (fix round 4), then
  *    sleeps the drawn gap, then emits.
  *  - [stop] takes the same lock, **emits every admitted pairing's cover frame immediately, gapless,
- *    while the socket is still live**, and only then runs `invalidateTransport`. A pairing whose
- *    frame is still being built is waited for — bounded by [DRAIN_TIMEOUT_MS], and in practice
- *    instant, because **there is no suspension point between admission and the built frame being
- *    handed to the drain**: `buildCover` is a plain non-suspending function, so an admitted pairing
- *    always resolves in straight-line CPU time rather than behind I/O.
+ *    while the socket is still live**, and only then runs `invalidateTransport`.
  *  - Whichever of the two removes a pairing from the register is the one that emits its frame, so a
  *    cover frame goes out exactly once — see [Pending].
  *
- * **The residual, stated rather than claimed away.** One window survives, and it is *forced by the
- * requirement above it*: between `ws.sendMessage` returning and [cover] taking the lock there are a
- * handful of instructions in which teardown can slip past. Closing it would mean registering the
- * pairing *before* the real publish — i.e. putting cover-side work back in front of the handoff, and
- * a lock a real send could queue on, which R-U3-1 forbids absolutely. So the two requirements meet
- * here, and what is left is a few instructions with no suspension, no I/O and no allocation of
- * consequence — the same class as "the socket dies between the two writes", which is already
- * accepted for ordinary network loss and which no ordering can remove. Round 2's window was 5–50 ms
- * wide and caught *every* pairing that was mid-gap; this one is not a window teardown can be relied
- * on to hit.
+ * ## WHY BUILD-THEN-ADMIT IS SAFE NOW, AND WHY IT WAS NOT BEFORE (fix round 4)
+ *
+ * Round 3 admitted first *because* teardown ran on a different thread: a pairing caught mid-build
+ * would otherwise have been abandoned, so the register had to hold unbuilt pairings and the drain
+ * had to **wait** for them — bounded by a 100 ms deadline. That deadline was a P1 in its own right.
+ * "Non-suspending" bounds *suspension*, not *time*: slow cryptographic generation, scheduler
+ * starvation or a stalled `recipient()` all overrun it without suspending, and the drain then
+ * abandoned the pairing and disconnected — producing the deterministically unpaired, teardown-
+ * correlated real frame the drain exists to prevent.
+ *
+ * The confinement contract on [CoverTraffic] removes the premise. Teardown is queued on the same
+ * single worker every send runs on, and everything from the caller's `ws.sendMessage` through
+ * [buildCover] to `inFlight.add` is one uninterrupted slice of that worker with **no suspension
+ * point in it**. Teardown therefore cannot land mid-build: it runs strictly before the slice (and
+ * the pairing is refused — but so was the real frame it would have covered, because the socket was
+ * already dead when the caller's publish tail ran) or strictly after it (and the pairing is in the
+ * register, already built, and is drained). So:
+ *
+ *  - the register never holds an unbuilt pairing, so the drain never waits;
+ *  - there is no wall clock anywhere in teardown, so there is nothing left to overrun;
+ *  - and the round-3 residual — the "handful of instructions" between the handoff and admission —
+ *    **is closed, not accepted**, because those instructions are not interleavable.
+ *
+ * What that costs, stated: the build now sits between the real frame and the register rather than
+ * after the register. It is still strictly *after* `ws.sendMessage`, so R-U3-1 is untouched — no
+ * cover-side instruction moved in front of a handoff, and the K window is byte-for-byte the pre-U3
+ * one. And it buys the deletion of the resolved-flag, the condition variable, the drain loop and the
+ * deadline: four moving parts and two P1s, for one reordering.
+ *
+ * **The one thing an implementation cannot enforce for itself** is that its caller really is
+ * confined. [teardown] is therefore kept even though a strictly confined caller would not need it:
+ * it keeps this class internally consistent (exactly-once emit, no torn register) under a caller
+ * that violates the contract, so a contract violation degrades to the round-3 behaviour minus the
+ * wait, rather than to corruption. The contract itself is pinned by the caller's own tests.
  *
  * ## What survives, and what it costs
  *
@@ -273,15 +348,18 @@ interface CoverTraffic {
  *
  * [teardown] is a different lock with a different job: it serialises *cover* work against *teardown*
  * only. It is taken after the real frame is already gone, it is never held across a suspension, and
- * the only blocking wait on it is [stop]'s bounded drain.
+ * **there is no wait on it at all** — the drain has nothing to wait for (fix round 4), so the only
+ * way to block on it is the lock's own uncontended acquisition. Under the confinement contract even
+ * that never contends, because teardown and the sending coroutine are the same worker.
  *
  * ## Lock order
  *
  * [teardown] is a leaf for the send path — [cover] holds nothing else while taking it, and calls
  * [recipient] and [sender] (which take `DecoySectionLock` and the vault runtime's own locks
- * internally) **outside** it. [stop] holds it across `WsClient.sendMessage` and `WsClient.disconnect`,
- * neither of which takes a lock this class can be waiting on. The documented order (section →
- * stateLock → session → storage) is untouched.
+ * internally) **outside** it. [ensureProvisioning] takes it, and takes nothing else under it: the
+ * `scope.launch` it performs there only allocates and dispatches. [stop] and [quiesce] hold it
+ * across `WsClient.sendMessage` and the transport lambda, neither of which takes a lock this class
+ * can be waiting on. The documented order (section → stateLock → session → storage) is untouched.
  *
  * ## Provisioning is triggered HERE — the first thing in the tree that spends a registration
  *
@@ -330,8 +408,6 @@ class DecoySendPairing(
      * confined worker. A seam only so tests can put that job in their own virtual time.
      */
     private val provisionContext: CoroutineContext = Dispatchers.IO,
-    /** Monotonic clock for [stop]'s drain deadline. A seam so the timeout is testable. */
-    private val nanoTime: () -> Long = System::nanoTime,
 ) : CoverTraffic {
 
     private val provisioning = AtomicBoolean(false)
@@ -340,63 +416,62 @@ class DecoySendPairing(
     private var provisionJob: Job? = null
 
     /**
-     * Serialises cover work against teardown, and **nothing else**. Guards [transportInvalid],
-     * [inFlight] and every field of every [Pending] in it. Never held across a suspension point.
+     * Serialises cover work against teardown, and **nothing else**. Guards [transportInvalid] and
+     * [inFlight]. Never held across a suspension point.
+     *
+     * Under the [CoverTraffic] confinement contract this lock is never contended — teardown and the
+     * sending coroutine are the same worker. It is kept anyway: see "the one thing an implementation
+     * cannot enforce for itself" in the class kdoc.
      */
     private val teardown = ReentrantLock()
-
-    /** Signalled whenever a [Pending] becomes [Pending.resolved] — [stop]'s drain waits on it. */
-    private val resolved = teardown.newCondition()
 
     /** True from the moment [stop] is about to invalidate the transport. Terminal; never cleared. */
     private var transportInvalid = false
 
-    /** Every pairing admitted and not yet finished. @GuardedBy [teardown]. */
+    /**
+     * Every pairing admitted and not yet finished. @GuardedBy [teardown].
+     *
+     * **Every member is already BUILT** (fix round 4) — a pairing is admitted with its cover frame
+     * in hand, so the drain has nothing to wait for and needs no deadline.
+     */
     private val inFlight = mutableSetOf<Pending>()
 
     /**
-     * One admitted pairing. Both fields are @GuardedBy [teardown], deliberately: teardown and the
-     * sending coroutine race for the right to emit, and one lock is easier to argue about than two
-     * atomics.
+     * One admitted pairing: a cover frame that has been built and not yet emitted.
      *
      * **MEMBERSHIP OF [inFlight] IS THE RIGHT TO EMIT**, which is why there is no `emitted` flag:
      * whoever removes a pending from the register emits its frame, and the removal happens under the
-     * lock, so exactly one of the two ever does. That matters in one real window — [stop]'s drain
-     * releases the lock while it waits for a pairing that is still building, and a pairing it has
-     * already emitted can wake inside that window and reach [finish] with the transport still valid.
+     * lock, so exactly one of the two ever does — the drain, or the sending coroutine waking from
+     * its gap (or unwinding through cancellation).
      */
-    private class Pending {
-        /** The cover frame has been built (or refused, leaving [decoy] null). */
-        var resolved = false
-        var decoy: MessageEnvelope? = null
-    }
+    private class Pending(val decoy: MessageEnvelope)
 
     override suspend fun cover(real: MessageEnvelope) {
-        // ADMIT FIRST, BUILD SECOND. The register is what makes this pairing teardown's problem, so
-        // it is taken before any work that could take time — a pairing that is still building when
-        // the vault locks is waited for, not abandoned.
-        val pending = Pending()
+        // BUILD FIRST, ADMIT SECOND — the reverse of round 3, and safe for the reason set out in the
+        // class kdoc: teardown runs on this same worker, so this whole prologue (the caller's
+        // publish tail, this build, the admission below) is ONE uninterrupted slice with no
+        // suspension point in it. Nothing can land in the middle of it, so the register never has to
+        // hold an unbuilt pairing and the drain never has to wait for one.
+        //
+        // R-U3-5, checked before the build rather than only at admission: a locked session must not
+        // even DO the cover work — no vault read, no identity read, no keypair. Advisory only (the
+        // admission below is the authoritative check); it costs one uncontended lock and saves the
+        // whole build on every send that races a teardown it has already lost.
+        if (teardown.withLock { transportInvalid }) return
+        // Non-suspending and total: a refusal is a null, never a throw (R-U3-4 — the real send has
+        // already gone and must not be affected).
+        val decoy = buildCover(real) ?: return
+        val pending = Pending(decoy)
         val admitted = teardown.withLock {
             if (transportInvalid) false else inFlight.add(pending)
         }
         // Teardown has already invalidated the transport. R-U3-5 forbids emitting anything after
-        // that point, and it would be refused by the dead socket in any case. (The real frame this
-        // would have covered had almost certainly been refused too — see the residual in the class
-        // kdoc for the handful of instructions in which it might not have been.)
+        // that point, and it would be refused by the dead socket in any case — and the real frame
+        // this would have covered was refused too, because the caller's `ws.sendMessage` ran on this
+        // same worker, in this same slice, after the socket was already dead.
         if (!admitted) return
         try {
-            // Non-suspending and total: from admission to the frame being handed to the drain below
-            // there is no suspension point, which is what bounds stop()'s wait to CPU time.
-            val decoy = buildCover(real)
-            val proceed = teardown.withLock {
-                pending.resolved = true
-                pending.decoy = decoy
-                resolved.signalAll()
-                // Skip the gap if teardown has been — waiting can then only lose the frame, and
-                // [finish] will find the register no longer holds this pairing.
-                decoy != null && !transportInvalid
-            }
-            if (proceed) sleep(gapMs())
+            sleep(gapMs())
         } finally {
             // R-U3-3: the drawn gap is lost to cancellation, the PAIR is not. An unpaired real frame
             // is a marked frame, and cancellation (vault lock, teardown, backgrounding) is frequent
@@ -406,63 +481,63 @@ class DecoySendPairing(
         }
     }
 
-    override fun stop(invalidateTransport: () -> Unit) {
-        // (2) Stop provisioning. Outside the lock: cancellation is non-blocking and the job never
-        // touches [teardown].
-        provisionJob?.cancel()
-        provisionJob = null
-        teardown.withLock {
-            try {
-                // (1) + (3): no pairing admitted from here on, and every pairing already admitted is
-                // emitted NOW — gapless, while the socket is still live. A pairing still building is
-                // waited for; [DRAIN_TIMEOUT_MS] is a backstop for a thread that never gets
-                // scheduled, not an expected path, because the section it is in cannot suspend.
-                val deadline = nanoTime() + DRAIN_TIMEOUT_MS * 1_000_000L
-                while (true) {
-                    drainResolvedLocked()
-                    if (inFlight.isEmpty()) break
-                    val remaining = deadline - nanoTime()
-                    if (remaining <= 0L) break
-                    resolved.awaitNanos(remaining)
-                }
-            } finally {
-                // (4) ONLY NOW — and in a `finally`, because a teardown that fails to invalidate the
-                // transport is a session that outlives its own lock. Held under the same lock as the
-                // drain, so no pairing can observe a live socket, be admitted, and then find it
-                // dead: it is either admitted before this line and drained above, or refused after
-                // it and emits nothing.
-                inFlight.clear()
-                transportInvalid = true
-                invalidateTransport()
-            }
+    override fun stop(invalidateTransport: () -> Unit) = teardown.withLock {
+        try {
+            // (2) Stop provisioning. Under the lock, which is what closes the CAS-then-assign race:
+            // [ensureProvisioning] holds this same lock from its transportInvalid check through the
+            // assignment of [provisionJob], so a job either exists here and is cancelled, or has not
+            // been created and never will be (the check below the lock sees transportInvalid).
+            provisionJob?.cancel()
+            provisionJob = null
+            // (1) + (3): no pairing admitted from here on, and every pairing already admitted is
+            // emitted NOW — gapless, while the socket is still live. There is no wait: every member
+            // of the register is already built.
+            drainLocked()
+        } finally {
+            // (4) ONLY NOW — and in a `finally`, because a teardown that fails to invalidate the
+            // transport is a session that outlives its own lock. Held under the same lock as the
+            // drain, so no pairing can observe a live socket, be admitted, and then find it
+            // dead: it is either admitted before this line and drained above, or refused after
+            // it and emits nothing.
+            inFlight.clear()
+            transportInvalid = true
+            invalidateTransport()
         }
     }
 
-    /** Emit and retire every pairing whose frame is ready. @GuardedBy [teardown]. */
-    private fun drainResolvedLocked() {
+    override fun quiesce(swapTransport: () -> Unit) = teardown.withLock {
+        try {
+            // The same drain, for a socket that is being REPLACED rather than closed: every admitted
+            // pairing's cover frame goes out gapless on the connection its real frame went out on,
+            // so no pair is split across a TLS teardown/reconnect.
+            drainLocked()
+        } finally {
+            // NOT terminal: [transportInvalid] stays false and the register stays open, so the next
+            // send over the new socket is paired exactly as before. Held under the lock so a pairing
+            // cannot be admitted against the old socket and emitted against the new one.
+            inFlight.clear()
+            swapTransport()
+        }
+    }
+
+    /** Emit and retire every admitted pairing, gapless. @GuardedBy [teardown]. */
+    private fun drainLocked() {
         val iterator = inFlight.iterator()
         while (iterator.hasNext()) {
             val pending = iterator.next()
-            if (!pending.resolved) continue
             // Claim it before emitting: the removal IS the right to emit, and it must not be
             // undone by a throw out of `emit`.
             iterator.remove()
-            pending.decoy?.let(::emit)
+            emit(pending.decoy)
         }
     }
 
     /**
-     * Retire one pairing: emit its cover frame unless teardown's drain already claimed it, or unless
-     * the transport is gone (in which case the drain has been and the socket would refuse it anyway).
+     * Retire one pairing: emit its cover frame unless a drain already claimed it, or unless the
+     * transport is gone (in which case teardown has been and the socket would refuse it anyway).
      */
     private fun finish(pending: Pending) = teardown.withLock {
-        val ours = inFlight.remove(pending)
-        // Released BEFORE the emit: a pairing cancelled before its frame was built still has to
-        // release stop()'s drain, and `emit` rethrows CancellationException.
-        pending.resolved = true
-        resolved.signalAll()
-        val decoy = pending.decoy
-        if (ours && decoy != null && !transportInvalid) emit(decoy)
+        if (inFlight.remove(pending) && !transportInvalid) emit(pending.decoy)
     }
 
     // ── the cover frame ─────────────────────────────────────────────────────────────────────
@@ -475,9 +550,13 @@ class DecoySendPairing(
      * `MessagingCoordinator`'s `runCatching` and mark a delivered message FAILED. Cover traffic would
      * then have corrupted the state of a send it could not otherwise touch.
      *
-     * **Non-suspending on purpose**, and that is load-bearing twice over: it is what lets [stop]'s
-     * drain wait for an admitted pairing without the wait ever standing behind I/O, and it keeps the
-     * whole cover-side build off any suspension seam a teardown could interleave with.
+     * **Non-suspending on purpose**, and after fix round 4 that is what the whole teardown argument
+     * rests on: because there is no suspension point between the caller's `ws.sendMessage` and this
+     * frame reaching the register, the confinement worker cannot be handed to teardown in between,
+     * so a build is never interrupted and the register never holds an unbuilt pairing. (Round 3 read
+     * this as "the drain's wait can only stand behind CPU work, so a bounded wait is safe". That was
+     * the P1: non-suspending bounds *suspension*, not *time*. The property is worth having for the
+     * reason above, not for that one.)
      */
     private fun buildCover(real: MessageEnvelope): MessageEnvelope? = try {
         val syntheticAccountId = recipient()
@@ -522,11 +601,21 @@ class DecoySendPairing(
      * the provisioning section of the class kdoc for why that is a requirement and not a
      * relaxation. The number of relay REGISTRATIONS is bounded by [DecoyAccountProvisioner]'s
      * runtime-scoped latch, which is the guard that actually protects the shared worldwide bucket.
+     *
+     * **The whole method runs under [teardown]** (fix round 4), and that is the fix for a real race,
+     * not tidiness. Round 3 checked `transportInvalid` under the lock, released it, then won the CAS
+     * and assigned [provisionJob] — so a `stop()` landing in between saw a null handle, cancelled
+     * nothing, invalidated the transport and returned, and the job then started **after teardown**:
+     * a coroutine outliving its session, able to spend a scarce registration from the shared
+     * worldwide bucket and to touch a closing vault runtime. Holding the lock across
+     * check → CAS → assign makes the two orders the only two possible ones: either `stop()` gets the
+     * lock first and this returns without launching, or this assigns first and `stop()` cancels what
+     * it finds. `job.start()` on a LAZY job only dispatches, so nothing runs under the lock.
      */
-    private fun ensureProvisioning() {
+    private fun ensureProvisioning() = teardown.withLock {
         // Nothing decoy-related may start after teardown (R-U3-5).
-        if (teardown.withLock { transportInvalid }) return
-        if (!provisioning.compareAndSet(false, true)) return
+        if (transportInvalid) return@withLock
+        if (!provisioning.compareAndSet(false, true)) return@withLock
         // LAZY so [provisionJob] is assigned before the body can run: stop() must never find a null
         // handle for a job that is already provisioning.
         val job = scope.launch(provisionContext, start = CoroutineStart.LAZY) {
@@ -559,13 +648,11 @@ class DecoySendPairing(
          */
         const val GAP_MAX_MS: Int = 50
 
-        /**
-         * Backstop for [stop]'s drain, in milliseconds. It is NOT the expected wait: every admitted
-         * pairing resolves in straight-line CPU time (there is no suspension point between admission
-         * and the built frame reaching the drain), so this only bounds a thread that is not
-         * scheduled at all. Teardown runs under the app's transport lock, so the bound is kept short
-         * enough that the worst case is not a visible stall.
-         */
-        const val DRAIN_TIMEOUT_MS: Long = 100
+        // There is deliberately no DRAIN_TIMEOUT_MS any more. Round 3 had one, and it was a P1: the
+        // drain abandoned any pairing whose build overran 100 ms, which "non-suspending" does not
+        // prevent (slow crypto, scheduler starvation, a stalled `recipient()`), and abandoning one
+        // is exactly the teardown-correlated unpaired real frame the drain exists to prevent. The
+        // register now only ever holds BUILT pairings, so the drain has nothing to wait for and
+        // there is no wall clock in this class at all.
     }
 }

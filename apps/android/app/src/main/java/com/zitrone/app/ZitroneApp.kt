@@ -1516,8 +1516,17 @@ class AppContainer(private val app: Application) {
         if (live != null &&
             live.wsClient.connectionState.value != WsClient.ConnectionState.DISCONNECTED
         ) {
-            live.wsClient.disconnect()
-            live.apiClient.accessToken?.let(live.wsClient::connect)
+            // 0.10.0 U3 fix round 4 — this used to disconnect and redial directly, which split any
+            // cover pair sleeping in its drawn gap across the TLS teardown and the reconnect. A
+            // split pair is a STRONGER signal than a missing cover frame (third-lens ruling,
+            // round 3): two identical-length frames milliseconds apart, straddling a connection
+            // boundary an observer can see, correlated with the user changing their anonymity
+            // transport. The swap now goes through the coordinator, which drains cover traffic on
+            // its confined worker first and keeps pairing afterwards over the new socket.
+            live.coordinator.reconnectTransport {
+                live.wsClient.disconnect()
+                live.apiClient.accessToken?.let(live.wsClient::connect)
+            }
         }
     }
 

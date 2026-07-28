@@ -2996,3 +2996,66 @@ demoted, four rounds → six, merge pending → merged. §4.3 gains the third le
 "materially" under R-U3-1 and the four-step teardown lifecycle under R-U3-5.
 
 No merge, no push, no version bump. 3 of 6 fix rounds remain.
+
+## U3 FIX ROUND 4 of 6 — the COMPOSED fix: a success signal, and teardown on the send worker (2026-07-28)
+
+Round 3 raised severity: **2 P1 → 4 P1**, two of them new. That is the fix-introduces-defects
+signature, and this round records two things it would be easy to leave out — **one of the four P1s
+was caused by the architect's own instruction**, and **one was an impossibility claim of mine that a
+reviewer refuted with a construction**. Full record: `reviews/decoy-0.10.0/u3-fix-r4-composed.md`.
+
+### The construction, because the rest follows from it (W4)
+
+Round 3 declared a residual and called it forced: teardown can slip between `ws.sendMessage`
+returning and the pairing registering, and closing it seemed to need cover work and a lock in front
+of a real send. **Unsound.** The window does not need to be atomic with the handoff, only
+*serialised* against teardown — and `MessagingCoordinator` already owns a serialisation point every
+send goes through: its `limitedParallelism(1)` `confined` worker. Terminal teardown is now enqueued
+there, so it runs strictly before or strictly after a send's slice, never inside; and with no
+suspension point between the publish tail and admission, that slice is uninterruptible. **No lock and
+no cover-side instruction was added in front of any real send.** R-U3-5 step 1's other half is an
+`acceptingSends` volatile gate read before any crypto on all three send paths — also not jointly
+unsatisfiable, contrary to round 3.
+
+### The architect's instruction (W1)
+
+"Invert the call so cover follows the handoff" was implemented, but `publishOutgoing`/`publishReceipt`
+returned `Unit`: contact-deleted, socket-refused and handed-off were indistinguishable and cover ran
+in all three. Two of them put a **lone decoy** on the wire — a frame the user never generated, the
+marked-pair defect with the sign flipped. Both tails now return "handed to the relay" and every call
+site is `if (publish…) cover(…)`.
+
+### What fell out of the composition
+
+- **W2** — the drain's 100 ms deadline abandoned any build that overran it ("non-suspending" bounds
+  *suspension*, not *time*). `cover()` now BUILDS then ADMITS, so the register only ever holds built
+  pairings: the deadline, the wait loop, the condition variable and the `resolved` flag are all
+  deleted and **no wall clock remains in the class**.
+- **W3** — the Tor/I2P toggle no longer splits a pair across a TLS teardown/reconnect. New
+  **non-terminal** `CoverTraffic.quiesce` drains and keeps pairing over the new socket, dispatched on
+  the same worker. The disconnect tripwire's deliberate carve-out for `ZitroneApp` is **gone**, not
+  converted into a tracked exception.
+- **W5** — `ensureProvisioning` holds the teardown lock across check → CAS → assign; `stop()` cancels
+  under the same lock.
+- **W6** — all three tripwires were re-derived, because **the call-site one passed while W1 was
+  live**: it pinned statement *adjacency*, not dependence. The interface tripwire now pins the whole
+  declared method set; the disconnect tripwire reads both owners with comments stripped and braces
+  walked; a fourth pins the confined dispatch and the send gate.
+
+### Evidence
+
+`ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug` from
+`apps/android` → **BUILD SUCCESSFUL, Gradle exit 0**; **716 tests / 0 failures / 0 errors** across 78
+classes (712 → 716); `DecoySendPairingTest` 28 → 35 tests. **13 mutations with a rebuild between
+each, 12 discriminated.** The survivor is reported rather than hidden: reverting to round 3's
+admit-then-build order is **behaviour-preserving once teardown is confined** — the deadline, not the
+order, was the defect. Two test-side mutations confirm the new behavioural tests pin confinement.
+
+### Residual declared rather than claimed away
+
+`stop()` blocks on the confined worker for at most 250 ms before falling back to the calling thread.
+The bound is on *waiting for the worker*, not on cover work — it exists because `UnlockController`
+closes the vault runtime the instant `stop()` returns, and a lock that hangs without wiping key
+material is worse than any framing defect. On expiry that one teardown degrades to round-3 behaviour.
+
+No merge, no push, no version bump. **2 of 6 fix rounds remain.**

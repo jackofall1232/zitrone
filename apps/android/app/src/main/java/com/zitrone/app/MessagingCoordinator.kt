@@ -65,6 +65,9 @@ import java.time.Instant
 import java.time.format.DateTimeFormatter
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.coroutineContext
 import kotlin.math.min
 
@@ -157,9 +160,10 @@ class MessagingCoordinator(
     private val intentMarkerPresent: () -> Boolean = { false },
     /**
      * Cover traffic (0.10.0 U3). Called with every outbound envelope — text, attachment control
-     * payload and read receipt alike — **immediately after** that envelope's publish tail has run,
-     * so a same-length decoy frame follows the real one. [CoverTraffic.NONE] (the default, and every
-     * non-vault construction) is a call that returns.
+     * payload and read receipt alike — **immediately after that envelope's publish tail has handed
+     * it to the relay, and only then**, so a same-length decoy frame follows a real one that
+     * actually went (fix round 4). [CoverTraffic.NONE] (the default, and every non-vault
+     * construction) is a call that returns.
      *
      * **This seam never runs a real send, and nothing it does precedes one** (§4.3 R-U3-1, R-U3-2
      * ruling of 2026-07-27, tightened in U3 fix round 3). Until that round the publish tail was
@@ -171,7 +175,10 @@ class MessagingCoordinator(
      * and this seam is called after it. The instruction sequence from the durability barrier to the
      * socket is the pre-U3 one.
      *
-     * Teardown runs through [CoverTraffic.stop], which is handed `ws.disconnect` — see [stop].
+     * Teardown runs through [CoverTraffic.stop], which is handed `ws.disconnect` — see
+     * [coverTeardown] — and a live transport SWAP runs through [CoverTraffic.quiesce], see
+     * [reconnectTransport]. Both are dispatched onto the [confined] worker so they cannot interleave
+     * with a send's publish-then-pair slice.
      */
     private val coverTraffic: CoverTraffic = CoverTraffic.NONE,
 ) : WsClient.Listener {
@@ -280,6 +287,25 @@ class MessagingCoordinator(
     private var acceptingDeliveries = false
 
     /**
+     * OUTBOUND gate — **step 1 of the R-U3-5 teardown lifecycle, "stop admitting new real sends"**
+     * (U3 fix round 4). Cleared synchronously at the top of [stop] and [deleteAccountAndWipe]'s
+     * teardown, before the cover-traffic teardown is enqueued, and set on [start].
+     *
+     * Round 3 argued this step was not jointly satisfiable with "no cover-side instruction precedes
+     * the real handoff" — that closing the admission window needed a lock in front of the send. That
+     * was wrong, and this flag is half of why: refusing a *new* send is a plain volatile read at the
+     * very top of the send coroutine, thousands of instructions and several suspension points before
+     * the durability barrier. It is nowhere near the barrier→socket window, it takes no lock, and it
+     * is not cover-specific — a send admitted after teardown was already doomed to hit a dead socket
+     * and be marked FAILED. The other half is that terminal teardown is *enqueued on the confined
+     * worker*, behind the sends already running there (see [coverTeardown]).
+     *
+     * @Volatile: written on the teardown thread, read on the confined dispatcher.
+     */
+    @Volatile
+    private var acceptingSends = false
+
+    /**
      * True only while [deleteAccountAndWipe]'s coroutine is RUNNING (round 15). It covers the
      * narrow window BEFORE the intent marker is durable (coroutine start → intent write), which the
      * durable [intentMarkerPresent] check cannot yet see. The full auth-protection guard is
@@ -361,25 +387,41 @@ class MessagingCoordinator(
      * barrier and `ws.sendMessage`, and this method is what kept the enforcement. It is a member of
      * the send path, not of the cover-traffic seam, and it would stay exactly as it is if cover
      * traffic were deleted.
+     *
+     * **Returns whether the envelope was actually HANDED TO THE RELAY** (U3 fix round 4). It used to
+     * return `Unit`, which collapsed three outcomes — discarded because the contact was deleted,
+     * refused because the socket was down, and genuinely handed off — into one the caller could not
+     * tell apart. The caller ran cover traffic in all three, so two of them put a decoy on the wire
+     * with **no real frame behind it**: a frame the user never generated, which is the same
+     * marked-pair defect as an unpaired real frame with the sign flipped. Hence the guard on the
+     * cover call at all three call sites.
      */
-    private fun publishOutgoing(envelope: MessageEnvelope, contactId: String, messageId: String) {
+    private fun publishOutgoing(
+        envelope: MessageEnvelope,
+        contactId: String,
+        messageId: String,
+    ): Boolean {
         if (!contactExists(contactId)) {
             diag("send: contact deleted mid-send — dropping local copy")
             messages.discard(messageId)
-        } else if (ws.sendMessage(envelope)) {
+            return false
+        }
+        if (ws.sendMessage(envelope)) {
             // Handed to the relay — but honestly still just SENDING. The tick waits for the relay's
             // message.stored (→SENT) and the recipient's message.delivered (→DELIVERED); see
             // [MessageState].
-        } else {
-            // The socket was down: the send did not reach the relay. The ratchet advance is already
-            // durable, so a retry advances cleanly. Connection state only — never the envelope.
-            diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
-            messages.markFailed(messageId)
+            return true
         }
+        // The socket was down: the send did not reach the relay. The ratchet advance is already
+        // durable, so a retry advances cleanly. Connection state only — never the envelope.
+        diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
+        messages.markFailed(messageId)
+        return false
     }
 
     /**
-     * THE PUBLISH TAIL for read receipts — the same non-suspending contract as [publishOutgoing],
+     * THE PUBLISH TAIL for read receipts — the same non-suspending contract as [publishOutgoing]
+     * and the same `true` = "handed to the relay" result,
      * with the receipt's own failure handling: a receipt for a just-deleted contact is dropped (no
      * post-delete ciphertext) and NOT queued, while a socket-down receipt is queued for the
      * reconnect flush because the messages are already READ locally and will never re-enter
@@ -389,15 +431,18 @@ class MessagingCoordinator(
         envelope: MessageEnvelope,
         contactId: String,
         messageIds: List<String>,
-    ) {
+    ): Boolean {
         if (!contactExists(contactId)) {
             diag("receipt: contact deleted mid-send — dropped, not queued")
-        } else if (ws.sendMessage(envelope)) {
-            // Delivered to the socket — nothing more to do.
-        } else {
-            diag("receipt: not handed to relay — queued (${ws.connectionState.value})")
-            queueReceipts(contactId, messageIds)
+            return false
         }
+        if (ws.sendMessage(envelope)) {
+            // Delivered to the socket — nothing more to do.
+            return true
+        }
+        diag("receipt: not handed to relay — queued (${ws.connectionState.value})")
+        queueReceipts(contactId, messageIds)
+        return false
     }
 
     /**
@@ -507,6 +552,7 @@ class MessagingCoordinator(
         _registrationPow.value = RegistrationPowUiState()
         _linking.value = true
         acceptingDeliveries = true
+        acceptingSends = true
         linkJob = scope.launch(confined) { bootstrapLoop() }
     }
 
@@ -727,17 +773,17 @@ class MessagingCoordinator(
     fun stop() {
         _linking.value = false
         acceptingDeliveries = false
+        // R-U3-5 step 1, and it must come FIRST: no new real send is admitted from here on, so the
+        // set of sends the teardown below has to serialise behind is closed rather than growing.
+        acceptingSends = false
         linkJob?.cancel()
-        // Cover traffic (spec §4.3 R-U3-5) + THE SOCKET, in that order and by construction. Nothing
-        // decoy-related survives the session and a locked vault emits nothing — but the disconnect
-        // is passed IN rather than called here, because getting the order wrong is a real defect and
-        // not a style point: until U3 fix round 3 this method disconnected first, so every vault
-        // lock that landed in a pairing's drawn gap put a lone real frame and then a TLS close on
-        // the wire. That is a deterministic, recognisable class of unpaired real sends correlated
-        // with lock, teardown and backgrounding — the exact observable cover traffic exists to
-        // remove (R-U3-3). [CoverTraffic.stop] stops admitting pairings, stops provisioning, drains
-        // the pairings it already admitted while the socket is still live, and only then runs this.
-        coverTraffic.stop { ws.disconnect() }
+        // Steps 2–4, ON THE CONFINED WORKER and blocking until they have run — see
+        // [runTerminalTeardownOnConfinedWorker] for why the dispatch is the whole point. Skipped
+        // when it has already happened, because [deleteAccountAndWipe] tears cover traffic down on
+        // the worker and only THEN calls back into a lock() that lands here — dispatching onto the
+        // worker from a caller the worker is itself waiting on would stall for the whole quiesce
+        // bound before falling back.
+        if (!terminalTeardownDone) runTerminalTeardownOnConfinedWorker(::coverTeardown)
         // Teardown hook: drop all pending re-fire jobs + fire state so nothing
         // carries across an identity switch (see NotificationScheduler).
         notificationScheduler.cancelAll()
@@ -746,6 +792,108 @@ class MessagingCoordinator(
         // carries across an identity switch (see PendingPostAckLedger).
         pendingPostAck.clear()
     }
+
+    /**
+     * Steps 2–4 of the R-U3-5 teardown lifecycle: **the only place in this class that stops cover
+     * traffic and invalidates the transport.**
+     *
+     * The disconnect is passed IN rather than called beside the drain, because getting the order
+     * wrong is a real defect and not a style point: until U3 fix round 3 [stop] disconnected first,
+     * so every vault lock that landed in a pairing's drawn gap put a lone real frame and then a TLS
+     * close on the wire — a deterministic, recognisable class of unpaired real sends correlated with
+     * lock, teardown and backgrounding, the exact observable cover traffic exists to remove
+     * (R-U3-3). [CoverTraffic.stop] stops admitting pairings, stops provisioning, drains the
+     * pairings it already admitted while the socket is still live, and only then runs this lambda.
+     *
+     * **Must be called ON the confined worker** — either directly from a coroutine already running
+     * there ([deleteAccountAndWipe]) or through [runTerminalTeardownOnConfinedWorker] ([stop]).
+     *
+     * Idempotent, and it has to be: a session can reach terminal teardown twice (an account delete
+     * tears down and then locks; a revoke can race a lock). [transportInvalid] inside cover traffic
+     * is already terminal, so a second run would be harmless — the flag exists so the *dispatch* can
+     * be skipped, not the drain.
+     */
+    private fun coverTeardown() {
+        if (terminalTeardownDone) return
+        terminalTeardownDone = true
+        coverTraffic.stop { ws.disconnect() }
+    }
+
+    /** Whether [coverTeardown] has run. @Volatile: set on the worker, read on the teardown thread. */
+    @Volatile
+    private var terminalTeardownDone = false
+
+    /**
+     * Run terminal teardown on the confinement worker and block until it has — **the construction
+     * that closes the round-3 residual, and it is worth spelling out why it is not just tidiness.**
+     *
+     * Round 3 declared a residual: between `ws.sendMessage` returning and the pairing registering
+     * itself with cover traffic there are a handful of instructions, and a concurrent `stop()` could
+     * land in them, leaving an unpaired real frame correlated with teardown. It argued the window
+     * was *forced* — that closing it needed the pairing registered before the publish, i.e. cover
+     * work and a lock in front of a real send, which R-U3-1 forbids absolutely.
+     *
+     * That argument was refuted with a construction and this is it. Teardown does not need to be
+     * atomic with the handoff; it needs to be **serialised against it**, and this coordinator
+     * already owns a serialisation point that every send goes through — [confined], a single worker.
+     * Enqueueing teardown there puts it *behind the sends already running*, and because there is no
+     * suspension point between a send's `ws.sendMessage` and the pairing's admission, teardown
+     * cannot land inside that span: it runs strictly before the send's slice (and the send's own
+     * publish tail then hits an already-dead socket and is marked FAILED, uncovered and unpaired
+     * because there is nothing on the wire to pair) or strictly after it (and the pairing is
+     * admitted, built, and drained). **No cover-side instruction and no lock was added in front of
+     * any real send to get this.**
+     *
+     * **Why it blocks.** `UnlockController` calls `stop()` and then closes the vault runtime in a
+     * `finally` — the final reseal and key-material wipe. Cover traffic reads that runtime to build
+     * frames, so returning before the drain has run would let the wipe race a build; and a session
+     * whose socket outlives its own lock is worse than any framing defect.
+     *
+     * **The bound, stated honestly.** [TEARDOWN_QUIESCE_MS] does not bound any cover-side work —
+     * there is none left to bound, the drain has no wait in it. It bounds only *how long we wait for
+     * the single worker to become free*, and it exists because the alternative to a bound here is a
+     * vault lock that can hang and never wipe its keys. If it expires (a worker blocked, not
+     * suspended, for that long — the coordinator's blocking work is millisecond-scale disk commits)
+     * teardown falls back to the calling thread, which is exactly the round-3 behaviour: correct,
+     * with the round-3 race back for that one teardown. Exactly one of the two paths runs it.
+     */
+    private fun runTerminalTeardownOnConfinedWorker(terminal: () -> Unit) {
+        val ran = AtomicBoolean(false)
+        val done = CountDownLatch(1)
+        // NonCancellable, and deliberately: the session scope is cancelled immediately after this
+        // returns, and a teardown that never ran is a socket that never closed.
+        scope.launch(confined + NonCancellable) {
+            try {
+                if (ran.compareAndSet(false, true)) terminal()
+            } finally {
+                done.countDown()
+            }
+        }
+        if (done.await(TEARDOWN_QUIESCE_MS, TimeUnit.MILLISECONDS)) return
+        // Either we take it over, or the worker claimed it in the same instant — in which case wait
+        // for it, because what it is running is now bounded work with no wait of its own.
+        if (ran.compareAndSet(false, true)) terminal() else done.await()
+    }
+
+    /**
+     * A transport SWAP under a live session (Tor/I2P toggle): drain cover traffic, then run
+     * [swapTransport], then carry on pairing over the new socket. **Non-terminal** — the session
+     * survives and [CoverTraffic.quiesce] leaves the register open.
+     *
+     * Called by `ZitroneApp.applyTransportLocked`, which used to disconnect and redial the socket
+     * directly. That left any pairing sleeping in its drawn gap **split across a TLS teardown and
+     * reconnect** — ruled P1 by the third lens in round 3 on a distinction neither reviewer made: a
+     * split pair is a *stronger* signal than a missing cover frame, because it lets an observer link
+     * two identical-length frames across a connection boundary, ties them to an independently
+     * observable infrastructure event, and correlates them with the user changing their anonymity
+     * transport.
+     *
+     * Serialised on the confined worker for the same reason as
+     * [runTerminalTeardownOnConfinedWorker], and blocking for a narrower one: the caller holds the
+     * app's transport lock and re-points the clients the moment this returns.
+     */
+    fun reconnectTransport(swapTransport: () -> Unit) =
+        runTerminalTeardownOnConfinedWorker { coverTraffic.quiesce(swapTransport) }
 
     /**
      * Emit one privacy-safe boot-diagnostic line to BOTH logcat (when `adb` is
@@ -952,6 +1100,10 @@ class MessagingCoordinator(
         burnOnRead: Boolean,
         existing: Boolean,
     ) {
+        // R-U3-5 step 1 — see [acceptingSends]. Before any crypto, any durable write and any
+        // suspension: a send admitted after teardown started could only reach a socket that is being
+        // closed, and would advance the ratchet to do it.
+        if (!acceptingSends) return
         val accountId = api.accountId ?: return
         // Stage marker for the diagnostic log in onFailure below.
         // Stage names only — never data.
@@ -1051,10 +1203,11 @@ class MessagingCoordinator(
             // The NON-SUSPENDING publish tail (see [publishOutgoing]), called directly and FIRST —
             // the instruction sequence from the durability barrier to `ws.sendMessage` is the pre-U3
             // one, with no cover-traffic code in it at all (U3 fix round 3).
-            publishOutgoing(envelope, conversation.contactId, messageId)
-            // Cover traffic (U3), strictly AFTER the real frame is on the socket: it emits a
-            // same-length decoy frame after a drawn gap and cannot reach the send above.
-            coverTraffic.cover(envelope)
+            // Cover traffic (U3), strictly AFTER the real frame is on the socket AND ONLY IF IT GOT
+            // THERE (fix round 4): it emits a same-length decoy frame after a drawn gap and cannot
+            // reach the send above. A decoy for an envelope the relay never received would be a lone
+            // marked frame the user never generated.
+            if (publishOutgoing(envelope, conversation.contactId, messageId)) coverTraffic.cover(envelope)
         }.onFailure { e ->
             if (e is CancellationException) throw e
             // The message never made it out — surface FAILED so the user can
@@ -1138,6 +1291,8 @@ class MessagingCoordinator(
         burnOnRead: Boolean,
         existing: Boolean,
     ) {
+        // R-U3-5 step 1 — see [acceptingSends] and [deliverText].
+        if (!acceptingSends) return
         val accountId = api.accountId ?: return
         var stage = "encrypt-blob"
         runCatching {
@@ -1261,10 +1416,10 @@ class MessagingCoordinator(
             // The NON-SUSPENDING publish tail (see [publishOutgoing]), called directly and FIRST. If
             // the contact was deleted mid-upload it drops the envelope AND the local copy (incl. the
             // in-memory attachment bytes).
-            publishOutgoing(envelope, conversation.contactId, messageId)
             // Cover traffic (U3) — see [deliverText]. An attachment's control payload is an ordinary
-            // message.send on the wire and is paired exactly like one, strictly after it.
-            coverTraffic.cover(envelope)
+            // message.send on the wire and is paired exactly like one, strictly after it and only on
+            // a genuine handoff.
+            if (publishOutgoing(envelope, conversation.contactId, messageId)) coverTraffic.cover(envelope)
         }.onFailure { e ->
             if (e is CancellationException) throw e
             // Upload throw or transport error — the attachment never made it out.
@@ -1366,6 +1521,9 @@ class MessagingCoordinator(
      */
     private fun sendReadReceipt(contactId: String, messageIds: List<String>) {
         scope.launch(confined) {
+            // R-U3-5 step 1 — see [acceptingSends] and [deliverText]. The ids stay unqueued on
+            // purpose: the session is going away, and nothing survives it.
+            if (!acceptingSends) return@launch
             val accountId = api.accountId ?: return@launch
             runCatching {
                 val plaintext = ControlPayload.readReceipt(messageIds)
@@ -1408,12 +1566,12 @@ class MessagingCoordinator(
                     return@runCatching
                 }
                 // The NON-SUSPENDING publish tail (see [publishReceipt]), called directly and FIRST.
-                publishReceipt(envelope, contactId, messageIds)
                 // Cover traffic (U3) — see [deliverText]. A receipt is paired like every other
                 // envelope through this choke point, and deliberately so: a receipt envelope is
                 // built to be indistinguishable from a text message, and pairing only text would
-                // hand an observer the receipt detector that indistinguishability denies it.
-                coverTraffic.cover(envelope)
+                // hand an observer the receipt detector that indistinguishability denies it. Only on
+                // a genuine handoff: a queued receipt has put nothing on the wire to cover.
+                if (publishReceipt(envelope, contactId, messageIds)) coverTraffic.cover(envelope)
             }.onFailure { e ->
                 if (e is CancellationException) throw e
                 queueReceipts(contactId, messageIds)
@@ -1715,12 +1873,16 @@ class MessagingCoordinator(
             // 4. Confirmation is durable — only now tear the session/RAM down. From here the server
             // account is gone AND recorded, so destruction is unconditionally safe and recoverable.
             acceptingDeliveries = false
+            acceptingSends = false
             _linking.value = false
             linkJob?.cancel()
-            // The SAME cover-traffic-then-transport order as [stop] (U3 fix round 3): the account
+            // The SAME cover-traffic-then-transport teardown as [stop] (U3 fix round 3): the account
             // delete is a teardown too, and a pairing left mid-gap here would leave the same
-            // teardown-correlated unpaired real frame on the wire.
-            coverTraffic.stop { ws.disconnect() }
+            // teardown-correlated unpaired real frame on the wire. Called DIRECTLY rather than
+            // through [runTerminalTeardownOnConfinedWorker] because this coroutine is already ON the
+            // confined worker — dispatching to it from itself and then blocking on the result would
+            // deadlock the worker against its own queue.
+            coverTeardown()
             messages.clearAll()
             conversations.clearAll()
             // Teardown hook: no re-fire job or fire state survives the wipe.
@@ -2117,6 +2279,9 @@ class MessagingCoordinator(
         // state but before the queued cleanup below runs.
         _linking.value = false
         acceptingDeliveries = false
+        // R-U3-5 step 1 on the revoke path too: the tokens are about to go, so a send admitted from
+        // here on could only fail — and [onForcedLogout] below runs the real teardown.
+        acceptingSends = false
         linkJob?.cancel()
         api.clearTokens()
         notificationScheduler.cancelAll()
@@ -2164,6 +2329,15 @@ class MessagingCoordinator(
         const val BASE_BACKOFF_MS = 1_000L
         const val MAX_BACKOFF_MS = 60_000L
         const val MAX_BACKOFF_SHIFT = 6
+
+        /**
+         * How long [runTerminalTeardownOnConfinedWorker] waits for the confinement worker to become
+         * free. **It bounds scheduling, not cover-side work** — see that method's kdoc. Teardown
+         * runs on a user-visible path (vault lock, under the app's transport lock), so it is kept
+         * short enough that the worst case is not a visible stall, and its expiry degrades to the
+         * previous behaviour rather than to a lost socket.
+         */
+        const val TEARDOWN_QUIESCE_MS = 250L
     }
 }
 

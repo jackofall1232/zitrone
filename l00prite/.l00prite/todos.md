@@ -1168,6 +1168,42 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       Still open: U3-C **cross-send** (relay-side, decision #2 above), review round 2 not dispatched.
       **4 of the 6 fix rounds remain.**
 
+- [ ] **U3 FIX ROUND 4 of 6 APPLIED (2026-07-28) — the COMPOSED fix. Severity had gone UP.**
+      Round 3's review returned **4 P1** where round 2 returned 2, two of them new — the
+      fix-introduces-defects signature. Two facts are recorded because they are the point:
+      **one P1 was caused by the architect's own instruction**, and **one was an impossibility claim
+      from fix round 3 that a reviewer refuted with a construction.** Full record:
+      `reviews/decoy-0.10.0/u3-fix-r4-composed.md`.
+      **W4 — the construction, and everything follows from it.** Teardown does not need to be atomic
+      with the handoff, only SERIALISED against it, and the coordinator already owns a serialisation
+      point every send goes through: its `limitedParallelism(1)` confined worker. Terminal teardown
+      is now enqueued there, so it runs strictly before or strictly after a send's publish-then-pair
+      slice and never inside it. The declared R-U3-1 residual is **closed, not accepted**, and no
+      lock and no cover-side instruction was added in front of any real send. R-U3-5 step 1's other
+      half is an `acceptingSends` gate read before any crypto on all three send paths.
+      **W1 — the architect's instruction.** `publishOutgoing`/`publishReceipt` returned `Unit`, so
+      contact-deleted, socket-refused and handed-off were indistinguishable and cover ran in all
+      three: two of them emitted a **lone decoy**, a frame the user never generated. Both tails now
+      return "handed to the relay"; all three call sites are `if (publish…) cover(…)`.
+      **W2 — no wall clock survives.** The drain's 100 ms deadline abandoned any build that overran
+      it, and "non-suspending" bounds suspension, not time. `cover()` now BUILDS then ADMITS, so the
+      register only holds built pairings; deadline, wait loop, condition variable and `resolved` flag
+      are all deleted.
+      **W3 — the Tor/I2P toggle no longer splits a pair** across a TLS teardown/reconnect (third lens:
+      a split pair is a STRONGER signal than a missing cover frame). New **non-terminal**
+      `CoverTraffic.quiesce`; the disconnect tripwire's deliberate carve-out for `ZitroneApp` is GONE
+      rather than converted into a tracked exception.
+      **W5** — `ensureProvisioning` holds the teardown lock across check → CAS → assign.
+      **W6 — the call-site tripwire PASSED WHILE W1 WAS LIVE** (it pinned adjacency, not dependence).
+      All three re-derived; a fourth pins the confined dispatch and the send gate.
+      **Evidence:** `:app:testDebugUnitTest :app:assembleDebug` → BUILD SUCCESSFUL, Gradle exit 0,
+      **716 tests / 0 failures / 0 errors** (712 → 716); pairing suite 28 → 35. **13 mutations, 12
+      discriminated**; the survivor (reverting to round 3's admit-then-build) is reported as
+      behaviour-preserving under confinement rather than as a test gap.
+      **Residual declared:** `stop()` blocks up to 250 ms for the worker, then falls back to the
+      caller — a scheduling bound, not a cover-work bound, required because `runtime.close()` follows
+      `stop()` immediately. **2 of the 6 fix rounds remain. Review round 4 not dispatched.**
+
 - [ ] **U3 inherits three things from U2, none of them optional.** *(Rewritten at U2 fix round 1 —
       the interface changed, so two of the three old items no longer say the right thing.)*
       1. **Hand `DecoyEnvelopeBuilder.build` THE REAL ENVELOPE**, the one about to go to
