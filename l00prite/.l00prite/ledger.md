@@ -1,5 +1,101 @@
 # Zitrone run ledger (CX33 / ubuntu-4gb-hel1-3)
 
+## 0.10.0-beta U3 (send pairing) — 7 review rounds, 6 fix rounds, and the requirement was the defect
+
+**Status 2026-07-28: code on `feat/0.10.0-decoy-u3-pairing`, UNMERGED. FIX ROUND 6 (the yield) IS
+APPLIED — `:app:testDebugUnitTest :app:assembleDebug` exit 0, 742 tests / 0 failures, 12/12 mutations
+discriminated. Review round 8 of the whole unit is the remaining gate before merge.**
+
+**The arc.** R1 4 P1 → design contradiction, maintainer ruled real-frame-first. R2 2 P1. R3 4 P1
+(severity UP; two introduced by R2's own fix). R4 1 P1 — **first reviewer convergence in seven
+rounds**. R5 the lock-boundary fix. R6 **hard cap**: Grok `CLEAN` vs Codex 4 P1 — maximal divergence,
+but not a factual disagreement. R7 (past cap, maintainer-authorised) added Gemini as a fourth lens.
+
+**R7 was unanimous 4/4 on the meta-rule:** a declared, tested residual cannot satisfy a requirement
+declared absolute. Kimi then refuted the dissent on *facts* — two of the four mechanisms were not
+"merely unpaired frames" but **failed real sends** (queue saturation, budget exhaustion), an R-U3-1
+delivery failure rather than an R-U3-3 marking one.
+
+**THE ROOT CAUSE WAS THE ARCHITECT'S REQUIREMENT, NOT THE CODE.** Both requirements were written as
+guarantees about **outcomes**, which the network can always falsify. Seven rounds of correct
+adversarial reasoning ground against a premise that should never have been written. Rewritten
+2026-07-28 (`78fd0f89`, `bed38595`):
+
+- **R-U3-1 → subordination.** No cover work precedes the real handoff; **cover never competes for a
+  contended resource — it yields.** Absolute as a rule about our code; promises nothing about the
+  network. **This dissolves the two worst findings**, which existed only because cover could compete.
+- **R-U3-3 → best-effort with a correlation bound**, and the bound is **disclosure, not rate**: cover
+  must not fail in ways revealing events an observer *cannot already observe*. Load-shedding is
+  degradation (fine); lock/teardown/transport correlation is disclosure (prohibited — closed in
+  R3–R5). **Drop tolerance ruled GENEROUS**: err toward dropping, stay off for a window, never
+  stutter.
+- **Value model recorded**: the decoy is the **sugar in the lemonade** — it makes the candidate set 2
+  instead of 1 and imposes cost, compounding with I2P/Tor. Skin, not core.
+
+**Dispositions.** Mechanisms 1 & 3 → **the yield fix, APPLIED 2026-07-28 (fix round 6)**. 2 →
+accepted trade (an unpaired frame beats skipping a key wipe). 4 → accepted uncorrelated residual.
+
+### Fix round 6 — `CoverPressure`, the R-U3-1 yield
+
+**What it is.** A production yield policy the seam consults at the top of every send, before the
+build and before provisioning. Three pressure signals, each chosen because it is *observable without
+knowing any limit*: outbound queue depth over an 8 KiB watermark (OkHttp's own `WebSocket.queueSize`,
+newly exposed as `WsClient.outboundQueueBytes`); the relay's `rate_limited` (newly routed from
+`MessagingCoordinator.onServerError`, which was an empty method); and this session's own recent frame
+rate — 40 frames, both halves of every pair counted, in a sliding trailing minute. Any trip turns
+cover off for a **60 s window**, one width of the relay's own bucket, so a pressure event produces one
+consistent gap rather than a stutter (R-U3-3).
+
+**THE RULING THIS REVERSES.** "A client-side budget defence is unsound because `sendLimit` is a server
+constant the relay never communicates" — carried since fix round 1, in the spec, both todos, the
+kdoc and the test suite. It is **correct of a headroom policy**, which must predict the limit, and
+**does not touch a reactive one**. Nothing in `CoverPressure` knows or assumes a number. The relay-side
+item (message id on `rate_limited`; exempting cover frames from the budget) stays worth doing and
+stays grouped for CX23, but it is no longer the only route — and the *user-facing* half of the
+`onServerError` defect is untouched and still needs the relay.
+
+**The disclosure line is where the yield stops.** `stop()` and `quiesce()` drain unconditionally; the
+drain does not consult pressure, and a tripwire fails if it starts to. Shedding under load is
+degradation (the burst is already visible); a cover frame missing at a vault lock is disclosure.
+
+**Claims swept, not phrasings.** Three separate statements of the same wrong idea were struck where
+they lived: *"a human sender will not approach `sendLimit`"* (spec §6.3, kdoc), *"cross-send
+preemption is a relay-side item no client-side defence can address"* (kdoc, test, todos, ledger), and
+the R-U3-3 section's *"the only condition consulted per send is…"*, which a second per-send condition
+had just falsified. **A fourth was found by the sweep rather than by the task:** the kdoc's *"the
+delay cover traffic adds to a real send is not small, it is none"* is true of this class's lock and
+false of the confined worker — a real send dispatched during a cover BUILD waits for it. Corrected in
+place and priced in the spec; **not** fixed, because the build is on that worker precisely to keep
+admission atomic against teardown, and moving it would reinstate rounds 4–5's P1s.
+
+**Evidence.** `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug` from
+`apps/android` — exit 0 before the first mutation and after the last. 48 pairing + 12 pressure + 33
+provisioner tests. **12 mutations applied one at a time with a full rebuild between each; 12
+discriminated, 0 survived** (seam ignores the yield; watermark disabled; seam drops `rate_limited`;
+coordinator drops `rate_limited`; cover frames unmetered; real frames unmetered; off-window removed;
+rate window narrowed; `WsClient` queue reading constant; yield fails open on throw; drain consults
+pressure; `ZitroneApp` wires a constant-0 queue).
+
+**What still lets cover compete, stated rather than buried.** (1) The ~20 cover frames at the *onset*
+of a burst, before the meter trips — closing that needs a limit the relay never states. (2) The
+confined worker, for the build's duration — a priced, structurally required trade. (3) The 5–50 ms
+between the yield check and the emit, in which the queue would have to cross 16 MiB. Nothing else.
+
+**Also this session:** the idle/dead-air ping was **CUT** (`c65d9a3e`) — an unpaired ping must invent
+a schedule, which is the fingerprint §8 chose pairing to avoid; U5 gone, `DecoyCounterReservation`
+removed with it, 0.10.0 is five units. The synthetic-account-survives-burn gate was **closed**
+(dominated by the real account, which already survives and is disclosed; and post-burn it is
+*unaddressable*). The **I2P/Tor underclaim was corrected** (`9f583821`) — both transports work.
+
+**Owed to U6:** the dead-air disclosure, and *"when cover traffic does not fire, your message is still
+end-to-end encrypted and still on your anonymous transport — what you lose is one layer of ambiguity,
+not your protection."*
+
+**Reviewer roster (maintainer, 2026-07-28):** Kimi K3 + Grok main, Codex tie-breaker, Gemini
+available. Kimi completes only in the interactive CLI (plan mode + `/yolo`); `kimi -p` does not finish
+— see `/root/.claude/CLAUDE.md`. Prompting guidance in `reviews/KIMI-PROMPTING.md`.
+
+
 Now at `l00prite/.l00prite/ledger.md` (TRACKED in-repo, new nested layout). Append entries; do not overwrite prior runs.
 
 ---
@@ -2649,3 +2745,479 @@ pre-existing suite was green under all three, so the old coverage proved nothing
 **Still owed:** paired-blind review round 3 (3 of a hard cap of 6 used). Maintainer ratification of
 U2's original spec corrections and of the round-1 Ruling-2 deviation. **No merge, no push, no
 version bump.**
+
+---
+
+## 2026-07-27 — 0.10.0 U3: pairing at the send choke point. **BUILT and WIRED** on `feat/0.10.0-decoy-u3-pairing` (`ba5a6b9e`)
+
+**This is the unit that makes cover traffic real.** U1 and U2 were deliberately unwired; from this
+branch a device provisions a synthetic account — one registration from the **shared worldwide
+bucket** — lazily, on its first send whose durable barrier passed.
+
+### What was built
+
+`decoy/DecoySendPairing.kt`: the `CoverTraffic` seam (`paired(cover, publish)` + `stop()`, with
+`CoverTraffic.NONE` as the whole "off" implementation) and its one real implementation. Wired at the
+three `ws.sendMessage` sites in `MessagingCoordinator` (text, attachment control payload, read
+receipt), torn down from `MessagingCoordinator.stop()` beside `notificationScheduler.cancelAll()`,
+and constructed in `SessionContainer` from lambdas only — no `VaultRuntime`, no store, no
+`ApiClient`, so "the pairing path writes nothing durable" is a fact about the type.
+`SignalProtocolManager.localIdentitySerialized()` was added for the 33-byte `IdentityKey.serialize()`
+form the builder's `Sender` requires (the registration wire format next to it is the raw 32-byte one
+— they are deliberately different representations).
+
+### The mechanism, and the two things it had to work around
+
+- **The publish tail is handed over as a plain `() -> Unit`.** The D2c contract is that nothing
+  suspends between `contactExists` and `ws.sendMessage`; passing that tail through a non-suspending
+  function type makes the rule **compiler-enforced at all three sites** instead of a comment repeated
+  at each. It also means the seam physically cannot insert a suspension into the window.
+- **The real publish runs EXACTLY ONCE on every path** — build refusal, socket throw, cancelled
+  scope, cancellation while waiting for the pairing lock — enforced by a `finally` with latched
+  one-shot emitters, not argued in prose. R-U3-1 is therefore paid for structurally.
+- **The decoy-first branch cannot put its delay before the durable flush.** The first shape tried was
+  `emit decoy → sleep → flush → tail`; the flush's own duration would then be ADDED to the
+  decoy-first gap and to nothing else, so the observer could read the order off the gap
+  (short gap ⇒ real-first). The sleep sits between the flush and the tail instead, where a suspension
+  is already legal and the gap is symmetric between branches.
+- **A pairing lock (`Mutex`) holds the pair's two frames exclusive against another pair's.** Without
+  it the decoy-first branch's sleep lets a queued send publish first — **reordering**, which R-U3-1
+  forbids categorically (it only *bounds* delay) — and only one of the two branches would ever be
+  interleaved, so "a foreign frame between the pair" would itself identify the order. Acquired after
+  the flush, i.e. at the point that already decides today's wire order, so order is preserved rather
+  than reconstructed; a concurrent send waits at most one drawn gap.
+
+### The two OPEN questions, answered with their justification
+
+1. **Delay distribution: uniform over 5‥50 ms, drawn per send.** Uniform because it is the
+   maximum-entropy distribution over a bounded support, and a bound is forced by R-U3-1 (the real
+   frame waits out the gap on half of all sends). An exponential is rejected twice over: its tail
+   breaks the bound and its mode at zero makes short gaps *more* guessable. The ceiling is under the
+   ~100 ms perceptibility threshold and under the median RTT on every supported transport; the floor
+   exists so the two writes cannot be coalesced into one TCP segment (which would present the pair as
+   a single double-length frame and throw away the equal-length property).
+   **`random` is a `SecureRandom` BY TYPE, and that is a security requirement:** the gap is directly
+   observable and the order bit is not, both come from the same generator, so a `java.util.Random`
+   would let an observer recover the 48-bit LCG state from measured gaps and then predict every
+   subsequent order bit — the one value the mechanism hides.
+2. **Every envelope through the choke point is paired — receipts and attachment control payloads
+   included.** Pairing only user-visible messages would **destroy a property the product already
+   has**: a receipt is deliberately built to be indistinguishable from text (`ttl_seconds: null`,
+   `burn_on_read: false`, `media_type: "text"`, padded ciphertext), so selective pairing would sort
+   the one size class an observer can see into paired and unpaired halves and hand it a receipt
+   detector that does not exist today — a new leak introduced by the privacy feature, R-U3-3's
+   marked-frame problem exactly. Observable consequence: outbound `message.send` volume doubles for
+   every class (`sendLimit` 100/min per account is untouched by human senders). It does not interact
+   with §2.4's uncovered plaintext control channel, which is separable by size regardless.
+
+### The send predicate, and why it is NOT `canSend()`
+
+The only per-send condition is "does this vault have a synthetic account id". It is durable, flips at
+most once per session (absent → present) and never flaps, which is exactly R-U3-3's acceptable
+"persistent cause → uniformly-off cover". **`DecoyAccountProvisioner.canSend()` was deliberately not
+used**: it folds in `VaultRuntime.capacityExceeded`, which is transient — the stutter R-U3-3 forbids
+— and it is unobservable here anyway, because `capacityExceeded` fail-closes `flushBeforeAck` for the
+whole vault, so a send that reaches the seam has already flushed. `canSend` answers a provisioning
+question; the send path's question is `hasAccount`.
+
+### Invariant table: NOT PERFORMED, and the reason
+
+**U3 adds no durable field and no writer or reader of one.** The pairing path performs zero
+mutations; it reads `TAG_DECOY.accountId` through `DecoyAuthStore`'s existing getter, which is
+already a row in U1's table. The registration writes it triggers are U1's, unchanged. Per the
+standing rule, the ritual is skipped where it does not apply rather than performed emptily.
+
+### Evidence
+
+- `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks`
+  from `apps/android` → **BUILD SUCCESSFUL, Gradle exit 0**, **696 tests / 3 skipped / 0 failures /
+  0 errors** (681 → 696: fifteen new gate tests), APK produced.
+- **15 mutations, 15 killed.** Every one of the 15 new tests discriminated against at least one.
+
+| # | Mutation | Tests failed |
+|---|---|---|
+| M1 | order is always real-first | 4 |
+| M2 | order alternates (predictable, still exactly 50%) | 3 |
+| M3 | order is a biased coin, p = 0.55 | 1 |
+| M4 | the gap is a fixed delay | 2 |
+| M5 | the gap distribution depends on the order | 1 |
+| M6 | no `finally` — a cancelled pairing drops the frame that had not gone | 1 |
+| M7 | an uncovered send does not publish the real frame | 5 |
+| M8 | no pairing lock — pairs interleave and a queued send overtakes | 1 |
+| M9 | provisioning is launched on every uncovered send | 1 |
+| M10 | `stop()` does not tear the provisioning job down | 1 |
+| M11 | only user-visible messages are paired | 2 |
+| M12 | the cover emit is not contained — a socket throw escapes | 1 |
+| M13 | the cover is addressed to the real contact | 2 |
+| M14 | `CoverTraffic.NONE` drops the real send | 1 |
+| M15 | a dead socket on the cover frame is treated as an error | 2 |
+
+**M14 and M15 were added because the first thirteen left two tests undiscriminated** — the
+`CoverTraffic.NONE` test and the dead-socket test. Both mutations killed them, so no test in the unit
+is carried by another guard. Source restored byte-for-byte (`git status` clean) and a full
+`--rerun-tasks` build run after the final revert, per the harness rule in `failures.md`.
+
+### Owed before merge
+
+- **Paired-blind review round 1 of U3 has not been dispatched.**
+- **The U1 follow-up that this unit made LIVE**: `todos.md` says account deletion / burn leaves the
+  synthetic relay account registered and that it "must be answered before U3 wires provisioning".
+  U3 wires provisioning. It is now reachable and unanswered.
+- U4 (synthetic-side receive) does not exist, so cover envelopes rest on the relay until the janitor
+  TTL purges them, and the 🍋‍🟩 indicator + honest docs (U6) are not built.
+- No merge, no push, no version bump.
+
+## 2026-07-27 — 0.10.0 U3 **FIX ROUND 1 of 6: STOPPED ON A DESIGN DECISION** (`feat/0.10.0-decoy-u3-pairing`)
+
+Adjudication `reviews/decoy-0.10.0/u3-r1-adjudication.md` (4 P1, 2 P2, 4 P3) reserved one outcome as
+the maintainer's: *if a randomly-ordered pair cannot satisfy R-U3-1, R-U3-1 and R-U3-2 are in genuine
+conflict and R-U3-1 wins.* **The analysis leads there.** Full derivation:
+`reviews/decoy-0.10.0/u3-fix-r1-ordering-decision.md`.
+
+### The finding — decoy-first has no legal position for the gap
+
+There are exactly three places the drawn gap can sit on a decoy-first send, and all three break
+something absolute:
+
+- **after the durability barrier** (today) → U3-A/U3-B: widens the process-death loss window and the
+  `deleteContact` race that pre-U3 was ~0 ms wide;
+- **before the barrier** → U3-E at its worst: the flush's own duration lands inside the decoy-first
+  interval and nothing else's — the exact asymmetry the implementer already found and removed once;
+- **inside the tail** → breaks D2c directly: a suspension between `contactExists` and
+  `ws.sendMessage`, i.e. ciphertext to a contact just deleted.
+
+**U3-B and U3-E are the two horns of one dilemma, not independent findings.** No decoy-first
+implementation satisfies both. Neither reviewer nor the adjudication noticed they contradict.
+
+Independently, a decoy enqueued ahead of a real frame spends its `sendLimit` permit first, and the
+only client-side defence is a headroom policy that is *unsound* — `sendLimit` is a server constant
+the relay never communicates, so a client assuming 100/min against a relay configured lower inverts
+the priority it claims to guarantee.
+
+### The correction to the adjudication — real-first does NOT fix U3-C
+
+U3-C is stated as an ordering defect ("one permit left + decoy-first ⇒ the decoy takes it"), which
+implies real-first closes it. **It does not.** Send N's cover frame is emitted 5–50 ms *after* send
+N's real frame and can take the last permit send N+1's real frame needed. Ordering removes only
+**self**-preemption inside one pair; **cross-send** preemption is inherent to doubling volume on a
+shared per-account budget and survives every ordering choice.
+
+The real shape of U3-C: cover traffic halves the account's effective send capacity, and a
+rate-limited real send is **silently unrecoverable** — `hub.go` sends `rate_limited` with no message
+id and `MessagingCoordinator.onServerError` (`MessagingCoordinator.kt:2120`) is a no-op, so the
+bubble sits in `SENDING` forever. Only a relay-side answer closes it: exempt/raise the per-account
+`message.send` budget, or carry the message id on `rate_limited` so the client can retry. **That is
+a second maintainer decision, and the ordering ruling does not close it.**
+
+### What conceding R-U3-2 is worth, so the trade can be priced
+
+Order randomness defends against neither adversary it appears to: the hostile relay reads
+`recipient_id` in cleartext on both envelopes, and the passive observer sees two equal-length opaque
+frames whose send *event* and timing are identical either way. What it does buy is one narrow thing:
+against an observer watching **both ends**, 5–50 ms of ambiguity in the outbound→inbound correlation.
+
+**Recommended, explicitly not decided: rule real-frame-first.** It makes all four P1s structural
+rather than guarded — the real frame is committed to the socket before any cover code runs, so
+nothing on the cover side *can* preempt it.
+
+### Landed anyway — U3-D, the one fix that is ruling-independent
+
+`paired`'s `finally` is the mechanism that makes "the real publish always escapes" absolute, and
+`emit` rethrows `CancellationException` — the one throwable it does not swallow — **from inside the
+region that guard protects**. On the decoy-first path the cover emitter runs first, so that rethrow
+skipped the real publish. Fixed by making the guard **unconditional** (nested `finally`), per the
+ruling that a broken safety mechanism is repaired, not wrapped in a second one.
+
+### Evidence
+
+- New test `a CancellationException out of the cover frame cannot skip the real publish` drives the
+  path the kdoc advertises (a second send cancelled while WAITING for `window`, so its `finally` is
+  the first place either emitter runs). **Run against the unfixed source it FAILS** —
+  `cover traffic swallowed a real send`, expected 1 got 0, `DecoySendPairingTest.kt:413`, Gradle
+  exit 1. That is the mutation; the fix turns it green. It also demonstrates **U3-G** live in
+  passing: the cancelled waiter emits both frames while another pair holds the window.
+- `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug` from
+  `apps/android` → **BUILD SUCCESSFUL, Gradle exit 0**, **697 tests / 3 skipped / 0 failures /
+  0 errors** (696 → 697), APK produced.
+
+### Not fixed, deliberately
+
+U3-A, U3-B, U3-C, U3-E, U3-F, U3-G, U3-H all have fixes whose *shape* the ordering ruling decides —
+under real-first most of them cease to exist rather than being repaired. Building them twice is the
+waste the stop condition exists to prevent. U3-I is owed in full (one of its four gaps now covered).
+U3-J (synthetic-account delete) unchanged and still the merge gate. No merge, no push, no version
+bump.
+
+---
+
+## U3 FIX ROUND 2 of 6 — the real-frame-first ruling, implemented as a SIMPLIFICATION (2026-07-27)
+
+Branch `feat/0.10.0-decoy-u3-pairing`. Implements §4.3 R-U3-2 as amended in `81761dfb`.
+Full record: `reviews/decoy-0.10.0/u3-fix-r2-real-first.md`.
+
+**The whole of R-U3-1 is now one statement.** `paired` begins with `publish()` — first statement,
+outside every `try`, no suspension point in front of it, no condition guarding it. Everything else
+is downstream of a frame already on the socket.
+
+### Findings: what became of each
+
+- **IMPOSSIBLE BY CONSTRUCTION** — U3-A (a process can only die at a suspension point, and the class
+  has exactly one, strictly after the socket handoff), U3-B (no suspension between the flush and the
+  tail to interleave in), U3-C's self-preemption half (the real frame is enqueued first), U3-D (the
+  `CancellationException` rethrow now runs after the publish; its round-1 nested-`finally` repair was
+  DELETED as a decoy-first artefact).
+- **GONE, not repaired** — U3-E (the asymmetry was between two branches; there is one branch),
+  U3-G and U3-H (there is no lock).
+- **REPAIRED and demoted with a derivation** — U3-F. The finding is right: the floor separates two
+  *calls*, not two socket writes, and OkHttp owns the writer thread. What it did not derive is the
+  cost — with the order fixed, a coalesced pair is one record of twice the frame length, which says
+  exactly what two frames say and names no conversation. Cosmetic, not a leak. The kdoc now claims
+  best-effort where it claimed a guarantee.
+
+### The lock does NOT survive, argued from its callers
+
+`window` had two justifications and the ruling removed both (a real send overtaking a decoy-first
+pairing; branch symmetry so interleaving could not reveal the order). **No third caller** — `paired`
+took it and nothing else did. Deleted with the "Lock order" kdoc section. Also deleted: `Plan`, the
+order bit, three `decoyFirst` branches, the `realDone`/`decoyDone` latches, the nested `finally`,
+the `alwaysDecoyFirst()` test helper.
+
+**Kept, each still load-bearing:** the `finally` (cancellation must not leave a MARKED unpaired
+frame — R-U3-3, not a decoy-first artefact); `coverFor`'s catch-all, whose justification INVERTED —
+it now stops a cover-side throw from reaching the coordinator's `runCatching` and marking an
+already-delivered message FAILED; `SecureRandom` by type, on a rewritten argument (the gap is the
+only drawn quantity and is directly observable, so a `java.util.Random` becomes a device fingerprint
+linking pairs, sessions and — one instance per live vault session — two vaults' traffic).
+
+### Tests — the point of the round (U3-I)
+
+15 → 20. New: process death at the only suspension point; a `deleteContact` queued on ONE
+`StandardTestDispatcher` behind a running send; the `sendLimit` boundary with one permit left; a
+concurrent send delayed by nothing (replaces the lock test whose premise the ruling deleted); and
+`no cover-side code runs before the real publish` — the test for the *quiet* regression, since
+hoisting the envelope build above the publish adds no suspension and would slip past the others.
+The order test is now **absolute** (one decoy-first send is a defect) and runs on the production
+generator. Added a lag-1 autocorrelation assertion on the gap: the old suite could not distinguish a
+per-send draw from one draw reused.
+
+### Evidence
+
+- **15 mutations, 15 discriminated, 0 survivors**, rebuilt between each; **all 20 tests killed by at
+  least one mutation** — nothing in the file is inert. M3 (restore the mutex) is killed by exactly
+  one test, which is the U3-H test doing its job. M6b (each gap reused for the next send) passes
+  support, bound and mean and is killed only by the autocorrelation assertion (`r=0.512`, confirmed
+  by reading the failure message).
+- `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks`
+  from `apps/android` → **BUILD SUCCESSFUL, Gradle exit 0**, **701 tests / 3 skipped / 0 failures /
+  0 errors** (697 → 701), APK produced.
+
+### Two gaps the RULING itself left, closed here as documentation only
+
+1. The ruling says the traded property is "recorded as a residual in §2.4" — **the ruling commit did
+   not add it.** Added, plus the second-order consequence: pairs from concurrent sends may now
+   interleave on the wire, which reveals nothing.
+2. **§5's U3 row still demanded "ordering is uniformly random — pinned by a statistical test"** — the
+   unit's own merge gate contradicting the ruling that governs it. Struck and replaced.
+
+No merge, no push, no version bump. 4 of 6 fix rounds remain.
+
+## U3 FIX ROUND 3 of 6 — cover traffic made strictly SUBORDINATE, at both ends (2026-07-27)
+
+Review round 2 (Codex 2 P1 / Grok 0 P1) was disjoint on the top finding for the FIFTH consecutive
+round, and both severity disputes went to a third lens, which ruled **P1 on both**. The adjudication
+named the shape: **cover traffic placed where it can precede or outlive the real send.**
+
+### V1 — the false structural claim, and the real loss path it hid
+
+Round 2 justified real-first with *"a process can only die at a suspension point."* A coroutine may
+only **suspend** at a suspension point; **the OS can kill the process at any instruction**, which is
+what the threat model assumes. Entering `paired` — interface dispatch, captured lambda, coroutine
+state machine — was cover-specific work sitting between the durable ratchet advance and
+`ws.sendMessage`. The third lens: *"materially" modifies "delayed", not "made less durable"*, and
+there is no de minimis exception for a widened `K ∪ C`.
+
+`CoverTraffic.paired(cover, publish)` is **deleted**. The interface is `suspend fun cover(real)` — it
+has no parameter it could run. The coordinator publishes through its own **non-suspending**
+`publishOutgoing` / `publishReceipt` and then calls the seam. Those two methods are what KEPT D2c
+compiler-enforced when the tail moved back to the call site; inlining the tail would have made `C`
+literally empty and **silently retired that enforcement** — the deletion class this unit has now been
+caught by twice.
+
+### V2 — teardown OWNS the pairings it admitted, and owns the disconnect
+
+Round 2's `stop()` cancelled only the provisioning job, and the coordinator disconnected FIRST, so
+every vault lock landing in a drawn gap put **a lone real frame and then a TLS close** on the wire.
+The third lens ruled reordering insufficient: step 3 needs ownership. So the ordering is now a
+dependency, not a convention — `CoverTraffic.stop(invalidateTransport)` **runs the disconnect
+itself**, last, after emitting every admitted pairing's frame gaplessly while the socket is still
+live, and after a bounded wait for any pairing still building. **Register membership is the right to
+emit** (the `emitted` flag is deleted); the wait is safely bounded because `buildCover` cannot
+suspend. Both remaining `ws.disconnect()` call sites in the coordinator pass it in.
+
+### V3 — the wiring latch bounds CONCURRENT jobs, not attempts
+
+A durable back-off makes `provisionIfNeeded` return without burning `Gate.attempted` — one *check*,
+not the one *attempt*. U3's once-per-session CAS meant a session whose single call landed inside the
+window never tried again. The latch now releases on job completion; the registration budget was never
+its job.
+
+### Evidence
+
+- **11 mutations, 11 discriminated, 0 survivors**, rebuilt between each. M8 and M9 **survived their
+  first form** and were fixed rather than excused: the `emitted` flag was unreachable-as-false, so it
+  was replaced by register membership (reachable in the drain's wait window), and the post-teardown
+  test now asserts a locked vault does no cover work at all. M10 is killed by the **compiler** — that
+  is the D2c enforcement V1 had to keep.
+- Tests 20 → 28 in the pairing suite, driving a socket that **really dies** and the **real teardown
+  entry point**; plus a cross-unit test in `DecoyAccountProvisionerTest` that runs a real
+  `VaultRuntime` with a real 429 deferral through the real send seam.
+- Two **source-level call-site tripwires** — every `ws.disconnect()` is inside `coverTraffic.stop {`,
+  every `coverTraffic.cover(` follows a publish tail. Unusual and deliberate: `MessagingCoordinator`
+  cannot be host-constructed, and the call site is where both P1s lived.
+- `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks`
+  from `apps/android` → **BUILD SUCCESSFUL, Gradle exit 0**, **712 tests / 3 skipped / 0 failures /
+  0 errors** (701 → 712), APK produced.
+
+### Two residuals DECLARED in §4.3 rather than claimed away
+
+1. The handful of instructions between `ws.sendMessage` returning and the pairing registering itself.
+   **V1 and V2 are jointly unsatisfiable at that seam** — closing it means cover work in front of the
+   handoff and a lock a real send could queue on. Round 2's window was 5–50 ms and caught *every*
+   mid-gap pairing; this one is not a window teardown can be relied on to hit.
+2. `ZitroneApp.applyTransportLocked` disconnects on a user-initiated transport change and does not
+   drain. Narrower (not lock/teardown-correlated, reconnects immediately), but named.
+
+§5 destaled for the 14th time — U1/U2 UNWIRED struck (U3 wires both), the obsolete 640–643 B figure
+demoted, four rounds → six, merge pending → merged. §4.3 gains the third lens's clarification of
+"materially" under R-U3-1 and the four-step teardown lifecycle under R-U3-5.
+
+No merge, no push, no version bump. 3 of 6 fix rounds remain.
+
+## U3 FIX ROUND 4 of 6 — the COMPOSED fix: a success signal, and teardown on the send worker (2026-07-28)
+
+Round 3 raised severity: **2 P1 → 4 P1**, two of them new. That is the fix-introduces-defects
+signature, and this round records two things it would be easy to leave out — **one of the four P1s
+was caused by the architect's own instruction**, and **one was an impossibility claim of mine that a
+reviewer refuted with a construction**. Full record: `reviews/decoy-0.10.0/u3-fix-r4-composed.md`.
+
+### The construction, because the rest follows from it (W4)
+
+Round 3 declared a residual and called it forced: teardown can slip between `ws.sendMessage`
+returning and the pairing registering, and closing it seemed to need cover work and a lock in front
+of a real send. **Unsound.** The window does not need to be atomic with the handoff, only
+*serialised* against teardown — and `MessagingCoordinator` already owns a serialisation point every
+send goes through: its `limitedParallelism(1)` `confined` worker. Terminal teardown is now enqueued
+there, so it runs strictly before or strictly after a send's slice, never inside; and with no
+suspension point between the publish tail and admission, that slice is uninterruptible. **No lock and
+no cover-side instruction was added in front of any real send.** R-U3-5 step 1's other half is an
+`acceptingSends` volatile gate read before any crypto on all three send paths — also not jointly
+unsatisfiable, contrary to round 3.
+
+### The architect's instruction (W1)
+
+"Invert the call so cover follows the handoff" was implemented, but `publishOutgoing`/`publishReceipt`
+returned `Unit`: contact-deleted, socket-refused and handed-off were indistinguishable and cover ran
+in all three. Two of them put a **lone decoy** on the wire — a frame the user never generated, the
+marked-pair defect with the sign flipped. Both tails now return "handed to the relay" and every call
+site is `if (publish…) cover(…)`.
+
+### What fell out of the composition
+
+- **W2** — the drain's 100 ms deadline abandoned any build that overran it ("non-suspending" bounds
+  *suspension*, not *time*). `cover()` now BUILDS then ADMITS, so the register only ever holds built
+  pairings: the deadline, the wait loop, the condition variable and the `resolved` flag are all
+  deleted and **no wall clock remains in the class**.
+- **W3** — the Tor/I2P toggle no longer splits a pair across a TLS teardown/reconnect. New
+  **non-terminal** `CoverTraffic.quiesce` drains and keeps pairing over the new socket, dispatched on
+  the same worker. The disconnect tripwire's deliberate carve-out for `ZitroneApp` is **gone**, not
+  converted into a tracked exception.
+- **W5** — `ensureProvisioning` holds the teardown lock across check → CAS → assign; `stop()` cancels
+  under the same lock.
+- **W6** — all three tripwires were re-derived, because **the call-site one passed while W1 was
+  live**: it pinned statement *adjacency*, not dependence. The interface tripwire now pins the whole
+  declared method set; the disconnect tripwire reads both owners with comments stripped and braces
+  walked; a fourth pins the confined dispatch and the send gate.
+
+### Evidence
+
+`ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug` from
+`apps/android` → **BUILD SUCCESSFUL, Gradle exit 0**; **716 tests / 0 failures / 0 errors** across 78
+classes (712 → 716); `DecoySendPairingTest` 28 → 35 tests. **13 mutations with a rebuild between
+each, 12 discriminated.** The survivor is reported rather than hidden: reverting to round 3's
+admit-then-build order is **behaviour-preserving once teardown is confined** — the deadline, not the
+order, was the defect. Two test-side mutations confirm the new behavioural tests pin confinement.
+
+### Residual declared rather than claimed away
+
+`stop()` blocks on the confined worker for at most 250 ms before falling back to the calling thread.
+The bound is on *waiting for the worker*, not on cover work — it exists because `UnlockController`
+closes the vault runtime the instant `stop()` returns, and a lock that hangs without wiping key
+material is worse than any framing defect. On expiry that one teardown degrades to round-3 behaviour.
+
+No merge, no push, no version bump. **2 of 6 fix rounds remain.**
+
+## 2026-07-28 — U3 FIX ROUND 5 of 6: the lock boundary, and a primitive doing two incompatible jobs
+
+Branch `feat/0.10.0-decoy-u3-pairing`. Round 4's paired-blind review was the **first in seven rounds
+where both reviewers converged on the same top finding**, with severity falling — exhaustion, not
+anchoring. Adjudicated 1 P1 / 3 P2 / 5 P3; full note in
+`reviews/decoy-0.10.0/u3-fix-r5-lock-boundary.md`.
+
+### The P1, and why the obvious repair was refused
+
+`reconnectTransport` reused the terminal-teardown helper, whose 250 ms **caller-thread fallback** is
+terminal-safe only for `stop()` (which invalidates the transport and refuses late admissions).
+`quiesce` deliberately leaves the register OPEN, so when the fallback fired it drained an empty
+register on the calling thread, swapped the socket, and let a send still mid-slice on the worker emit
+its cover frame on the NEW connection while its real frame had gone out on the old one. **No
+coroutine suspension is needed for that interleave** — the uninterruptible-slice argument only holds
+against teardown running ON the worker, and the fallback has just taken it off. The fallback did not
+merely have an unjustified bound; it structurally defeated the argument the whole round-4 fix rests
+on, exactly when it fired.
+
+Lengthening or dropping the bound reinstates a verified five-step deadlock (`applyTransport` holds
+`transportLock` → blocking reconnect waits on `confined` → `deleteAccountAndWipe` runs there →
+`onConfirmed` → `lockIf` → `stopSession` takes `transportLock`). **So the lock boundary was fixed
+instead**: `applyTransportLocked` now installs the endpoints and RETURNS the session to redial;
+`applyTransport` releases `transportLock` and only then requests a reconnect that is confined to the
+worker, skipped once terminal teardown has begun, coalesced by generation, and has **no fallback and
+no wait at all**. Deviation from the ruling, recorded: it does not *wait* for confinement — waiting
+was the fallback's only reason to exist and would relocate the hang to the resolver collector.
+
+### The finding that explains why the P1 survived a round that claimed to close it
+
+**No test instantiated `MessagingCoordinator`.** Both round-4 "confinement" tests built their own
+`Executors.newSingleThreadExecutor()`; production dispatch was pinned only by source strings; the
+fallback branch was never executed by anything. The dispatch is therefore now production code that a
+JVM test CAN build — `CoverTrafficWorker`, three deliberately different entry points (on-worker
+terminal, dispatched+bounded terminal, dispatched-only non-terminal) — driven by seven behavioural
+tests, including an end-to-end one over a socket whose identity changes on a swap, so a split pair is
+observed rather than argued.
+
+Also: both terminal waits are bounded (round 4 left the second unbounded, in the function whose whole
+rationale is that an unbounded wait is the worst outcome); the natural-socket-death-mid-gap residual
+is re-declared in the spec after being struck by accident; the "35 pairing tests" claim was wrong (34)
+and is corrected as an error rather than silently; and three tripwire evasions are closed — token
+spacing (`coverTraffic . cover(`, `disconnect( )`) is normalised away and the scans read EVERY app
+source rather than two named files.
+
+### Evidence
+
+`ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks`
+from `apps/android` → **BUILD SUCCESSFUL, Gradle exit 0**, three consecutive runs. **723 tests / 78
+classes / 3 skipped / 0 failures** (716 → 723); `DecoySendPairingTest` 34 → 41. **12 mutations with a
+rebuild between each, 12 discriminated.**
+
+**Process failure worth keeping:** the first mutation harness was killed by a timeout mid-run and left
+one mutation applied. The file was untracked, so `git status` hid it, the baseline was red, and every
+mutation would have reported "caught" for free. The re-run asserts a green baseline first, restores in
+a `finally`, checksums every touched file after each restore, and re-checks the baseline at the end.
+
+### Residuals declared
+
+Terminal fallback (unpaired real frame, measured by a test, never a lone decoy and never a split
+pair); a transport swap now WAITS for the worker instead of pre-empting it (latency, not framing —
+the endpoints are already re-pointed, so only the live socket lingers); natural socket death mid-gap;
+the confinement contract is a contract, not a type.
+
+No merge, no push, no version bump. **1 of 6 fix rounds remains.**

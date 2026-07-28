@@ -206,6 +206,17 @@ class WsClient(
 
     fun typingStop(peerId: String): Boolean = send(typingFrame(started = false, peerId = peerId))
 
+    /**
+     * Bytes handed to the socket and not yet written — OkHttp's own outbound buffer
+     * (`WebSocket.queueSize`). 0 when there is no live socket.
+     *
+     * A transport-health reading, not a cover-traffic concept: [send] returns `false` once that
+     * buffer would pass OkHttp's 16 MiB cap, and OkHttp *closes the connection* when it does, so a
+     * queue that is backing up is the writer thread telling us it cannot keep up. Anything that
+     * wants to be polite to the connection needs to be able to see it.
+     */
+    fun outboundQueueBytes(): Long = webSocket?.queueSize() ?: 0L
+
     // -- internals --------------------------------------------------------------
 
     private fun send(frame: JSONObject): Boolean =

@@ -818,6 +818,89 @@ instruction the spec had no business giving. Specs should state observable **req
 ("indistinguishable from a real envelope of the same shape") and let the implementation own the
 construction, because the implementation is testable against reality and prose is not.
 
+### ⭐⭐ THE COSTLIEST ERROR OF THE 0.10.0 ARC — "absolute" on a requirement about OUTCOMES
+
+**Seven review rounds and four independent lenses ground correctly against a premise that should
+never have been written. The review process was not at fault; it worked exactly as designed, which
+is precisely why it kept producing findings.**
+
+R-U3-1 and R-U3-3 were written as guarantees about **outcomes** — *"a real send is never made less
+durable"*, *"failure must be uniform, never intermittent"* — each with a supremacy clause. Outcomes
+depend on the network. **Networks drop packets.** So reachable counterexamples always exist, and four
+lenses duly found them: a full transport queue, an exhausted relay budget, a blocked worker, a socket
+dying between two writes. Three of four concluded the feature was unshippable. They were right,
+*given the requirement*.
+
+**THE RULE. State requirements as rules about YOUR OWN BEHAVIOUR, which you can hold absolutely.
+Never as guarantees about outcomes you do not control.**
+
+- ❌ *"A real send is never made less durable."* — a claim about the world.
+- ✅ *"Cover traffic never competes with a real send for any resource; it yields."* — a claim about
+  our code, holdable without exception, and **it dissolved the two most severe findings**, which
+  existed only because cover was permitted to compete.
+
+This is the U1/U2 lesson one level up. That one was *"a spec that tells the implementer HOW to
+construct something is a second implementation."* This one is: **a spec that promises an outcome it
+does not control is a second reality.** Recognise the shape: if a requirement can be falsified by the
+network misbehaving, it is describing the world, not your program.
+
+### ⭐ WRITE THE VALUE MODEL BEFORE THE REQUIREMENTS
+
+Nothing in the spec ever said **what this layer was worth relative to the others.** There was a
+threat model (§1) — that is not the same thing. Without a value model, "absolute" looked reasonable
+when written, and every downstream lens inherited the assumption that cover traffic was a primary
+guarantee.
+
+What one paragraph would have said, and what it prevented for seven rounds:
+
+> Cover traffic does **not** hide that a message was sent — the TLS frame already shows that. It makes
+> an observer's candidate set **2 instead of 1** and forces them to pay interception and decryption
+> cost on both, compounding with I2P/Tor which make interception itself expensive. **It is the skin,
+> not the core** — Signal Protocol holds the content, the vault holds deniability, the transports hold
+> anonymity. In the project's own metaphor: **the decoy is the sugar in the lemonade. It sweetens the
+> juice; it is not the juice.** A missing decoy is an umbrella turning inside out while the raincoat
+> stays on.
+
+**RULE: every unit gets a value model — what this layer buys, what it does NOT buy, and what it is
+worth relative to the layers around it — written BEFORE its requirements, and reviewed adversarially
+like anything else.** The expensive errors in this feature were not in the code and not in the review
+loop; they were in the layer above both, which nothing was pointed at.
+
+### THE ONE-DIRECTIONAL HONESTY SWEEP — overclaims found, underclaims invisible
+
+On 2026-07-27 a full sweep corrected four published **overclaims** (sealed sender, typing indicators,
+decoy traffic, 3-hop relay). It walked past a line saying I2P was *"still in development"* with Tor as
+merely *"the active fallback today"* — **four separate times, in the same files, sometimes in adjacent
+paragraphs.** Both transports work. Tor is fast and preferred in practice; I2P's first-connect tunnel
+build is normal behaviour, not a fault.
+
+**An underclaim is also a false statement, and this one's user harm is sharper than some of the
+overclaims':** a reader who believes a shipped privacy transport is unfinished leaves it off and stays
+on clearnet — the exact opposite of the feature's purpose. Overclaims risk unearned confidence;
+underclaims cause people to decline protection they already have.
+
+**The detection methods are different, which is why one sweep missed the other class.** Overclaims are
+found by attacking a claim's evidence: *does the code support this?* Underclaims are found by the
+converse: **what does the code do that the docs fail to mention, or describe as weaker than it is?**
+Run both directions, or you will only ever find one.
+
+### DISCLOSURE vs DEGRADATION — the correlation bound most people would state too broadly
+
+"Cover must not fail in ways that correlate with anything observable" is the natural phrasing and it
+is **wrong** — it forbids load-shedding, which the subordination rule above *requires*.
+
+The correct test: **cover must not fail in ways that reveal events an observer cannot ALREADY
+observe.**
+
+- **Load-shedding = DEGRADATION, acceptable.** Dropping cover under pressure correlates with heavy
+  sending — but a burst of frames is already visible. Nothing new is revealed; the candidate set is
+  1 instead of 2 while the user is busy.
+- **Lock / teardown / transport-change correlation = DISCLOSURE, prohibited.** Those name a client
+  lifecycle event the observer could not otherwise see. That is what rounds 3–5 closed.
+
+Generalises past this feature: when writing a non-leakage constraint, ask **what the observer already
+has**, not merely what correlates.
+
 ## Blockers
 - None blocking right now. **0.9.2 PR-3 Unit 1 (A-only guard) at ready-to-merge pending a final
   round-5 paired-blind pass on the reverted delta**; the enable-atomicity hardening is a tracked
@@ -903,3 +986,125 @@ appeared for a whole class of RECIPIENTS (those whose prekeys ran out) rather th
 is worse than a uniform leak. **When "fail closed" means "emit the thing you were built to hide",
 the guard is not conservative; it is the defect.** Check what the closed state actually looks like
 to the adversary before calling it safe.
+
+### THE OBSERVABLE DRAW AND THE UNOBSERVABLE DRAW MUST NOT SHARE A WEAK GENERATOR (0.10.0 U3)
+
+Cover traffic draws two values per send: an **order bit** (which of the two same-length frames goes
+first — the value the whole mechanism exists to hide) and a **gap** in milliseconds (which the
+observer *measures directly*, because it is the time between two packets it can see).
+
+Drawn from the same generator, the observable one is a **state oracle for the unobservable one**. A
+`java.util.Random` is a 48-bit LCG whose state is recoverable from a couple of outputs, so an
+observer who times a handful of pairs can predict every subsequent order bit and read the real frame
+off the wire from then on — with the frames still perfectly equal in length, which is what makes it
+hard to notice. The fix is not "use SecureRandom by convention": the parameter is **typed**
+`SecureRandom`, so passing a weak generator is unrepresentable.
+
+**RULE.** When one draw is exposed to the adversary and another must stay hidden, ask whether the
+exposed one reveals the generator's state. If they share a generator, the shared generator inherits
+the *stronger* requirement — and encode that in the type, not in a comment.
+
+### A DELAY PLACED BEFORE A VARIABLE-DURATION STEP LEAKS THE THING IT WAS ADDED TO HIDE (0.10.0 U3)
+
+The first shape for the decoy-first branch was `emit decoy → sleep(gap) → flushSendRatchet → publish
+real`, which reads as obviously correct: the gap is drawn per send, so the observed separation is
+random. It is not correct. The **flush's own duration is added to the decoy-first gap and to nothing
+else** (the real-first branch measures its gap from a frame that has already gone), so the two
+branches have *different* gap distributions and the observer reads the order straight off the
+timing — short gap ⇒ real went first.
+
+The delay was moved to sit between the flush and the publish tail, where a suspension is already
+legal and the gap means the same thing in both branches.
+
+**RULE, and it generalises past this feature:** a randomised delay only hides what it is adjacent to.
+Before placing one, ask **what else runs between the two observable events** — any variable-duration
+step inside the interval is added to the measurement, and if it is present in only one branch it is a
+discriminator. The mutation that catches this class is "make the gap distribution depend on the
+order" (M5 here); it is worth writing whenever a timing property is claimed.
+
+### PROCESS FIX (BINDING) — BRANCH FIRST, COMMIT AS SOON AS IT COMPILES (0.10.0 U3)
+
+U3's whole first implementation — five files, the new class, the 15-test gate, a green
+`:app:testDebugUnitTest` run — was **lost to an external revert of the working tree** partway through
+the unit. The tree came back at `4438cd72` with `git status` clean; nothing was recoverable from the
+implementer's side, because the work had never been branched or committed.
+
+> **⚠️ CAUSE IDENTIFIED AFTERWARDS — it was the ARCHITECT, and the record should say so.** The
+> "external revert" was `git stash push -u` run by the architect on the implementer's **live**
+> working tree, while preparing state for an announced server restart that then did not happen. The
+> implementer could not have known that; it correctly reported the symptom. Naming it matters because
+> the lesson doubles:
+>
+> **For the architect — never stash, reset, or check out across a running agent's working tree.** A
+> background agent holds no lock and gives no signal, so the tree looks idle when it is not. If state
+> must be preserved mid-flight, prefer a mechanism that does not mutate the shared tree: let the agent
+> commit, snapshot a copy outside the repo, or simply stop the agent first. Checking `git status`
+> immediately before stashing is not a defence — it is exactly what made the tree look safe.
+>
+> **The saving grace, and the reason the rule below is still right:** the stash was recoverable and
+> the work was rebuilt. Had the implementer branched and committed as instructed, the interruption
+> would have cost nothing at all. Two independent failures had to line up to lose work. The instruction for the unit *said* "branch from
+current `main`", and the branch had not been created: the work was sitting uncommitted on `main`.
+
+Nothing about the loss was subtle, and the cost was the whole implementation window. Two rules:
+
+1. **Create the unit's branch as the FIRST action of the unit**, before the first edit, not when the
+   work is ready to commit. A branch that exists cannot be forgotten under time pressure.
+2. **Commit as soon as the unit compiles and its own tests pass** — before mutation sweeps, before
+   doc updates, before memory writes. A mutation harness rewrites source files in place; if the tree
+   is not committed, its `finally` restore is the only copy of the work in existence. Committing
+   first turns "restore the file" into "`git checkout` the file", which is verifiable.
+
+The second rule has a corollary that already exists in this file for a different reason (a harness
+that leaves mutated artifacts behind): **`git status` clean is the harness's real postcondition**, and
+it can only be checked against a commit.
+
+### LESSON (0.10.0 U3, fix round 1) — CHECK THE FINDINGS AGAINST EACH OTHER BEFORE FIXING ANY OF THEM
+
+The U3 round-1 adjudication listed U3-B (a `deleteContact` interleaves in the gap) and U3-E (the
+decoy-first branch measures the real publish tail and the real-first branch does not) as independent
+findings at different severities. **They cannot both be fixed.** Fixing U3-B requires no suspension
+between the durable barrier and the socket write, which forces the gap to sit *before* the barrier;
+that puts the flush's own duration inside the decoy-first interval and nothing else's, which *is*
+U3-E. There is no third position for the gap. Two reviewers and an adjudicator each read both
+findings and none noticed they contradict — because every one of them was checking findings against
+the *code*, and nobody checked them against *each other*.
+
+**The rule:** before implementing a fix round, lay the confirmed findings side by side and ask which
+pairs are mutually exclusive. A fix list is not a checklist until it has been shown to be
+simultaneously satisfiable. When two findings are the two horns of one dilemma, the round's real
+output is naming the dilemma, not shipping half of it — and if the horns sit on different sides of
+an "absolute" requirement, the resolution is a design decision and belongs to the maintainer.
+
+**The tell to look for:** the same structural change (here, "pairing inserted a suspension between
+the durability barrier and the send tail") appearing as the mechanism behind findings that pull in
+opposite directions. One cause, two findings, opposite remedies — that is a dilemma wearing the
+costume of a backlog.
+
+### LESSON (0.10.0 U3, fix round 5) — A RED BASELINE MAKES EVERY MUTATION "CAUGHT" FOR FREE
+
+The first round-5 mutation harness was killed by a tool timeout mid-run and left one mutation applied
+in `CoverTrafficWorker.kt`. That file was **new and therefore untracked**, so `git status --short`
+showed it as `??` and nothing else — the corruption was invisible to the check that exists to catch
+exactly this. The harness was restarted, ran to completion, and reported **8 of 8 mutations caught**.
+
+Every one of those results was worthless. The stale mutation removed the terminal fallback, which
+makes the suite RED, and a red baseline means every mutation "fails the suite" whether or not any
+guard discriminates it. A mutation sweep measures the *difference* between baseline and mutant; with
+a broken baseline there is no difference to measure and the sweep silently degrades into a
+tautology that looks like a perfect score.
+
+**The rules, and they are cheap:**
+1. **Assert the baseline is green as the harness's first action**, and abort loudly if it is not. A
+   sweep that cannot state its baseline has no result.
+2. **Restore in a `finally`, then verify with a checksum** of every file the sweep can touch —
+   comparing against a fingerprint taken before the first mutation. `git status` is not sufficient
+   while any touched file is untracked.
+3. **Re-check the baseline after the last mutation.** If it is not green, the restore failed and the
+   whole run is void.
+4. A perfect score is a reason for suspicion, not celebration — especially one that arrives right
+   after a harness was interrupted.
+
+The existing rule in this file ("commit as soon as the unit compiles") would have converted this into
+`git checkout`; it did not fire because the file was new, and `git add` had not happened. **New files
+are the blind spot: `git status` reports their existence, not their content.**

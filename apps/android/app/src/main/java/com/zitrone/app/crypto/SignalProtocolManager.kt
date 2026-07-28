@@ -111,6 +111,19 @@ class SignalProtocolManager(
         store.getIdentityKeyPair().publicKey.publicKey.getPublicKeyBytes()
 
     /**
+     * libsignal's 33-byte `IdentityKey.serialize()` form — the DJB type tag plus the 32 bytes
+     * [localIdentityPublicKeyBytes] returns. This is the SENDER's identity as it appears INSIDE a
+     * `PreKeySignalMessage`, a different representation from the raw 32-byte REGISTRATION wire
+     * format above (see that comment: the relay rejects the 33-byte form).
+     *
+     * Public key only, no private half. Its one consumer is
+     * [com.zitrone.app.decoy.DecoyEnvelopeBuilder.Sender], which needs the same bytes a real first
+     * message carries so a cover envelope is the same length as the one it covers; the builder
+     * range-checks the form rather than trusting it.
+     */
+    fun localIdentitySerialized(): ByteArray = store.getIdentityKeyPair().publicKey.serialize()
+
+    /**
      * Signs the timestamped login challenge with the identity key (XEdDSA
      * over the Curve25519 identity key). Challenge format is defined by the
      * server contract: "sublemonable-login:<account_id>:<unix_ts>".

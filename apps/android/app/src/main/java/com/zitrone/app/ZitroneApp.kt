@@ -51,7 +51,16 @@ import com.zitrone.app.data.SettingsRepository
 import com.zitrone.app.data.TransportState
 import com.zitrone.app.data.VaultAuthStore
 import com.zitrone.app.data.VaultRosterStore
+import com.zitrone.app.data.DecoyAuthStore
 import com.zitrone.app.data.VaultSettingsStore
+import com.zitrone.app.decoy.ApiClientDecoyRelay
+import com.zitrone.app.decoy.CoverPressure
+import com.zitrone.app.decoy.CoverTraffic
+import com.zitrone.app.decoy.DecoyAccountProvisioner
+import com.zitrone.app.decoy.DecoyEnvelopeBuilder
+import com.zitrone.app.decoy.DecoyRelayApi
+import com.zitrone.app.decoy.DecoySendPairing
+import com.zitrone.app.decoy.RegistrationPowSolver
 import com.zitrone.app.diagnostics.BootDiagnostics
 import com.zitrone.app.i2p.I2pIntegration
 import com.zitrone.app.net.ApiClient
@@ -1457,6 +1466,13 @@ class AppContainer(private val app: Application) {
             persistDeleteIntent = imageStore::markDeleteIntent,
             persistServerDeleteConfirmed = imageStore::markServerDeleteConfirmed,
             intentMarkerPresent = imageStore::hasDeleteIntentMarker,
+            // Cover traffic (0.10.0 U3). Resolved at ATTEMPT time, not here: a provisioning attempt
+            // that starts after a transport swap must register over the transport that is live
+            // then — the same reason applyTransportLocked re-points the session's ApiClient/WsClient.
+            decoyRelay = {
+                val (decoyClient, decoyApiBase, _) = transportEndpoints(transportResolver.state.value)
+                ApiClientDecoyRelay(decoyApiBase, decoyClient)
+            },
         )
     }
 
@@ -1468,9 +1484,7 @@ class AppContainer(private val app: Application) {
     }
 
     private fun onSessionPublished() {
-        synchronized(transportLock) {
-            applyTransportLocked(transportResolver.state.value)
-        }
+        applyTransport(transportResolver.state.value)
         lemonDropVeilController.onUnlocked()
     }
 
@@ -1487,22 +1501,56 @@ class AppContainer(private val app: Application) {
         scope.launch(Dispatchers.IO) { runCatching { reapStaleBiometricAliases() } }
     }
 
-    private fun applyTransport(state: TransportState) =
-        synchronized(transportLock) { applyTransportLocked(state) }
+    /**
+     * Apply a transport state (Tor/I2P toggle, resolver change, session publish).
+     *
+     * **The lock boundary here is load-bearing, and getting it wrong was a P1 (0.10.0 U3 fix round
+     * 5).** Two properties have to hold at once:
+     *
+     *  - the socket swap must be **serialised against every send's publish/admit slice**, i.e. it
+     *    must run on the coordinator's confined worker — otherwise a pairing whose real frame has
+     *    just gone out on the old socket emits its cover frame on the new one, and a SPLIT pair
+     *    straddling a TLS boundary is a stronger signal than a missing cover frame;
+     *  - and `transportLock` must not be **held while waiting for that worker**, because the worker
+     *    can be running `deleteAccountAndWipe`, whose `onConfirmed → lockIf → stopSession` takes
+     *    `transportLock` — a verified five-step lock inversion.
+     *
+     * Round 4 satisfied the first and broke the second, and papered over it with a 250 ms timeout
+     * that ran the swap on THIS thread — which silently un-did the first property exactly when it
+     * fired. So the two are separated instead: **everything that needs the lock happens under it and
+     * nothing else does.** [applyTransportLocked] resolves and installs the new endpoints and hands
+     * back the session that needs its live socket redialled; the lock is released; and only then is
+     * the reconnect requested — asynchronously, confined to the worker, with no fallback.
+     */
+    private fun applyTransport(state: TransportState) {
+        val live = synchronized(transportLock) { applyTransportLocked(state) } ?: return
+        // OUTSIDE transportLock, and it does not wait: this queues the drain-and-swap on the
+        // coordinator's confined worker and returns. The endpoints it will dial were installed
+        // above, under the lock, so a swap that runs later still reaches the current transport.
+        live.coordinator.reconnectTransport {
+            live.wsClient.disconnect()
+            live.apiClient.accessToken?.let(live.wsClient::connect)
+        }
+    }
 
-    private fun applyTransportLocked(state: TransportState) {
-        if (state != transportResolver.state.value) return
+    /**
+     * Install [state]'s endpoints on the live session. @GuardedBy [transportLock].
+     *
+     * @return the session whose live socket must now be redialled over the new endpoints, or null
+     * when there is nothing to redial (no session, or its socket is already down — a down socket
+     * redials itself through `WsClient`'s own backoff, over the endpoints just installed).
+     * **The redial itself is deliberately not done here** — see [applyTransport].
+     */
+    private fun applyTransportLocked(state: TransportState): SessionContainer? {
+        if (state != transportResolver.state.value) return null
         val (client, apiBase, ws) = transportEndpoints(state)
         httpClient = client
         val live = _session.value
         live?.apiClient?.updateTransport(httpClient, apiBase)
         live?.wsClient?.updateTransport(httpClient, ws)
         if (state == TransportState.TOR) TorIntegration.requestOrbotStart(app)
-        if (live != null &&
-            live.wsClient.connectionState.value != WsClient.ConnectionState.DISCONNECTED
-        ) {
-            live.wsClient.disconnect()
-            live.apiClient.accessToken?.let(live.wsClient::connect)
+        return live?.takeIf {
+            it.wsClient.connectionState.value != WsClient.ConnectionState.DISCONNECTED
         }
     }
 
@@ -1574,6 +1622,15 @@ class SessionContainer(
     persistDeleteIntent: () -> Unit = {},
     persistServerDeleteConfirmed: () -> Unit = {},
     intentMarkerPresent: () -> Boolean = { false },
+    /**
+     * Builds the relay client cover-traffic provisioning registers its synthetic account through
+     * (0.10.0 U3). A FACTORY, not an instance, for two reasons: the transport can swap under a live
+     * session (`applyTransportLocked`), so the attempt must dial whatever is current rather than
+     * whatever was current at unlock; and one [com.zitrone.app.decoy.ApiClientDecoyRelay] owns one
+     * attempt's RAM-only staging store (see its kdoc). Null — the default, and every construction
+     * outside the app — means no cover traffic at all.
+     */
+    decoyRelay: (() -> DecoyRelayApi)? = null,
 ) {
     /** Which image slot this session unlocked — needed to persist a biometric re-wrap ([withVaultKey]). */
     val slotIndex: Int = vaultOpen.slotIndex
@@ -1604,6 +1661,12 @@ class SessionContainer(
     val lemonDropRedeemer: LemonDropRedeemer
     val lemonDropCreator: LemonDropCreator
     val notificationScheduler: NotificationScheduler
+
+    /**
+     * Cover traffic for this vault's send path (0.10.0 U3), or [CoverTraffic.NONE]. Held only so it
+     * is constructed before the coordinator that owns its teardown; nothing else reads it.
+     */
+    private val coverTraffic: CoverTraffic
     val coordinator: MessagingCoordinator
 
     init {
@@ -1674,6 +1737,38 @@ class SessionContainer(
                 },
                 clock = { android.os.SystemClock.elapsedRealtime() },
             )
+            // Cover traffic (0.10.0 U3), or CoverTraffic.NONE when this build has no decoy relay.
+            // Every collaborator is a lambda: DecoySendPairing gets no VaultRuntime, no store and no
+            // ApiClient, so "the send-pairing path writes nothing durable" is a fact about its type
+            // — the discipline DecoyEnvelopeBuilder documents. The synthetic account id is read per
+            // send because it APPEARS mid-session, when provisioning lands.
+            coverTraffic = decoyRelay?.let { relayFactory ->
+                DecoySendPairing(
+                    scope = scope,
+                    sender = {
+                        apiClient.accountId?.let { accountId ->
+                            DecoyEnvelopeBuilder.Sender(
+                                accountId = accountId,
+                                registrationId = signalManager.localRegistrationId(),
+                                identityKeySerialized = signalManager.localIdentitySerialized(),
+                            )
+                        }
+                    },
+                    recipient = { DecoyAuthStore(rt).accountId },
+                    send = wsClient::sendMessage,
+                    // The R-U3-1 yield (0.10.0 U3 fix round 6). The queue reading MUST be the live
+                    // socket's own: a supplier that always answers 0 leaves cover free to fill the
+                    // outbound buffer a real frame needs, which is the defect this closes.
+                    pressure = CoverPressure(queuedBytes = wsClient::outboundQueueBytes),
+                    provision = {
+                        DecoyAccountProvisioner.forRuntime(
+                            runtime = rt,
+                            relay = relayFactory(),
+                            powSolver = RegistrationPowSolver(),
+                        ).provisionIfNeeded()
+                    },
+                )
+            } ?: CoverTraffic.NONE
             coordinator = MessagingCoordinator(
                 appContext = app,
                 scope = scope,
@@ -1694,6 +1789,9 @@ class SessionContainer(
                 persistDeleteIntent = persistDeleteIntent,
                 persistServerDeleteConfirmed = persistServerDeleteConfirmed,
                 intentMarkerPresent = intentMarkerPresent,
+                // U3: wraps the publish tail of every outbound envelope. MessagingCoordinator.stop()
+                // is what tears it down, which is why the coordinator owns the reference.
+                coverTraffic = coverTraffic,
             )
         } catch (t: Throwable) {
             runCatching { rt.close() }

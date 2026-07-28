@@ -11,6 +11,72 @@
 - [x] Added the `security-review-loop.md` prompt to `l00prite/.l00prite/prompts/` + the prompt index
       (PR #52 `b8eb652` / PR #53, merged). It drove PR-2's paired-blind loop to clean convergence.
 
+
+## ✅ CLOSED 2026-07-27 — synthetic relay account surviving account-delete / Pucker Burn is NOT a gate
+
+**Maintainer ruling. This was tracked as a merge gate for U3; it is closed, not deferred.**
+
+**The argument.** After a burn, decoy traffic is pointless (there is no real traffic left to hide)
+and real traffic can no longer reach the device (the vault is gone). So a surviving synthetic account
+protects nothing and exposes nothing.
+
+**Two things make it airtight rather than merely pragmatic:**
+
+1. **It is strictly dominated by an exposure already disclosed and accepted.**
+   `SECURITY_MODEL.md:628` states plainly that *a burn is device-local and does not delete your
+   account on the relay.* The REAL account survives a burn. The synthetic one holds strictly less —
+   an `accounts` row with an identity public key and nothing else, no message history (envelopes are
+   deleted on ack), no linkage (`delivery_receipts` carry only `SHA-256(message_id)`), and no request
+   logs by design. If the real account surviving is acceptable, the synthetic one is *a fortiori*.
+
+2. **Post-burn it is unaddressable.** The synthetic account's id lived only inside `TAG_DECOY`, in the
+   wiped vault. An adversary holding the burned device cannot name the account, so cannot query it,
+   cannot link it to the user, and cannot use it to count vaults. It is not merely inert — it is
+   unreachable.
+
+**One documentation consequence, for U6 — not a gate.** The existing disclosure says *your account*
+(singular) survives a burn. Once cover traffic ships that becomes *your account and the cover-traffic
+account it created for that vault.* One line, and it belongs with U6's `SECURITY_MODEL.md` work
+alongside the dead-air disclosure. Same class as the 0.9.3 burn-scope correction, which had to fix
+exactly this shape of claim once already.
+
+
+## 🚚 CX23 TRIP — four items, grouped 2026-07-27. All need direct CX23 access.
+
+Grouped deliberately: each needs the same access and CX33 has none, so batch them rather than paying
+the access cost four times.
+
+- [ ] **(a) `onServerError` SURFACES NOTHING TO THE USER — a LIVE DEFECT IN SHIPPED CODE, not a decoy
+      concern.** *(Wording corrected 2026-07-28: the method is no longer literally empty — U3 fix
+      round 6 routes `rate_limited` to the cover-traffic yield — but **not one thing here is fixed by
+      that**. It is a cover-traffic signal, not error handling, and the user-facing half below is
+      untouched and still needs the relay.)*
+      **Every server rejection is still silently swallowed.** A rate-limited or otherwise-rejected send leaves the message displayed as
+      `SENDING` forever: not marked failed, not retried, no error surfaced. **Users currently have no
+      way to know a send failed.** This predates decoy traffic and is worth fixing on its own merits.
+      **Fix:** carry the message id on `rate_limited` (and other per-message rejections) so the client
+      can attribute and retry. Relay + client.
+- [ ] **(b) Cover traffic halves the account's send budget** — decoy-scoped, unlike (a). `sendLimit`
+      is charged to the authenticated account, so a covered send costs two permits. **Exempt or raise
+      the budget for cover frames.**
+      **⚠️ NO LONGER THE ONLY FIX, and the "UNSOUND" ruling is WITHDRAWN (U3 fix round 6,
+      2026-07-28).** The client side is now defended: `CoverPressure` sheds cover on the relay's own
+      `rate_limited` (routed through `MessagingCoordinator.onServerError`, which used to be empty) and
+      on the session's own recent frame rate, so cover contributes at most ~20 frames to any minute
+      and at least 60 of the nominal 100 stay free for real sends. The old ruling — *a client assuming
+      100/min against a relay configured lower inverts the priority it claims to guarantee* — is
+      correct **of a headroom policy**, which must predict the limit; it does not touch a **reactive**
+      one, which needs no number at all. This item is now an improvement (cover frames should not cost
+      the user's budget at all), not a defect gate. **Does not block U3.**
+- [ ] **(c) Onion mirror staging** — the next artefact the onion serves is 0.10.0 (0.9.4 never will;
+      see RELEASE STRATEGY). Forward check at publish time, not a stale-APK defect any more.
+- [ ] **(d) CX23 P2 — non-IP registration keying. NOW UNBLOCKED.** The precondition is answered:
+      **Caddy APPENDS `X-Forwarded-For`** (no `header_up` override), so `ProxyHeader` is unsafe as-is.
+      Two viable routes: `header_up X-Forwarded-For {remote_host}` in the Caddyfile so Caddy
+      overwrites and the header becomes trustworthy, **or** last-hop parsing server-side (take only
+      the element Caddy appended). Neither helps Tor/I2P, which collapse via the sidecars regardless —
+      registration PoW is the per-client cost there.
+
 ## 🗺️ RELEASE STRATEGY — recorded 2026-07-27 (maintainer). Read before planning any unit.
 
 **The "-beta" version labels are a deliberate hedge, not a maturity claim.** Everything shipped so
@@ -962,12 +1028,16 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       dishonesty) still holds; an understated one is just worse, which is why it was applied rather
       than left standing while it waits.
 
-- [ ] **U1 follow-up — account deletion / burn leaves the synthetic relay account registered.**
+- [ ] **U1 follow-up — account deletion / burn leaves the synthetic relay account registered.
+      ⚠️ NOW LIVE AND UNANSWERED — U3 WIRED PROVISIONING (2026-07-27). MERGE GATE.**
       `deleteAccountAndWipe` deletes the REAL relay account and obliterates the image; a provisioned
-      synthetic account would survive on the relay as an orphan. Not live today (U1 is unwired and
-      nothing provisions), but it must be answered before U3 wires provisioning: either delete the
-      synthetic account alongside the real one, or state in `SECURITY_MODEL.md` that it is left and
-      why that leaks nothing beyond what §1's threat model already concedes.
+      synthetic account survives on the relay as an orphan. ~~Not live today (U1 is unwired and
+      nothing provisions), but it must be answered before U3 wires provisioning~~ — **U3 is built and
+      wired on `feat/0.10.0-decoy-u3-pairing`, so a vault that sends anything now provisions.** The
+      answer is still owed and is now a precondition for MERGING U3, not for writing it: either
+      delete the synthetic account alongside the real one, or state in `SECURITY_MODEL.md` that it is
+      left and why that leaks nothing beyond what §1's threat model already concedes. Same question
+      applies to the Pucker Burn wipe, which never contacts the relay at all.
 
 - [x] **U2 must settle §2.2 vs §2.3 for the first envelope. — SETTLED, and the ruling was already
       made before U2 started.** The maintainer's §2.3 ruling governs: **no `SessionBuilder.process`**,
@@ -1008,11 +1078,201 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       is the same width as `"text"`. G2-C: the U1 invariant table corrected IN PLACE (18 stale
       references), with `DecoyState`'s kdoc made the canonical field-set pointer. G2-D: the
       provisioner's allocator-based lock justification rewritten, decision kept.
+
+- [x] **U3 — pairing at the send choke point. BUILT and WIRED 2026-07-27 on
+      `feat/0.10.0-decoy-u3-pairing` (`ba5a6b9e`; LOCAL, not pushed, not merged, no version bump).**
+      `decoy/DecoySendPairing.kt` — the `CoverTraffic` seam (`paired(cover, publish)` + `stop()`,
+      `CoverTraffic.NONE` as the whole "off" implementation) wrapped around the NON-SUSPENDING publish
+      tail at all three `ws.sendMessage` sites, plus `SignalProtocolManager.localIdentitySerialized()`
+      for the 33-byte `IdentityKey.serialize()` form the builder's `Sender` needs.
+      **696 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0, `--rerun-tasks`;
+      **15 mutations, 15 killed** (M14/M15 added because the first thirteen left two tests
+      undiscriminated — no test in the unit is carried by another guard).
+      **No invariant table: U3 adds no durable field and no writer** — it reads
+      `TAG_DECOY.accountId` through `DecoyAuthStore`'s existing getter and mutates nothing; the
+      registration writes it triggers are U1's.
+      **The two OPEN questions are answered in `DecoySendPairing`'s kdoc, with the argument:**
+      (1) the gap is **uniform over 5‥50 ms per send** — max-entropy over the bound R-U3-1 forces,
+      floor set so the two writes cannot share one TCP segment, and the generator is typed
+      `SecureRandom` because the OBSERVABLE gap would otherwise leak the state that produces the
+      UNOBSERVABLE order bit; (2) **every envelope through the choke point is paired**, receipts and
+      attachment control payloads included, because those are built to be indistinguishable from text
+      and selective pairing would hand an observer a receipt detector that does not exist today.
+      **Mechanism notes worth carrying into review:** the tail is passed as a plain `() -> Unit`, so
+      "no suspension between `contactExists` and `ws.sendMessage`" is now compiler-enforced; a
+      `finally` guarantees the real publish runs exactly once on every path including cancellation; a
+      pairing `Mutex` keeps a queued real send from overtaking a decoy-first pairing (reordering is
+      forbidden categorically, unlike delay) and keeps both branches equally interleaving-free.
+      `canSend()` is deliberately NOT the send predicate — it folds in the transient
+      `capacityExceeded`, which is the stutter R-U3-3 forbids, and is unobservable at a point the
+      flush has already passed.
+      ⚠️ **THE PARAGRAPH ABOVE IS SUPERSEDED BY FIX ROUNDS 2 AND 3 AND IS LEFT ONLY AS THE RECORD OF
+      WHAT WAS BUILT.** Round 2 (maintainer ruling): the ordering is real-frame-first, the pairing
+      `Mutex` is DELETED, and the `finally` now guards the COVER frame (an unpaired real frame is a
+      marked frame), not the publish. Round 3 (third-lens P1s): `paired(cover, publish)` is DELETED —
+      the seam is `cover(real)` and cannot be handed a real send at all, because entering it was
+      itself cover work inside the process-death window; the non-suspending tail lives at the call
+      site as `MessagingCoordinator.publishOutgoing` / `publishReceipt`, which is what keeps D2c
+      compiler-enforced; and `stop(invalidateTransport)` now OWNS the disconnect, running it only
+      after draining every admitted pairing. **28 pairing tests + 33 provisioner tests; 712 total /
+      3 skipped / 0 failures; 11 mutations, 11 discriminated.** See
+      `reviews/decoy-0.10.0/u3-fix-r3-subordinate.md`.
+      **OWED: paired-blind review round 1 of U3 (0 of a hard cap of 6 used), and the now-live U1
+      follow-up above (orphaned synthetic account on delete/burn) as a merge gate.**
       **681 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0, `--rerun-tasks`;
       **7 mutations, 7 discriminated** — and M5/M6/M7 fail ONLY the new test, confirming the old
       coverage proved nothing about mirroring. Section budget re-measured over three runs: raw body
       700 B, encoded delta 635/641/645 B — recorded as a DISTRIBUTION, since the previously recorded
       "640–643 B" was a two-run interval that three fresh runs already fall outside.
+
+- [x] ✅ **MAINTAINER DECISION #1 — RULED 2026-07-27 (`81761dfb`): REAL-FRAME-FIRST, ALWAYS.
+      Random ordering CONCEDED. Implemented in U3 fix round 2.**
+      Recorded as a RULING rather than a preference because the exhaustion proof makes it one: three
+      possible gap positions on a decoy-first send, all three break something, no fourth position —
+      **decoy-first has no correct implementation, not merely a worse one.** Structural beats
+      guarded. The traded property is near-worthless against the targeted adversary (5–50 ms of
+      correlation ambiguity, only for an observer watching BOTH ends, who already reads
+      `recipient_id` in cleartext on both envelopes). Residual now recorded in §2.4.
+      Derivation: `reviews/decoy-0.10.0/u3-fix-r1-ordering-decision.md`; implementation:
+      `reviews/decoy-0.10.0/u3-fix-r2-real-first.md`.
+
+- [ ] ⚠️ **MAINTAINER DECISION #2 — the rate-budget conflict, which decision #1 does NOT close.**
+      **SPLIT AND SUPERSEDED 2026-07-27 (`75f1b68d`) — see CX23 TRIP items (a) and (b) at the top of
+      this file, which are the live tracking. Kept here as the derivation only.** Fix round 2
+      confirmed the split from the code side: real-first makes SELF-preemption inside a pair
+      impossible by construction and is tested (`with one send permit left the REAL frame takes
+      it`), and cross-send preemption is the part no ordering can touch.
+      **The adjudication states U3-C as an ordering defect and that is wrong.** Real-first removes
+      only self-preemption inside one pair; send N's cover frame goes out 5–50 ms AFTER send N's real
+      frame and can still take the last permit send N+1's real frame needed. Cross-send preemption is
+      inherent to doubling volume on a shared per-account budget, whatever the order.
+      Real shape: cover halves the account's effective send capacity, and a rate-limited real send is
+      **silently unrecoverable** — `hub.go` sends `rate_limited` with no message id and
+      `MessagingCoordinator.onServerError` (`MessagingCoordinator.kt:2120`) is a no-op, so the bubble
+      sits in `SENDING` forever with nothing to retry. ~~**Only a relay-side answer closes it:**~~
+      **⚠️ HALF WRONG, corrected 2026-07-28 (U3 fix round 6).** *"Only a relay-side answer"* conflated
+      two separable problems. **Cover competing for the budget is now closed client-side** —
+      `CoverPressure` yields on `rate_limited` and on the session's own frame rate, which needs no
+      message id and no knowledge of the limit, so the "unsound" ruling applied only to a *headroom*
+      policy. **The silently-unrecoverable real send is NOT closed** and still needs the relay to
+      carry the message id; that half stays exactly as stated, under CX23 item (a). Exempting or
+      raising the per-account `message.send` budget for cover frames remains worth doing, as an
+      improvement rather than the fix.
+
+- [ ] **U3 FIX ROUND 2 of 6 APPLIED (2026-07-27) — the ruling implemented as a SIMPLIFICATION.**
+      Record: `reviews/decoy-0.10.0/u3-fix-r2-real-first.md`. `paired` is now `publish()` — first
+      statement, outside every `try`, no suspension in front of it — then the cover frame after a
+      drawn gap. **U3-A, U3-B, U3-C's self-preemption half and U3-D are impossible BY CONSTRUCTION;
+      U3-E, U3-G and U3-H are GONE rather than repaired; U3-F is repaired and demoted with a
+      derivation** (a coalesced pair is one record of twice the frame length, which says exactly what
+      two frames say — cosmetic, not a leak). **The pairing `Mutex` is DELETED**, argued from its
+      callers: both of its justifications were decoy-first artefacts and it had no third caller.
+      Also deleted: `Plan`, the order bit, three branches, the latching booleans, the nested
+      `finally`. Kept and re-argued: the `finally` (an unpaired frame is a MARKED frame — R-U3-3),
+      `coverFor`'s catch-all (justification INVERTED: it now stops a cover-side throw from marking an
+      already-delivered message FAILED), and `SecureRandom` by type (the gap is now the only drawn
+      quantity and is directly observable — a `java.util.Random` becomes a device fingerprint that
+      could link two vaults' traffic).
+      **U3-I discharged in full:** 15 → 20 tests, all four named gaps covered — process death at the
+      only suspension point, a `deleteContact` queued on one `StandardTestDispatcher`, the
+      `sendLimit` boundary, and a concurrent send delayed by nothing; plus `no cover-side code runs
+      before the real publish`, which catches the quiet regression the others would miss.
+      **15 mutations, 15 discriminated, 0 survivors; all 20 tests killed by at least one.**
+      **701 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0, Gradle exit 0.
+      **The ruling left two gaps, both closed here as documentation:** §2.4 never received the
+      residual the ruling promised it, and §5's U3 row still demanded a statistical order test.
+      Still open: U3-C **cross-send** (relay-side, decision #2 above), review round 2 not dispatched.
+      **4 of the 6 fix rounds remain.**
+
+- [ ] **U3 FIX ROUND 4 of 6 APPLIED (2026-07-28) — the COMPOSED fix. Severity had gone UP.**
+      Round 3's review returned **4 P1** where round 2 returned 2, two of them new — the
+      fix-introduces-defects signature. Two facts are recorded because they are the point:
+      **one P1 was caused by the architect's own instruction**, and **one was an impossibility claim
+      from fix round 3 that a reviewer refuted with a construction.** Full record:
+      `reviews/decoy-0.10.0/u3-fix-r4-composed.md`.
+      **W4 — the construction, and everything follows from it.** Teardown does not need to be atomic
+      with the handoff, only SERIALISED against it, and the coordinator already owns a serialisation
+      point every send goes through: its `limitedParallelism(1)` confined worker. Terminal teardown
+      is now enqueued there, so it runs strictly before or strictly after a send's publish-then-pair
+      slice and never inside it. The declared R-U3-1 residual is **closed, not accepted**, and no
+      lock and no cover-side instruction was added in front of any real send. R-U3-5 step 1's other
+      half is an `acceptingSends` gate read before any crypto on all three send paths.
+      **W1 — the architect's instruction.** `publishOutgoing`/`publishReceipt` returned `Unit`, so
+      contact-deleted, socket-refused and handed-off were indistinguishable and cover ran in all
+      three: two of them emitted a **lone decoy**, a frame the user never generated. Both tails now
+      return "handed to the relay"; all three call sites are `if (publish…) cover(…)`.
+      **W2 — no wall clock survives.** The drain's 100 ms deadline abandoned any build that overran
+      it, and "non-suspending" bounds suspension, not time. `cover()` now BUILDS then ADMITS, so the
+      register only holds built pairings; deadline, wait loop, condition variable and `resolved` flag
+      are all deleted.
+      **W3 — the Tor/I2P toggle no longer splits a pair** across a TLS teardown/reconnect (third lens:
+      a split pair is a STRONGER signal than a missing cover frame). New **non-terminal**
+      `CoverTraffic.quiesce`; the disconnect tripwire's deliberate carve-out for `ZitroneApp` is GONE
+      rather than converted into a tracked exception.
+      **W5** — `ensureProvisioning` holds the teardown lock across check → CAS → assign.
+      **W6 — the call-site tripwire PASSED WHILE W1 WAS LIVE** (it pinned adjacency, not dependence).
+      All three re-derived; a fourth pins the confined dispatch and the send gate.
+      **Evidence:** `:app:testDebugUnitTest :app:assembleDebug` → BUILD SUCCESSFUL, Gradle exit 0,
+      **716 tests / 0 failures / 0 errors** (712 → 716); pairing suite 28 → 35. **13 mutations, 12
+      discriminated**; the survivor (reverting to round 3's admit-then-build) is reported as
+      behaviour-preserving under confinement rather than as a test gap.
+      **Residual declared:** `stop()` blocks up to 250 ms for the worker, then falls back to the
+      caller — a scheduling bound, not a cover-work bound, required because `runtime.close()` follows
+      `stop()` immediately. **2 of the 6 fix rounds remain. Review round 4 not dispatched.**
+
+- [ ] **U3 FIX ROUND 5 of 6 APPLIED (2026-07-28) — the lock boundary, and one reused primitive.**
+      Round 4's paired-blind review was the **FIRST CONVERGENCE IN SEVEN ROUNDS**: both reviewers
+      landed on the same top finding independently, with severity FALLING — exhaustion, not
+      anchoring, per `failures.md`. Adjudicated 1 P1 / 3 P2 / 5 P3. Full record:
+      `reviews/decoy-0.10.0/u3-fix-r5-lock-boundary.md`.
+      **X1 (P1 on tie-break) — the round-4 fix was made through a REUSED PRIMITIVE.**
+      `reconnectTransport` shared terminal teardown's helper, whose 250 ms **caller-thread fallback**
+      is terminal-safe only for `stop()` (which invalidates the transport and refuses late
+      admissions). `quiesce` deliberately leaves the register OPEN, so when the fallback fired it
+      drained an empty register on the caller, swapped the socket, and let a send still mid-slice on
+      the worker emit its cover frame on the NEW connection while its real frame had gone out on the
+      old — a **split pair across a TLS boundary**, correlated with a transport change. **No
+      coroutine suspension is needed for it:** the uninterruptible-slice argument only ever held
+      against teardown running ON the worker, and the fallback had just taken it off. It did not
+      merely have an unjustified bound — it structurally defeated the argument the round-4 fix rests
+      on, exactly when it fired.
+      **FIXED AT THE LOCK BOUNDARY, not at the fallback**, because lengthening or dropping the bound
+      reinstates a verified five-step deadlock (`applyTransport` holds `transportLock` → blocking
+      reconnect waits on `confined` → `deleteAccountAndWipe` runs there → `onConfirmed` → `lockIf` →
+      `stopSession` takes `transportLock`). `applyTransportLocked` now installs the endpoints and
+      RETURNS the session to redial; `applyTransport` releases the lock and only then requests a
+      reconnect that is confined to the worker, skipped once terminal teardown has begun, coalesced
+      by generation, and has **no fallback and no wait at all**. *(Deviation from the ruling,
+      recorded: the ruling said the reconnect may "wait for confinement without a fallback"; it does
+      not wait — waiting was the fallback's only reason to exist and would relocate the hang.)*
+      **X5 (P2) — the tests named for confinement did not test confinement, which is WHY X1
+      survived.** No test instantiated `MessagingCoordinator`; both behavioural tests built their OWN
+      `Executors.newSingleThreadExecutor()`; the fallback branch was never executed by anything. The
+      dispatch is now production code a JVM test can build — **`CoverTrafficWorker`**, three
+      deliberately different entry points (on-worker terminal / dispatched+bounded terminal /
+      dispatched-only non-terminal) — driven by seven behavioural tests, including an end-to-end one
+      over a socket whose identity changes on a swap, so a split pair is OBSERVED, not argued.
+      **X3/X4** — the dispatch tripwire now pins the swap's confinement and the lock boundary; the
+      declared residual path is executed by a test asserting exactly what it costs (an unpaired REAL
+      frame, never a lone decoy, never a split pair).
+      **X6** both terminal waits are bounded (round 4 left the second unbounded, in the function whose
+      whole rationale is that an unbounded wait is the worst outcome). **X7** the
+      natural-socket-death-mid-gap residual is re-declared in the spec after being struck by accident.
+      **X8** the "35 pairing tests" claim was wrong (34) and is corrected AS AN ERROR. **X9** three
+      tripwire evasions closed — token spacing (`coverTraffic . cover(`, `disconnect( )`) normalised
+      away, and the scans read EVERY app source rather than two named files.
+      **Evidence:** `:app:testDebugUnitTest :app:assembleDebug --rerun-tasks` → BUILD SUCCESSFUL,
+      Gradle exit 0, **three consecutive runs**; **723 tests / 78 classes / 3 skipped / 0 failures**
+      (716 → 723); pairing suite 34 → 41. **12 mutations, 12 discriminated.**
+      **Process failure kept on the record:** the first mutation harness was killed by a timeout and
+      left one mutation applied in an UNTRACKED file, so `git status` hid it and the baseline was red
+      — every mutation would have reported "caught" for free. The re-run asserts a green baseline
+      first, restores in a `finally`, checksums every touched file after each restore, and re-checks
+      the baseline at the end.
+      **New residual declared:** a transport swap now WAITS for the worker instead of pre-empting it.
+      Latency, not framing — the endpoints are already re-pointed, so only the one live socket
+      lingers, and the registration PoW (the only multi-second CPU work) runs on `Dispatchers.Default`.
+      **1 of the 6 fix rounds remains. Review round 5 not dispatched.**
 
 - [ ] **U3 inherits three things from U2, none of them optional.** *(Rewritten at U2 fix round 1 —
       the interface changed, so two of the three old items no longer say the right thing.)*
