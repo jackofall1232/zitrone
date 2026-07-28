@@ -18,9 +18,11 @@ import com.zitrone.app.crypto.vault.VaultStateCodec
 import com.zitrone.app.crypto.vault.openPayload
 import com.zitrone.app.data.DecoyAuthStore
 import com.zitrone.app.decoy.DecoyAccountProvisioner
+import com.zitrone.app.decoy.DecoyEnvelopeBuilder
 import com.zitrone.app.decoy.DecoyIdentity
 import com.zitrone.app.decoy.DecoyPowSolver
 import com.zitrone.app.decoy.DecoyRelayApi
+import com.zitrone.app.decoy.DecoySendPairing
 import com.zitrone.app.net.ApiClient
 import org.signal.libsignal.protocol.IdentityKeyPair
 import org.signal.libsignal.protocol.ecc.Curve
@@ -857,6 +859,93 @@ class DecoyAccountProvisionerTest {
         assertTrue("the window passed, so the attempt is made", runBlocking { sameSession.provisionIfNeeded() })
         assertEquals("exactly one attempt, once it was allowed", 1, relay.registerCalls.get())
     }
+
+    @Test
+    fun `THE WIRED PATH gets that attempt too - a send after the window provisions for real`() {
+        // The cross-unit half of the test above, and the defect it was written for (U3 fix round 3,
+        // V3): the property above is asserted with TWO DIRECT CALLS to provisionIfNeeded, while the
+        // production caller is DecoySendPairing — which latched provisioning to once per session and
+        // therefore made ONE call. Landing that call inside a durable back-off left cover traffic off
+        // for the whole session even after the window expired, and no test in either unit could see
+        // it, because U1's test never went through the pairing and U3's never drove a real
+        // provisioner. This one drives both: a real VaultRuntime carrying a real 429 deferral, a real
+        // DecoyAccountProvisioner, and the real send seam.
+        val vault = Vault()
+        val limited = FakeRelay(
+            failAt = FakeRelay.Stage.REGISTER,
+            failure = ApiClient.ApiException(429, "rate_limited"),
+        )
+        assertFalse(runBlocking { provisioner(vault.runtime, limited).provisionIfNeeded() })
+        val persisted = requireNotNull(vault.durableState())
+        val notBefore = requireNotNull(persisted.decoy?.provisionNotBeforeMs)
+
+        // ONE session over the deferral the 429 left on disk, reached only through the send path.
+        val reopened = Vault(persisted)
+        val relay = FakeRelay()
+        var now = notBefore - 1
+        val wired = provisioner(reopened.runtime, relay, now = { now })
+        val emitted = AtomicInteger(0)
+        // The provisioning job is fire-and-forget on Dispatchers.IO by production requirement (a
+        // multi-second proof-of-work must never occupy the send path), so the send that triggers it
+        // has returned long before it finishes. This is how the test observes it settling.
+        val attempts = java.util.concurrent.LinkedBlockingQueue<Boolean>()
+        val pairing = DecoySendPairing(
+            scope = scope,
+            sender = {
+                DecoyEnvelopeBuilder.Sender(
+                    accountId = "11111111-2222-3333-4444-555555555555",
+                    registrationId = 4_242,
+                    identityKeySerialized = IdentityKeyPair.generate().publicKey.serialize(),
+                )
+            },
+            recipient = { DecoyAuthStore(reopened.runtime).accountId },
+            send = { emitted.incrementAndGet(); true },
+            provision = { attempts.put(wired.provisionIfNeeded()) },
+            sleep = {},
+        )
+
+        // A send INSIDE the window: uncovered, and no registration spent.
+        runBlocking { pairing.cover(sampleEnvelope()) }
+        assertEquals("the send path never called the provisioner", false, attempts.poll(5, TimeUnit.SECONDS))
+        assertEquals("a deferred vault contacted the relay", 0, relay.registerCalls.get())
+        assertEquals("a deferred vault emitted cover traffic", 0, emitted.get())
+
+        // The window expires mid-session. A later send must still get the one attempt.
+        now = notBefore
+        runBlocking { pairing.cover(sampleEnvelope()) }
+        assertEquals(
+            "the wired path made no second call after the back-off expired",
+            true,
+            attempts.poll(5, TimeUnit.SECONDS),
+        )
+        assertEquals(
+            "the wired path never retried after the back-off expired — cover traffic is off for the session",
+            1,
+            relay.registerCalls.get(),
+        )
+        assertNotNull("nothing was committed", reopened.durableDecoy()?.accountId)
+
+        // …and from here the vault is covered.
+        runBlocking { pairing.cover(sampleEnvelope()) }
+        assertEquals("cover traffic never started once the account existed", 1, emitted.get())
+    }
+
+    /** A minimal real envelope — the builder measures it, so it has to be a plausible one. */
+    private fun sampleEnvelope() = com.zitrone.app.data.MessageEnvelope(
+        id = java.util.UUID.randomUUID().toString(),
+        senderId = "11111111-2222-3333-4444-555555555555",
+        recipientId = "99999999-8888-7777-6666-555555555555",
+        ciphertext = java.util.Base64.getEncoder()
+            .encodeToString(ByteArray(323).also { java.security.SecureRandom().nextBytes(it) }),
+        ephemeralKey = null,
+        preKeyId = null,
+        messageNumber = 4,
+        previousChainLength = 0,
+        timestamp = "2026-07-27T09:41:07.123Z",
+        ttlSeconds = 3_600,
+        burnOnRead = false,
+        mediaType = com.zitrone.app.data.MessageEnvelope.MEDIA_TEXT,
+    )
 
     @Test
     fun `the deferral jitters - two rate-limited vaults do not retry in lockstep`() {

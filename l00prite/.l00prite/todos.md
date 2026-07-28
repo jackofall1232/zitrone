@@ -1096,6 +1096,17 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       `canSend()` is deliberately NOT the send predicate — it folds in the transient
       `capacityExceeded`, which is the stutter R-U3-3 forbids, and is unobservable at a point the
       flush has already passed.
+      ⚠️ **THE PARAGRAPH ABOVE IS SUPERSEDED BY FIX ROUNDS 2 AND 3 AND IS LEFT ONLY AS THE RECORD OF
+      WHAT WAS BUILT.** Round 2 (maintainer ruling): the ordering is real-frame-first, the pairing
+      `Mutex` is DELETED, and the `finally` now guards the COVER frame (an unpaired real frame is a
+      marked frame), not the publish. Round 3 (third-lens P1s): `paired(cover, publish)` is DELETED —
+      the seam is `cover(real)` and cannot be handed a real send at all, because entering it was
+      itself cover work inside the process-death window; the non-suspending tail lives at the call
+      site as `MessagingCoordinator.publishOutgoing` / `publishReceipt`, which is what keeps D2c
+      compiler-enforced; and `stop(invalidateTransport)` now OWNS the disconnect, running it only
+      after draining every admitted pairing. **28 pairing tests + 33 provisioner tests; 712 total /
+      3 skipped / 0 failures; 11 mutations, 11 discriminated.** See
+      `reviews/decoy-0.10.0/u3-fix-r3-subordinate.md`.
       **OWED: paired-blind review round 1 of U3 (0 of a hard cap of 6 used), and the now-live U1
       follow-up above (orphaned synthetic account on delete/burn) as a merge gate.**
       **681 tests / 3 skipped / 0 failures**, `assembleDebug` exit 0, `--rerun-tasks`;

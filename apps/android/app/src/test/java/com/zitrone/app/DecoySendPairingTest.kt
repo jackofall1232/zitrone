@@ -13,10 +13,14 @@ import com.zitrone.app.net.WsClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
@@ -30,6 +34,8 @@ import org.signal.libsignal.protocol.IdentityKeyPair
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.math.abs
 import kotlin.math.sqrt
@@ -165,9 +171,41 @@ class DecoySendPairingTest {
         provisionContext = EmptyCoroutineContext,
     )
 
-    /** Run one pairing, recording the real publish in [frames] alongside whatever the socket got. */
-    private suspend fun DecoySendPairing.record(cover: MessageEnvelope, frames: MutableList<Any>) =
-        paired(cover) { frames.add(Real) }
+    /**
+     * ONE COVERED SEND, in the coordinator's own order: the non-suspending publish tail runs at the
+     * **call site** and the cover-traffic seam is entered only afterwards.
+     *
+     * That is not a stylistic choice in the harness — it is the shape of the production call site
+     * since U3 fix round 3 (`publishOutgoing(...)` then `coverTraffic.cover(envelope)`), and the
+     * reason for it is that the seam can no longer be handed a real send at all. See
+     * `the cover-traffic seam cannot be handed a real send to run`.
+     */
+    private suspend fun DecoySendPairing.record(real: MessageEnvelope, frames: MutableList<Any>) {
+        frames.add(Real)
+        cover(real)
+    }
+
+    /**
+     * A socket that really dies. `WsClient.send` is `webSocket?.send(frame) ?: false`, so once
+     * `disconnect()` has nulled the socket every subsequent frame is silently refused — which is the
+     * whole mechanism behind the round-2 teardown defect and the thing an always-succeeding fake
+     * socket could never show.
+     */
+    private class DyingSocket(private val frames: MutableList<Any>) {
+        @Volatile
+        var connected = true
+            private set
+
+        fun disconnect() {
+            connected = false
+        }
+
+        fun send(frame: MessageEnvelope): Boolean = synchronized(this) {
+            if (!connected) return false
+            frames.add(frame)
+            true
+        }
+    }
 
     private fun frameLength(envelope: MessageEnvelope): Int =
         WsClient.messageSendFrame(envelope).toString().toByteArray(Charsets.UTF_8).size
@@ -408,11 +446,12 @@ class DecoySendPairingTest {
         // U3-D, kept as a regression test after the ruling made it impossible. `emit` rethrows
         // CancellationException — the one throwable it deliberately does not swallow — and under the
         // old random ordering that rethrow could run BEFORE the real publish and take it with it.
-        // It now cannot: the publish is the first statement of `paired`.
+        // It now cannot: the publish happens at the call site, before the seam is entered at all.
         var published = 0
         val pairing = pairing(mutableListOf(), send = { throw CancellationException("cover frame") })
         try {
-            pairing.paired(textEnvelope()) { published++ }
+            published++
+            pairing.cover(textEnvelope())
         } catch (_: CancellationException) {
             // The cover frame's cancellation still propagates; it just arrives too late to matter.
         }
@@ -423,20 +462,46 @@ class DecoySendPairingTest {
     // ── R-U3-1 edges the round-1 review left uncovered (U3-I) ───────────────────────────────
 
     @Test
-    fun `at the only suspension point the real frame is already on the wire`() = runTest {
-        // U3-A, process death. A process cannot be killed mid-statement in a way this suite can
-        // observe, but it CAN only be killed at a suspension point — so the property that makes
-        // process death harmless is "at every suspension point after the durable barrier, the real
-        // frame has already been handed to the socket". There is exactly one suspension point in
-        // this class, the drawn gap, and the sleep seam IS that point: asserting here asserts the
-        // property exhaustively rather than by sampling.
+    fun `the cover-traffic seam cannot be handed a real send to run`() {
+        // U3-A / V1, and the correction of the claim this file used to make. Round 2 asserted that
+        // process death was harmless because "a process can only be killed at a suspension point".
+        // That is FALSE: a coroutine may only SUSPEND at a suspension point, while the OS can kill
+        // the process at ANY instruction — which is exactly what this project's threat model
+        // assumes. So "publish() is the first statement of paired()" was not enough: getting into
+        // paired() already cost an interface dispatch, a captured lambda and entry into a coroutine
+        // state machine, all of it AFTER the ratchet advance was durable and BEFORE ws.sendMessage.
+        // A kill in there lost a message whose ratchet had already moved. If the baseline kill
+        // window is K, cover traffic made it K ∪ C, and R-U3-1 is absolute.
+        //
+        // The only way to make C empty is for the caller to publish and THEN call the seam, so the
+        // seam must have no parameter it could run. That is the property asserted here, because it
+        // is the one an implementer could quietly undo: reintroducing a `publish: () -> Unit`
+        // parameter would compile, would pass every behavioural test in this file, and would put
+        // cover-specific instructions back in front of the handoff.
+        for (method in CoverTraffic::class.java.methods.filter { it.name == "cover" }) {
+            assertTrue(
+                "CoverTraffic.cover takes a callable — a real send can be handed to cover traffic again",
+                method.parameterTypes.none { kotlin.Function::class.java.isAssignableFrom(it) },
+            )
+        }
+    }
+
+    @Test
+    fun `the drawn gap is the only suspension point, and it is after the handoff`() = runTest {
+        // What survives of U3-A once the false premise is dropped. Process death is no longer
+        // argued from suspension points at all — the real frame is on the socket before this class
+        // is entered — but the gap must still be the ONLY place this class suspends, because a
+        // second suspension seam would be a second place a teardown could interleave and a place
+        // stop()'s drain could not wait through (buildCover is deliberately non-suspending).
         val frames = mutableListOf<Any>()
         var atSuspension: List<Any>? = null
-        val pairing = pairing(frames, sleep = { atSuspension = frames.toList() })
+        var suspensions = 0
+        val pairing = pairing(frames, sleep = { suspensions++; atSuspension = frames.toList() })
         pairing.record(textEnvelope(), frames)
 
+        assertEquals("the class suspends somewhere other than the drawn gap", 1, suspensions)
         assertEquals(
-            "process death at the gap would lose a real message whose ratchet already advanced",
+            "the real frame was not already on the socket at the gap",
             listOf<Any>(Real),
             atSuspension,
         )
@@ -459,11 +524,10 @@ class DecoySendPairingTest {
             val pairing = pairing(frames, sleep = { delay(it) })
 
             launch(worker) {
-                pairing.paired(textEnvelope()) {
-                    // The coordinator's real tail, in miniature.
-                    contactWasLiveAtPublish = !contactDeleted
-                    frames.add(Real)
-                }
+                // The coordinator's real tail, in miniature — at the CALL SITE, where it now lives.
+                contactWasLiveAtPublish = !contactDeleted
+                frames.add(Real)
+                pairing.cover(textEnvelope())
             }
             launch(worker) { contactDeleted = true }
             advanceUntilIdle()
@@ -492,7 +556,8 @@ class DecoySendPairingTest {
             if (permits > 0) { permits--; accepted.add(frame); true } else false
 
         val pairing = pairing(mutableListOf(), send = ::spend)
-        pairing.paired(textEnvelope()) { spend(Real) }
+        spend(Real)
+        pairing.cover(textEnvelope())
 
         assertEquals(
             "the cover frame spent the last permit the real send needed",
@@ -507,15 +572,17 @@ class DecoySendPairingTest {
         // most GAP_MAX_MS" — false under multiple waiters, where the bound was per-hop, not total.
         // Real-first needs no lock, so the honest bound is ZERO: no virtual time passes between the
         // two real frames even though the first pairing is mid-gap. Restoring any lock around the
-        // pair fails this, which is the mutation it exists to catch.
+        // pair fails this, which is the mutation it exists to catch — and it now also covers the
+        // teardown lock the class DOES hold: taking it anywhere before a publish, or holding it
+        // across the gap, would put a real send behind another pair again.
         val worker = StandardTestDispatcher(testScheduler)
         val frames = mutableListOf<Any>()
         val pairing = pairing(frames, sleep = { delay(it) })
         val firstReal = Any()
         val secondReal = Any()
 
-        launch(worker) { pairing.paired(textEnvelope(counter = 1)) { frames.add(firstReal) } }
-        launch(worker) { pairing.paired(textEnvelope(counter = 2)) { frames.add(secondReal) } }
+        launch(worker) { frames.add(firstReal); pairing.cover(textEnvelope(counter = 1)) }
+        launch(worker) { frames.add(secondReal); pairing.cover(textEnvelope(counter = 2)) }
         runCurrent()
 
         assertEquals(
@@ -573,7 +640,7 @@ class DecoySendPairingTest {
         pairing.record(textEnvelope(), frames)
         runCurrent()
 
-        pairing.stop()
+        pairing.stop {}
         advanceUntilIdle()
 
         assertFalse("nothing decoy-related may outlive the session", finished)
@@ -581,11 +648,324 @@ class DecoySendPairingTest {
     }
 
     @Test
-    fun `CoverTraffic NONE runs the real tail exactly once and emits nothing`() = runTest {
-        var published = 0
-        CoverTraffic.NONE.paired(textEnvelope()) { published++ }
-        CoverTraffic.NONE.stop()
+    fun `a back-off that expires mid-session still gets its attempt`() = runTest {
+        // V3, and the defect class it belongs to: a new CALLER silently retiring a property another
+        // unit pins. U1's own contract is "a back-off window that expires mid-session still gets its
+        // one attempt" — a purely local deferral check is one CHECK, not the one ATTEMPT, so it does
+        // not burn `Gate.attempted`. U3's wiring latched provisioning to ONCE PER SESSION, so the
+        // single call landed inside the window, returned without provisioning, and was never made
+        // again: cover traffic stayed off for the whole session even after the window expired.
+        //
+        // The latch now bounds CONCURRENT jobs, not attempts. The registration budget is unaffected
+        // because it was never this latch's job — DecoyAccountProvisioner's runtime-scoped latch is
+        // the guard that protects the shared worldwide bucket, and the cross-unit version of this
+        // test (DecoyAccountProvisionerTest) drives that guard for real.
+        var deferred = true
+        var calls = 0
+        var provisioned = false
+        val frames = mutableListOf<Any>()
+        val pairing = pairing(
+            frames,
+            recipient = { if (provisioned) syntheticAccountId else null },
+            provision = {
+                calls++
+                if (!deferred) provisioned = true
+            },
+        )
 
-        assertEquals(1, published)
+        pairing.record(textEnvelope(), frames)
+        advanceUntilIdle()
+        assertEquals("provisioning is not triggered from the send path", 1, calls)
+        assertEquals("an unprovisioned vault emitted cover traffic", 0, decoysIn(frames).size)
+
+        // The window expires. Same session, same instance, no unlock in between.
+        deferred = false
+        pairing.record(textEnvelope(), frames)
+        advanceUntilIdle()
+        assertEquals(
+            "the back-off expired mid-session and the wired path never tried again",
+            2,
+            calls,
+        )
+
+        frames.clear()
+        pairing.record(textEnvelope(), frames)
+        assertEquals("cover traffic never started after the window expired", 1, decoysIn(frames).size)
+    }
+
+    @Test
+    fun `provisioning is never started after teardown`() = runTest {
+        // R-U3-5, and the hole re-arming the latch could have opened: a released latch must not let
+        // a send that slips past teardown spend a registration for a session that no longer exists.
+        var calls = 0
+        val frames = mutableListOf<Any>()
+        val pairing = pairing(frames, recipient = { null }, provision = { calls++ })
+
+        pairing.stop {}
+        pairing.record(textEnvelope(), frames)
+        advanceUntilIdle()
+
+        assertEquals("a locked session started a provisioning attempt", 0, calls)
+        assertEquals("the real send is unaffected by teardown", listOf<Any>(Real), frames)
+    }
+
+    // ── R-U3-3 + R-U3-5: teardown owns the pairings it admitted ─────────────────────────────
+
+    @Test
+    fun `teardown drains an in-flight pairing BEFORE the socket dies`() = runTest {
+        // V2, the round-2 defect, driven through the real teardown entry point and a socket that
+        // really goes dead. Round 2's MessagingCoordinator.stop() called ws.disconnect() FIRST and
+        // coverTraffic.stop() second, and stop() cancelled only the provisioning job — so a vault
+        // lock landing in a drawn gap put a lone real frame and then a TLS close on the wire. That
+        // is a deterministic, recognisable class of unpaired real sends correlated with lock,
+        // teardown and backgrounding: exactly what R-U3-3 calls worse than no cover at all.
+        //
+        // The invalidation is now passed INTO stop() rather than called beside it, so the drain
+        // cannot be reordered after it by editing the caller.
+        val frames = mutableListOf<Any>()
+        val socket = DyingSocket(frames)
+        val pairing = pairing(frames, send = socket::send, sleep = { delay(it) })
+
+        val job = launch { pairing.record(textEnvelope(), frames) }
+        runCurrent()
+        assertEquals("the real frame should already be out, mid-gap", listOf<Any>(Real), frames)
+
+        pairing.stop { socket.disconnect() }
+
+        assertFalse("the socket was not invalidated by teardown", socket.connected)
+        assertEquals("teardown lost the cover frame — the real frame is marked", 2, frames.size)
+        assertTrue("the real frame did not go first", frames.first() === Real)
+
+        // The sleeping coroutine still unwinds, and must not emit a SECOND cover frame.
+        job.cancelAndJoin()
+        assertEquals("the cover frame was emitted twice", 2, frames.size)
+    }
+
+    @Test
+    fun `a pairing admitted after teardown emits nothing at all`() = runTest {
+        // The other half of R-U3-5: once the transport is invalid, cover traffic is over. A frame
+        // emitted here would be a decoy for a real send the dead socket already refused — and a
+        // locked vault must not even DO the work: no vault read, no identity read, no keypair.
+        val frames = mutableListOf<Any>()
+        val socket = DyingSocket(frames)
+        var coverWork = 0
+        val pairing = pairing(
+            frames,
+            recipient = { coverWork++; syntheticAccountId },
+            send = socket::send,
+            sleep = { delay(it) },
+        )
+
+        pairing.stop { socket.disconnect() }
+        pairing.record(textEnvelope(), frames)
+        advanceUntilIdle()
+
+        assertEquals("a locked session emitted cover traffic", listOf<Any>(Real), frames)
+        assertEquals("a locked session read the vault to build a decoy it can never send", 0, coverWork)
+    }
+
+    @Test
+    fun `a pairing the drain already emitted does not emit again when it wakes`() {
+        // Exactly-once, in the ONE window where it can actually be violated: stop()'s drain releases
+        // the lock while it waits for a pairing that is still BUILDING, and a pairing it has already
+        // emitted can wake inside that window with the transport still valid. Nothing but membership
+        // of the register stops it emitting a second time — and a duplicate is not harmless: three
+        // frames where the pattern is two marks the send exactly the way one frame does.
+        val frames = java.util.Collections.synchronizedList(mutableListOf<Any>())
+        val socket = DyingSocket(frames)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val builds = java.util.concurrent.atomic.AtomicInteger(0)
+        val slowBuildEntered = CountDownLatch(1)
+        val firstSleeping = CountDownLatch(1)
+        try {
+            val pairing = DecoySendPairing(
+                scope = scope,
+                sender = ::sender,
+                recipient = {
+                    // The SECOND pairing is the one caught mid-build by teardown.
+                    if (builds.incrementAndGet() == 2) {
+                        slowBuildEntered.countDown()
+                        Thread.sleep(70)
+                    }
+                    syntheticAccountId
+                },
+                send = socket::send,
+                provision = {},
+                // A fixed gap, longer than it takes teardown to start and shorter than the slow
+                // build: the first pairing is guaranteed to wake INSIDE the drain's wait.
+                sleep = { firstSleeping.countDown(); delay(45) },
+                random = seeded(3),
+            )
+            val first = scope.launch { pairing.record(textEnvelope(counter = 1), frames) }
+            assertTrue(firstSleeping.await(5, TimeUnit.SECONDS))
+            val second = scope.launch { pairing.record(textEnvelope(counter = 2), frames) }
+            assertTrue(slowBuildEntered.await(5, TimeUnit.SECONDS))
+
+            pairing.stop { socket.disconnect() }
+            runBlocking { first.join(); second.join() }
+
+            assertEquals("two covered sends are exactly four frames", 4, frames.size)
+            assertEquals("a cover frame was emitted twice", 2, decoysIn(frames.toList()).size)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `teardown waits for a pairing whose cover frame is still being BUILT`() {
+        // The half of the drain that a "cancel everything sleeping" fix would miss. A pairing is
+        // admitted before its frame exists, so between admission and the frame reaching the drain
+        // there is a window — the vault read, the identity read, a keypair generation. Abandoning a
+        // pairing caught there leaves the same marked real frame as losing one mid-gap.
+        //
+        // Real threads on purpose: stop() blocks, and the point is that it blocks for THIS.
+        // buildCover is non-suspending, so the wait can only ever stand behind CPU work, never I/O
+        // — which is what makes a bounded wait safe here.
+        val frames = java.util.Collections.synchronizedList(mutableListOf<Any>())
+        val socket = DyingSocket(frames)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val buildEntered = CountDownLatch(1)
+        val teardownReleased = CountDownLatch(1)
+        try {
+            val pairing = DecoySendPairing(
+                scope = scope,
+                sender = ::sender,
+                recipient = {
+                    buildEntered.countDown()
+                    teardownReleased.await(5, TimeUnit.SECONDS)
+                    // Still inside the build when stop() takes the lock and finds this pairing
+                    // admitted but unresolved.
+                    Thread.sleep(10)
+                    syntheticAccountId
+                },
+                send = socket::send,
+                provision = {},
+                random = seeded(9),
+            )
+            val sending = scope.launch(Dispatchers.Default) { pairing.record(textEnvelope(), frames) }
+            assertTrue("the pairing never started building", buildEntered.await(5, TimeUnit.SECONDS))
+            teardownReleased.countDown()
+
+            pairing.stop { socket.disconnect() }
+
+            assertFalse(socket.connected)
+            assertEquals("a pairing caught mid-build was abandoned, not drained", 2, frames.size)
+            assertTrue("the real frame did not go first", frames.first() === Real)
+            runBlocking { sending.cancelAndJoin() }
+            assertEquals("the cover frame was emitted twice", 2, frames.size)
+        } finally {
+            teardownReleased.countDown()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `the drain is bounded - a pairing that never resolves cannot hold the socket open`() {
+        // The backstop, asserted rather than assumed: teardown runs under the app's transport lock
+        // on a user-visible path, so an unresolvable pairing must not stall it. The clock is a seam
+        // so the bound is tested without spending it.
+        val frames = java.util.Collections.synchronizedList(mutableListOf<Any>())
+        val socket = DyingSocket(frames)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val wedged = CountDownLatch(1)
+        val admitted = CountDownLatch(1)
+        var clock = 0L
+        try {
+            val pairing = DecoySendPairing(
+                scope = scope,
+                sender = ::sender,
+                recipient = {
+                    admitted.countDown()
+                    wedged.await(10, TimeUnit.SECONDS)
+                    syntheticAccountId
+                },
+                send = socket::send,
+                provision = {},
+                random = seeded(9),
+                // Time only moves when stop() consults it, so the deadline is already spent the
+                // second time round the drain loop.
+                nanoTime = { clock.also { clock += DecoySendPairing.DRAIN_TIMEOUT_MS * 1_000_000L } },
+            )
+            scope.launch(Dispatchers.Default) { pairing.record(textEnvelope(), frames) }
+            assertTrue(admitted.await(5, TimeUnit.SECONDS))
+
+            pairing.stop { socket.disconnect() }
+
+            assertFalse("the drain deadline did not invalidate the transport", socket.connected)
+            assertEquals("a wedged pairing was not skipped", listOf<Any>(Real), frames.toList())
+        } finally {
+            wedged.countDown()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `CoverTraffic NONE emits nothing and still tears the transport down`() = runTest {
+        var invalidated = 0
+        CoverTraffic.NONE.cover(textEnvelope())
+        CoverTraffic.NONE.stop { invalidated++ }
+
+        assertEquals("cover-traffic-off must still disconnect the socket", 1, invalidated)
+    }
+
+    // ── the call site itself ────────────────────────────────────────────────────────────────
+
+    @Test
+    fun `the coordinator never invalidates the transport outside the cover-traffic teardown`() {
+        // MessagingCoordinator cannot be constructed off-device, so the one thing this suite cannot
+        // reach behaviourally is the CALL SITE — and the call site is where the round-2 defect
+        // actually lived (`ws.disconnect()` above `coverTraffic.stop()`). Passing the invalidation
+        // INTO stop() makes the ordering structural, and this pins the structure: every disconnect
+        // in the coordinator goes through the seam, so there is no second one to get wrong.
+        val source = coordinatorSource()
+        val stray = source.lines()
+            .withIndex()
+            .filter { (_, line) -> "ws.disconnect()" in line && "coverTraffic.stop {" !in line }
+            .map { (i, line) -> "${i + 1}: ${line.trim()}" }
+
+        assertEquals(
+            "a transport invalidation outside CoverTraffic.stop — teardown can strand a pairing",
+            emptyList<String>(),
+            stray,
+        )
+        assertTrue(
+            "the cover-traffic teardown is not wired to the disconnect at all",
+            "coverTraffic.stop { ws.disconnect() }" in source,
+        )
+    }
+
+    @Test
+    fun `the coordinator publishes the real frame before it calls the cover seam`() {
+        // The other half of what the call site owns, and the half V1 turns on: the seam can no
+        // longer be handed a real send (asserted by reflection above), but the two statements could
+        // still be written the wrong way round — `coverTraffic.cover(envelope)` above the publish
+        // tail would put a decoy on the wire first and cover-side work back in front of the handoff.
+        // Nothing else in this suite can see the call site, so it is read.
+        val lines = coordinatorSource().lines()
+        val callSites = lines.indices.filter { "coverTraffic.cover(" in lines[it] }
+        assertEquals("the cover seam is not called from all three send paths", 3, callSites.size)
+
+        for (site in callSites) {
+            val previousCode = (site - 1 downTo 0)
+                .map { lines[it].trim() }
+                .firstOrNull { it.isNotEmpty() && !it.startsWith("//") && !it.startsWith("*") }
+            assertTrue(
+                "line ${site + 1}: the cover seam is entered before the real publish tail, " +
+                    "preceded by <$previousCode>",
+                previousCode != null &&
+                    (previousCode.startsWith("publishOutgoing(") || previousCode.startsWith("publishReceipt(")),
+            )
+        }
+    }
+
+    private fun coordinatorSource(): String {
+        val relative = "src/main/java/com/zitrone/app/MessagingCoordinator.kt"
+        var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: ".").absoluteFile
+        while (dir != null) {
+            val candidate = java.io.File(dir, relative)
+            if (candidate.isFile) return candidate.readText()
+            dir = dir.parentFile
+        }
+        throw AssertionError("MessagingCoordinator.kt not found from ${System.getProperty("user.dir")}")
     }
 }

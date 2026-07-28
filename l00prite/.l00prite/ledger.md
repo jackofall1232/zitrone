@@ -2924,3 +2924,75 @@ per-send draw from one draw reused.
    unit's own merge gate contradicting the ruling that governs it. Struck and replaced.
 
 No merge, no push, no version bump. 4 of 6 fix rounds remain.
+
+## U3 FIX ROUND 3 of 6 — cover traffic made strictly SUBORDINATE, at both ends (2026-07-27)
+
+Review round 2 (Codex 2 P1 / Grok 0 P1) was disjoint on the top finding for the FIFTH consecutive
+round, and both severity disputes went to a third lens, which ruled **P1 on both**. The adjudication
+named the shape: **cover traffic placed where it can precede or outlive the real send.**
+
+### V1 — the false structural claim, and the real loss path it hid
+
+Round 2 justified real-first with *"a process can only die at a suspension point."* A coroutine may
+only **suspend** at a suspension point; **the OS can kill the process at any instruction**, which is
+what the threat model assumes. Entering `paired` — interface dispatch, captured lambda, coroutine
+state machine — was cover-specific work sitting between the durable ratchet advance and
+`ws.sendMessage`. The third lens: *"materially" modifies "delayed", not "made less durable"*, and
+there is no de minimis exception for a widened `K ∪ C`.
+
+`CoverTraffic.paired(cover, publish)` is **deleted**. The interface is `suspend fun cover(real)` — it
+has no parameter it could run. The coordinator publishes through its own **non-suspending**
+`publishOutgoing` / `publishReceipt` and then calls the seam. Those two methods are what KEPT D2c
+compiler-enforced when the tail moved back to the call site; inlining the tail would have made `C`
+literally empty and **silently retired that enforcement** — the deletion class this unit has now been
+caught by twice.
+
+### V2 — teardown OWNS the pairings it admitted, and owns the disconnect
+
+Round 2's `stop()` cancelled only the provisioning job, and the coordinator disconnected FIRST, so
+every vault lock landing in a drawn gap put **a lone real frame and then a TLS close** on the wire.
+The third lens ruled reordering insufficient: step 3 needs ownership. So the ordering is now a
+dependency, not a convention — `CoverTraffic.stop(invalidateTransport)` **runs the disconnect
+itself**, last, after emitting every admitted pairing's frame gaplessly while the socket is still
+live, and after a bounded wait for any pairing still building. **Register membership is the right to
+emit** (the `emitted` flag is deleted); the wait is safely bounded because `buildCover` cannot
+suspend. Both remaining `ws.disconnect()` call sites in the coordinator pass it in.
+
+### V3 — the wiring latch bounds CONCURRENT jobs, not attempts
+
+A durable back-off makes `provisionIfNeeded` return without burning `Gate.attempted` — one *check*,
+not the one *attempt*. U3's once-per-session CAS meant a session whose single call landed inside the
+window never tried again. The latch now releases on job completion; the registration budget was never
+its job.
+
+### Evidence
+
+- **11 mutations, 11 discriminated, 0 survivors**, rebuilt between each. M8 and M9 **survived their
+  first form** and were fixed rather than excused: the `emitted` flag was unreachable-as-false, so it
+  was replaced by register membership (reachable in the drain's wait window), and the post-teardown
+  test now asserts a locked vault does no cover work at all. M10 is killed by the **compiler** — that
+  is the D2c enforcement V1 had to keep.
+- Tests 20 → 28 in the pairing suite, driving a socket that **really dies** and the **real teardown
+  entry point**; plus a cross-unit test in `DecoyAccountProvisionerTest` that runs a real
+  `VaultRuntime` with a real 429 deferral through the real send seam.
+- Two **source-level call-site tripwires** — every `ws.disconnect()` is inside `coverTraffic.stop {`,
+  every `coverTraffic.cover(` follows a publish tail. Unusual and deliberate: `MessagingCoordinator`
+  cannot be host-constructed, and the call site is where both P1s lived.
+- `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug --rerun-tasks`
+  from `apps/android` → **BUILD SUCCESSFUL, Gradle exit 0**, **712 tests / 3 skipped / 0 failures /
+  0 errors** (701 → 712), APK produced.
+
+### Two residuals DECLARED in §4.3 rather than claimed away
+
+1. The handful of instructions between `ws.sendMessage` returning and the pairing registering itself.
+   **V1 and V2 are jointly unsatisfiable at that seam** — closing it means cover work in front of the
+   handoff and a lock a real send could queue on. Round 2's window was 5–50 ms and caught *every*
+   mid-gap pairing; this one is not a window teardown can be relied on to hit.
+2. `ZitroneApp.applyTransportLocked` disconnects on a user-initiated transport change and does not
+   drain. Narrower (not lock/teardown-correlated, reconnects immediately), but named.
+
+§5 destaled for the 14th time — U1/U2 UNWIRED struck (U3 wires both), the obsolete 640–643 B figure
+demoted, four rounds → six, merge pending → merged. §4.3 gains the third lens's clarification of
+"materially" under R-U3-1 and the four-step teardown lifecycle under R-U3-5.
+
+No merge, no push, no version bump. 3 of 6 fix rounds remain.
