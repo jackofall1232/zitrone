@@ -1108,3 +1108,39 @@ tautology that looks like a perfect score.
 The existing rule in this file ("commit as soon as the unit compiles") would have converted this into
 `git checkout`; it did not fire because the file was new, and `git add` had not happened. **New files
 are the blind spot: `git status` reports their existence, not their content.**
+
+## 2026-07-28 — I fixed an unsatisfiable absolute by writing a new unsatisfiable absolute
+
+**What happened.** Rounds 1–7 of U3 ground against R-U3-1/R-U3-3 because they were written as
+guarantees about OUTCOMES. That was diagnosed and rewritten. **The rewrite then said cover traffic
+"must never compete with a real send for any resource" and called that absolute — and read
+literally it is also false.** Emitting a cover frame IS competing for resources; that is what a
+cover frame is. Every cover frame is charged to the same account budget and the same socket.
+
+**Why it survived my own review.** The sentence had a rescuing clause — *"where a shared resource is
+contended, cover yields"* — but "contended" was defined in a follow-up ruling, not in the
+requirement. **A reviewer reads the requirement.** So the requirement, standing alone, still said
+something the code cannot do, and a round-8 lens would have produced the onset-of-burst frames and
+the confined worker's occupancy as counterexamples and rated them P1 — the identical failure mode,
+one round after diagnosing it.
+
+**Who caught it.** The implementer, unprompted, before dispatch. It has now corrected my requirement
+wording seven times.
+
+**The pattern, stated generally.** *Diagnosing an error class does not immunise you against it.* I
+correctly identified "absolute claims about outcomes the network can falsify" and then immediately
+wrote an absolute claim about resources the machine can falsify. **The fix for an over-strong claim
+is not a differently-scoped over-strong claim; it is checking the replacement against a reachable
+counterexample before shipping it.** I had a working code path in front of me and did not test the
+new sentence against it.
+
+**Rule.** When rewriting a requirement that reviewers falsified, **falsify the replacement yourself
+first.** Construct the counterexample. If the requirement is meant to be absolute, the counterexample
+must be impossible, not merely rare or merely handled elsewhere. And if a requirement's truth depends
+on a definition, **the definition belongs inside the requirement**, because that is the unit a
+reviewer is handed.
+
+**Corrected wording, which does hold:** *cover yields on every signal of contention available to it,
+and spends nothing after one.* Absolute, about our own code, and satisfied by the implementation.
+The three places cover still consumes a resource are now NAMED in the requirement rather than
+denied by it. See [[the one-directional honesty sweep]] and the outcomes-vs-behaviour entry above.
