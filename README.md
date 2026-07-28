@@ -82,8 +82,12 @@ Five layered defenses, each built as if the one beneath it has already failed:
 - 🧅 **Multi-hop relay** — 3-hop onion routing; no single relay knows both ends. **Design and code
   exist, but no client routes messages through it yet** — messages go direct to the relay today.
   *(Corrected 2026-07-27: previously stated without qualification.)*
-- 🤿 **I2P-first** — I2P is the primary transport (still in development — Tor is the active
-  fallback today), clearnet only as a flagged last resort
+- 🤿 **I2P-first** — I2P is the primary transport and **is working**; Tor is the fallback and
+  performs well (fast to boot, latency negligibly above clearnet); clearnet only as a flagged last
+  resort. I2P tunnels take time to build on first connect — that is normal, not a failure.
+  *(Corrected 2026-07-28: this line previously said I2P was "still in development" with Tor as "the
+  active fallback today". Both transports work. The old wording understated a shipped privacy
+  feature — see the note in `docs/SECURITY_MODEL.md`.)*
 - 👻 **Standard / Stealth / Ghost** connection modes
 - 🍋 **Privacy view** — frosted-lemon blur until you reveal, for shoulder-surfing defense
 

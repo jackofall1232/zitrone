@@ -807,6 +807,23 @@ against the project's dependency philosophy. Browser clients auto-detect an `.on
 host. Only v3 onion addresses are used. Full rationale for I2P-first is in
 [`docs/TOR_ARCHITECTURE.md`](TOR_ARCHITECTURE.md) §6.
 
+> **Status note, corrected 2026-07-28 — both anonymous transports WORK.** Earlier wording elsewhere
+> in the project described I2P as "still in development" with Tor as merely "the active fallback".
+> That understated what ships. **I2P works** — tunnel construction takes time on first connect, which
+> is normal I2P behaviour and not a fault. **Tor works well**: fast to boot, with latency negligibly
+> above clearnet, and is a perfectly good choice in practice.
+>
+> **This correction runs opposite to the four made on 2026-07-27**, which removed *overclaims*
+> (sealed sender, typing indicators, decoy traffic, 3-hop relay). An **underclaim is also a false
+> statement, and it has its own user harm**: a reader who believes a shipped privacy transport is
+> unfinished may leave it off and stay on clearnet. The honesty sweep that produced those four
+> corrections only ever asked "is this claiming more than it delivers?" — it never asked the
+> converse, and so it walked past this line four separate times.
+>
+> **Not corrected here, because it remains true:** the project's *own* multi-hop relay layer
+> (`buildCircuit` / `POST /relay/forward`) is still not wired into the message send path. That is
+> separate from Tor's own circuits, which are real and carrying traffic.
+
 Transport anonymity and message confidentiality are independent: clearnet fallback affects
 anonymity only — it never weakens encryption. Messages are Signal Protocol end-to-end encrypted
 regardless of which transport carries them.
