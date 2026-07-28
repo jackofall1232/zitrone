@@ -892,10 +892,30 @@ guessed at.
 >
 > ### R-U3-1 (rewritten) — COVER TRAFFIC IS SUBORDINATE. This rule is absolute; the outcome is not.
 >
-> **No cover-specific work may precede a real frame's transport handoff, and cover traffic must never
-> compete with a real send for any resource.** Where a shared resource is contended — the transport's
-> outbound queue, the relay's send budget — **cover yields**: it is dropped, not queued ahead of, not
-> charged against, the real frame. Cover is the discardable half of the pair by construction.
+> **No cover-specific work may precede a real frame's transport handoff, and cover traffic yields on
+> every signal of contention available to it, and spends nothing after one.** Cover is the
+> discardable half of the pair by construction.
+>
+> **[R8 CORRECTION — the previous wording was still unsatisfiable, and would have cost another
+> round.]** It read *"cover must never compete with a real send for any resource"* and called that
+> absolute. **Read literally it is false: emitting a cover frame IS competing for resources — that is
+> what a cover frame is.** Every cover frame is charged to the same account budget and the same
+> socket. A reviewer applying the literal text would produce the onset-of-burst frames and the
+> confined worker's occupancy during a build as counterexamples and rate them P1 — **exactly as
+> rounds 1–7 did against the earlier "absolute outcome" wording.** The same failure mode in miniature,
+> found by the implementer before round 8 was dispatched.
+>
+> The rescuing clause was a conditional (*"where a resource is contended"*) whose key term was defined
+> only in a follow-up ruling. The wording above binds them: **yield on every available signal, spend
+> nothing after one.** That is genuinely absolute, genuinely about our own code, and is what the
+> implementation actually holds.
+>
+> **Named residuals where cover still consumes a resource, which this wording admits rather than
+> denies:** ~20 cover frames at the *onset* of a burst before the meter trips (closing it would
+> require predicting a limit the relay never states); the confined worker's occupancy for the
+> duration of a cover build (the build is on that worker precisely to keep admission atomic against
+> teardown — moving it reinstates the rounds 4–5 P1s); and the 5–50 ms between the pressure check and
+> the emit.
 >
 > *This is a rule about our code and it holds without exception.* It does **not** promise that a real
 > send always succeeds: the network can fail with or without cover traffic. It promises that **cover
