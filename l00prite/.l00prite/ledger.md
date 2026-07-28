@@ -3258,3 +3258,44 @@ reinstating the rounds 4–5 P1s); the 5–50 ms between pressure check and emit
 terminal teardown (which beats a vault lock that skips its key wipe); natural socket death mid-gap.
 
 No version bump. U4 and U6 remain before 0.10.0 can be cut.
+
+---
+
+## 2026-07-28 — U4 built (synthetic-side receive), review round 1 dispatched
+
+Branch `feat/0.10.0-decoy-u4-synthetic-receive`, commits `c18e94b6` (spec §4.4), `f30ee5eb`
+(implementation), `e7e1a41b` (mutation-survivor fixes). **NOT merged, no version bump, not pushed.**
+
+**Process change, and it is the U3 lesson applied:** the requirements were written into the spec
+(§4.4) and **falsified in place** before any code existed. Each R-U4-* is a rule about our own
+code's behaviour with a constructed counterexample; where one is stated absolutely, the
+counterexample is shown to be *unreachable*, not merely unlikely.
+
+**A design fork was resolved in U4's favour by that discipline.** The send-back needs a shape. A
+prekey-shaped reply must carry the synthetic account's `registration_id` inside the blob, which
+`DecoyState` does not persist — so it would have meant a new durable field, a `TAG_DECOY` format
+change and a §4.1 storage-format question. An **established-session** reply needs neither, and is
+also what X3DH actually does (B answers with a `SignalMessage`, not a `PreKeySignalMessage`). So
+**U4 adds no durable-state writer at all**, and the §4 WRITER/READER table is unchanged — a claim
+the review is asked to check rather than take on trust.
+
+**Evidence:** `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug
+--rerun-tasks` from `apps/android` → **BUILD SUCCESSFUL, Gradle exit 0, 784 tests / 0 failures /
+0 errors / 3 skipped** (742 → 784). **18 mutations, rebuild between each: 16 discriminated on the
+first sweep, both survivors were TEST defects and are now caught (2/2 on re-run).**
+
+**Both survivors are worth keeping**, because each was an observable that could not see the thing it
+claimed to test. `stop()`'s cancellation survived deletion because every job body *also* re-checks
+the stopped flag, so nothing was emitted either way; the first fix for it *also* survived, because
+`stop()` cleared the pending set and the new counter therefore read zero whether or not the cancel
+ran. The lesson is the U3 one in a new place: **an assertion that passes for the wrong reason is
+indistinguishable from one that passes for the right reason until you mutate the code.**
+
+**Two U3 tripwires were changed, deliberately, and the review is pointed at both.** The
+disconnect-ownership guard fired on the synthetic socket; the harm it names is splitting a *pairing*
+and the synthetic socket carries none, so the exemption is **receiver-typed rather than
+file-scoped** — a blanket file carve-out is exactly what the round-4 third lens ruled out — and the
+half that cannot be checked there (that `WsSyntheticSocket` is only ever handed the decoy client) is
+pinned by a new assertion.
+
+Round 1 dispatched to Codex and Grok, blind to each other.

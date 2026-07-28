@@ -1,0 +1,1 @@
+I'll conduct a full-unit adversarial review of U4 (read-only): start with §4.4 of the decoy spec, then walk the listed implementation and tests.Reading the U4 requirements and core implementation next.
