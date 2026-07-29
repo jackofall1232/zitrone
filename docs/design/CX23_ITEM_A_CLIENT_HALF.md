@@ -1,6 +1,6 @@
 # CX23 item (a) — the client half
 
-**Status:** relay half DONE and deployed on CX23 (commit `1c63e8c`). Client half NOT started.
+**Status:** relay half DONE and deployed on CX23 (commit `e25d59a`). Client half NOT started.
 **Where:** the client half must be built on `main` (or a branch off it). The deployed CX23 branch
 does not contain the 0.10.0 client at all — `apps/android/.../decoy/` does not exist there.
 **Do not build Android on CX23.** It runs live Postgres + the relay, and `ci-gradle` (the flock
@@ -78,4 +78,4 @@ security-sensitive), plus mutation evidence.
 
 The relay half does **not** fix the user-visible symptom. Until the client half ships in a
 release, users still see `SENDING` forever. Item (a) should stay open, annotated "relay half done
-(`1c63e8c`), client half owed", rather than checked.
+(`e25d59a`), client half owed", rather than checked.
