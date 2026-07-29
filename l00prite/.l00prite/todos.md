@@ -1310,3 +1310,18 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       text: release notes plus `SECURITY_MODEL.md`, saying that 0.10.0 vaults cannot be opened by
       0.9.x and that downgrading presents them as corrupt. 0.10.0 must not ship without it, because
       0.10.0 is the release that makes the second break real (spec §4.1 sequencing note).
+
+- [ ] **Production diagnostics rescope (maintainer decision 2026-07-29) — its own unit, NOT part of
+      U4/0.10.0.** Direction approved: in RELEASE builds the Diagnostics screen is backed by a
+      **RAM-only ring buffer** — current process, current session, cleared on vault lock, never
+      written to disk — and the `Log.w("ZitroneBoot", …)` logcat mirror is release-stripped too.
+      The durable `BootDiagnostics` file survives in DEBUG builds only (the "parallel developer
+      install" is the debug flavor, not a second app). Why: `boot-diagnostics.log` is device-global
+      and lives OUTSIDE the vault, so it accumulates cross-vault evidence (registration lines, PoW
+      records, socket churn) a decoy-vault unlock can display; and the handshake-failure line's
+      `${t.message}` embeds relay hostnames for UnknownHost/Connect exceptions despite the "never
+      the URL" comment — the "basic" line is the leakiest one to persist. Constraints: keep the
+      single full-erase function wired to every wipe path (Pucker Burn, account delete) for the
+      debug artifact; per-session scoping must prevent a hidden vault's lines being readable after
+      switching vaults. Slot: 0.11.0 polish (final alpha), same before-external-testers bucket as
+      the storage-format disclosure.

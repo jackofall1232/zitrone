@@ -1320,9 +1320,14 @@ explicit rather than assumed.
 vault store access beyond the credentials read U1 already owns. The requirement is enforced by the
 type's dependencies, checkable by reading its constructor.
 
-#### R-U4-3 — U4 adds no durable-state writer
+#### R-U4-3 — U4 adds no durable-state writer, and reaches no existing one
 
-> **U4 introduces no new persisted field and no new writer to `TAG_DECOY` or any other section.**
+> **U4 introduces no new persisted field and no new writer to `TAG_DECOY` or any other section —
+> and it invokes no *existing* durable writer either, diagnostic sinks included.** "Adds no
+> writer" alone was found too weak twice in one review cycle (round 4: the guard's `diag()` line;
+> round 5: the synthetic socket's lifecycle wired into `BootDiagnostics.record`): each wrote
+> nothing *new* to the vault while still leaving durable, timestamped evidence of cover traffic on
+> disk through a writer that already existed.
 
 This is why the send-back is built in **established-session shape** (`ephemeral_key` absent). A
 prekey-shaped reply would need the synthetic account's `registration_id` inside the blob, which
@@ -1336,7 +1341,9 @@ which is worth stating explicitly so a later reader does not "fix" it.
 
 Consequently the WRITER/READER invariant table of §4 is **unchanged by U4**, and that is a claim to
 be checked at review, not taken on trust: the check is that no U4 file calls `runtime.mutate`,
-`DecoySectionLock.withSection`, or `storeTokensForAccount`.
+`DecoySectionLock.withSection`, or `storeTokensForAccount`, **and** that neither U4 file nor the
+production wiring that constructs the synthetic socket hands it a logging or diagnostics sink —
+`WsSyntheticSocket` deliberately has no parameter through which one could arrive.
 
 #### R-U4-4 — subordination, inherited from U3 rather than restated
 

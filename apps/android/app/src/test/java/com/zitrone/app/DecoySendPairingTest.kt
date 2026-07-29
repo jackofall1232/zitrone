@@ -1346,6 +1346,22 @@ class DecoySendPairingTest {
                 from = at + 1
                 // WsClient's own declaration is the thing being called, not a call.
                 if (code.substring(0, at).trimEnd().endsWith("fun")) continue
+                // U4: THE SYNTHETIC SOCKET IS NOT THE SOCKET THIS GUARD PROTECTS.
+                //
+                // The harm this test names is "it can strand or SPLIT a pairing". A pairing is a
+                // real frame and its cover frame, both on the REAL socket. The synthetic account's
+                // socket carries no pairings at all — its acks and burns answer envelopes that have
+                // already arrived — so a disconnect there cannot split anything.
+                //
+                // The exemption is deliberately RECEIVER-TYPED rather than file-scoped, because a
+                // blanket "ignore these two files" is exactly the carve-out the round-4 third lens
+                // ruled out: it converts a latent defect into a known, unmonitored one.
+                // `DecoyInboundSession.socket` is a `SyntheticSocket`, which the real `WsClient` is
+                // not and cannot be assigned to. `WsSyntheticSocket.ws` IS a `WsClient`, so that
+                // one is safe only if the right client is injected — which is not checkable here
+                // and is pinned separately by DecoyU4SourceTripwireTest's construction assertion.
+                if (name == "DecoyInboundSession.kt" && precedes(code, at, "socket.")) continue
+                if (name == "WsSyntheticSocket.kt" && precedes(code, at, "ws.")) continue
                 val opener = enclosingLambdaOpener(code, at)
                 if (allowedOwners.none { opener.endsWith(it) }) {
                     stray += "$name: disconnect() inside <${opener.takeLast(60)}>"
@@ -1356,6 +1372,38 @@ class DecoySendPairingTest {
             "a socket disconnect that cover traffic does not own — it can strand or SPLIT a pairing",
             emptyList<String>(),
             stray,
+        )
+        // CALLABLE REFERENCES TOO (U4 review round 4, Codex). The scan above matches the token
+        // `disconnect()`, so `val d = ws::disconnect; d()` walked straight past it and could close
+        // the real socket mid-gap with every guard green — a guard that does not guard what it
+        // claims. There is no legitimate use of `::disconnect` anywhere in the app today, so the
+        // honest rule is that there are none at all rather than a second ownership model to keep
+        // in step with the first.
+        val references = allMainSources()
+            .filter { (_, source) -> "::disconnect" in normalised(source) }
+            .map { (name, _) -> name }
+        assertEquals(
+            "a disconnect taken as a callable reference escapes the ownership scan above; if one " +
+                "is ever genuinely needed, it has to be added to the scan, not just to the code",
+            emptyList<String>(),
+            references,
+        )
+        // AND THE METHOD NAME AS A STRING LITERAL (U4 review round 5, Codex). `disconnect()` and
+        // `::disconnect` are both source tokens; `javaClass.getMethod("disconnect").invoke(ws)`
+        // contains neither, and works from ANY file — the reflective lookup is the one route to a
+        // disconnect that no token scan above can see. Every reflective route needs the member
+        // name as a string, so that is what is banned. No file in the app has a legitimate use
+        // for the literal today. (Residual, declared: a concatenated or computed name still
+        // slips this — lexical scans bound honest mistakes and lazy evasions, not adversaries
+        // with commit access.)
+        val nameLiterals = allMainSources()
+            .filter { (_, source) -> "\"disconnect\"" in source }
+            .map { (name, _) -> name }
+        assertEquals(
+            "the string literal \"disconnect\" appears in app source — the only use for it is a " +
+                "reflective member lookup, which escapes every disconnect-ownership scan above",
+            emptyList<String>(),
+            nameLiterals,
         )
         // …and the two owners are really wired, so deleting the disconnect entirely does not pass.
         assertTrue(
@@ -1434,10 +1482,28 @@ class DecoySendPairingTest {
         // — a defence pinned only by the code that could not observe it — and it is the reason
         // `pressure` has no default value in the constructor.
         val app = normalised(appSource("ZitroneApp.kt"))
+        // THE WHOLE LAMBDA BODY, not two substring checks (U4 review round 2, Grok F1). Asserting
+        // that both readings merely APPEAR left the guard open to a body that calls them and then
+        // answers with something else — `{ wsClient.outboundQueueBytes(); synthetic…(); 0L }` has
+        // both tokens present and reports an empty queue forever, which is precisely the
+        // always-0 supplier this tripwire was invented to catch in U3 round 5. Pinning the body
+        // exactly means the sum must BE the answer.
+        val open = app.indexOf("queuedBytes = {")
+        assertTrue("the pressure meter's queue supplier was not found", open > 0)
+        val body = app.substring(open + "queuedBytes = {".length, app.indexOf("}", open))
+        assertEquals(
+            "the queue supplier must be exactly the sum of both live sockets' outbound queues",
+            "wsClient.outboundQueueBytes() + (syntheticSocket?.outboundQueueBytes() ?: 0L)",
+            body.replace(Regex("\\s+"), " ").trim(),
+        )
+        // U4 hoisted the meter into a local so the synthetic side can consult THE SAME instance
+        // (R-U4-4), which moved the construction out of the argument list this used to match. The
+        // property being pinned is unchanged and is now two facts instead of one: the meter reads
+        // the live socket, and the pairing is handed that meter. The single-construction assertion
+        // below is what stops the hoist from becoming a second, differently-wired instance.
         assertTrue(
-            "cover pressure is not wired to the live socket's own outbound queue — a reading that " +
-                "is always 0 lets cover fill the buffer the next real frame needs",
-            "pressure = CoverPressure(queuedBytes = wsClient::outboundQueueBytes)" in app,
+            "the send pairing must be handed the hoisted meter, not a fresh one",
+            "pressure = coverPressure," in app,
         )
         assertEquals(
             "more than one place builds the pressure policy, so one of them can be wired wrong",
@@ -2030,6 +2096,10 @@ class DecoySendPairingTest {
      * in `ZitroneApp`). "A second owner of this call exists somewhere" is the defect these guards
      * are about, so the search space is the whole app.
      */
+    /** Whether the call at [at] in [code] is made on the receiver [receiver] (`socket.`, `ws.`). */
+    private fun precedes(code: String, at: Int, receiver: String): Boolean =
+        code.substring(0, at).endsWith(receiver)
+
     private fun allMainSources(): List<Pair<String, String>> =
         mainSourceRoot().walkTopDown()
             .filter { it.isFile && it.extension == "kt" }

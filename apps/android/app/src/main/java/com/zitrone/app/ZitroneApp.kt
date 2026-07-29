@@ -58,9 +58,11 @@ import com.zitrone.app.decoy.CoverPressure
 import com.zitrone.app.decoy.CoverTraffic
 import com.zitrone.app.decoy.DecoyAccountProvisioner
 import com.zitrone.app.decoy.DecoyEnvelopeBuilder
+import com.zitrone.app.decoy.DecoyInboundSession
 import com.zitrone.app.decoy.DecoyRelayApi
 import com.zitrone.app.decoy.DecoySendPairing
 import com.zitrone.app.decoy.RegistrationPowSolver
+import com.zitrone.app.decoy.WsSyntheticSocket
 import com.zitrone.app.diagnostics.BootDiagnostics
 import com.zitrone.app.i2p.I2pIntegration
 import com.zitrone.app.net.ApiClient
@@ -1524,21 +1526,47 @@ class AppContainer(private val app: Application) {
      */
     private fun applyTransport(state: TransportState) {
         val live = synchronized(transportLock) { applyTransportLocked(state) } ?: return
-        // OUTSIDE transportLock, and it does not wait: this queues the drain-and-swap on the
-        // coordinator's confined worker and returns. The endpoints it will dial were installed
-        // above, under the lock, so a swap that runs later still reaches the current transport.
-        live.coordinator.reconnectTransport {
-            live.wsClient.disconnect()
-            live.apiClient.accessToken?.let(live.wsClient::connect)
+        // WHICH SOCKETS NEED A REDIAL IS DECIDED PER SOCKET, and that is a fix (U4 review round 1,
+        // Codex P1). This used to be one decision, taken inside applyTransportLocked, on the REAL
+        // socket's connection state alone: a session whose real socket happened to be DISCONNECTED
+        // returned null and applyTransport bailed out entirely. A down real socket redials itself
+        // through WsClient's backoff, so that was right for the real socket — but the SYNTHETIC
+        // socket may be up at that moment, and it was then left connected on the endpoints the user
+        // had just switched away from. Cover traffic kept flowing over a transport the user
+        // believes is off, which is the disclosure the U4 wiring exists to prevent and which the
+        // comment below already claimed it did.
+        if (live.wsClient.connectionState.value != WsClient.ConnectionState.DISCONNECTED) {
+            // OUTSIDE transportLock, and it does not wait: this queues the drain-and-swap on the
+            // coordinator's confined worker and returns. The endpoints it will dial were installed
+            // above, under the lock, so a swap that runs later still reaches the current transport.
+            live.coordinator.reconnectTransport {
+                live.wsClient.disconnect()
+                live.apiClient.accessToken?.let(live.wsClient::connect)
+            }
         }
+        // U4: the synthetic socket moves with the real one. Left on the old endpoints it would keep
+        // cover traffic flowing over the transport the user just switched away from — worse than no
+        // cover at all, because those frames are attributable to this device on a transport the
+        // user believes is off.
+        //
+        // Deliberately NOT inside the confined swap above, and the difference from the real socket
+        // is the point: the confinement exists so a pairing cannot emit its cover frame on a
+        // different socket than its real frame. The synthetic side has no pairing — its acks and
+        // burns answer envelopes that have already arrived — so there is nothing to split, and the
+        // redial needs a token read that may suspend, which the confined lambda cannot do.
+        live.decoyInbound?.let { session -> scope.launch { session.reconnect() } }
     }
 
     /**
      * Install [state]'s endpoints on the live session. @GuardedBy [transportLock].
      *
-     * @return the session whose live socket must now be redialled over the new endpoints, or null
-     * when there is nothing to redial (no session, or its socket is already down — a down socket
-     * redials itself through `WsClient`'s own backoff, over the endpoints just installed).
+     * @return the live session with both sockets' endpoints installed, or null when there is no
+     * session at all. **Which sockets need redialling is NOT decided here, and no longer decided
+     * once for both** (U4 review round 1): this used to return null when the REAL socket was
+     * already down, on the reasoning that such a socket redials itself through `WsClient`'s own
+     * backoff — true of the real socket, but it also skipped the SYNTHETIC one, which could be up
+     * and was then left on the endpoints the user had just left. [applyTransport] now takes that
+     * decision per socket, and the real socket's down-means-leave-it rule lives there.
      * **The redial itself is deliberately not done here** — see [applyTransport].
      */
     private fun applyTransportLocked(state: TransportState): SessionContainer? {
@@ -1548,10 +1576,11 @@ class AppContainer(private val app: Application) {
         val live = _session.value
         live?.apiClient?.updateTransport(httpClient, apiBase)
         live?.wsClient?.updateTransport(httpClient, ws)
+        // U4: the synthetic socket dials the same endpoints as the real one. Installed here, under
+        // the lock, with the redial itself left to applyTransport — same split as the real socket.
+        live?.decoySocket?.updateTransport(httpClient, ws)
         if (state == TransportState.TOR) TorIntegration.requestOrbotStart(app)
-        return live?.takeIf {
-            it.wsClient.connectionState.value != WsClient.ConnectionState.DISCONNECTED
-        }
+        return live
     }
 
     companion object {
@@ -1667,6 +1696,31 @@ class SessionContainer(
      * is constructed before the coordinator that owns its teardown; nothing else reads it.
      */
     private val coverTraffic: CoverTraffic
+
+    /**
+     * The synthetic cover account's own socket (0.10.0 U4), or null when this build has no decoy
+     * relay. Exposed because [ZitroneApp.applyTransportLocked] must re-point it on a transport
+     * swap alongside [wsClient] — a synthetic socket left on the old endpoints after a Tor/I2P
+     * toggle would keep cover traffic on a transport the user just turned off.
+     *
+     * The type is the wrapper, not a raw [WsClient], and deliberately: the wrapper owns the only
+     * reference to its client, so there is no socket here for anything else to disconnect.
+     */
+    val decoySocket: WsSyntheticSocket?
+
+    /**
+     * Late-bound so the synthetic socket can report `rate_limited` to a meter that is built after
+     * it (the meter reads the socket's queue, so the socket has to exist first). Assigned exactly
+     * once, in [init], before either object is reachable from outside this container.
+     */
+    private var coverPressureRef: CoverPressure? = null
+
+    /**
+     * The synthetic side of the cover exchange (0.10.0 U4), or null. Exposed so the transport swap
+     * can redial it; its TEARDOWN is not called from outside — it is bound to the send pairing's
+     * (see `DecoyInboundSession.bindTo`) so the ordering cannot be broken by a later edit.
+     */
+    val decoyInbound: DecoyInboundSession?
     val coordinator: MessagingCoordinator
 
     init {
@@ -1742,7 +1796,61 @@ class SessionContainer(
             // ApiClient, so "the send-pairing path writes nothing durable" is a fact about its type
             // — the discipline DecoyEnvelopeBuilder documents. The synthetic account id is read per
             // send because it APPEARS mid-session, when provisioning lands.
-            coverTraffic = decoyRelay?.let { relayFactory ->
+            // The synthetic account's own socket (0.10.0 U4). Same endpoints and same OkHttp client
+            // as the real one — a second connection, not a second network — so a transport swap
+            // re-points both through applyTransportLocked/applyTransport. Built BEFORE the pressure
+            // meter because the meter reads its queue too; see below.
+            //
+            // WsSyntheticSocket CONSTRUCTS its own WsClient rather than being handed one, which is
+            // why nothing here can pass it the real socket by accident or by edit (U4 review round
+            // 3). See that class for the three rounds of lexical guard this replaces — and for why
+            // it accepts no diagnostics sink either (U4 review round 5): its socket lifecycle must
+            // never reach BootDiagnostics or any other durable writer.
+            val syntheticSocket = decoyRelay?.let {
+                WsSyntheticSocket(
+                    wsUrl = wsUrl,
+                    httpClient = httpClient,
+                    scope = scope,
+                    onRateLimited = { coverPressureRef?.syntheticRateLimited() },
+                )
+            }
+            decoySocket = syntheticSocket
+            // The R-U3-1 yield (0.10.0 U3 fix round 6), hoisted out of the pairing because U4's
+            // send-back consults THE SAME INSTANCE (R-U4-4). A second CoverPressure with its own
+            // thresholds would be two independent meters, each seeing half the traffic and neither
+            // tripping when the pair of them should. The queue reading MUST be the live socket's
+            // own: a supplier that always answers 0 leaves cover free to fill the outbound buffer a
+            // real frame needs, which is the defect this closes.
+            //
+            // BOTH SOCKETS' QUEUES ARE SUMMED (U4 review round 2, Codex P2). Reading only the real
+            // socket left the meter blind to the one U4 actually emits on: a synthetic queue could
+            // back up without limit while `yielding()` stayed false, so R-U4-4's "yields on every
+            // signal of contention available to it" was not true as literally written. They share a
+            // device uplink, so the honest aggregate is the sum. Suppressing the pairing's cover
+            // because the SYNTHETIC socket is congested is acceptable in the direction that
+            // matters: cover is the discardable half, and no yield can ever delay a real frame.
+            val coverPressure = CoverPressure(
+                queuedBytes = {
+                    wsClient.outboundQueueBytes() + (syntheticSocket?.outboundQueueBytes() ?: 0L)
+                },
+            )
+            // The socket is built before the meter (it feeds the meter's queue limb) and the meter
+            // is what the socket reports rate_limited to, so one of the two references has to be
+            // late-bound. This is that knot, kept to a single assignment rather than resolved by
+            // giving the socket a settable dependency.
+            coverPressureRef = coverPressure
+            val inbound = syntheticSocket?.let { syntheticWs ->
+                DecoyInboundSession(
+                    scope = scope,
+                    syntheticAccountId = { DecoyAuthStore(rt).accountId },
+                    realAccountId = { apiClient.accountId },
+                    accessToken = { DecoyAuthStore(rt).accessToken },
+                    socket = syntheticWs,
+                    pressure = coverPressure,
+                )
+            }
+            decoyInbound = inbound
+            val pairing = decoyRelay?.let { relayFactory ->
                 DecoySendPairing(
                     scope = scope,
                     sender = {
@@ -1756,19 +1864,23 @@ class SessionContainer(
                     },
                     recipient = { DecoyAuthStore(rt).accountId },
                     send = wsClient::sendMessage,
-                    // The R-U3-1 yield (0.10.0 U3 fix round 6). The queue reading MUST be the live
-                    // socket's own: a supplier that always answers 0 leaves cover free to fill the
-                    // outbound buffer a real frame needs, which is the defect this closes.
-                    pressure = CoverPressure(queuedBytes = wsClient::outboundQueueBytes),
+                    pressure = coverPressure,
                     provision = {
                         DecoyAccountProvisioner.forRuntime(
                             runtime = rt,
                             relay = relayFactory(),
                             powSolver = RegistrationPowSolver(),
                         ).provisionIfNeeded()
+                        // Provisioning is lazy, so the synthetic account can APPEAR mid-session —
+                        // this is the call that opens its socket the first time. Idempotent; the
+                        // start below covers a vault that already had an account at unlock.
+                        inbound?.start()
                     },
                 )
             } ?: CoverTraffic.NONE
+            // U4's teardown is bound to U3's rather than left to two call sites to remember: the
+            // synthetic socket must not outlive the real session. See DecoyInboundSession.bindTo.
+            coverTraffic = inbound?.bindTo(pairing) ?: pairing
             coordinator = MessagingCoordinator(
                 appContext = app,
                 scope = scope,
@@ -1792,7 +1904,18 @@ class SessionContainer(
                 // U3: wraps the publish tail of every outbound envelope. MessagingCoordinator.stop()
                 // is what tears it down, which is why the coordinator owns the reference.
                 coverTraffic = coverTraffic,
+                // U4 / R-U4-1: the synthetic side replies occasionally, so the real client can now
+                // receive an envelope that must never become a message. Read per envelope, not
+                // captured — the synthetic account APPEARS mid-session when provisioning lands, and
+                // a captured null would leave the guard permanently open on exactly the vaults that
+                // go on to generate cover traffic. Null id answers false for every sender.
+                isSyntheticSender = { senderId ->
+                    DecoyAuthStore(rt).accountId?.let { it == senderId } == true
+                },
             )
+            // A vault that ALREADY had a synthetic account at unlock: open its socket now. A vault
+            // that does not returns immediately and is covered by the provisioning path instead.
+            inbound?.let { session -> scope.launch { session.start() } }
         } catch (t: Throwable) {
             runCatching { rt.close() }
             throw t

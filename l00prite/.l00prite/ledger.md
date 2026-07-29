@@ -3258,3 +3258,112 @@ reinstating the rounds 4–5 P1s); the 5–50 ms between pressure check and emit
 terminal teardown (which beats a vault lock that skips its key wipe); natural socket death mid-gap.
 
 No version bump. U4 and U6 remain before 0.10.0 can be cut.
+
+---
+
+## 2026-07-28 — U4 built (synthetic-side receive), review round 1 dispatched
+
+Branch `feat/0.10.0-decoy-u4-synthetic-receive`, commits `c18e94b6` (spec §4.4), `f30ee5eb`
+(implementation), `e7e1a41b` (mutation-survivor fixes). **NOT merged, no version bump, not pushed.**
+
+**Process change, and it is the U3 lesson applied:** the requirements were written into the spec
+(§4.4) and **falsified in place** before any code existed. Each R-U4-* is a rule about our own
+code's behaviour with a constructed counterexample; where one is stated absolutely, the
+counterexample is shown to be *unreachable*, not merely unlikely.
+
+**A design fork was resolved in U4's favour by that discipline.** The send-back needs a shape. A
+prekey-shaped reply must carry the synthetic account's `registration_id` inside the blob, which
+`DecoyState` does not persist — so it would have meant a new durable field, a `TAG_DECOY` format
+change and a §4.1 storage-format question. An **established-session** reply needs neither, and is
+also what X3DH actually does (B answers with a `SignalMessage`, not a `PreKeySignalMessage`). So
+**U4 adds no durable-state writer at all**, and the §4 WRITER/READER table is unchanged — a claim
+the review is asked to check rather than take on trust.
+
+**Evidence:** `ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest :app:assembleDebug
+--rerun-tasks` from `apps/android` → **BUILD SUCCESSFUL, Gradle exit 0, 784 tests / 0 failures /
+0 errors / 3 skipped** (742 → 784). **18 mutations, rebuild between each: 16 discriminated on the
+first sweep, both survivors were TEST defects and are now caught (2/2 on re-run).**
+
+**Both survivors are worth keeping**, because each was an observable that could not see the thing it
+claimed to test. `stop()`'s cancellation survived deletion because every job body *also* re-checks
+the stopped flag, so nothing was emitted either way; the first fix for it *also* survived, because
+`stop()` cleared the pending set and the new counter therefore read zero whether or not the cancel
+ran. The lesson is the U3 one in a new place: **an assertion that passes for the wrong reason is
+indistinguishable from one that passes for the right reason until you mutate the code.**
+
+**Two U3 tripwires were changed, deliberately, and the review is pointed at both.** The
+disconnect-ownership guard fired on the synthetic socket; the harm it names is splitting a *pairing*
+and the synthetic socket carries none, so the exemption is **receiver-typed rather than
+file-scoped** — a blanket file carve-out is exactly what the round-4 third lens ruled out — and the
+half that cannot be checked there (that `WsSyntheticSocket` is only ever handed the decoy client) is
+pinned by a new assertion.
+
+Round 1 dispatched to Codex and Grok, blind to each other.
+
+## 2026-07-29 — U4 review rounds 1–5: the same lesson three sizes larger
+
+Rounds 1–4 were adjudicated and fixed in-session on 2026-07-28 (see the per-round adjudications in
+`reviews/decoy-0.10.0/`); the session died mid-round-5 — Codex had returned a verdict, Grok had
+written 443 bytes of narration. Grok was re-dispatched blind on the identical prompt the next day
+and completed. Only the completed run was adjudicated.
+
+**Round 5: 4 distinct findings, all upheld, and BOTH lenses independently converged on the same top
+finding and the same redial finding** — the unit's second convergence, this time on ground round 4
+claimed to have closed.
+
+The P1 is the round-4 diag finding three sizes larger: round 4 removed one `diag()` call from the
+R-U4-1 guard and banned sinks in the U4 files, while `ZitroneApp` — one construction site away —
+was handing `bootDiagnostics.record` to the synthetic socket as its `diag` parameter, putting the
+cover socket's ENTIRE LIFECYCLE (handshake, connected, closed, failure) durably on disk in
+`boot-diagnostics.log`, on every unlock of every decoy-relay vault. No scanned file contained a
+`diag(` call token; the defect was a parameter, forwarded. Two rounds running, the finding was not
+"the guard is absent" but "the guard's scope is narrower than its claim."
+
+**The response is structural, not lexical: the `diag` parameter no longer exists.** There is no
+argument through which a sink can reach the synthetic socket; `WsClient`'s own default `{}` is the
+sink. The widened tripwires (bare-token ban, construction-site scan, brace-only redial segment,
+reflection ban, app-wide `"disconnect"` literal ban) are the backstop, not the fence. R-U4-3 was
+also reworded (Grok, requirement defect): it now forbids REACHING an existing durable writer, not
+only adding one — the letter of the old text permitted the P1.
+
+Build: 799 tests / 0 failures / 3 skipped, exit 0, run before AND after the mutation sweep.
+Mutations: 5 applied, 5 discriminated, restores checksum-verified (fixes were uncommitted, so
+restores were reverse-edits against recorded SHA-256s, not `git checkout`). Three of the five were
+lens-named evasions applied verbatim that the round-4 guards demonstrably passed.
+
+**ROUND 6 IS NEXT AND LAST — the hard cap.** Severity did not fall this round (round 4: 4 P3;
+round 5: 1 P1) because round 5 attacked the fixes, not the unit afresh. Per the cap rule: converge
+clean at 6 → stop and report ready-to-merge; anything still contested at 6 → third lens (Gemini),
+then stop and hand to the maintainer regardless.
+
+## 2026-07-29 — U4 review round 6 (FINAL): CONVERGED AT THE CAP — the loop STOPS here
+
+**Grok: CLEAN. Codex: 0 P1, 0 P2, 1 P3.** The P3 was a claim-scope defect in round 5's own fix:
+the `WsSyntheticSocket` comment said "no parameter through which a sink could be supplied," but
+`httpClient` and `onRateLimited` remain opaque constructor routes — an OkHttpClient carrying an
+EventListener would observe the synthetic connection durably. Not a current disclosure (verified:
+zero hook tokens in all main sources; Grok checked the identical surface and agreed the tree is
+clean, classing the future route as lexical-guard residual). UPHELD; fixed with a comment
+correction + one new tripwire: NO OkHttp client builder in the app may install an observability
+hook — both sockets share the client, so a hook added for real-socket debugging would silently
+observe cover traffic. Mutation-verified (an installed `EventListener.NONE` was caught; restore =
+empty diff). **Zero production-code change**, which is what makes fixing at the cap acceptable;
+recorded honestly that this fix gets no blind review because there is no round 7.
+
+Adjudicated as CONVERGENCE, not contest: both lenses 0 P1 / 0 P2, and the sole P3's factual
+substrate was agreed by both — a severity classification difference over an agreed fact leaves no
+dispute for the Gemini third lens to break, so it was not invoked.
+
+Evidence: 800 tests / 0 failures / 3 skipped, exit 0 (799 → 800, the hook tripwire).
+
+**U4 closes at 24 findings over six rounds, every one upheld and fixed.** Residuals standing are
+declared in `u4-r6-adjudication.md` (conceded-relay drop power, expired-JWT quiet cover, uncovered
+control channel, computed-name reflection class, no behavioural isSyntheticSender test — the last
+is a 0.11.0 polish candidate).
+
+**STOPPED per the hard cap. U4 is ready for the maintainer's merge decision. Nothing merges, no
+version bumps, and no further rounds run without an explicit maintainer instruction.**
+
+Also this session: maintainer decided the production-diagnostics rescope (RAM-only ring buffer in
+release, durable BootDiagnostics debug-only, logcat mirror stripped) — recorded as its own unit in
+todos.md, slotted 0.11.0, NOT folded into U4.

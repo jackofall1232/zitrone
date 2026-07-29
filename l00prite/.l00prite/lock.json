@@ -1,12 +1,12 @@
 {
  "schema_version": 1,
- "lock_id": "lock-20260728T-u3-fix-r5",
+ "lock_id": "lock-20260729T-u4-review-r6",
  "owner_agent": null,
  "owner_session": null,
- "acquired_at": "2026-07-28T06:00:00Z",
- "expires_at": "2026-07-28T07:30:00Z",
- "ttl_seconds": 5400,
- "purpose": "U3 fix round 5 \u2014 X1 lock boundary + CoverTrafficWorker extraction, X3/X4/X5 tests and tripwires, X6 bounded second wait, X7 re-declared residual, X8 test count, X9 tripwire evasions; released",
+ "acquired_at": "2026-07-29T01:00:00Z",
+ "expires_at": "2026-07-29T03:00:00Z",
+ "ttl_seconds": 7200,
+ "purpose": "U4 review round 6 (FINAL) — CONVERGED at the cap (Grok CLEAN, Codex 1 P3 upheld+fixed doc/test-only, OkHttp-hook tripwire added, 800 tests green, mutation 1/1); loop STOPPED, awaiting maintainer merge decision; diagnostics-rescope todo recorded; released",
  "protected_paths": [
   "ledger.md",
   "memory.md",

@@ -112,6 +112,27 @@ class CoverPressure(
     private var written = 0L
 
     /**
+     * The same ring, for the SYNTHETIC account's own sends — U4's send-backs.
+     *
+     * **Separate because it is a separate budget, and blending them was a defect** (U4 review round
+     * 2, Grok F2). A send-back authenticates as the synthetic account and charges *its* relay
+     * bucket, not the real one. Counting those frames into [recent] let ~40 send-backs — which a
+     * relay can induce by delivering cover-shaped envelopes — arm the real account's off-window and
+     * leave genuine sends uncovered for a full minute, with the real socket quiet the whole time.
+     */
+    private val syntheticRecent = LongArray(RATE_FRAMES)
+
+    private var syntheticWritten = 0L
+
+    /**
+     * Send-backs are off until this reading of [nowMs] — armed by the SYNTHETIC account's own
+     * `rate_limited` and rate, and read only by [yieldingSendBack]. It never gates the send
+     * pairing's cover: see [syntheticRateLimited].
+     */
+    @Volatile
+    private var syntheticOffUntil: Long = Long.MIN_VALUE
+
+    /**
      * Cover is off until this reading of [nowMs]. `Long.MIN_VALUE` — not 0 — because [nowMs] is
      * monotonic-but-arbitrary and may legitimately be negative.
      *
@@ -126,8 +147,11 @@ class CoverPressure(
      *
      * Called for the REAL frame at the top of [DecoySendPairing.cover] (which the coordinator enters
      * only on a genuine handoff) and for a cover frame that the socket took. Both charge the same
-     * per-account relay bucket, so both are counted: the meter measures **budget consumption**, not
-     * user activity.
+     * per-account relay bucket — the REAL account's — so both are counted: the meter measures
+     * **budget consumption**, not user activity.
+     *
+     * U4's send-backs are deliberately **not** counted here, because they do not charge this bucket.
+     * They go to [recordSyntheticFrame]. See that method for what went wrong when they did.
      */
     fun recordFrame() = meter.withLock {
         recent[(written % recent.size).toInt()] = nowMs()
@@ -145,6 +169,58 @@ class CoverPressure(
      */
     fun relayRateLimited() {
         offUntil = nowMs() + OFF_WINDOW_MS
+    }
+
+    /** One `message.send` frame was accepted on the SYNTHETIC account — a U4 send-back. */
+    fun recordSyntheticFrame() = meter.withLock {
+        syntheticRecent[(syntheticWritten % syntheticRecent.size).toInt()] = nowMs()
+        syntheticWritten++
+    }
+
+    /**
+     * The relay answered `rate_limited` on the **synthetic** connection.
+     *
+     * Takes SEND-BACKS off for a full [OFF_WINDOW_MS] and **nothing else** — the send pairing's
+     * cover is untouched, and that asymmetry is the whole point of this method existing separately
+     * from [relayRateLimited].
+     *
+     * Routing this into the shared off-window was a defect found in U4 review round 2 (Grok F2), and
+     * it is worth stating why it was tempting: the two accounts share a device and a socket pair, so
+     * "the relay is pushing back" feels like one fact. It is not. The budgets are per-account, and a
+     * relay — conceded in the threat model — can emit one `rate_limited` on the synthetic connection
+     * and thereby switch off cover for every real send for the next minute, without the real
+     * account being anywhere near its limit. That is a lever an adversary should not be handed for
+     * free, and it is sharper than the intermittent drops it would replace: a consistent
+     * minute-long gap in cover is a better mark than no gap at all.
+     */
+    fun syntheticRateLimited() {
+        syntheticOffUntil = nowMs() + OFF_WINDOW_MS
+    }
+
+    /**
+     * **Must a U4 send-back yield?**
+     *
+     * Strictly weaker than [yielding]: everything that stops the pairing's cover also stops a
+     * send-back — the two sockets share a device uplink, and a send-back is the most discardable
+     * frame in the system — **plus** the synthetic account's own budget signals, which stop nothing
+     * else.
+     */
+    fun yieldingSendBack(): Boolean = try {
+        yielding() || run {
+            val now = nowMs()
+            when {
+                now < syntheticOffUntil -> true
+                syntheticSendRateHigh(now) -> {
+                    syntheticOffUntil = now + OFF_WINDOW_MS
+                    true
+                }
+                else -> false
+            }
+        }
+    } catch (c: CancellationException) {
+        throw c
+    } catch (t: Throwable) {
+        true
     }
 
     /**
@@ -202,6 +278,12 @@ class CoverPressure(
     private fun sendRateHigh(now: Long): Boolean = meter.withLock {
         if (written < recent.size) return@withLock false
         now - recent[(written % recent.size).toInt()] < RATE_WINDOW_MS
+    }
+
+    /** [sendRateHigh] for the synthetic account's own ring. */
+    private fun syntheticSendRateHigh(now: Long): Boolean = meter.withLock {
+        if (syntheticWritten < syntheticRecent.size) return@withLock false
+        now - syntheticRecent[(syntheticWritten % syntheticRecent.size).toInt()] < RATE_WINDOW_MS
     }
 
     companion object {
