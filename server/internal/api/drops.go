@@ -38,7 +38,7 @@ type dropDepositRequest struct {
 // DepositDrop accepts an encrypted envelope for anonymous pickup. No auth; a
 // valid proof-of-work over the drop ID is required instead.
 func (h *Handlers) DepositDrop(c *fiber.Ctx) error {
-	if !h.dropLimit.Allow(c.IP()) {
+	if !h.dropLimit.Allow(h.clientKey.key(c)) {
 		return errJSON(c, fiber.StatusTooManyRequests, "rate_limited")
 	}
 	var req dropDepositRequest
@@ -81,7 +81,7 @@ type dropRedeemRequest struct {
 // RedeemDrop returns an envelope and destroys the drop. Single-use: a second
 // attempt with the same token returns 404. No account required.
 func (h *Handlers) RedeemDrop(c *fiber.Ctx) error {
-	if !h.dropLimit.Allow(c.IP()) {
+	if !h.dropLimit.Allow(h.clientKey.key(c)) {
 		return errJSON(c, fiber.StatusTooManyRequests, "rate_limited")
 	}
 	var req dropRedeemRequest

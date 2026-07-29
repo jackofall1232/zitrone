@@ -41,12 +41,24 @@ alongside the dead-air disclosure. Same class as the 0.9.3 burn-scope correction
 exactly this shape of claim once already.
 
 
-## 🚚 CX23 TRIP — four items, grouped 2026-07-27. All need direct CX23 access.
+## 🚚 CX23 TRIP — RUN 2026-07-29. (b), (c), (d) CLOSED; (a) relay half done, client half owed.
 
 Grouped deliberately: each needs the same access and CX33 has none, so batch them rather than paying
-the access cost four times.
+the access cost four times. The trip was made on 2026-07-29 directly on CX23.
 
-- [ ] **(a) `onServerError` SURFACES NOTHING TO THE USER — a LIVE DEFECT IN SHIPPED CODE, not a decoy
+**Everything below is DEPLOYED on CX23 and PUSHED** — the branches are named per item. Merge order
+matters: `cx23/per-client-rate-limit-keying` is STACKED on `cx23/relay-attribution-for-main` (its
+config hunk sits on top of `SendRatePerMinute`), so merging (d) into main alone hits a conflict.
+`cx23/0.9.4-pow-deploy` is what production runs and is a backup/audit ref — do NOT merge it, it
+carries the 0.9.4 PoW deploy commits and duplicates main's own onion flip.
+
+- [ ] **(a) RELAY HALF DONE 2026-07-29 (`8c91809` on `cx23/relay-attribution-for-main`; deployed on
+      CX23 as `e25d59a`). CLIENT HALF OWED — deliberately still unchecked, because the relay half
+      does NOT fix the user-visible symptom.** Client work is in flight as
+      `origin/feat/0.10.1-send-failure-surfacing`, and its wire contract was verified to match the
+      deployed relay exactly. **0.10.1 is inert until `8c91809` is merged**, and a redeploy of prod
+      from `main` before that reverts attribution to nothing. Original finding follows.
+      **(a) `onServerError` SURFACES NOTHING TO THE USER — a LIVE DEFECT IN SHIPPED CODE, not a decoy
       concern.** *(Wording corrected 2026-07-28: the method is no longer literally empty — U3 fix
       round 6 routes `rate_limited` to the cover-traffic yield — but **not one thing here is fixed by
       that**. It is a cover-traffic signal, not error handling, and the user-facing half below is
@@ -56,7 +68,15 @@ the access cost four times.
       way to know a send failed.** This predates decoy traffic and is worth fixing on its own merits.
       **Fix:** carry the message id on `rate_limited` (and other per-message rejections) so the client
       can attribute and retry. Relay + client.
-- [ ] **(b) Cover traffic halves the account's send budget** — decoy-scoped, unlike (a). `sendLimit`
+- [x] **(b) DONE 2026-07-29 — budget RAISED, not exempted** (`8c91809`, deployed). `sendLimit`
+      100→**200/min**, now tunable via `SEND_RATE_PER_MINUTE` without a rebuild. Cover frames are
+      deliberately NOT exempted: distinguishing them needs either a client-set flag (a client could
+      mark everything cover and escape the budget) or a relay-side record of which account is whose
+      synthetic peer — a STORED linkage the relay must not hold. Spec §6.2a item 3 sanctions
+      "exempting **or raising**". Note (b) and (d) are independent: `sendLimit` keys on the
+      authenticated account (`hub.go:174`), so it was never part of the (d) bucket collapse.
+      Original finding follows.
+      **(b) Cover traffic halves the account's send budget** — decoy-scoped, unlike (a). `sendLimit`
       is charged to the authenticated account, so a covered send costs two permits. **Exempt or raise
       the budget for cover frames.**
       **⚠️ NO LONGER THE ONLY FIX, and the "UNSOUND" ruling is WITHDRAWN (U3 fix round 6,
@@ -68,9 +88,41 @@ the access cost four times.
       correct **of a headroom policy**, which must predict the limit; it does not touch a **reactive**
       one, which needs no number at all. This item is now an improvement (cover frames should not cost
       the user's budget at all), not a defect gate. **Does not block U3.**
-- [ ] **(c) Onion mirror staging** — the next artefact the onion serves is 0.10.0 (0.9.4 never will;
+- [x] **(c) DONE 2026-07-29 — the onion serves `zitrone-v0.10.0-beta.apk`** (was advertising
+      v0.8.2-beta). Staged binary verified against the release-cut ledger sha256
+      `fa183f30…c877db` BEFORE `SHA256SUMS` was written, not derived from whatever sat in the
+      directory. `SHA256SUMS` had also listed a `v0.9.3-beta.apk` that was never staged on that box.
+      Both mirrors (public + secret) serve it; 0.7.6/0.8.0/0.8.2 remain downloadable.
+      Original finding follows.
+      **(c) Onion mirror staging** — the next artefact the onion serves is 0.10.0 (0.9.4 never will;
       see RELEASE STRATEGY). Forward check at publish time, not a stale-APK defect any more.
-- [ ] **(d) CX23 P2 — non-IP registration keying. NOW UNBLOCKED.** The precondition is answered:
+- [x] **(d) DONE 2026-07-29 (`88078cc` on `cx23/per-client-rate-limit-keying`, deployed) — AND IT
+      WAS TEN CALL SITES, NOT ONE.** This is the part worth recording more than the fix: P2 is
+      written up as *registration* keying, but `c.IP()` was the limiter key at **register,
+      challenge, drops (×2), the relay drop path, QR drops (×3) and blobs (×2)** — all ten collapsed
+      to one global bucket behind Caddy, so any single client could exhaust the limit for everyone
+      worldwide. On `main` it is **nine** sites (no challenge endpoint there — main has no regpow).
+      Route (ii) was taken, plus two things neither route specified:
+      - **Trusted-peer gate.** X-Forwarded-For is consulted ONLY when the socket peer (unspoofable)
+        is a configured trusted proxy. **Verified empirically on the box:** Caddy reaches the
+        container through the published port and arrives as the bridge **gateway 172.18.0.1**, while
+        the Tor/I2P sidecars are containers at **172.18.0.x, x≠1**. That distinction is what makes
+        it safe. `TRUSTED_PROXY_IPS` takes **EXACT IPs only — CIDRs are rejected**, because
+        `172.18.0.0/16` would trust the sidecars and reopen the full bypass.
+      - **Keys are HMAC'd under a per-process salt, and this is not incidental.** Drops and QR drops
+        are unauthenticated precisely so no sender identity exists anywhere, and blob redeem is
+        unauthenticated so a fetch cannot be linked to an account. Keying those on a raw client
+        address would hand the relay a stable per-client identifier it does not currently hold — a
+        privacy regression traded for a rate-limiting fix. Hashing keeps per-client buckets while
+        the limiter holds opaque values that cannot be correlated across restarts.
+      Empty `TRUSTED_PROXY_IPS` = pre-existing behaviour, so a stale value is inert — and because
+      that degrades INVISIBLY, startup logs the mode (`rate limiting: per-client keying active…`).
+      Still does **not** help Tor/I2P (one bucket per sidecar); registration PoW remains the answer
+      there. `prekeyLimit` was already keyed on account id and was left alone.
+      **Evidence:** vet + full suite + gofmt clean, 5/5 mutations discriminated. NOT measured against
+      the live limiter — probing `/api/v1/register` would consume the very bucket at issue.
+      Original finding follows.
+      **(d) CX23 P2 — non-IP registration keying. NOW UNBLOCKED.** The precondition is answered:
       **Caddy APPENDS `X-Forwarded-For`** (no `header_up` override), so `ProxyHeader` is unsafe as-is.
       Two viable routes: `header_up X-Forwarded-For {remote_host}` in the Caddyfile so Caddy
       overwrites and the header becomes trustworthy, **or** last-hop parsing server-side (take only
@@ -750,8 +802,14 @@ external probes from CX33 (TLS handshake, `GET /healthz` on 443 and 8443, `dig`)
       firewall 8443 so only Caddy can reach it. NOTE: changing the published port is a compose
       change — three-file invocation required
       (`-f docker-compose.yml -f docker-compose.tor.yml -f docker-compose.i2p.yml`).
-- [ ] **P2 — `registerLimit` collapses to ONE GLOBAL BUCKET keyed on Caddy's socket address.**
-      **INTERIM APPLIED, REAL FIX STILL OPEN — and now UNBLOCKED for design.**
+- [x] **P2 — FIXED 2026-07-29 (`88078cc`, deployed). AND THE SCOPE WAS WRONG: ten call sites, not
+      just registration** — register, challenge, drops (×2), the relay drop path, QR drops (×3),
+      blobs (×2); nine on `main`, which has no challenge endpoint. See CX23 TRIP item (d) for the
+      design (trusted-peer gate + last-XFF element + HMAC'd keys) and why `ProxyHeader` was NOT
+      used. **`header_up` route (i) was NOT taken** — the Caddyfile is untouched, so nothing about
+      the TLS front-end changed. Original finding follows, for the diagnostic record.
+      **P2 — `registerLimit` collapses to ONE GLOBAL BUCKET keyed on Caddy's socket address.**
+      **~~INTERIM APPLIED, REAL FIX STILL OPEN~~ — REAL FIX NOW APPLIED.**
       - **Interim (`20ade12b`, deployed 2026-07-26, on main 2026-07-27):** widened **5/hr → 300/hr**.
         `handlers.go` now reads `ratelimit.New(300, time.Hour, ...)`. This is **relief, not a fix** —
         the key is unchanged, so it is still one bucket shared by every client worldwide. At 5/hr it
@@ -1326,18 +1384,26 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       switching vaults. Slot: 0.11.0 polish (final alpha), same before-external-testers bucket as
       the storage-format disclosure.
 
-- [ ] **CX23 item (a) — `onServerError` surfaces nothing: RELAY HALF DONE (`1c63e8c`, deployed),
-      CLIENT HALF OWED.** Not checked, per the CX23 note: the relay half does not fix the
+- [ ] **CX23 item (a) — `onServerError` surfaces nothing: RELAY HALF DONE (`e25d59a` deployed /
+      `8c91809` for main), CLIENT HALF OWED.** *(This entry previously cited `1c63e8c`; that commit
+      was amended away and exists on NO branch — cherry-picking it gets nothing.)*
+      Not checked, per the CX23 note: the relay half does not fix the
       user-visible symptom, so until the client half ships in a release **users still see `SENDING`
       forever** on a rejected send — not failed, not retried, no error. Predates decoy traffic;
       worth fixing on its own merits.
 
-      **⚠️ `1c63e8c` IS NOT ON `origin` (verified 2026-07-29 from CX33: fetched every remote ref,
-      the object does not exist).** So (i) the deployed relay fix is SINGLE-COPY on a production
-      box, and (ii) **a redeploy from `main` reverts it** — the same trap the 8443/rate-limit
-      warning had, recurring for real. Push it to a `cx23/*` branch before anything else touches
-      the relay. Until it is pushed, the wire contract below is UNVERIFIED — it is the note's
-      claim, not something read from source.
+      **✅ RESOLVED 2026-07-29 — PUSHED.** The warning below was correct and has been acted on. The
+      relay half is now on `origin` twice: `cx23/relay-attribution-for-main` (`8c91809`, the fix
+      alone, cherry-picked onto main and re-verified there) and `cx23/0.9.4-pow-deploy` (`76399f7`,
+      exactly what production runs — backup/audit only, do NOT merge). The wire contract below is
+      no longer an unverified claim: it was read from source and the 0.10.1 client branch was
+      checked against it (`WsClient.kt` reads
+      `frame.optString("message_id").takeIf { it.isNotEmpty() }` and names the same three codes).
+      **(ii) still stands until merge:** a redeploy from `main` reverts attribution to nothing.
+
+      *Original warning, kept because the pattern is the point:* `1c63e8c` IS NOT ON `origin`
+      (verified 2026-07-29 from CX33) — the deployed relay fix was SINGLE-COPY on a production box,
+      the same trap the 8443/rate-limit warning had, recurring for real.
 
       **Wire contract the relay now provides (additive; older clients unaffected):**
       `serverEvent.MessageID` populated on `rate_limited` (when the header parsed), `store_failed`,
@@ -1363,7 +1429,7 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       2. **TWO COMMENT BLOCKS ARE NOW FALSE IN PRODUCTION** and are false *today*, before any client
          work: `MessagingCoordinator.kt:~2337` ("needs the relay to carry the message id on the
          error, **which it does not**") and `DecoySendPairing.kt:~109` ("the relay's `rate_limited`
-         carries **no message id**"). `1c63e8c` is deployed, so both assert something untrue of the
+         carries **no message id**"). `e25d59a` is deployed, so both assert something untrue of the
          live relay. This project treats a kdoc claim the code does not support as a finding; fix
          them with the client half.
 

@@ -156,26 +156,52 @@ func (h *Hub) handleEvent(c *Client, raw []byte) {
 }
 
 func (h *Hub) handleSend(c *Client, ev clientEvent) {
-	if !h.sendLimit.Allow(c.accountID.String()) {
-		c.send(serverEvent{Type: "error", Code: "rate_limited"})
-		return
-	}
+	// The header is parsed BEFORE the budget check so a rejection can name the
+	// message it rejected. A per-message rejection that carries no id cannot be
+	// attributed by the client, which leaves the message displayed as SENDING
+	// forever — not failed, not retried, nothing surfaced to the user. Echoing
+	// the id is not a disclosure: it is the sender's own id on the sender's own
+	// connection, the same reasoning that already applies to message.stored.
+	//
+	// The cost is that a frame rejected by the limiter is now unmarshalled
+	// first. That is bounded by the read limit the transport already imposes,
+	// and there is no way to name a message without reading its id.
 	var header envelopeHeader
-	if err := json.Unmarshal(ev.Envelope, &header); err != nil {
+	parseErr := json.Unmarshal(ev.Envelope, &header)
+
+	// Every send attempt consumes a permit, well-formed or not: a malformed
+	// frame must not be a free pass through the limiter.
+	allowed := h.sendLimit.Allow(c.accountID.String())
+
+	// Echoed only when it is a well-formed UUID, so a malformed header cannot
+	// make the relay reflect arbitrary client-supplied bytes back.
+	id, idErr := uuid.Parse(header.ID)
+	msgID := ""
+	if parseErr == nil && idErr == nil {
+		msgID = id.String()
+	}
+
+	// rate_limited keeps precedence over bad_envelope, as before.
+	if !allowed {
+		c.send(serverEvent{Type: "error", Code: "rate_limited", MessageID: msgID})
+		return
+	}
+	if parseErr != nil {
+		// No id here by construction: msgID is empty whenever parseErr != nil,
+		// so this frame carries none. The bad_envelope below can carry one.
 		c.send(serverEvent{Type: "error", Code: "bad_envelope"})
 		return
 	}
-	id, err1 := uuid.Parse(header.ID)
 	recipient, err2 := uuid.Parse(header.RecipientID)
-	if err1 != nil || err2 != nil || header.SenderID != c.accountID.String() {
-		c.send(serverEvent{Type: "error", Code: "bad_envelope"})
+	if idErr != nil || err2 != nil || header.SenderID != c.accountID.String() {
+		c.send(serverEvent{Type: "error", Code: "bad_envelope", MessageID: msgID})
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := h.store.StoreEnvelope(ctx, id, recipient, ev.Envelope); err != nil {
-		c.send(serverEvent{Type: "error", Code: "store_failed"})
+		c.send(serverEvent{Type: "error", Code: "store_failed", MessageID: msgID})
 		return
 	}
 	// SENT tick: acknowledge to the sending connection that the relay has the

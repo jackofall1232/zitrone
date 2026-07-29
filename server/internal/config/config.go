@@ -22,7 +22,26 @@ type Config struct {
 	MaxPrekeysPerUser          int
 	MessageTTLUndeliveredHours int
 	RateLimitEnabled           bool
-	TorEnabled                 bool
+	// SendRatePerMinute is the per-account WebSocket send budget. The default
+	// assumes cover traffic: since 0.10.0-beta a covered send is TWO frames on
+	// the same authenticated socket (the real envelope plus its decoy), so the
+	// budget is charged twice per real message and the old 100 exhausted an
+	// account at ~50 real sends. 200 keeps the nominal 100 real sends a minute
+	// reachable with pairing on. Cover frames are not exempted: distinguishing
+	// them would mean either trusting a client-set flag (which would let a
+	// client mark everything cover and escape the budget) or recording which
+	// account is whose synthetic peer — a stored linkage the relay must not
+	// hold.
+	SendRatePerMinute int
+	// TrustedProxyIPs are the EXACT socket addresses whose X-Forwarded-For the
+	// relay will believe when deriving rate-limit keys. Empty (the default)
+	// disables the header entirely and keys on the socket peer, which is the
+	// pre-existing behaviour — so an unset or stale value degrades to one shared
+	// bucket rather than to a bucket the client chooses. CIDRs are rejected on
+	// purpose: a range covering the Tor/I2P sidecars would let overlay clients
+	// spoof the header and escape the limiter. See api/clientkey.go.
+	TrustedProxyIPs []string
+	TorEnabled      bool
 	// OnionSiteDir, when set and TorEnabled, is served as a static no-JS mirror
 	// site (APK download + checksums + self-hosting instructions) at the root of
 	// the hidden service. Empty disables it — clearnet deployments serve no site.
@@ -64,6 +83,8 @@ func Load() (*Config, error) {
 		MaxPrekeysPerUser:          envInt("MAX_PREKEYS_PER_USER", 100),
 		MessageTTLUndeliveredHours: envInt("MESSAGE_TTL_UNDELIVERED_HOURS", 72),
 		RateLimitEnabled:           envBool("RATE_LIMIT_ENABLED", true),
+		SendRatePerMinute:          envInt("SEND_RATE_PER_MINUTE", 200),
+		TrustedProxyIPs:            splitCSV(os.Getenv("TRUSTED_PROXY_IPS")),
 		TorEnabled:                 envBool("TOR_ENABLED", false),
 		OnionSiteDir:               os.Getenv("ONION_SITE_DIR"),
 		OnionAddress:               os.Getenv("ONION_ADDRESS"),

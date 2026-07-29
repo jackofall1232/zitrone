@@ -48,7 +48,16 @@ func main() {
 	}
 
 	handlers := api.New(store, issuer, cfg)
-	sendLimit := ratelimit.New(100, time.Minute, cfg.RateLimitEnabled)
+	// A wrong or stale TRUSTED_PROXY_IPS degrades silently to one shared bucket
+	// (that is the safe direction, see api/clientkey.go) — which means it also
+	// degrades invisibly. Say which mode we came up in, so the state of the
+	// limiters is readable from the logs rather than inferred.
+	if handlers.ClientKeyingEnabled() {
+		log.Printf("rate limiting: per-client keying active (%d trusted proxy address(es))", len(cfg.TrustedProxyIPs))
+	} else {
+		log.Printf("rate limiting: TRUSTED_PROXY_IPS unset — keying on socket peer, so all clients behind a proxy SHARE ONE BUCKET")
+	}
+	sendLimit := ratelimit.New(cfg.SendRatePerMinute, time.Minute, cfg.RateLimitEnabled)
 	hub := ws.NewHub(store, sendLimit)
 
 	// No access logging, no body logging — application errors only.
