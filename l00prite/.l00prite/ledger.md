@@ -3492,3 +3492,59 @@ cherry-picking it gets nothing. The relay half is `e25d59a` (deployed) / `8c9180
 `feat/0.10.1-send-failure-surfacing` merged main back in (`4882afd8`) and re-verified: 813 Android
 tests / 0 failures. **0.10.1 is still NOT merged** — review round 1 is fixed but round 2 is owed,
 and the lenses split on whether the missing coordinator harness blocks merge.
+
+## 2026-07-29 — PoW REVERSAL RECORDED and merged (`d83b9b3a`). Docs + one comment; no relay change.
+
+The repo held **two contradictory design positions at once**: the 0.9.4 CHANGELOG entry and
+`docs/REGISTRATION_POW_CALIBRATION.md` presented registration proof-of-work as the shipped answer to
+registration rate limiting, while the answer that actually shipped is **`clientKeyer`**. Reconciled
+with reasoning rather than a cross-reference, so a later reader cannot find two design docs
+disagreeing.
+
+**Recorded in `todos.md`** (→ "DESIGN REVERSAL — registration PoW is OUT"): what `clientKeyer` does
+and why it is sound (XFF read only when the socket peer is a configured trusted proxy; **exact IPs,
+CIDRs rejected at construction**; **last** XFF element only, since that is the one the proxy wrote;
+address HMAC'd under a salt made fresh per process and never persisted). Why PoW was chosen — IP
+keying is structurally meaningless behind Tor and I2P — **and that this is still true and unsolved**:
+`clientKeyer` cannot fix overlay collapse and does not claim to; `clientkey_test.go:35-39` **asserts
+two Tor clients must land in the same bucket**, deliberately.
+
+**The overlay position is written as a reason, not a shrug:** one shared bucket per transport,
+accepted because Tor circuit-building and introduction-point setup make registration volume expensive
+to achieve at the source, and because trusting the sidecars for header-based keying would reopen the
+exact spoofing bypass `clientKeyer` closes. **Explicitly NOT "users tolerate outages."** If overlay
+abuse becomes real the answer is a cost function or a credential scheme, not header trust.
+
+**Reversal, not deletion.** Both PoW docs carry SUPERSEDED banners and are kept: the **D=5**
+derivation, the **Revvl 6x floor measurements** and the relay sweep are real measured work that would
+have to be redone. Recovery path: re-merge **`dda31b9`** from `cx23/0.9.4-pow-deploy` or
+`cx23/0.9.4-registration-pow`.
+
+**Two findings from verifying the brief rather than taking it as given:**
+
+1. **`server/internal/pow/` MUST NOT be deleted.** It is still imported by `drops.go` and
+   `qrdrops.go` for **dead-drop** PoW (`DROP_POW_DIFFICULTY`, default 20) — a separate feature.
+   "Removing PoW" is *registration* PoW plus its challenge endpoint only. Deleting the package breaks
+   dead drops. Now stated in the record.
+2. **The "inert env vars" were already fully absent.** `REGISTRATION_POW_ENABLED` and
+   `REGISTRATION_CHALLENGE_SECRET` are in neither `config.go`, `server/.env.example`, nor the live
+   `.env` — there was no flag left to flip. Their only surviving mention was
+   `docs/DEPLOY_0.9.4_POW.md`, which now opens by naming them inert, so nobody sets one expecting an
+   effect.
+
+**`registerLimit` comment fixed** — it was wrong twice (it named 0.9.4 registration PoW as the
+pending real fix). It now records that `clientKeyer` shipped, that **300/hour is an ABUSE BRAKE and
+not a capacity control** (relay capacity binds long before the limiter does, so tuning it for
+throughput is meaningless), and that overlay collapse is accepted with its reason.
+
+**`cfg.SendRatePerMinute` reported = 200** — `config.go` default, `docker-compose.yml` passes
+`${SEND_RATE_PER_MINUTE:-200}`, live `.env` does not set it, so nothing overrides. Effective real
+budget with cover on is **100 real sends/minute**, and `sendLimit.Allow` is called at exactly ONE
+site (`hub.go:174`, the `message.send` path) so receipts/acks/burns/typing consume none of it;
+attachments are one `message.send` each with the blob on a separate `blobLimit`. **Assessment: the
+cover-frame exemption is theoretical for human use** — 100/min is ~1.7 sends/second sustained, and
+200 restores the pre-0.10.0 nominal rather than granting headroom. It was independently rejected for
+a sound reason anyway (exempting means trusting a client flag, or storing which account is whose
+synthetic peer — a linkage the relay must not hold).
+
+Verified after merge: `go build` / `go vet` / `go test ./...` all pass, six packages ok.

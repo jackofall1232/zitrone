@@ -1,12 +1,12 @@
 {
  "schema_version": 1,
- "lock_id": "lock-20260729T-pow-reversal",
+ "lock_id": "lock-20260729T-pow-reversal-merge",
  "owner_agent": null,
  "owner_session": null,
- "acquired_at": "2026-07-29T20:00:00Z",
- "expires_at": "2026-07-29T21:30:00Z",
- "ttl_seconds": 5400,
- "purpose": "Record the registration-PoW reversal + supersede PoW docs + fix stale registerLimit comment; released",
+ "acquired_at": "2026-07-29T20:45:00Z",
+ "expires_at": "2026-07-29T21:15:00Z",
+ "ttl_seconds": 1800,
+ "purpose": "Ledger the PoW-reversal record merge; released",
  "protected_paths": [
   "ledger.md",
   "memory.md",
