@@ -1,3 +1,17 @@
+> # ⛔ SUPERSEDED — this runbook will not be executed (2026-07-29)
+>
+> **Registration PoW was REVERSED.** The shipped answer is `clientKeyer` (trusted-proxy client
+> keying); see `l00prite/.l00prite/todos.md` → "DESIGN REVERSAL — registration PoW is OUT" for the
+> reasoning, including why the Tor/I2P bucket collapse that motivated PoW is *accepted* rather than
+> fixed by `clientKeyer`.
+>
+> **Do not follow the steps below.** In particular `REGISTRATION_POW_ENABLED` and
+> `REGISTRATION_CHALLENGE_SECRET` are **INERT**: they are absent from `config.go`, from
+> `server/.env.example`, and from the live `.env` (verified 2026-07-29). Setting either has no
+> effect — there is nothing left to flip. This document is the only place they still appear, and it
+> is kept for the deployment sequence and the fail-closed secret requirement, which would be needed
+> again if PoW returns via `dda31b9` (`cx23/0.9.4-pow-deploy` / `cx23/0.9.4-registration-pow`).
+
 # 0.9.4-beta registration PoW — deployment runbook
 
 **Nothing here is flipped yet.** This records the order and the decisions so they are made

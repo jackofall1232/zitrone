@@ -1445,3 +1445,73 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       **Per DoD: paired-blind independent review before merge (send path is security-sensitive) plus
       mutation evidence.** Build on `main` or a branch off it. **NEVER build Android on CX23** —
       live Postgres + relay, and `ci-gradle` (flock, disk floor, daemon caps) exists only on CX33.
+
+## 🔄 DESIGN REVERSAL — registration PoW is OUT; `clientKeyer` is the answer (2026-07-29)
+
+**Read this before believing any PoW document in this repo.** Two design positions were in the tree
+at once: the 0.9.4 CHANGELOG entry and `docs/REGISTRATION_POW_CALIBRATION.md` describe registration
+proof-of-work as the shipped answer to registration rate limiting, and it is not — `clientKeyer`
+(trusted-proxy client keying, `server/internal/api/clientkey.go`) is. Both PoW docs are now marked
+superseded and point here. Nothing below deletes the measurements; see "recoverable".
+
+### What `clientKeyer` actually does, and why it is sound
+
+Per-client buckets for **clearnet**, replacing one global bucket that every clearnet user shared
+because Caddy **appends** `X-Forwarded-For` rather than overwriting it. Its safety is structural, not
+conventional:
+
+- **`X-Forwarded-For` is consulted ONLY when the socket peer is a configured trusted proxy.** An
+  untrusted peer's header is ignored entirely.
+- **Trusted entries are EXACT IPs — CIDRs are deliberately rejected** (dropped as junk at
+  construction), so a broad range can never be trusted by accident.
+- **The LAST XFF element is used**, because that is the only one the trusted proxy itself wrote;
+  everything to its left is client-supplied and untrusted.
+- **The derived address is HMAC'd under a salt generated fresh at process start** and never
+  persisted, so buckets are not a stored, correlatable record of who connected.
+
+### Why PoW was chosen originally — and why that reason still stands unfixed
+
+PoW was chosen because **IP keying is structurally meaningless behind Tor and I2P**. That is still
+true. `clientKeyer` **explicitly cannot fix overlay collapse, and does not claim to**: its own test
+(`clientkey_test.go:35-39`, commented "THE ONE THAT MATTERS MOST") **asserts that two Tor clients
+claiming different addresses must land in the SAME bucket**. The Tor sidecar forwards raw HTTP, so an
+overlay client can set `X-Forwarded-For` to anything; trusting the sidecar would reopen a full
+spoofing bypass. So the test pins the collapse *deliberately* rather than treating it as a defect.
+
+### The accepted position on overlay traffic — one shared bucket per transport
+
+Accepted, with the reason recorded rather than waved at:
+
+1. **Registration volume over Tor is expensive to achieve.** Circuit building and introduction-point
+   setup impose real per-attempt cost on the attacker, so the shared bucket is not the free
+   amplification it would be on clearnet.
+2. **The sidecars can never be trusted for header-based keying** without reopening the exact bypass
+   `clientKeyer` exists to close — a trusted sidecar means any overlay client picks its own bucket.
+
+**This is NOT "users tolerate outages."** The position is that the attack is costly at the source and
+that the alternative keying is unsound at any price. If overlay registration abuse ever becomes real,
+the answer is a cost function (PoW) or an invitation/credential scheme, not header trust.
+
+### PoW remains RECOVERABLE — this is a reversal, not a deletion
+
+The path back is **re-merging `dda31b9`** from `cx23/0.9.4-pow-deploy` or
+`cx23/0.9.4-registration-pow`. Kept deliberately:
+
+- **`docs/REGISTRATION_POW_CALIBRATION.md` is marked SUPERSEDED, not deleted.** The **D=5**
+  derivation, the **Revvl floor measurements**, and the relay-side sweep are real measured work that
+  would have to be redone from scratch if PoW returns. Same for `docs/DEPLOY_0.9.4_POW.md`, which
+  holds the deployment sequence and the fail-closed secret requirement.
+
+### Scope precision — what is NOT being removed
+
+**`server/internal/pow/` STAYS.** It is still imported by `drops.go` and `qrdrops.go` for the
+**dead-drop** proof-of-work (`DROP_POW_DIFFICULTY`, default 20), which is a different feature and is
+unaffected. "Removing PoW" means **registration** PoW and its challenge endpoint only. Deleting the
+package would break dead drops.
+
+### Env vars: already inert, and already absent
+
+`REGISTRATION_POW_ENABLED` and `REGISTRATION_CHALLENGE_SECRET` **are not in `config.go`, not in
+`server/.env.example`, and not in the live `.env`** (verified 2026-07-29) — there is no flag left to
+flip and no config to strip. The only place they still appear is `docs/DEPLOY_0.9.4_POW.md`, which is
+now headed as superseded so nobody follows it expecting an effect.
