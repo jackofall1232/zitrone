@@ -293,6 +293,34 @@ class DecoyU4SourceTripwireTest {
     }
 
     @Test
+    fun `no OkHttp client in the app installs an observability hook`() {
+        // U4 review round 6, Codex P3. Round 5 deleted the synthetic socket's diag parameter and
+        // its comment claimed "no parameter through which a sink could be supplied" — an
+        // overclaim: `httpClient` is such a parameter, because an OkHttpClient carrying an
+        // EventListener or interceptor observes every connection it makes, durably if the hook
+        // writes. BOTH sockets share the app's client, so a hook added for the real socket's
+        // observability silently covers the synthetic connection too. No client builder in the
+        // app installs one today; this pins that adding one is a conscious decision that has to
+        // reckon with the cover socket, not a drive-by debugging aid.
+        val hooks = listOf(
+            "EventListener", "addInterceptor(", "addNetworkInterceptor(",
+            ".eventListener(", "eventListenerFactory",
+        )
+        for ((name, source) in allMainSources()) {
+            val code = codeOf(source)
+            for (hook in hooks) {
+                assertTrue(
+                    "$name installs or names an OkHttp observability hook (`$hook`) — the app's " +
+                        "shared client also carries the SYNTHETIC socket, so any hook observes " +
+                        "cover traffic; if one is genuinely needed, it must exclude or reckon " +
+                        "with the cover connection and update this test",
+                    !code.contains(hook),
+                )
+            }
+        }
+    }
+
+    @Test
     fun `the U4 files use no reflection at all`() {
         // U4 review round 5, Codex. Every guard above and the disconnect-ownership scan in
         // DecoySendPairingTest match SOURCE TOKENS — `disconnect()`, `::disconnect`, `: WsClient`.

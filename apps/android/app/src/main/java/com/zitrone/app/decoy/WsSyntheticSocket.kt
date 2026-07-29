@@ -82,12 +82,18 @@ class WsSyntheticSocket(
         override fun onAuthExpired() = Unit
     }
 
-    // No diagnostics sink, and no parameter through which one could be supplied (U4 review round
+    // No diagnostics sink, and no NAMED sink parameter left to wire one through (U4 review round
     // 5, both lenses). WsClient's own default is the silent `{}`; every lifecycle line it would
     // otherwise emit — handshake, connected, closed, failure — is durable, timestamped evidence of
     // a SECOND socket once a sink like BootDiagnostics.record is attached, and synthetic handshake
     // failures surfacing anywhere violates R-U4-6's "dropped silently". The real socket logs for
     // connectivity UX; this account has no UX.
+    //
+    // What this does NOT claim (U4 review round 6, Codex): `httpClient` and `onRateLimited` are
+    // still constructor parameters, and both are opaque — an OkHttpClient carrying an
+    // EventListener or interceptor would observe this connection durably, and a callback can call
+    // anything. The boundary is held by what production passes (a hook-free client, pinned by a
+    // tripwire over every client builder, and an in-memory meter callback), not by this type.
     private val ws = WsClient(wsUrl, httpClient, scope).also { it.listener = listener }
 
     /** Re-point at new endpoints on a transport swap. The redial is [DecoyInboundSession.reconnect]. */

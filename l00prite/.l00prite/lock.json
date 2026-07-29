@@ -1,12 +1,12 @@
 {
  "schema_version": 1,
- "lock_id": "lock-20260729T-u4-review-r5",
+ "lock_id": "lock-20260729T-u4-review-r6",
  "owner_agent": null,
  "owner_session": null,
- "acquired_at": "2026-07-29T00:05:00Z",
- "expires_at": "2026-07-29T02:05:00Z",
+ "acquired_at": "2026-07-29T01:00:00Z",
+ "expires_at": "2026-07-29T03:00:00Z",
  "ttl_seconds": 7200,
- "purpose": "U4 review round 5 — Grok re-run after disconnect, adjudication (4 findings upheld, P1 diag sink), structural fix (diag parameter deleted), tripwires widened, R-U4-3 reworded, 5/5 mutations discriminated; released",
+ "purpose": "U4 review round 6 (FINAL) — CONVERGED at the cap (Grok CLEAN, Codex 1 P3 upheld+fixed doc/test-only, OkHttp-hook tripwire added, 800 tests green, mutation 1/1); loop STOPPED, awaiting maintainer merge decision; diagnostics-rescope todo recorded; released",
  "protected_paths": [
   "ledger.md",
   "memory.md",

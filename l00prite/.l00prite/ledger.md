@@ -3335,3 +3335,35 @@ lens-named evasions applied verbatim that the round-4 guards demonstrably passed
 round 5: 1 P1) because round 5 attacked the fixes, not the unit afresh. Per the cap rule: converge
 clean at 6 → stop and report ready-to-merge; anything still contested at 6 → third lens (Gemini),
 then stop and hand to the maintainer regardless.
+
+## 2026-07-29 — U4 review round 6 (FINAL): CONVERGED AT THE CAP — the loop STOPS here
+
+**Grok: CLEAN. Codex: 0 P1, 0 P2, 1 P3.** The P3 was a claim-scope defect in round 5's own fix:
+the `WsSyntheticSocket` comment said "no parameter through which a sink could be supplied," but
+`httpClient` and `onRateLimited` remain opaque constructor routes — an OkHttpClient carrying an
+EventListener would observe the synthetic connection durably. Not a current disclosure (verified:
+zero hook tokens in all main sources; Grok checked the identical surface and agreed the tree is
+clean, classing the future route as lexical-guard residual). UPHELD; fixed with a comment
+correction + one new tripwire: NO OkHttp client builder in the app may install an observability
+hook — both sockets share the client, so a hook added for real-socket debugging would silently
+observe cover traffic. Mutation-verified (an installed `EventListener.NONE` was caught; restore =
+empty diff). **Zero production-code change**, which is what makes fixing at the cap acceptable;
+recorded honestly that this fix gets no blind review because there is no round 7.
+
+Adjudicated as CONVERGENCE, not contest: both lenses 0 P1 / 0 P2, and the sole P3's factual
+substrate was agreed by both — a severity classification difference over an agreed fact leaves no
+dispute for the Gemini third lens to break, so it was not invoked.
+
+Evidence: 800 tests / 0 failures / 3 skipped, exit 0 (799 → 800, the hook tripwire).
+
+**U4 closes at 24 findings over six rounds, every one upheld and fixed.** Residuals standing are
+declared in `u4-r6-adjudication.md` (conceded-relay drop power, expired-JWT quiet cover, uncovered
+control channel, computed-name reflection class, no behavioural isSyntheticSender test — the last
+is a 0.11.0 polish candidate).
+
+**STOPPED per the hard cap. U4 is ready for the maintainer's merge decision. Nothing merges, no
+version bumps, and no further rounds run without an explicit maintainer instruction.**
+
+Also this session: maintainer decided the production-diagnostics rescope (RAM-only ring buffer in
+release, durable BootDiagnostics debug-only, logcat mirror stripped) — recorded as its own unit in
+todos.md, slotted 0.11.0, NOT folded into U4.
