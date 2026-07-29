@@ -4106,3 +4106,112 @@ exec
   1924	    /**
   1925	     * Hand a wiped-in-finally COPY of the live vault key to [block] (delegates to
 
+codex
+# FINDINGS
+
+## U4-R5-1 — P1 — synthetic socket writes durable diagnostics
+
+**Files:** `ZitroneApp.kt:1807-1814`, `WsSyntheticSocket.kt:48-59,86`, `WsClient.kt:225-287`
+
+**Sequence:** A vault with a synthetic account starts its socket. `WsClient.openSocket()` immediately calls `diag("ws[…]: firing WS /ws handshake")`; connection, close, and failure paths call it again. `ZitroneApp` supplies `diag = { line -> bootDiagnostics.record(line) }`.
+
+**Outcome:** U4 writes durable, timestamped socket activity and synthetic-only failures into `boot-diagnostics.log`. This violates R-U4-6’s “failed connection is dropped silently” and demonstrates that R-U4-3 is too weak: “adds no durable-state writer” permits U4 to invoke an existing durable writer. Repeated or synthetic-only lifecycle entries can reveal the additional cover socket to a device examiner.
+
+**Why tests miss it:** `DecoyU4SourceTripwireTest:94-117` forbids only `diag(`, not a `diag` constructor parameter forwarded into `WsClient`. It does not inspect the production argument in `ZitroneApp`.
+
+## U4-R5-2 — P3 — restored redial-position tripwire does not pin reachability
+
+**File:** `DecoyU4SourceTripwireTest.kt:165-190`
+
+**Sequence:** Insert `if (live.wsClient.connectionState.value == DISCONNECTED) return` after the real gate’s closing brace but before the synthetic redial, or wrap the redial in a second equivalent gate.
+
+**Outcome:** When the real socket is down and the synthetic socket remains live, a transport toggle leaves the synthetic connection on the old endpoints—the defect the test claims to prevent.
+
+**Why tests miss it:** The assertion proves only `redial > gateEnd`. It does not establish that no return or second gate controls the redial.
+
+## U4-R5-3 — P3 — the synthetic disconnect exemption remains escapable
+
+**Files:** `DecoyU4SourceTripwireTest.kt:226-258`; `DecoySendPairingTest.kt:1315-1390`
+
+**Sequence:** Add an app-callable helper in `WsSyntheticSocket.kt` accepting `Any`, obtain `disconnect` reflectively, and invoke it. A caller passes the real `WsClient`.
+
+**Outcome:** The exempted file can disconnect the real socket outside `CoverTraffic` ownership, allowing a real/cover pair to be split.
+
+**Why tests miss it:** The U4 scan only rejects colon-style `WsClient` declarations. The U3 scan only recognizes literal `disconnect()` and `::disconnect`; reflection requires neither. Thus the claimed compiler-enforced property is narrower than stated.
+
+# CONFIRM-OR-REFUTE
+
+1. **CONFIRM, except for the requirement weakness above.** The guard is first in `onMessageDeliver` and precedes `signal.decrypt` (`MessagingCoordinator.kt:1915-1939`). It rereads `DecoyAuthStore(rt).accountId` per envelope (`ZitroneApp.kt:1911-1913`). A closed-runtime exception is swallowed by the enclosing `runCatching`, so it does not fall through to decrypt. Account IDs are relay-unique, preventing a genuine account from simultaneously equalling the synthetic account. Bare ack is appropriate after a positive synthetic-ID match: unlike the tombstone branch, no receiving ratchet or RAM-only deletion state needs durability.
+
+2. **REFUTE.** The production wiring shares one `CoverPressure`, but both changed guards remain bypassable as described in U4-R5-2 and U4-R5-3. The app-wide `::disconnect` ban is otherwise correctly scoped; no legitimate current use exists.
+
+3. **CONFIRM.** Send-backs check `yieldingSendBack()` after their delay and before build/send (`DecoyInboundSession.kt:244-266`). Both socket queues feed the shared meter (`ZitroneApp.kt:1831-1835`). Ack is immediate, while delayed work is capped at 64 (`DecoyInboundSession.kt:225-234,277-303`), so an inbound flood cannot create unbounded jobs. The uncapped ack cost is one small synchronous socket enqueue per received frame; the conceded relay can still impose CPU/network work, but cannot grow retained application work without bound.
+
+4. **CONFIRM.** `start()` and `reconnect()` serialize through `connecting`; start’s check-and-dial is atomic against `stop()` under `lock` (`DecoyInboundSession.kt:154-215`). `bindTo` makes terminal synthetic teardown precede pairing teardown. Transport swaps update both endpoint sets and independently redial the synthetic socket. I found no current path that lets it outlive a lock, though the redial tripwire does not preserve that property against regression.
+
+5. **REFUTE as an absolute “no durable writer” claim.** The inbound session has no crypto/store dependency and does not advance a ratchet. However, the production socket reaches `BootDiagnostics.record` through `WsClient.diag`; see U4-R5-1. R-U4-3 is explicitly too weak because it forbids adding writers, not reaching existing ones.
+
+6. **CONFIRM.** `buildReply` emits established-session shape, checks sender/recipient consistency, caps and exactly mirrors decoded ciphertext length, and fails closed for impossible sizes (`DecoyEnvelopeBuilder.kt:374-411,423-428`). Restarting the in-memory counter at zero is relay-visible and imperfect, but consistent with the documented ratchet-turn explanation and does not create device-persistent evidence.
+
+7. **REFUTE.** I found no additional current deadlock, unbounded retained growth, crypto mutation, or route from U4 failure into a real send. The material extra issue is the durable diagnostic path.
+
+# MISSING CONTEXT
+
+I did not execute tests because the review is read-only and the requested conclusions are source/path based. Proving whether generic duplicate WS diagnostics are uniquely attributable to cover traffic would require the exact Settings diagnostic presentation and an induced two-socket runtime trace; the durable writer and literal R-U4-6 violation are source-verifiable without it.
+
+VERDICT: FINDINGS (1 P1, 0 P2, 2 P3)
+tokens used
+80,272
+# FINDINGS
+
+## U4-R5-1 — P1 — synthetic socket writes durable diagnostics
+
+**Files:** `ZitroneApp.kt:1807-1814`, `WsSyntheticSocket.kt:48-59,86`, `WsClient.kt:225-287`
+
+**Sequence:** A vault with a synthetic account starts its socket. `WsClient.openSocket()` immediately calls `diag("ws[…]: firing WS /ws handshake")`; connection, close, and failure paths call it again. `ZitroneApp` supplies `diag = { line -> bootDiagnostics.record(line) }`.
+
+**Outcome:** U4 writes durable, timestamped socket activity and synthetic-only failures into `boot-diagnostics.log`. This violates R-U4-6’s “failed connection is dropped silently” and demonstrates that R-U4-3 is too weak: “adds no durable-state writer” permits U4 to invoke an existing durable writer. Repeated or synthetic-only lifecycle entries can reveal the additional cover socket to a device examiner.
+
+**Why tests miss it:** `DecoyU4SourceTripwireTest:94-117` forbids only `diag(`, not a `diag` constructor parameter forwarded into `WsClient`. It does not inspect the production argument in `ZitroneApp`.
+
+## U4-R5-2 — P3 — restored redial-position tripwire does not pin reachability
+
+**File:** `DecoyU4SourceTripwireTest.kt:165-190`
+
+**Sequence:** Insert `if (live.wsClient.connectionState.value == DISCONNECTED) return` after the real gate’s closing brace but before the synthetic redial, or wrap the redial in a second equivalent gate.
+
+**Outcome:** When the real socket is down and the synthetic socket remains live, a transport toggle leaves the synthetic connection on the old endpoints—the defect the test claims to prevent.
+
+**Why tests miss it:** The assertion proves only `redial > gateEnd`. It does not establish that no return or second gate controls the redial.
+
+## U4-R5-3 — P3 — the synthetic disconnect exemption remains escapable
+
+**Files:** `DecoyU4SourceTripwireTest.kt:226-258`; `DecoySendPairingTest.kt:1315-1390`
+
+**Sequence:** Add an app-callable helper in `WsSyntheticSocket.kt` accepting `Any`, obtain `disconnect` reflectively, and invoke it. A caller passes the real `WsClient`.
+
+**Outcome:** The exempted file can disconnect the real socket outside `CoverTraffic` ownership, allowing a real/cover pair to be split.
+
+**Why tests miss it:** The U4 scan only rejects colon-style `WsClient` declarations. The U3 scan only recognizes literal `disconnect()` and `::disconnect`; reflection requires neither. Thus the claimed compiler-enforced property is narrower than stated.
+
+# CONFIRM-OR-REFUTE
+
+1. **CONFIRM, except for the requirement weakness above.** The guard is first in `onMessageDeliver` and precedes `signal.decrypt` (`MessagingCoordinator.kt:1915-1939`). It rereads `DecoyAuthStore(rt).accountId` per envelope (`ZitroneApp.kt:1911-1913`). A closed-runtime exception is swallowed by the enclosing `runCatching`, so it does not fall through to decrypt. Account IDs are relay-unique, preventing a genuine account from simultaneously equalling the synthetic account. Bare ack is appropriate after a positive synthetic-ID match: unlike the tombstone branch, no receiving ratchet or RAM-only deletion state needs durability.
+
+2. **REFUTE.** The production wiring shares one `CoverPressure`, but both changed guards remain bypassable as described in U4-R5-2 and U4-R5-3. The app-wide `::disconnect` ban is otherwise correctly scoped; no legitimate current use exists.
+
+3. **CONFIRM.** Send-backs check `yieldingSendBack()` after their delay and before build/send (`DecoyInboundSession.kt:244-266`). Both socket queues feed the shared meter (`ZitroneApp.kt:1831-1835`). Ack is immediate, while delayed work is capped at 64 (`DecoyInboundSession.kt:225-234,277-303`), so an inbound flood cannot create unbounded jobs. The uncapped ack cost is one small synchronous socket enqueue per received frame; the conceded relay can still impose CPU/network work, but cannot grow retained application work without bound.
+
+4. **CONFIRM.** `start()` and `reconnect()` serialize through `connecting`; start’s check-and-dial is atomic against `stop()` under `lock` (`DecoyInboundSession.kt:154-215`). `bindTo` makes terminal synthetic teardown precede pairing teardown. Transport swaps update both endpoint sets and independently redial the synthetic socket. I found no current path that lets it outlive a lock, though the redial tripwire does not preserve that property against regression.
+
+5. **REFUTE as an absolute “no durable writer” claim.** The inbound session has no crypto/store dependency and does not advance a ratchet. However, the production socket reaches `BootDiagnostics.record` through `WsClient.diag`; see U4-R5-1. R-U4-3 is explicitly too weak because it forbids adding writers, not reaching existing ones.
+
+6. **CONFIRM.** `buildReply` emits established-session shape, checks sender/recipient consistency, caps and exactly mirrors decoded ciphertext length, and fails closed for impossible sizes (`DecoyEnvelopeBuilder.kt:374-411,423-428`). Restarting the in-memory counter at zero is relay-visible and imperfect, but consistent with the documented ratchet-turn explanation and does not create device-persistent evidence.
+
+7. **REFUTE.** I found no additional current deadlock, unbounded retained growth, crypto mutation, or route from U4 failure into a real send. The material extra issue is the durable diagnostic path.
+
+# MISSING CONTEXT
+
+I did not execute tests because the review is read-only and the requested conclusions are source/path based. Proving whether generic duplicate WS diagnostics are uniquely attributable to cover traffic would require the exact Settings diagnostic presentation and an induced two-socket runtime trace; the durable writer and literal R-U4-6 violation are source-verifiable without it.
+
+VERDICT: FINDINGS (1 P1, 0 P2, 2 P3)

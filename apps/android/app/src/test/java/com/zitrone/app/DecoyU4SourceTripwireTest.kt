@@ -111,9 +111,32 @@ class DecoyU4SourceTripwireTest {
         }
         for (file in U4_FILES) {
             val source = codeOf(read(file))
-            for (sink in listOf("diag(", "Log.", "println", "BootDiagnostics")) {
-                assertTrue("$file must not log: found `$sink`", !source.contains(sink))
+            // Bare `diag`, not `diag(` (U4 review round 5, both lenses): the socket wiring never
+            // CALLED diag — it accepted a `diag` PARAMETER and forwarded it into WsClient, whose
+            // lifecycle lines then reached BootDiagnostics.record and boot-diagnostics.log with no
+            // call token anywhere in a U4 file. The structural hole was "U4 may accept a logging
+            // sink"; the parameter is gone, so the honest rule is that the token does not appear.
+            for (sink in listOf("diag", "Log.", "println", "BootDiagnostics")) {
+                assertTrue("$file must not log or accept a logging sink: found `$sink`", !source.contains(sink))
             }
+        }
+        // …and the PRODUCTION CONSTRUCTION SITE is scanned too (U4 review round 5, both lenses):
+        // the round-4 version of this test read only the U4 files, and the defect lived in
+        // ZitroneApp, which handed `bootDiagnostics.record` to the socket it was building. No
+        // argument the construction passes may name a sink.
+        val app = codeOf(read("ZitroneApp.kt"))
+        val construction = app.indexOf("WsSyntheticSocket(")
+        assertTrue("the synthetic socket is no longer constructed in ZitroneApp", construction > 0)
+        val constructionEnd = app.indexOf("decoySocket = syntheticSocket", construction)
+        assertTrue("could not locate the end of the synthetic socket construction", constructionEnd > construction)
+        val block = app.substring(construction, constructionEnd)
+        for (sink in listOf("diag", "Diagnostics", "Log.", "println", "record(")) {
+            assertTrue(
+                "the synthetic socket must be constructed WITHOUT any diagnostics sink — its " +
+                    "socket lifecycle on disk is durable evidence a second socket ran on this " +
+                    "device; found `$sink` in the construction",
+                !block.contains(sink),
+            )
         }
     }
 
@@ -187,6 +210,17 @@ class DecoyU4SourceTripwireTest {
                 "socket left on the old transport keeps cover flowing where the user turned it off",
             redial > gateEnd,
         )
+        // `redial > gateEnd` alone pins string geometry, not the property (U4 review round 5, both
+        // lenses): a SECOND gate — or a bare `return` — inserted between the first gate's closing
+        // brace and the redial keeps the position assertion green while re-gating the synthetic
+        // redial on the real socket's state, which is exactly round 1's P1. So the segment between
+        // them must be NOTHING but that closing brace: any code appearing here is code that can
+        // condition the redial, and has to move or change this test consciously.
+        assertTrue(
+            "nothing but the gate's closing brace may sit between the real gate and the synthetic " +
+                "redial — code here can re-gate the redial on the real socket's connection state",
+            Regex("^\\s*\\}\\s*$").matches(app.substring(gateEnd, redial)),
+        )
     }
 
     @Test
@@ -256,6 +290,33 @@ class DecoyU4SourceTripwireTest {
             1,
             Regex("WsClient\\(").findAll(wrapper).count(),
         )
+    }
+
+    @Test
+    fun `the U4 files use no reflection at all`() {
+        // U4 review round 5, Codex. Every guard above and the disconnect-ownership scan in
+        // DecoySendPairingTest match SOURCE TOKENS — `disconnect()`, `::disconnect`, `: WsClient`.
+        // Reflection needs none of them: a helper in the exempted file taking `Any` and resolving
+        // `disconnect` via `javaClass.getMethod` disconnects the real socket with every lexical
+        // guard green, and inherits this file's ownership exemption while doing it. Neither U4
+        // file has any use for reflection, so the honest rule is zero — the lookup surface is
+        // banned, which is what makes `Method.invoke` unreachable without ever matching `invoke`
+        // (the listener's legitimate `onDeliver?.invoke` stays untouched).
+        val lookups = listOf(
+            "javaClass", "::class", "Class.forName", "getMethod", "getDeclaredMethod",
+            "java.lang.reflect", "kotlin.reflect", "MethodHandles",
+        )
+        for (file in U4_FILES) {
+            val source = codeOf(read(file))
+            for (lookup in lookups) {
+                assertTrue(
+                    "$file must not use reflection: found `$lookup`. A reflective member lookup " +
+                        "evades every source-token guard on the disconnect surface; if reflection " +
+                        "is ever genuinely needed here, extend the guards first",
+                    !source.contains(lookup),
+                )
+            }
+        }
     }
 
     @Test

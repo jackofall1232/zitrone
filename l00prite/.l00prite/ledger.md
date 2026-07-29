@@ -3299,3 +3299,39 @@ half that cannot be checked there (that `WsSyntheticSocket` is only ever handed 
 pinned by a new assertion.
 
 Round 1 dispatched to Codex and Grok, blind to each other.
+
+## 2026-07-29 — U4 review rounds 1–5: the same lesson three sizes larger
+
+Rounds 1–4 were adjudicated and fixed in-session on 2026-07-28 (see the per-round adjudications in
+`reviews/decoy-0.10.0/`); the session died mid-round-5 — Codex had returned a verdict, Grok had
+written 443 bytes of narration. Grok was re-dispatched blind on the identical prompt the next day
+and completed. Only the completed run was adjudicated.
+
+**Round 5: 4 distinct findings, all upheld, and BOTH lenses independently converged on the same top
+finding and the same redial finding** — the unit's second convergence, this time on ground round 4
+claimed to have closed.
+
+The P1 is the round-4 diag finding three sizes larger: round 4 removed one `diag()` call from the
+R-U4-1 guard and banned sinks in the U4 files, while `ZitroneApp` — one construction site away —
+was handing `bootDiagnostics.record` to the synthetic socket as its `diag` parameter, putting the
+cover socket's ENTIRE LIFECYCLE (handshake, connected, closed, failure) durably on disk in
+`boot-diagnostics.log`, on every unlock of every decoy-relay vault. No scanned file contained a
+`diag(` call token; the defect was a parameter, forwarded. Two rounds running, the finding was not
+"the guard is absent" but "the guard's scope is narrower than its claim."
+
+**The response is structural, not lexical: the `diag` parameter no longer exists.** There is no
+argument through which a sink can reach the synthetic socket; `WsClient`'s own default `{}` is the
+sink. The widened tripwires (bare-token ban, construction-site scan, brace-only redial segment,
+reflection ban, app-wide `"disconnect"` literal ban) are the backstop, not the fence. R-U4-3 was
+also reworded (Grok, requirement defect): it now forbids REACHING an existing durable writer, not
+only adding one — the letter of the old text permitted the P1.
+
+Build: 799 tests / 0 failures / 3 skipped, exit 0, run before AND after the mutation sweep.
+Mutations: 5 applied, 5 discriminated, restores checksum-verified (fixes were uncommitted, so
+restores were reverse-edits against recorded SHA-256s, not `git checkout`). Three of the five were
+lens-named evasions applied verbatim that the round-4 guards demonstrably passed.
+
+**ROUND 6 IS NEXT AND LAST — the hard cap.** Severity did not fall this round (round 4: 4 P3;
+round 5: 1 P1) because round 5 attacked the fixes, not the unit afresh. Per the cap rule: converge
+clean at 6 → stop and report ready-to-merge; anything still contested at 6 → third lens (Gemini),
+then stop and hand to the maintainer regardless.

@@ -1388,6 +1388,23 @@ class DecoySendPairingTest {
             emptyList<String>(),
             references,
         )
+        // AND THE METHOD NAME AS A STRING LITERAL (U4 review round 5, Codex). `disconnect()` and
+        // `::disconnect` are both source tokens; `javaClass.getMethod("disconnect").invoke(ws)`
+        // contains neither, and works from ANY file — the reflective lookup is the one route to a
+        // disconnect that no token scan above can see. Every reflective route needs the member
+        // name as a string, so that is what is banned. No file in the app has a legitimate use
+        // for the literal today. (Residual, declared: a concatenated or computed name still
+        // slips this — lexical scans bound honest mistakes and lazy evasions, not adversaries
+        // with commit access.)
+        val nameLiterals = allMainSources()
+            .filter { (_, source) -> "\"disconnect\"" in source }
+            .map { (name, _) -> name }
+        assertEquals(
+            "the string literal \"disconnect\" appears in app source — the only use for it is a " +
+                "reflective member lookup, which escapes every disconnect-ownership scan above",
+            emptyList<String>(),
+            nameLiterals,
+        )
         // …and the two owners are really wired, so deleting the disconnect entirely does not pass.
         assertTrue(
             "the cover-traffic teardown is not wired to the disconnect at all",

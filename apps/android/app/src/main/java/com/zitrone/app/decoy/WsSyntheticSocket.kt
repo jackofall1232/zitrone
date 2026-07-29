@@ -55,7 +55,6 @@ class WsSyntheticSocket(
      * here would let one relay frame black out cover for every real send.
      */
     private val onRateLimited: () -> Unit = {},
-    diag: (String) -> Unit = {},
 ) : DecoyInboundSession.SyntheticSocket {
 
     override var onDeliver: ((MessageEnvelope) -> Unit)? = null
@@ -83,7 +82,13 @@ class WsSyntheticSocket(
         override fun onAuthExpired() = Unit
     }
 
-    private val ws = WsClient(wsUrl, httpClient, scope, diag).also { it.listener = listener }
+    // No diagnostics sink, and no parameter through which one could be supplied (U4 review round
+    // 5, both lenses). WsClient's own default is the silent `{}`; every lifecycle line it would
+    // otherwise emit — handshake, connected, closed, failure — is durable, timestamped evidence of
+    // a SECOND socket once a sink like BootDiagnostics.record is attached, and synthetic handshake
+    // failures surfacing anywhere violates R-U4-6's "dropped silently". The real socket logs for
+    // connectivity UX; this account has no UX.
+    private val ws = WsClient(wsUrl, httpClient, scope).also { it.listener = listener }
 
     /** Re-point at new endpoints on a transport swap. The redial is [DecoyInboundSession.reconnect]. */
     fun updateTransport(newClient: OkHttpClient, newWsUrl: String) =

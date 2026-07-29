@@ -1803,14 +1803,15 @@ class SessionContainer(
             //
             // WsSyntheticSocket CONSTRUCTS its own WsClient rather than being handed one, which is
             // why nothing here can pass it the real socket by accident or by edit (U4 review round
-            // 3). See that class for the three rounds of lexical guard this replaces.
+            // 3). See that class for the three rounds of lexical guard this replaces — and for why
+            // it accepts no diagnostics sink either (U4 review round 5): its socket lifecycle must
+            // never reach BootDiagnostics or any other durable writer.
             val syntheticSocket = decoyRelay?.let {
                 WsSyntheticSocket(
                     wsUrl = wsUrl,
                     httpClient = httpClient,
                     scope = scope,
                     onRateLimited = { coverPressureRef?.syntheticRateLimited() },
-                    diag = { line -> bootDiagnostics.record(line) },
                 )
             }
             decoySocket = syntheticSocket
