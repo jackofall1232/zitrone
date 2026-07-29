@@ -1,3 +1,22 @@
+> # ⛔ SUPERSEDED — registration PoW was REVERSED (2026-07-29)
+>
+> **The shipped answer to registration rate limiting is `clientKeyer`** (trusted-proxy client
+> keying, `server/internal/api/clientkey.go`), **not proof-of-work.** Registration PoW and its
+> challenge endpoint are being removed. Read the reversal and its reasoning in
+> `l00prite/.l00prite/todos.md` → "DESIGN REVERSAL — registration PoW is OUT".
+>
+> **This document is kept, not deleted, because the measurements in it are real work.** The D=5
+> derivation, the Revvl 6x floor-device numbers, and the relay-side sweep would all have to be
+> redone if PoW ever returns. The path back is re-merging `dda31b9` from `cx23/0.9.4-pow-deploy`
+> or `cx23/0.9.4-registration-pow`.
+>
+> **What is still true below:** the measurements. **What is no longer true:** every statement that
+> PoW is the answer, is shipping, or is calibrated *for shipping*. Nothing here describes the
+> current relay.
+>
+> Note also that **`server/internal/pow/` still exists and is still used** — for the DEAD-DROP
+> proof-of-work (`DROP_POW_DIFFICULTY`), a different feature. Only *registration* PoW is out.
+
 # Registration proof-of-work — Argon2id calibration (0.9.4-beta)
 
 Status as of 2026-07-27: **BOTH SIDES MEASURED — calibration RESOLVED at D=5.** The floor

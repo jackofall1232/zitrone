@@ -53,12 +53,25 @@ func New(store *db.Store, issuer *auth.Issuer, cfg *config.Config) *Handlers {
 		store:  store,
 		issuer: issuer,
 		cfg:    cfg,
-		// INTERIM: still a single global bucket (keyed on Caddy's socket address,
-		// see Caddyfile — X-Forwarded-For is appended not overwritten, so trusting
-		// it as-is would let clients spoof buckets). Widened from 5/hour, which was
-		// a wall at ~2 users worldwide, while the real per-client fix (0.9.4
-		// registration proof-of-work, see the cx23/0.9.4-registration-pow branch)
-		// is built. Not a fix.
+		// NOT interim any more, and NOT a global bucket on clearnet: [clientKeyer]
+		// is the per-client fix and it shipped (see clientkey.go). The previous
+		// comment here said the real fix was 0.9.4 registration proof-of-work,
+		// pending on cx23/0.9.4-registration-pow — that design was REVERSED and
+		// registration PoW is being removed. See l00prite/.l00prite/todos.md →
+		// "DESIGN REVERSAL — registration PoW is OUT".
+		//
+		// WHAT THIS NUMBER IS: an ABUSE BRAKE, not a capacity control. At 300/hour
+		// the relay's own capacity binds long before the limiter does, so tuning it
+		// for throughput is meaningless — it exists to stop one client hammering
+		// registration, and 5/hour (the original) was a wall at ~2 users worldwide
+		// rather than a brake.
+		//
+		// WHAT IT STILL CANNOT DO: overlay traffic collapses into ONE bucket per
+		// transport, because the Tor/I2P sidecars forward raw HTTP and can never be
+		// trusted for header-based keying without reopening the spoofing bypass
+		// clientKeyer exists to close. clientkey_test.go asserts that collapse
+		// deliberately. Accepted, not overlooked: Tor circuit-building and
+		// introduction-point setup make registration volume expensive at the source.
 		registerLimit: ratelimit.New(300, time.Hour, cfg.RateLimitEnabled),
 		prekeyLimit:   ratelimit.New(50, time.Minute, cfg.RateLimitEnabled),
 		// Dead drops are unauthenticated — proof-of-work is the main cost, but a
