@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "lock_id": "lock-20260726T172500Z-094-prestage",
+  "lock_id": "lock-20260729T144459Z-cx23-a-b",
   "owner_agent": null,
   "owner_session": null,
-  "acquired_at": "2026-07-26T17:25:00Z",
-  "expires_at": "2026-07-26T17:55:00Z",
-  "ttl_seconds": 1800,
+  "acquired_at": "2026-07-29T14:44:59Z",
+  "expires_at": "2026-07-29T15:29:59Z",
+  "ttl_seconds": 2700,
   "purpose": null,
   "protected_paths": [
     "ledger.md",
