@@ -1,22 +1,22 @@
 {
-  "schema_version": 1,
-  "lock_id": "lock-20260729T180527Z-cx23-trip-close",
-  "owner_agent": null,
-  "owner_session": null,
-  "acquired_at": "2026-07-29T18:05:27Z",
-  "expires_at": "2026-07-29T18:35:27Z",
-  "ttl_seconds": 1800,
-  "purpose": null,
-  "protected_paths": [
-    "ledger.md",
-    "memory.md",
-    "state.json",
-    "heartbeat.json",
-    "failures.md",
-    "todos.md",
-    "events/",
-    "reviews/",
-    "sessions/"
-  ],
-  "status": "released"
+ "schema_version": 1,
+ "lock_id": "lock-20260729T-cx23-merge",
+ "owner_agent": null,
+ "owner_session": null,
+ "acquired_at": "2026-07-29T19:00:00Z",
+ "expires_at": "2026-07-29T20:00:00Z",
+ "ttl_seconds": 3600,
+ "purpose": "Record the CX23 stack merge to main; released",
+ "protected_paths": [
+  "ledger.md",
+  "memory.md",
+  "state.json",
+  "heartbeat.json",
+  "failures.md",
+  "todos.md",
+  "events/",
+  "reviews/",
+  "sessions/"
+ ],
+ "status": "released"
 }

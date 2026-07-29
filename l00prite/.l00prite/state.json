@@ -2,7 +2,7 @@
   "schema_version": 2,
   "project_name": "Zitrone",
   "current_goal": "0.10.0-beta SHIPPED 2026-07-29 (vc21, a0d7598b): cover traffic is live on Android. U1-U4 merged; U6 disclosure delivered BEFORE the cut (SECURITY_MODEL §storage-format + shipped decoy-traffic section + CHANGELOG). GH prerelease v0.10.0-beta targets d955391b, APK sha256 fa183f30…c877db, signer cert 6c7f92a7…892753 verified both sides, served asset byte-identical, onion mirror staged, website /download/beta live on the new version + checksum.",
-  "current_phase": "0.10.0-beta CUT AND LIVE. Next per release strategy: 0.11.0 = the polish round (FINAL ALPHA), then the flip to a true beta / V1 candidate. 0.11.0 queue in todos.md: production-diagnostics rescope (RAM-only in release, BootDiagnostics debug-only), behavioural isSyntheticSender test, plus standing hygiene (CI SAST, release-apk.yml shell injection, website web-overclaim).",
+  "current_phase": "0.10.0-beta shipped and live. CX23 relay stack MERGED to main (8ba25e98): error attribution, per-client rate-limit keying, send budget 100->200 for cover traffic. 0.10.1 client half on feat/0.10.1-send-failure-surfacing (4882afd8), round 1 fixed + send timeout built, ROUND 2 OWED, not merged.",
   "active_agent": null,
   "last_agent": "claude",
   "last_updated": "2026-07-29",
@@ -16,5 +16,5 @@
   "ci_status": "local only — release verification: keystore cert continuity checked BEFORE build; :app:assembleRelease BUILD SUCCESSFUL exit 0 in 3m36s; apksigner cert digest matches anchor; aapt2 badging vc21/0.10.0-beta; GitHub-served APK downloaded and byte-identical (fa183f30…c877db); website build exit 0 with new version+checksum baked and zero 0.9.4 refs; live site confirmed serving v0.10.0-beta. | FIELD 2026-07-29 (maintainer): relay deployed from main and healthy, messages sending with no perceptible delay, onion mirror serving the current build (confirms ad80919b landed). NOT yet an R-U3-1 confirmation — depends on whether cover traffic was enabled on the sending vault; question owed at next session start.",
   "execution_active": false,
   "execution_stop_reason": null,
-  "next_recommended_action": "FIRST, ask the maintainer one question: was cover traffic ENABLED on the vault that sent during the 2026-07-29 field check? It decides whether that check is an R-U3-1 field confirmation or only a healthy-relay result. THEN open the 0.11.0 polish round (FINAL ALPHA) — the maintainer will spec it and wants missed items discussed; inputs, the queue, and the STALE todos.md entries are in the zitrone-0110-planning-inputs memory."
+  "next_recommended_action": "1) CX23 REDEPLOY is owed: the send-budget fix (100->200) and per-client keying only take effect once the relay is redeployed from main — 0.10.0 is live now with a halved effective budget because a covered send is two frames. 2) Dispatch 0.10.1 REVIEW ROUND 2 (paired-blind, whole unit INCLUDING the new send timeout and the now-merged relay contract); the round-1 lens split on whether the missing MessagingCoordinator harness blocks merge is still unadjudicated. 3) Then 0.11.0 polish round per zitrone-0110-planning-inputs."
 }

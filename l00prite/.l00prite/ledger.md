@@ -3455,3 +3455,40 @@ actually test it, and none has been run.
 
 **Standing project rule applied:** a clean field observation is the absence of a symptom, not the
 presence of a proof — same discipline as "a CLEAN from any lens is not a proof".
+
+## 2026-07-29 — CX23 STACK MERGED to `main` (`8ba25e98`) on maintainer instruction
+
+Merged bottom-up in the stacked order the CX23 record specified, which is load-bearing: merging
+`per-client-rate-limit-keying` alone would have hit a hand-resolved conflict, because `main` has no
+PoW code and the `challengeLimit` call site does not exist here.
+
+1. `cx23/relay-attribution-for-main` (`8c91809`) → `0a2fe2e6`
+2. `cx23/per-client-rate-limit-keying` (`88078cc`) → `697f4c89`
+3. `cx23/todos-cx23-trip-closed` (`a551cbb`) → `8ba25e98`
+
+`cx23/0.9.4-pow-deploy` (`76399f7`) deliberately NOT merged — it is the production backup.
+
+**Verified after merging, not assumed:** `go build ./...`, `go vet ./...`, `go test ./...` all pass
+(exit 0, six packages ok). Present on main afterwards: three `MessageID: msgID` emission sites,
+`clientkey.go`, and `sendLimit := ratelimit.New(cfg.SendRatePerMinute, …)` with the default at 200.
+
+**Two things this closes that were live defects, not hygiene:**
+
+- **The 0.10.1 client half now has a real contract.** Before this merge both review lenses had
+  confirmed the in-repo relay attached no id to any error, so the client half fixed nothing anyone
+  could build. I source-verified the merged relay against the client's assumptions: `msgID` set only
+  when `parseErr == nil && idErr == nil`, `rate_limited` checked before the parse error (precedence),
+  per-code id coverage as documented, `omitempty` so empty ⇒ absent ⇒ normalised to null.
+- **0.10.0 has been live with a HALVED send budget.** A covered send is TWO frames, so the old
+  `ratelimit.New(100, …)` exhausted an account at ~50 real sends/minute. `SEND_RATE_PER_MINUTE`
+  now defaults to 200. **This is a live-production consequence of the 0.10.0 cut and CX23 needs the
+  redeploy for it to take effect.** Cover frames are deliberately not exempted: exempting them would
+  mean trusting a client flag (letting a client mark everything cover and escape the budget) or
+  storing which account is whose synthetic peer — a linkage the relay must not hold.
+
+**A stale commit id was corrected in the record.** `1c63e8c` was amended away and is on no branch;
+cherry-picking it gets nothing. The relay half is `e25d59a` (deployed) / `8c91809` (merged here).
+
+`feat/0.10.1-send-failure-surfacing` merged main back in (`4882afd8`) and re-verified: 813 Android
+tests / 0 failures. **0.10.1 is still NOT merged** — review round 1 is fixed but round 2 is owed,
+and the lenses split on whether the missing coordinator harness blocks merge.
