@@ -58,7 +58,7 @@ func main() {
 		log.Printf("rate limiting: TRUSTED_PROXY_IPS unset — keying on socket peer, so all clients behind a proxy SHARE ONE BUCKET")
 	}
 	sendLimit := ratelimit.New(cfg.SendRatePerMinute, time.Minute, cfg.RateLimitEnabled)
-	hub := ws.NewHub(store, sendLimit)
+	hub := ws.NewHub(store, sendLimit, time.Duration(cfg.MessageTTLUndeliveredHours)*time.Hour)
 
 	// No access logging, no body logging — application errors only.
 	app := fiber.New(fiber.Config{

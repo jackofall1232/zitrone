@@ -46,6 +46,22 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    # PLANNER TUNING, DECLARED HERE ON PURPOSE (0.10.2 item 4). effective_cache_size
+    # was set live on the box at 4GiB, which is more cache than the 3.73GiB host
+    # physically has — so the planner was told to expect backing it could never get
+    # and biased toward index scans it cannot serve from cache. The capacity analysis
+    # puts the prekey working set into cache-miss territory from ~10^4 accounts, i.e.
+    # wrong in the direction that will start to matter.
+    #
+    # 2.5GiB (2560MB) is ~67% of host RAM, leaving room for the server, the overlay
+    # sidecars and the page cache itself. Command-line settings override both
+    # postgresql.conf and postgresql.auto.conf, so this supersedes whatever ALTER
+    # SYSTEM left in the volume and is reproducible on a fresh box instead of being
+    # a hand-edit nobody can see from the repo.
+    command:
+      - postgres
+      - -c
+      - effective_cache_size=2560MB
     environment:
       POSTGRES_USER: sub
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sub}

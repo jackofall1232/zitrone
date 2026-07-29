@@ -63,6 +63,25 @@ type Config struct {
 	// attachment size; the server enforces a slightly larger ciphertext cap that
 	// accounts for bucket padding + AEAD overhead (see api.BlobEffectiveCap).
 	BlobMaxBytes int // max attachment plaintext bytes (ciphertext cap adds slack)
+	// ⚠️ INVARIANT — BlobTTLHours >= MessageTTLUndeliveredHours + janitor period +
+	// max upload→send delay. DO NOT "tidy" this to equal the envelope TTL: that
+	// introduces a bug rather than closing waste (0.10.2 item 2).
+	//
+	// Three reasons, all structural. (1) THE ANCHORS DIFFER: a blob's expires_at is
+	// set at UPLOAD (api/blobs.go), while envelope TTL is anchored at SEND
+	// (created_at) — and upload strictly precedes send by design ("blob to the
+	// blind store FIRST"), with flushSendRatchet's suspending retry backoff sitting
+	// in the gap. At equal TTLs the blob therefore always dies first, by
+	// (send − upload). (2) ENFORCEMENT IS ASYMMETRIC: RedeemBlob requires
+	// expires_at > now(), so a blob is unfetchable the instant it expires, whereas
+	// PendingEnvelopes only became TTL-filtered in 0.10.2 and the janitor sweeps on
+	// a 10-minute period. (3) The net window is (send − upload) + janitor lag, and a
+	// recipient arriving inside it gets a message bubble with a permanently dead
+	// attachment — a 404 surfaced as "unavailable".
+	//
+	// 96 h (was 168 h) keeps a comfortable margin over the 72 h envelope TTL while
+	// cutting the worst-case retention of an 8 MB blob by 43%.
+	//
 	// BlobTTLHours is the unfetched-blob fallback TTL. Successful redemption
 	// deletes the blob immediately (fetch-and-burn); this only bounds the max
 	// lifetime of ciphertext that is never redeemed. Default 1 week (168h).
@@ -98,7 +117,7 @@ func Load() (*Config, error) {
 		BlobMaxBytes:               envInt("BLOB_MAX_BYTES", 8*1024*1024),
 		// 1-week fallback for unfetched attachment blobs (fetch-and-burn deletes
 		// on successful redeem; this only bounds never-collected ciphertext).
-		BlobTTLHours:    envInt("BLOB_TTL_HOURS", 168),
+		BlobTTLHours:    envInt("BLOB_TTL_HOURS", 96),
 		RelayPrivateKey: os.Getenv("RELAY_PRIVATE_KEY"),
 		RelayPublicKey:  os.Getenv("RELAY_PUBLIC_KEY"),
 		RelayPeers:      splitCSV(os.Getenv("RELAY_PEERS")),
@@ -119,7 +138,7 @@ func Load() (*Config, error) {
 	// (RedeemBlob's `expires_at > now()` guard matches nothing) — a silent,
 	// trust-breaking attachment failure. Clamp to the secure default (1 week).
 	if cfg.BlobTTLHours <= 0 {
-		cfg.BlobTTLHours = 168
+		cfg.BlobTTLHours = 96
 	}
 	// A <=0 BLOB_MAX_BYTES would cap every attachment at zero bytes (or worse,
 	// underflow downstream size math) — never trust it; fall back to the default.

@@ -1515,3 +1515,75 @@ package would break dead drops.
 `server/.env.example`, and not in the live `.env`** (verified 2026-07-29) — there is no flag left to
 flip and no config to strip. The only place they still appear is `docs/DEPLOY_0.9.4_POW.md`, which is
 now headed as superseded so nobody follows it expecting an effect.
+
+## ❌ SCRAPPED, NOT DEFERRED — the undelivered-message indicator (2026-07-29, maintainer)
+
+**Recorded so it cannot reappear as an assumed-pending item.** This is not "later"; there is no owed
+work and nothing accumulates because it is missing. Four independent reasons, each from source:
+
+1. **Send state is RAM-only by design.** `MessageRepository`'s kdoc is explicit: plaintext never
+   touches disk, there is no database and no file cache, and process death takes every message. An
+   indicator for "this never got delivered" would need state that outlives the process, which this
+   store deliberately does not have.
+2. **`SEND_TIMEOUT_MS` is 90 s and a coroutine `delay()` cannot survive 72 h of Android
+   backgrounding.** The existing timeout bounds a stuck bubble *within a session*; it is not and
+   cannot become a long-horizon delivery tracker.
+3. **The server-assisted version is blocked by a deliberate design choice** — there is no sender
+   column on `envelopes`. That absence is the zero-knowledge property, not an oversight, so "ask the
+   relay what of mine is undelivered" is unanswerable by construction.
+4. **The metadata-only vault outbox that would enable it is a real feature with its own deniability
+   surface** — vault-scoped, Pucker-Burn-covered. It is not a small addition to this one.
+
+**If it ever returns, it returns as its OWN spec**, with the outbox's deniability surface designed
+rather than inherited.
+
+## 🔧 0.10.2-beta — five contained capacity/leak fixes (2026-07-29)
+
+**The capacity finding that frames all of these: the ACCOUNT dimension is not the risk, the BLOB
+dimension is.** One blob is up to **8,454,180 B** — about **545 accounts' worth** of disk — and
+**~2,079 orphans exhaust all 16.37 GiB free on CX23.** Every item below closes an accumulation path
+or removes waste.
+
+- [ ] **Item 1 — reap expired `refresh_tokens`.** Nothing reclaims them: they are deleted only on USE
+      (`queries.sql:68`, gated `expires_at > now()`) or at account teardown (`:72`), so a token that
+      expires unused is never collected. **118 of 150 prod rows are expired-and-stuck (79%), oldest
+      2026-07-02.** At ~239 B/row it is trivial today but grows per session, unbounded, and
+      eventually overtakes the prekey batch as the dominant per-account term. Add
+      `DELETE FROM refresh_tokens WHERE expires_at <= $1` to the janitor's existing 10-minute pass.
+- [ ] **Item 2 — blob TTL 168 h → 96 h. NOT 72 h.** ⚠️ **Do NOT equalise blob and envelope TTL — that
+      introduces a bug rather than closing waste.** (a) The anchors differ: blob `expires_at` is set
+      at **upload** (`blobs.go:114`), envelope TTL is anchored at **send** (`created_at`), and upload
+      strictly precedes send by design ("blob to the blind store FIRST") — so at equal TTLs the blob
+      always dies first, by `(send − upload)`, with `flushSendRatchet`'s suspending retry backoff
+      sitting in that gap. (b) Enforcement is asymmetric: `RedeemBlob` has `expires_at > now()` so a
+      blob is unfetchable the instant it expires, while `PendingEnvelopes` has **no** TTL filter, so
+      an envelope stays deliverable up to 10 min past nominal (longer after a relay restart). (c) Net
+      window = `(send − upload) + janitor lag`, and a recipient arriving inside it gets a message
+      bubble with a permanently dead attachment (404 → "unavailable").
+      **Invariant to encode in a comment so nobody "tidies" it:**
+      `BLOB_TTL_HOURS ≥ envelope TTL + janitor period + max upload→send delay`.
+- [ ] **Item 3 — `PendingEnvelopes` TTL filter.** It is `SELECT id, payload FROM envelopes WHERE
+      recipient_id = $1` with no TTL predicate, so it delivers envelopes past nominal expiry until the
+      janitor sweeps. Add `created_at >= now() - ttl`. Removes the item-2 lag asymmetry and stops
+      delivering envelopes the sender already considers dead.
+- [ ] **Item 4 — `effective_cache_size` 4 GiB → 2.5 GiB.** It claims more cache than the 3.73 GiB box
+      physically has, biasing the planner toward index scans it cannot back with cache. The capacity
+      analysis puts the prekey working set into cache-miss territory from ~10⁴ accounts, so this is
+      wrong in the direction that will matter. **Config only.**
+- [ ] **Item 5 — ORPHANED BLOBS. Highest value; PLAN BEFORE CODE (maintainer gate).** Three routes
+      leave a blob uploaded with nothing that will ever fetch it, **all after a successful upload**:
+      (a) non-durable ratchet flush → `markFailed(messageId); return`; (b) contact deleted mid-upload
+      → `publishOutgoing` drops the envelope; (c) any throw / transport error.
+      **0.10.1's retry AMPLIFIES it:** `AttachmentCrypto.encrypt` draws a fresh token per call and
+      `blobId = sha256(token)`, so **every retry uploads a NEW blob and orphans the previous one** —
+      N retries = N × up to 8 MiB, each held the full TTL. There is no DELETE endpoint; only TTL
+      reclaims them, and per the scrapped indicator above the client cannot track them anyway (a
+      crash is one of the routes).
+      **Preferred fix: defer the upload until after the ratchet flush is durable** — closes the window
+      at the source, kills (a) and (c) outright, and kills the retry amplification, because a retry
+      that never uploaded cannot orphan anything.
+
+**Review plan:** items 1–4 get ONE paired-blind pass together. **Item 5 gets its own pass, because it
+is a send-path change.** Rule of 6, hard cap, third lens blind at the cap, stop for the maintainer
+regardless of outcome. Nothing merged, no version bump, nothing pushed without explicit approval.
+**Items 1–4 include relay changes needing a CX23 deploy — do NOT deploy; report what needs deploying.**

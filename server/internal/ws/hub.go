@@ -30,7 +30,7 @@ const prekeyLowWatermark = 20
 // satisfies it. Note there is deliberately no method to look up a message's
 // sender: the server never learns who sent an envelope (zero-knowledge).
 type Store interface {
-	PendingEnvelopes(ctx context.Context, recipientID uuid.UUID) ([]db.PendingEnvelope, error)
+	PendingEnvelopes(ctx context.Context, recipientID uuid.UUID, cutoff time.Time) ([]db.PendingEnvelope, error)
 	CountOneTimePrekeys(ctx context.Context, accountID uuid.UUID) (int, error)
 	StoreEnvelope(ctx context.Context, id, recipientID uuid.UUID, payload []byte) error
 	DeleteEnvelope(ctx context.Context, id, recipientID uuid.UUID) error
@@ -42,13 +42,18 @@ type Hub struct {
 	clients   map[uuid.UUID]*Client
 	store     Store
 	sendLimit *ratelimit.Limiter
+	// envelopeTTL is the undelivered-message TTL, used as the delivery cutoff so a
+	// reconnecting client is not handed envelopes the janitor has not swept yet
+	// (0.10.2 item 3). Same value the janitor purges by — one source of truth.
+	envelopeTTL time.Duration
 }
 
-func NewHub(store Store, sendLimit *ratelimit.Limiter) *Hub {
+func NewHub(store Store, sendLimit *ratelimit.Limiter, envelopeTTL time.Duration) *Hub {
 	return &Hub{
-		clients:   make(map[uuid.UUID]*Client),
-		store:     store,
-		sendLimit: sendLimit,
+		clients:     make(map[uuid.UUID]*Client),
+		store:       store,
+		sendLimit:   sendLimit,
+		envelopeTTL: envelopeTTL,
 	}
 }
 
@@ -85,7 +90,9 @@ func (h *Hub) online(accountID uuid.UUID) *Client {
 func (h *Hub) deliverPending(c *Client) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	pending, err := h.store.PendingEnvelopes(ctx, c.accountID)
+	// The same cutoff the janitor purges by (0.10.2 item 3): an envelope past its
+	// TTL is not delivered even though the sweep has not reached it yet.
+	pending, err := h.store.PendingEnvelopes(ctx, c.accountID, time.Now().Add(-h.envelopeTTL))
 	if err != nil {
 		log.Printf("ws: pending envelope fetch failed: %v", err)
 		return
