@@ -1,12 +1,12 @@
 {
  "schema_version": 1,
- "lock_id": "lock-20260729T-cx23-merge",
+ "lock_id": "lock-20260729T-pow-reversal",
  "owner_agent": null,
  "owner_session": null,
- "acquired_at": "2026-07-29T19:00:00Z",
- "expires_at": "2026-07-29T20:00:00Z",
- "ttl_seconds": 3600,
- "purpose": "Record the CX23 stack merge to main; released",
+ "acquired_at": "2026-07-29T20:00:00Z",
+ "expires_at": "2026-07-29T21:30:00Z",
+ "ttl_seconds": 5400,
+ "purpose": "Record the registration-PoW reversal + supersede PoW docs + fix stale registerLimit comment; released",
  "protected_paths": [
   "ledger.md",
   "memory.md",

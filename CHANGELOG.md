@@ -49,6 +49,27 @@ after the 0.11.0 polish round.
 
 ## [0.9.4-beta] - 2026-07-27
 
+> **⛔ CORRECTION (2026-07-29) — registration proof-of-work was REVERSED and is being removed.**
+> The entry below is left as written, because a changelog records what a release said at the time and
+> rewriting history would hide the reversal rather than document it. But **do not read it as current
+> design.** The shipped answer to registration rate limiting is **`clientKeyer`** — trusted-proxy
+> client keying (`server/internal/api/clientkey.go`): per-client buckets, `X-Forwarded-For` consulted
+> only when the socket peer is a configured trusted proxy, exact IPs never CIDRs, last XFF element
+> only, HMAC'd under a per-process salt.
+>
+> **The reason PoW was chosen has NOT been solved — it has been accepted.** IP keying is
+> structurally meaningless behind Tor and I2P, and `clientKeyer` cannot fix that; its own test
+> asserts that two Tor clients must share one bucket. The accepted position is one bucket per
+> overlay transport, because Tor's circuit-building and introduction-point cost makes registration
+> volume expensive to achieve, and because trusting the sidecars for header-based keying would
+> reopen the full spoofing bypass. Full reasoning:
+> `l00prite/.l00prite/todos.md` → "DESIGN REVERSAL — registration PoW is OUT".
+>
+> `REGISTRATION_POW_ENABLED` and `REGISTRATION_CHALLENGE_SECRET` referenced below are **inert** —
+> absent from `config.go`, `server/.env.example`, and the live `.env`. PoW is recoverable by
+> re-merging `dda31b9`. Note that **`server/internal/pow/` remains in use for DEAD-DROP PoW**; only
+> registration PoW is out.
+
 **Registration now proves your device is real instead of asking who you are.** Zitrone has no
 phone numbers, emails, or IP-based identification to rate-limit account creation with — and
 IP-keying is structurally meaningless behind Tor and I2P anyway. So account creation now runs a
