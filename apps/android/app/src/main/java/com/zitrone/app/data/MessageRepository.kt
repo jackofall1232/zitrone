@@ -126,6 +126,17 @@ class MessageRepository(
         update(
             messageId,
             precondition = {
+                // THIS STATE CHECK IS ALSO THE BOUND ON A RELAY-SUPPLIED ID (0.10.1). This became
+                // reachable from `onServerError`'s `message_id` — a value the RELAY chooses, and
+                // the relay is conceded in the threat model — rather than only from our own send
+                // path. An echoed id can therefore name anything, including an incoming message.
+                //
+                // An `isMine` clause was written here for that case and then REMOVED, because it
+                // was unreachable: `addIncoming` forces `state = DELIVERED`, so no incoming message
+                // is ever SENDING/SENT and this line already excludes every one of them. The
+                // mutation sweep is what proved it — deleting `isMine` broke no test, including the
+                // test written for it, which was passing off this check the whole time. An
+                // unreachable guard with a test that cannot fail is worse than no guard.
                 it.state == MessageState.SENDING || it.state == MessageState.SENT
             },
             transform = { it.copy(state = MessageState.FAILED) },

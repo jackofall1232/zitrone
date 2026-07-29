@@ -45,9 +45,27 @@ class WsSyntheticSocketTest {
         var rateLimited = 0
         val socket = socket { rateLimited++ }
 
-        socket.listener.onServerError("rate_limited", "slow down")
+        socket.listener.onServerError("rate_limited", "slow down", null)
 
         assertEquals(1, rateLimited)
+    }
+
+    @Test
+    fun `a rejected cover frame feeds the meter and attributes nothing`() {
+        // 0.10.1. The relay now echoes `message_id` on rejections, and the synthetic socket takes
+        // the parameter — but a decoy's failure is not a user-facing event, so it must go nowhere
+        // near attribution. What the id could name is a cover envelope, which owns no Message row;
+        // what this socket does with it is nothing at all. The yield still fires, because the
+        // budget is contended whether or not the relay could attribute the rejection.
+        var rateLimited = 0
+        val socket = socket { rateLimited++ }
+
+        socket.listener.onServerError("rate_limited", "slow down", "cover-envelope-id")
+
+        assertEquals("a rejected cover frame must still take cover off", 1, rateLimited)
+        // The socket exposes no attribution surface at all — the strongest statement available
+        // here is that the only collaborator it has is the meter, which the pressure wiring
+        // tripwire in DecoySendPairingTest pins independently.
     }
 
     @Test
@@ -55,8 +73,8 @@ class WsSyntheticSocketTest {
         var rateLimited = 0
         val socket = socket { rateLimited++ }
 
-        socket.listener.onServerError("bad_request", "nope")
-        socket.listener.onServerError("internal", "boom")
+        socket.listener.onServerError("bad_request", "nope", null)
+        socket.listener.onServerError("internal", "boom", null)
 
         assertEquals(0, rateLimited)
     }

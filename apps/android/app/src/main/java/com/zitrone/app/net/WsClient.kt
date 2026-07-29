@@ -121,8 +121,24 @@ class WsClient(
          */
         fun onAuthExpired()
 
-        /** Server error event. [message] is a server code, never content. */
-        fun onServerError(code: String, message: String)
+        /**
+         * Server error event. [message] is a server code, never content.
+         *
+         * [messageId] is the relay's attribution of the rejection to a specific `message.send`,
+         * and is **null whenever the relay did not attribute it** — the wire field is
+         * `omitempty`, and the relay echoes it only when the id is a well-formed UUID, so an
+         * absent or empty value means *unattributable*, never a message whose id is `""`.
+         *
+         * **A null id is not an error path.** It is the pre-0.10.1 behaviour and stays correct:
+         * some rejections genuinely cannot be attributed (the send budget is checked before the
+         * envelope is parsed, so a `rate_limited` frame may carry no id at all). Handle it by
+         * falling back to the connection-level path, not by guessing which send it was.
+         *
+         * **The id is the relay's claim, not proof.** The relay is conceded in the threat model
+         * and can echo any well-formed UUID, so a receiver must check the id against sends it
+         * actually owns before acting on it.
+         */
+        fun onServerError(code: String, message: String, messageId: String?)
     }
 
     enum class ConnectionState { DISCONNECTED, CONNECTING, CONNECTED }
@@ -337,7 +353,14 @@ class WsClient(
                 intentionallyClosed = true
                 l.onSessionRevoked()
             }
-            "error" -> l.onServerError(frame.optString("code", "unknown"), "")
+            // The id rides `message_id` and is `omitempty` server-side, so absent and empty are
+            // the same thing on the wire and both mean UNATTRIBUTABLE. Normalising to null here
+            // means no downstream implementor can mistake `""` for an id it might match.
+            "error" -> l.onServerError(
+                frame.optString("code", "unknown"),
+                "",
+                frame.optString("message_id").takeIf { it.isNotEmpty() },
+            )
         }
     }
 

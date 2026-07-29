@@ -2324,7 +2324,7 @@ class MessagingCoordinator(
         }
     }
 
-    override fun onServerError(code: String, message: String) {
+    override fun onServerError(code: String, message: String, messageId: String?) {
         // Server error codes carry no user data; v1 surfaces them only as
         // connection state, never as raw strings.
         //
@@ -2334,11 +2334,32 @@ class MessagingCoordinator(
         // seam. No message id is needed for that: cover does not have to know WHICH frame was
         // refused, or what the limit is, only that it must stop competing for it.
         //
-        // This is NOT the user-facing half of the defect. Attributing a rejection to the message it
-        // rejected — so the send can be marked failed and retried instead of showing SENDING forever
-        // — needs the relay to carry the message id on the error, which it does not; that is tracked
-        // separately and is a pre-existing bug in shipped code, not a decoy-traffic one.
+        // THE YIELD IS DELIBERATELY FIRST, AND DELIBERATELY UNCONDITIONAL ON THE ID. It is a
+        // cover-traffic signal, not error handling, and the two must not be entangled: a rejection
+        // the relay could not attribute still means the budget is contended, so cover must still
+        // stand down. `DecoySendPairingTest` pins this statement's exact form for that reason —
+        // restructuring it into the attribution below would fail that tripwire, which is the
+        // guard working as intended rather than an obstacle.
         if (code == ERROR_RATE_LIMITED) coverTraffic.onRelayRateLimited()
+        // …and THEN the user-facing half (0.10.1). Before the relay carried `message_id` there was
+        // nothing to attribute a rejection to, so every server rejection of a send was swallowed and
+        // the bubble showed SENDING forever — no failure, no retry, no error. The relay now echoes
+        // the id on `rate_limited` / `store_failed` / `bad_envelope`.
+        //
+        // **A null id is the normal, correct, pre-0.10.1 path, not a failure.** The send budget is
+        // checked before the envelope is parsed, so a `rate_limited` frame legitimately may carry no
+        // id; `message_id` is `omitempty` server-side and WsClient normalises absent/empty to null.
+        // Guessing which send it was would be worse than saying nothing.
+        //
+        // **The id is the relay's claim, never proof — and the relay is conceded in the threat
+        // model.** It can echo any well-formed UUID it likes. Two structural facts contain that,
+        // and neither depends on the relay behaving: `markFailed` no-ops on an id the repository
+        // does not hold, and a COVER envelope never creates a Message row at all, so a cover frame's
+        // rejection cannot surface to the user by construction. The remaining case — the relay
+        // echoing the id of a message that IS ours — is bounded by the CAS inside `markFailed`
+        // (SENDING/SENT and ours only), so the worst it can do is fail a send it could equally have
+        // dropped outright. Marking a delivered message failed is what the CAS exists to prevent.
+        if (messageId != null) messages.markFailed(messageId)
     }
 
     private companion object {

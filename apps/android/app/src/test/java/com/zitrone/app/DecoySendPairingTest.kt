@@ -1534,6 +1534,29 @@ class DecoySendPairingTest {
             "the rate_limited wire code drifted from the server's",
             "const val ERROR_RATE_LIMITED = \"rate_limited\"" in code,
         )
+        // 0.10.1 — THE YIELD MUST NOT BECOME CONDITIONAL ON ATTRIBUTION. This lives beside the pin
+        // above because both constrain the same function body, and together they say the thing
+        // neither says alone: the cover-traffic yield fires on the CODE, the user-facing failure
+        // fires on the ID, and neither is nested inside the other. A rejection the relay could not
+        // attribute (the send budget is checked before the envelope is parsed, so `rate_limited`
+        // legitimately may carry no id) must STILL take cover off — folding the yield inside
+        // `if (messageId != null)` would silently drop the one reactive signal the relay gives us
+        // about the shared send budget, in exactly the case where it matters most.
+        //
+        // A behavioural test cannot cover this: nothing in the suite can construct a
+        // MessagingCoordinator (it needs Context, NotificationScheduler, SignalProtocolManager and
+        // more). That harness is owed and is tracked; until it exists this is the guard.
+        val errorBody = bodyOf(code, "override fun onServerError(")
+        assertTrue(
+            "the user-facing failure attribution is gone — a rejected send shows SENDING forever",
+            "if(messageId != null) messages.markFailed(messageId)" in errorBody,
+        )
+        assertTrue(
+            "the cover yield is now nested inside the attribution: an UNATTRIBUTABLE rejection " +
+                "would no longer take cover off, which is the case the relay produces most",
+            errorBody.indexOf("if(code == ERROR_RATE_LIMITED)") <
+                errorBody.indexOf("if(messageId != null)"),
+        )
 
         // The yield must be the FIRST thing the seam does, and the drain must never see it.
         val pairing = normalised(appSource("decoy/DecoySendPairing.kt"))

@@ -216,6 +216,90 @@ class MessageRepositoryTest {
         assertEquals(MessageState.READ, repo.conversationMessages("c1").single().state)
     }
 
+    // ── 0.10.1: what a RELAY-SUPPLIED message id can and cannot touch ──────────────────────────
+    //
+    // `onServerError` now attributes a rejection to a message using an id the RELAY sent, and the
+    // relay is conceded in the threat model — it can echo any well-formed UUID it likes. These pin
+    // the structural bounds that make acting on that id safe, because they are properties of the
+    // CAS rather than of the relay behaving.
+
+    @Test
+    fun `markFailed on an id the repository does not hold changes nothing`() = runTest {
+        // This is what makes a rejected COVER frame unable to surface to the user: a cover envelope
+        // never creates a Message row, so its id is simply not here. Same protection against a
+        // hostile relay echoing an id from thin air. Not a lucky accident of lookup order — the CAS
+        // finds no conversation holding the id and returns the map untouched.
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+
+        repo.markFailed("a-cover-envelope-id")
+        repo.markFailed("00000000-0000-0000-0000-000000000000")
+
+        assertEquals(MessageState.SENDING, repo.conversationMessages("c1").single().state)
+    }
+
+    @Test
+    fun `markFailed cannot touch a delivered message, which is what protects incoming mail`() =
+        runTest {
+            // A relay echoing the id of an INCOMING message must not be able to mark it failed —
+            // that would corrupt the display state of mail it merely delivered.
+            //
+            // WHAT ACTUALLY PROTECTS THIS IS THE STATE CAS, not an ownership check. `addIncoming`
+            // forces DELIVERED, and `markFailed` only accepts SENDING/SENT. An earlier version of
+            // this test asserted an `isMine` clause instead — and passed identically after that
+            // clause was deleted, because the state check was doing the work all along. So this
+            // now names the mechanism it actually exercises, and mutating the state precondition
+            // is what makes it fail.
+            val repo = repository()
+            repo.addIncoming(message("theirs"))
+            repo.addOutgoing(message("mine", isMine = true))
+            repo.markDelivered("mine")
+
+            repo.markFailed("theirs")
+            repo.markFailed("mine") // ours, but already DELIVERED — equally out of reach
+
+            val byId = repo.conversationMessages("c1").associateBy { it.id }
+            assertEquals(MessageState.DELIVERED, byId.getValue("theirs").state)
+            assertEquals(
+                "a late rejection must never overwrite a message that actually got delivered",
+                MessageState.DELIVERED,
+                byId.getValue("mine").state,
+            )
+        }
+
+    @Test
+    fun `markFailed fails only the named message and leaves the rest of the conversation alone`() =
+        runTest {
+            val repo = repository()
+            repo.addOutgoing(message("m1", isMine = true))
+            repo.addOutgoing(message("m2", isMine = true))
+            repo.addOutgoing(message("m3", isMine = true))
+
+            repo.markFailed("m2")
+
+            val byId = repo.conversationMessages("c1").associateBy { it.id }
+            assertEquals(MessageState.FAILED, byId.getValue("m2").state)
+            assertEquals(MessageState.SENDING, byId.getValue("m1").state)
+            assertEquals(MessageState.SENDING, byId.getValue("m3").state)
+        }
+
+    @Test
+    fun `a failed message is retryable and a retry re-enters as a normal send`() = runTest {
+        // The rejection path has to end somewhere the user can act: FAILED is the state the bubble
+        // renders with "!" + retry, and `retryable` is what arms it. Pinning the round trip here
+        // means a change that marks a message FAILED without leaving it retryable — a dead end the
+        // user cannot escape — fails a test rather than shipping.
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+
+        repo.markFailed("m1")
+        assertEquals(MessageState.FAILED, repo.conversationMessages("c1").single().state)
+
+        val armed = repo.retryable("m1")
+        assertEquals("m1", armed?.id)
+        assertEquals(MessageState.SENDING, repo.conversationMessages("c1").single().state)
+    }
+
     @Test
     fun `own messages are never marked read locally`() = runTest {
         val repo = repository()
