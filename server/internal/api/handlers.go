@@ -38,7 +38,15 @@ type Handlers struct {
 	// relayPeers is the allowlist of next-hop forward URLs this relay may forward
 	// to. Empty means forwarding is refused (fail closed) — an SSRF guard.
 	relayPeers map[string]bool
+	// clientKey derives every IP-derived rate-limit key. See clientkey.go for why
+	// it is not simply c.IP() and why trusting X-Forwarded-For naively would be
+	// worse than the bug it fixes.
+	clientKey *clientKeyer
 }
+
+// ClientKeyingEnabled reports whether trusted-proxy client keying is active, so
+// startup can say which mode the limiters are running in.
+func (h *Handlers) ClientKeyingEnabled() bool { return h.clientKey != nil && h.clientKey.enabled() }
 
 func New(store *db.Store, issuer *auth.Issuer, cfg *config.Config) *Handlers {
 	return &Handlers{
@@ -72,6 +80,7 @@ func New(store *db.Store, issuer *auth.Issuer, cfg *config.Config) *Handlers {
 		relayKey:    loadRelayKey(cfg),
 		forwarder:   DefaultForwarder(),
 		relayPeers:  relayPeerSet(cfg.RelayPeers),
+		clientKey:   newClientKeyer(cfg.TrustedProxyIPs),
 	}
 }
 
@@ -163,7 +172,7 @@ type registerRequest struct {
 // request by construction. The client address is used transiently for rate
 // limiting and never stored or logged.
 func (h *Handlers) Register(c *fiber.Ctx) error {
-	if !h.registerLimit.Allow(c.IP()) {
+	if !h.registerLimit.Allow(h.clientKey.key(c)) {
 		return errJSON(c, fiber.StatusTooManyRequests, "rate_limited")
 	}
 	var req registerRequest
