@@ -1,0 +1,1 @@
+I'll review the full send-failure surfacing unit read-only: protocol context first, then the listed Android, relay, and test files against the round-1 fixes and the new send-timeout surface.I'll leave the other reviewer's round-2 file unread and inspect the unit sources and tests directly.
