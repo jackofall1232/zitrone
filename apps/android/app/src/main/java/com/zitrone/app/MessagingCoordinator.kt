@@ -2341,54 +2341,27 @@ class MessagingCoordinator(
     }
 
     override fun onServerError(code: String, message: String, messageId: String?) {
-        // Server error codes carry no user data; v1 surfaces them only as
-        // connection state, never as raw strings.
+        // Server error codes carry no user data; v1 surfaces them only as connection state, never as
+        // raw strings.
         //
-        // `rate_limited` is the relay refusing a `message.send` for volume, and it is the ONE signal
-        // the relay gives about the shared per-account send budget. Spec §4.3 R-U3-1 makes cover
-        // traffic the half that yields when a resource is contended, so it goes straight to the cover
-        // seam. No message id is needed for that: cover does not have to know WHICH frame was
-        // refused, or what the limit is, only that it must stop competing for it.
+        // THE ROUTING ITSELF LIVES IN [routeServerError] (0.10.1 review round 2). It used to be two
+        // statements here, guarded only by a source tripwire, because nothing in the suite can
+        // construct a MessagingCoordinator. Both blind reviewers ruled that insufficient — one on the
+        // evidence that the missing harness is what let round 2's P1 escape — and both proposed this
+        // same extraction rather than a Robolectric harness. The two decisions and their
+        // independence (the yield fires on the CODE, the failure on the ID, neither nested in the
+        // other) are now covered by behavioural tests instead of by matching source text.
         //
-        // THE YIELD IS DELIBERATELY FIRST, AND DELIBERATELY UNCONDITIONAL ON THE ID. It is a
-        // cover-traffic signal, not error handling, and the two must not be entangled: a rejection
-        // the relay could not attribute still means the budget is contended, so cover must still
-        // stand down. `DecoySendPairingTest` pins this statement's exact form for that reason —
-        // restructuring it into the attribution below would fail that tripwire, which is the
-        // guard working as intended rather than an obstacle.
-        if (code == ERROR_RATE_LIMITED) coverTraffic.onRelayRateLimited()
-        // …and THEN the user-facing half (0.10.1). Before the relay carried `message_id` there was
-        // nothing to attribute a rejection to, so every server rejection of a send was swallowed and
-        // the bubble showed SENDING forever — no failure, no retry, no error. The relay now echoes
-        // the id on `rate_limited` / `store_failed` / `bad_envelope`.
-        //
-        // **A null id is a correct path, not a failure — but it is RARER than this comment used to
-        // claim** (round 2, Grok). The earlier wording said the budget is checked before the envelope
-        // is parsed so `rate_limited` "frequently" carries no id. That described the PRE-MERGE relay.
-        // The merged `handleSend` unmarshals the header FIRST and then rate-limits, so a normal
-        // rate-limited send DOES carry its id. An unattributable rejection now means the header or
-        // the UUID failed to parse — plus lost frames and older relays. `message_id` is `omitempty`
-        // server-side and WsClient normalises absent/empty to null. Guessing which send it was would
-        // still be worse than saying nothing, and the send timeout is what bounds the null case.
-        //
-        // **The id is the relay's claim, never proof — and the relay is conceded in the threat
-        // model.** It can echo any well-formed UUID it likes. What contains that is structural and
-        // does not depend on the relay behaving:
-        //  - `markFailedByRelay` no-ops on an id the repository does not hold, and a COVER envelope
-        //    never creates a Message row at all, so a cover frame's rejection cannot surface to the
-        //    user by construction;
-        //  - it accepts SENDING **only**, so an error naming a message the relay already told us it
-        //    STORED is ignored — the receipt wins over a contradicting error;
-        //  - and if a spurious error does fail a send that actually succeeded, a later
-        //    `message.stored` / `message.delivered` now HEALS it rather than being latched out.
-        //
-        // **Ownership is NOT enforced here and this comment must not claim it is** (round 1, both
-        // lenses caught the earlier wording). No `isMine` check exists in the CAS; what makes an
-        // incoming message unreachable is that `addIncoming` forces DELIVERED, which the SENDING
-        // precondition excludes. That is a property of the production call graph, not of the type —
-        // `addOutgoing` would accept `isMine = false` with the default SENDING state if some future
-        // caller passed one.
-        if (messageId != null) messages.markFailedByRelay(messageId)
+        // What is left here is WIRING, which is what the reduced tripwire pins: this must delegate,
+        // and it must pass the cover seam and the relay-attributed failure entry point — not, say,
+        // `markFailed`, whose wider CAS would let an error contradict a receipt the relay already
+        // gave us.
+        routeServerError(
+            code = code,
+            messageId = messageId,
+            yieldCover = { coverTraffic.onRelayRateLimited() },
+            failByRelay = messages::markFailedByRelay,
+        )
     }
 
     private companion object {
@@ -2396,7 +2369,6 @@ class MessagingCoordinator(
         const val TAG = "ZitroneBoot"
 
         /** The relay's `message.send` throttle code (`server/internal/ws/hub.go`). */
-        const val ERROR_RATE_LIMITED = "rate_limited"
 
         const val BASE_BACKOFF_MS = 1_000L
         const val MAX_BACKOFF_MS = 60_000L

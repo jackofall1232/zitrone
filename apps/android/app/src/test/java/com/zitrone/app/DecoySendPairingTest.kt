@@ -1536,51 +1536,39 @@ class DecoySendPairingTest {
             "webSocket?.queueSize() ?: 0L" in normalised(appSource("net/WsClient.kt")),
         )
 
-        // The relay's only statement about the shared send budget must reach the seam. `rate_limited`
-        // is a wire constant of the server (server/internal/ws/hub.go), so it is pinned literally.
-        val code = normalised(coordinatorSource())
-        assertTrue(
-            "the relay's rate_limited no longer reaches cover traffic, so the one reactive signal " +
-                "about the per-account send budget is dropped on the floor again",
-            "if(code == ERROR_RATE_LIMITED) coverTraffic.onRelayRateLimited()" in
-                bodyOf(code, "override fun onServerError("),
-        )
-        assertTrue(
-            "the rate_limited wire code drifted from the server's",
-            "const val ERROR_RATE_LIMITED = \"rate_limited\"" in code,
-        )
-        // 0.10.1 — THE YIELD MUST NOT BECOME CONDITIONAL ON ATTRIBUTION. This lives beside the pin
-        // above because both constrain the same function body, and together they say the thing
-        // neither says alone: the cover-traffic yield fires on the CODE, the user-facing failure
-        // fires on the ID, and neither is nested inside the other. A rejection the relay could not
-        // attribute must STILL take cover off — folding the yield inside
-        // `if (messageId != null)` would silently drop the one reactive signal the relay gives us
-        // about the shared send budget, in exactly the case where it matters most.
+        // ROUND 2 of 0.10.1: THIS TRIPWIRE IS NOW REDUCED TO WIRING, deliberately.
         //
-        // A behavioural test cannot cover this: nothing in the suite can construct a
-        // MessagingCoordinator (it needs Context, NotificationScheduler, SignalProtocolManager and
-        // more). That harness is owed and is tracked; until it exists this is the guard.
+        // It used to pin the routing itself — the exact statement `if(code == ERROR_RATE_LIMITED)
+        // coverTraffic.onRelayRateLimited()` inside onServerError, plus the attribution below it and
+        // their order. Both blind reviewers ruled that insufficient (a source match cannot see a
+        // behavioural regression that keeps the same text, and it did not catch round 2's P1), so the
+        // routing moved into [routeServerError] and is covered by ServerErrorRouterTest for real.
+        //
+        // What a behavioural test on the router CANNOT see is whether production wires it, and wires
+        // it to the right collaborators. That is what remains here.
+        val code = normalised(coordinatorSource())
         val errorBody = bodyOf(code, "override fun onServerError(")
         assertTrue(
-            "the user-facing failure attribution is gone — a rejected send shows SENDING forever",
-            "if(messageId != null) messages.markFailedByRelay(messageId)" in errorBody,
+            "onServerError no longer delegates to the router, so the routing it reimplements is " +
+                "untested again — the exact position round 2 ruled unacceptable",
+            "routeServerError(" in errorBody,
         )
-        val yieldAt = errorBody.indexOf("if(code == ERROR_RATE_LIMITED)")
-        val attributeAt = errorBody.indexOf("if(messageId != null)")
         assertTrue(
-            "the cover yield is now nested inside the attribution: an UNATTRIBUTABLE rejection " +
-                "would no longer take cover off, which is the case the relay produces most",
-            yieldAt in 0 until attributeAt,
+            "the cover seam is not wired into the router, so a rate_limited would no longer take " +
+                "cover off the send path",
+            "yieldCover = { coverTraffic.onRelayRateLimited() }" in errorBody,
         )
-        // ORDER ALONE IS NOT THE PROPERTY (round 1, both lenses). `if (messageId == null) return`
-        // inserted ABOVE both statements keeps every pinned substring present and the indices in
-        // the right order, while defeating the exact guarantee this claims: an unattributable
-        // rejection would return before the yield. So nothing may short-circuit ahead of the yield
-        // — the yield has to be the first thing the handler does.
-        assertFalse(
-            "something can return before the cover yield, so an unattributable rejection would " +
-                "skip it — the yield must be unconditional, not merely first in source order",
-            errorBody.take(yieldAt).contains("return"),
+        assertTrue(
+            "the router is not wired to the RELAY-attributed failure entry point. markFailed's " +
+                "wider CAS accepts SENT, which would let a relay error contradict a receipt the " +
+                "relay itself already gave us — the round-1 P1, reintroduced through the wiring",
+            "failByRelay = messages::markFailedByRelay" in errorBody,
+        )
+        assertTrue(
+            "the rate_limited wire code drifted from the server's (server/internal/ws/hub.go)",
+            allMainSources().any { (_, source) ->
+                "const val ERROR_RATE_LIMITED = \"rate_limited\"" in normalised(source)
+            },
         )
 
         // The yield must be the FIRST thing the seam does, and the drain must never see it.
