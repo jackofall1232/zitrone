@@ -70,7 +70,7 @@ func (h *Handlers) RelayForward(c *fiber.Ctx) error {
 	if h.relayKey == nil {
 		return errJSON(c, fiber.StatusNotImplemented, "relay_disabled")
 	}
-	if !h.dropLimit.Allow(c.IP()) {
+	if !h.dropLimit.Allow(h.clientKey.key(c)) {
 		return errJSON(c, fiber.StatusTooManyRequests, "rate_limited")
 	}
 	var req relayForwardRequest

@@ -36,7 +36,15 @@ type Config struct {
 	// account is whose synthetic peer — a stored linkage the relay must not
 	// hold.
 	SendRatePerMinute int
-	TorEnabled        bool
+	// TrustedProxyIPs are the EXACT socket addresses whose X-Forwarded-For the
+	// relay will believe when deriving rate-limit keys. Empty (the default)
+	// disables the header entirely and keys on the socket peer, which is the
+	// pre-existing behaviour — so an unset or stale value degrades to one shared
+	// bucket rather than to a bucket the client chooses. CIDRs are rejected on
+	// purpose: a range covering the Tor/I2P sidecars would let overlay clients
+	// spoof the header and escape the limiter. See api/clientkey.go.
+	TrustedProxyIPs []string
+	TorEnabled      bool
 	// OnionSiteDir, when set and TorEnabled, is served as a static no-JS mirror
 	// site (APK download + checksums + self-hosting instructions) at the root of
 	// the hidden service. Empty disables it — clearnet deployments serve no site.
@@ -105,6 +113,7 @@ func Load() (*Config, error) {
 		MessageTTLUndeliveredHours: envInt("MESSAGE_TTL_UNDELIVERED_HOURS", 72),
 		RateLimitEnabled:           envBool("RATE_LIMIT_ENABLED", true),
 		SendRatePerMinute:          envInt("SEND_RATE_PER_MINUTE", 200),
+		TrustedProxyIPs:            splitCSV(os.Getenv("TRUSTED_PROXY_IPS")),
 		TorEnabled:                 envBool("TOR_ENABLED", false),
 		OnionSiteDir:               os.Getenv("ONION_SITE_DIR"),
 		OnionAddress:               os.Getenv("ONION_ADDRESS"),

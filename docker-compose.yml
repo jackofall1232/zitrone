@@ -23,6 +23,19 @@ services:
       # (0.10.0-beta cover traffic) is two frames on one authenticated socket
       # and is charged twice. Tunable without a rebuild.
       SEND_RATE_PER_MINUTE: ${SEND_RATE_PER_MINUTE:-200}
+      # Socket addresses whose X-Forwarded-For is believed when keying rate
+      # limits. This is Caddy: it reaches the container through the published
+      # port, so it arrives as the docker bridge GATEWAY. The Tor/I2P sidecars
+      # are containers on the same network (172.18.0.x, x != 1) and are
+      # deliberately NOT listed — they forward raw HTTP, so an overlay client
+      # can set X-Forwarded-For itself, and trusting them would let any client
+      # mint its own bucket. EXACT IPs only; a CIDR would be rejected, and one
+      # covering the sidecars would reopen exactly that bypass.
+      #
+      # If the compose network is ever recreated with a different subnet, this
+      # value goes stale and every clearnet client silently shares one bucket
+      # again — the startup log line says which mode is active.
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-172.18.0.1}
       TOR_ENABLED: ${TOR_ENABLED:-false}
       ONION_ADDRESS: ${ONION_ADDRESS:-}
       # 0.9.4 registration proof-of-work — CALIBRATION DEPLOY, ENFORCEMENT OFF.
