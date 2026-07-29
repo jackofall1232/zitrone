@@ -1325,3 +1325,57 @@ in the follow-up fix commit on top. Detail: ledger, "Unit W-A FOLLOW-UP round".
       debug artifact; per-session scoping must prevent a hidden vault's lines being readable after
       switching vaults. Slot: 0.11.0 polish (final alpha), same before-external-testers bucket as
       the storage-format disclosure.
+
+- [ ] **CX23 item (a) — `onServerError` surfaces nothing: RELAY HALF DONE (`1c63e8c`, deployed),
+      CLIENT HALF OWED.** Not checked, per the CX23 note: the relay half does not fix the
+      user-visible symptom, so until the client half ships in a release **users still see `SENDING`
+      forever** on a rejected send — not failed, not retried, no error. Predates decoy traffic;
+      worth fixing on its own merits.
+
+      **⚠️ `1c63e8c` IS NOT ON `origin` (verified 2026-07-29 from CX33: fetched every remote ref,
+      the object does not exist).** So (i) the deployed relay fix is SINGLE-COPY on a production
+      box, and (ii) **a redeploy from `main` reverts it** — the same trap the 8443/rate-limit
+      warning had, recurring for real. Push it to a `cx23/*` branch before anything else touches
+      the relay. Until it is pushed, the wire contract below is UNVERIFIED — it is the note's
+      claim, not something read from source.
+
+      **Wire contract the relay now provides (additive; older clients unaffected):**
+      `serverEvent.MessageID` populated on `rate_limited` (when the header parsed), `store_failed`,
+      and `bad_envelope` (when the id is a well-formed UUID). Echoed ONLY for well-formed UUIDs.
+      **Empty id = unattributable → fall back to the connection-level path, never treat as id `""`.**
+      `rate_limited` keeps precedence over `bad_envelope` (both-rejected ⇒ `rate_limited`, empty id).
+
+      **Client changes (file:line VERIFIED against main 2026-07-29):** `net/WsClient.kt:125`
+      (interface `fun onServerError(code: String, message: String)`) and `:340` (`l.onServerError(
+      frame.optString("code","unknown"), "")` — the id is dropped on the floor here). Implementors:
+      `MessagingCoordinator.kt:2327`, `decoy/WsSyntheticSocket.kt:72`. Test doubles:
+      `WsClientFrameTest.kt:125`, `WsSyntheticSocketTest.kt:48,58,59`.
+
+      **➕ TWO THINGS THE NOTE MISSES, both found by verifying it:**
+      1. **A U3 TRIPWIRE PINS THE BODY OF THE VERY FUNCTION BEING CHANGED.**
+         `DecoySendPairingTest.kt:1526-1536` locates `bodyOf(code, "override fun onServerError(")`
+         and asserts it contains **literally** `if(code == ERROR_RATE_LIMITED)
+         coverTraffic.onRelayRateLimited()`. Adding a third parameter keeps the locator prefix
+         intact, but any restructure (a `when(code)`, or attribution logic interleaved into that
+         branch) FAILS it. That tripwire is precisely what enforces the note's own constraint 3
+         ("the yield must not be entangled with error handling") — so keep the statement in that
+         exact form, or change the tripwire consciously and say why.
+      2. **TWO COMMENT BLOCKS ARE NOW FALSE IN PRODUCTION** and are false *today*, before any client
+         work: `MessagingCoordinator.kt:~2337` ("needs the relay to carry the message id on the
+         error, **which it does not**") and `DecoySendPairing.kt:~109` ("the relay's `rate_limited`
+         carries **no message id**"). `1c63e8c` is deployed, so both assert something untrue of the
+         live relay. This project treats a kdoc claim the code does not support as a finding; fix
+         them with the client half.
+
+      **Constraints that must survive:** a COVER frame's rejection must never surface to the user —
+      attribute only ids the REAL send path owns (a membership check, not trust in the echo: the
+      relay is conceded and can echo any well-formed UUID); the retry path must not resurrect the
+      R-U3-1 class (a retry IS a real send, so cover must never precede or compete with it);
+      failing on `store_failed` is correct because the relay does not hold the envelope.
+
+      **Tests owed:** id ⇒ that message FAILED and others untouched; empty id ⇒ no state change;
+      rejected cover frame ⇒ nothing user-visible but `CoverPressure` still fed; `store_failed` /
+      `bad_envelope` attribute the same way; retry emits a real send with no cover frame preceding.
+      **Per DoD: paired-blind independent review before merge (send path is security-sensitive) plus
+      mutation evidence.** Build on `main` or a branch off it. **NEVER build Android on CX23** —
+      live Postgres + relay, and `ci-gradle` (flock, disk floor, daemon caps) exists only on CX33.
