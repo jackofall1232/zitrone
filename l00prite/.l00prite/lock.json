@@ -1,12 +1,12 @@
 {
  "schema_version": 1,
- "lock_id": "lock-20260729T-0102",
+ "lock_id": "lock-20260729T-0102-item5",
  "owner_agent": null,
  "owner_session": null,
- "acquired_at": "2026-07-29T22:00:00Z",
- "expires_at": "2026-07-29T23:30:00Z",
- "ttl_seconds": 5400,
- "purpose": "0.10.2 record + items 1-4; item 5 plan reported; released",
+ "acquired_at": "2026-07-29T23:00:00Z",
+ "expires_at": "2026-07-30T00:00:00Z",
+ "ttl_seconds": 3600,
+ "purpose": "Record the item-5 decision and corrected derivation spec; released",
  "protected_paths": [
   "ledger.md",
   "memory.md",

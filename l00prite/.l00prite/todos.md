@@ -1587,3 +1587,58 @@ or removes waste.
 is a send-path change.** Rule of 6, hard cap, third lens blind at the cap, stop for the maintainer
 regardless of outcome. Nothing merged, no version bump, nothing pushed without explicit approval.
 **Items 1–4 include relay changes needing a CX23 deploy — do NOT deploy; report what needs deploying.**
+
+### Item 5 — MAINTAINER DECISION 2026-07-29: take the two alternatives, do NOT defer the upload
+
+**Deferral REJECTED, and the reason is recorded because it is the reusable part.** Moving the upload
+into the `flushSendRatchet → publishOutgoing` gap preserves the stated upload-first invariant (the
+envelope only *arrives* after `publishOutgoing`, so the blob is still in place first — verified in
+source, not assumed). But that gap is exactly what U3 spent weeks emptying: a process can die at any
+instruction, and if the ratchet advanced durably while the envelope never went out, **the message is
+permanently lost.** An 8 MiB Tor upload would widen that window from microseconds to minutes.
+**Trading an orphaned blob for a lost message is the worse currency.** Route (b) also survives
+deferral anyway — the contact-deleted check lives inside `publishOutgoing`, which is non-suspending
+by compiler-enforced design (D2c), so the upload cannot move inside it.
+
+**Approved instead — two changes, small blast radius:**
+
+**5a. One blob per message, so a retry cannot orphan the previous one.** The largest term by far
+(N retries × up to 8 MiB, each held the full TTL).
+
+> **⚠️ SECURITY CONSTRAINT — the token is the REDEMPTION CAPABILITY, and `messageId` is CLEARTEXT to
+> the relay.** `blobId = sha256(token)`, and the relay never sees the token until redemption
+> (`AttachmentCrypto` kdoc). The relay *does* parse `header.ID` for routing and attribution
+> (`hub.go`), so **any derivation the relay could compute hands it the capability to redeem the
+> attachment** and breaks the blind store. `messageId` must never be the token, and the derivation
+> must be keyed by something the relay does not have.
+
+> **⚠️ AND DERIVATION IS NOT ENOUGH — deriving only the token ships a BROKEN attachment.** `DepositBlob`
+> is `INSERT … ON CONFLICT (blob_id) DO NOTHING`, so a retry's upload silently keeps **attempt 1's
+> stored ciphertext**. But `encrypt()` draws a **fresh AES key and fresh nonce every call**, and the
+> padding fills with **random** bytes — so attempt 2's envelope carries attempt 2's key against
+> attempt 1's stored bytes: **an undecryptable attachment, surfaced as corruption rather than as a
+> failure.** Making the whole blob byte-identical instead would require deterministic padding fill
+> AND a deterministic nonce, and a repeated (key, nonce) over *differing* plaintext is the one GCM
+> failure that is catastrophic — precisely the trap to avoid.
+>
+> **THEREFORE: MEMOIZE, DO NOT DERIVE.** Compute the blob once per message and reuse the stored
+> artifacts (token, blobId, key, box) on retry, so the retry re-uploads identical bytes under the
+> same id. `ON CONFLICT DO NOTHING` then makes the second deposit a harmless no-op. No key
+> derivation, no nonce reuse, no crypto redesign.
+>
+> **A per-process cache is sufficient and is the smaller surface.** `MessageRepository` is RAM-only,
+> so a retry only ever happens inside one process lifetime — a crash takes the bubble with it and
+> there is nothing left to retry. So this needs **no vault scoping, no durable state, and no new
+> deniability surface**; it rides alongside the attachment bytes the message already retains in
+> memory for retry.
+
+**5b. An authenticated abandon/DELETE endpoint** for the known-failure paths (a) non-durable flush and
+(b) contact-deleted-mid-send, so the client reclaims immediately instead of waiting out the TTL.
+Id-only, authenticated, no linkage revealed — the depositor already knows the id. Crash (route c)
+remains TTL-bounded, now at 96 h rather than 168 h (item 2).
+
+**Net: retry amplification eliminated, known failures reclaimed, crash orphans bounded — with no
+change to the send-path ordering 0.10.1 just hardened.**
+
+**Still unconfirmed:** the "0 blobs on prod" baseline. Checked on CX33 (0), which is NOT prod; CX23
+has no SSH from here. Fold into the same trip as the deploy.
