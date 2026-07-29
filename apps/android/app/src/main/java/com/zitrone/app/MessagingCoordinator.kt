@@ -379,6 +379,39 @@ class MessagingCoordinator(
     private val confined = Dispatchers.IO.limitedParallelism(1)
 
     /**
+     * Per-message attachment deposit secrets, so a RETRY reuses one blob instead of orphaning the
+     * previous one (0.10.2 item 5a).
+     *
+     * `AttachmentCrypto.encrypt` drew a fresh token per call and `blobId = sha256(token)`, so every
+     * 0.10.1 retry uploaded a NEW blob and left the old one to its full TTL — N retries = N × up to
+     * 8 MiB, and blobs are the dimension that actually threatens the box (~2,079 orphans exhaust
+     * CX23's free space, one blob ≈ 545 accounts' worth of disk).
+     *
+     * **Only the 96-byte secrets are held, never the box.** Holding the 8 MiB ciphertext to force
+     * byte-identical re-uploads would trade a disk orphan for a heap leak, on bytes the message
+     * ALREADY retains in memory for retry. It is unnecessary anyway: whichever attempt's bytes the
+     * relay keeps carry their own nonce, so a stable key opens either.
+     *
+     * **Per-process is sufficient, and is the smaller surface.** `MessageRepository` is RAM-only, so
+     * a retry only ever happens inside one process lifetime — a crash takes the bubble and leaves
+     * nothing to retry. So this needs no vault scoping, no durable state, and adds no deniability
+     * surface. Entries are released the moment the send stops being retryable; see [releaseDeposit].
+     */
+    private class AttachmentDeposit(val token: ByteArray, val key: ByteArray)
+
+    private val attachmentDeposits = ConcurrentHashMap<String, AttachmentDeposit>()
+
+    /**
+     * Drop a message's memoized deposit secrets. Called on every terminal outcome — the relay took it
+     * (SENT), the recipient got it, the local copy was discarded, or it burned. **Without this the
+     * map grows for the process's lifetime**, which is the heap-leak side of the trade this fix
+     * exists to avoid. Idempotent.
+     */
+    private fun releaseDeposit(messageId: String) {
+        attachmentDeposits.remove(messageId)
+    }
+
+    /**
      * Whether [contactId] is still a live roster entry. Used by the send/deliver
      * publish tails: a send is always to an existing conversation, so a `false`
      * here means the contact was torn down mid-send and nothing may be deposited
@@ -423,6 +456,8 @@ class MessagingCoordinator(
         if (!contactExists(contactId)) {
             diag("send: contact deleted mid-send — dropping local copy")
             messages.discard(messageId)
+            // Contact deleted mid-send: the local copy is gone, so nothing will retry this id.
+            releaseDeposit(messageId)
             return false
         }
         if (ws.sendMessage(envelope)) {
@@ -1271,7 +1306,16 @@ class MessagingCoordinator(
         val accountId = api.accountId ?: return
         var stage = "encrypt-blob"
         runCatching {
-            val blob = AttachmentCrypto.encrypt(bytes)
+            // ONE BLOB PER MESSAGE (0.10.2 item 5a). A retry reuses the first attempt's token and
+            // key, so `blobId` is stable and the deposit lands on the same row
+            // (`ON CONFLICT (blob_id) DO NOTHING`) instead of orphaning the previous blob. The nonce
+            // is still fresh per call — see AttachmentCrypto.encrypt for why forcing byte-identity
+            // would be the dangerous option.
+            val memo = attachmentDeposits[messageId]
+            val blob = AttachmentCrypto.encrypt(bytes, memo?.token, memo?.key)
+            if (memo == null) {
+                attachmentDeposits[messageId] = AttachmentDeposit(blob.token, blob.key)
+            }
             // filename is forced null for images inside serialize(); mirror
             // that here so the local copy's metadata matches the wire.
             val controlFilename = if (kind == AttachmentControlPayload.KIND_IMAGE) null else filename
@@ -2206,6 +2250,9 @@ class MessagingCoordinator(
     /** Relay stored our envelope → SENT tick (one tick, "the relay has it"). */
     override fun onMessageStored(messageId: String) {
         messages.markSent(messageId)
+        // The relay has it: no further attempt will re-deposit under this id, so the memoized blob
+        // secrets are dead weight (0.10.2 item 5a — release, or the map grows for the process's life).
+        releaseDeposit(messageId)
     }
 
     /**
@@ -2216,6 +2263,8 @@ class MessagingCoordinator(
      */
     override fun onMessageDelivered(messageId: String) {
         messages.markDelivered(messageId)
+        // Belt and braces: a delivery receipt can arrive without a preceding `message.stored`.
+        releaseDeposit(messageId)
     }
 
     override fun onTyping(senderId: String, started: Boolean) {
