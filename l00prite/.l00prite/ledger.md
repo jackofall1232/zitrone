@@ -3367,3 +3367,17 @@ version bumps, and no further rounds run without an explicit maintainer instruct
 Also this session: maintainer decided the production-diagnostics rescope (RAM-only ring buffer in
 release, durable BootDiagnostics debug-only, logcat mirror stripped) — recorded as its own unit in
 todos.md, slotted 0.11.0, NOT folded into U4.
+
+## 2026-07-29 — U4 MERGED to `main` (`a8f49090`) on explicit maintainer instruction
+
+The cover exchange is now two-sided on main: pairing (U3) covers every real send, and the
+synthetic side (U4) acks, burns, and occasionally answers — the exchange is no longer
+conspicuously one-directional. Merge was `--no-ff` matching U3's pattern; post-merge verification
+on main: **BUILD SUCCESSFUL, exit 0, 800 tests / 0 failures / 0 errors / 3 skipped.**
+
+Same maintainer message confirmed the diagnostics rescope stays exactly where todos.md slots it:
+its own unit in the 0.11.0 polish round, not part of 0.10.0.
+
+**NOT pushed** — `origin/main` is 12 commits behind local `main` (everything from the U4 spec
+commit `c18e94b6` through the merge). Push is a separate per-action permission and has not been
+given.

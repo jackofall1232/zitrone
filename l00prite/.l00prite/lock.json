@@ -1,12 +1,12 @@
 {
  "schema_version": 1,
- "lock_id": "lock-20260729T-u4-review-r6",
+ "lock_id": "lock-20260729T-u4-merge",
  "owner_agent": null,
  "owner_session": null,
- "acquired_at": "2026-07-29T01:00:00Z",
- "expires_at": "2026-07-29T03:00:00Z",
- "ttl_seconds": 7200,
- "purpose": "U4 review round 6 (FINAL) — CONVERGED at the cap (Grok CLEAN, Codex 1 P3 upheld+fixed doc/test-only, OkHttp-hook tripwire added, 800 tests green, mutation 1/1); loop STOPPED, awaiting maintainer merge decision; diagnostics-rescope todo recorded; released",
+ "acquired_at": "2026-07-29T03:00:00Z",
+ "expires_at": "2026-07-29T04:00:00Z",
+ "ttl_seconds": 3600,
+ "purpose": "Record U4 merge to main in ledger/state; released",
  "protected_paths": [
   "ledger.md",
   "memory.md",

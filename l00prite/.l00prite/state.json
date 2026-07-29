@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "project_name": "Zitrone",
-  "current_goal": "0.10.0-beta decoy traffic — U4 (synthetic-side receive) REVIEW LOOP CLOSED at the 6-round hard cap, CONVERGED: round 6 Grok CLEAN, Codex 0 P1/0 P2/1 P3 (claim-scope defect in round 5's comment — httpClient/onRateLimited are opaque constructor routes the 'no sink parameter' claim overlooked; not a current disclosure, verified zero OkHttp hook tokens app-wide). Fixed at the cap with comment correction + new tripwire (no OkHttp client builder installs an observability hook — shared client means a real-socket hook would observe cover traffic), mutation-verified, ZERO production-code change; fix gets no blind review because there is no round 7, recorded honestly. 24 findings over six rounds, all upheld and fixed. Gemini third lens NOT invoked: both lenses 0 P1/0 P2 and the sole P3's facts were agreed — no dispute to break.",
-  "current_phase": "U1, U2, U3 merged to main (U3 at 4061f145). U4 on local branch feat/0.10.0-decoy-u4-synthetic-receive, review CONVERGED CLEAN at the cap, NOT merged, no push, no version bump. WAITING ON MAINTAINER MERGE DECISION — hard stop per the cap rule.",
+  "current_goal": "0.10.0-beta decoy traffic — U4 MERGED to main (a8f49090, --no-ff, explicit maintainer instruction 2026-07-29) after converging at the 6-round cap: 24 findings, all upheld and fixed. Post-merge build on main: 800 tests / 0 failures / 3 skipped, exit 0. The cover exchange is now two-sided and live in the codebase. NOT pushed: origin/main is 12 commits behind local main; push permission not given.",
+  "current_phase": "U1-U4 merged to main (U4 at a8f49090). Remaining 0.10.0 work per spec §5: U6 owes the storage-format disclosure DELIVERY (release notes + SECURITY_MODEL.md) before 0.10.0 ships. Queued for 0.11.0 polish (maintainer-approved): production-diagnostics rescope (RAM-only in release, BootDiagnostics debug-only); behavioural isSyntheticSender test is a polish candidate.",
   "active_agent": null,
   "last_agent": "claude",
   "last_updated": "2026-07-29",
@@ -13,8 +13,8 @@
   "last_event_processed": null,
   "pending_event_count": 0,
   "review_response_required": false,
-  "ci_status": "local only — :app:testDebugUnitTest :app:assembleDebug --rerun-tasks from apps/android, BUILD SUCCESSFUL, Gradle exit 0, 800 tests / 0 failures / 0 errors / 3 skipped (799 -> 800, the OkHttp-hook tripwire). Round-6 mutation: 1 applied (EventListener.NONE installed in CertificatePinning.buildClient), 1 discriminated, restore verified as empty git diff.",
+  "ci_status": "local only — post-merge verification ON MAIN: :app:testDebugUnitTest :app:assembleDebug --rerun-tasks, BUILD SUCCESSFUL, Gradle exit 0, 800 tests / 0 failures / 0 errors / 3 skipped.",
   "execution_active": false,
   "execution_stop_reason": null,
-  "next_recommended_action": "NONE WITHOUT THE MAINTAINER. The U4 loop is closed at the cap; per the rule the agent never merges, re-loops, or bumps versions on its own. Present to the maintainer: (1) merge U4 to main as-is (review record: l00prite/.l00prite/reviews/decoy-0.10.0/u4-r6-adjudication.md); (2) after U4's merge decision, the remaining 0.10.0 units continue per spec §5; (3) separately queued in todos.md: the production-diagnostics rescope unit (0.11.0, maintainer-approved direction) and U6's storage-format disclosure delivery."
+  "next_recommended_action": "Next 0.10.0 step per spec §5 and todos.md: U6 (docs/disclosure unit — storage-format disclosure delivery, §2.4/§2.3 residual honesty, no code). Before or alongside: decide whether to push main to origin (12 commits unpushed; needs explicit permission). No version bump until the maintainer calls the 0.10.0 cut."
 }
