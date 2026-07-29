@@ -48,7 +48,7 @@ func main() {
 	}
 
 	handlers := api.New(store, issuer, cfg)
-	sendLimit := ratelimit.New(100, time.Minute, cfg.RateLimitEnabled)
+	sendLimit := ratelimit.New(cfg.SendRatePerMinute, time.Minute, cfg.RateLimitEnabled)
 	hub := ws.NewHub(store, sendLimit)
 
 	// No access logging, no body logging — application errors only.

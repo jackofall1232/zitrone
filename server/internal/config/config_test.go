@@ -68,3 +68,34 @@ func TestLoadKeepsPositiveBlobValues(t *testing.T) {
 		t.Errorf("BlobMaxBytes = %d, want 1234567", cfg.BlobMaxBytes)
 	}
 }
+
+// CX23 item (b): the per-account send budget must default to 200, not 100.
+// Since 0.10.0-beta a covered send is two frames on one authenticated socket
+// (real envelope + decoy), so the budget is charged twice per real message;
+// at 100 an account exhausted at ~50 real sends and cover traffic caused real
+// sends to fail. The default is pinned here so it cannot revert silently.
+func TestLoadSendRateDefaultsAboveCoverTrafficDoubling(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SendRatePerMinute != 200 {
+		t.Fatalf("SendRatePerMinute = %d, want 200 — a covered send costs two permits", cfg.SendRatePerMinute)
+	}
+}
+
+// It stays operator-tunable without a rebuild.
+func TestLoadSendRateHonoursEnv(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("SEND_RATE_PER_MINUTE", "350")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SendRatePerMinute != 350 {
+		t.Fatalf("SendRatePerMinute = %d, want 350", cfg.SendRatePerMinute)
+	}
+}

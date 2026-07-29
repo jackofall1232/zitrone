@@ -229,3 +229,109 @@ func TestHandleReceived_OfflinePeer_NoOp(t *testing.T) {
 	h.handleEvent(recipientClient, raw)
 	mustNoFrame(t, recipientClient)
 }
+
+// --- CX23 item (a): per-message rejections must name the message ---
+//
+// A rejection that carries no message id cannot be attributed by the client,
+// which is what leaves a rejected send displayed as SENDING forever.
+
+// newLimitedTestHub builds a hub whose send budget is real and exhausted after
+// max permits, so rejection paths can be exercised.
+func newLimitedTestHub(store Store, max int) *Hub {
+	return NewHub(store, ratelimit.New(max, time.Minute, true))
+}
+
+func TestHandleSend_RateLimited_CarriesMessageID(t *testing.T) {
+	h := newLimitedTestHub(newFakeStore(), 1)
+
+	sender, recipient := uuid.New(), uuid.New()
+	c := newTestClient(sender)
+	h.add(c)
+
+	// First send consumes the only permit.
+	h.handleSend(c, sendEnvelope(t, uuid.New(), sender, recipient))
+	drainType(t, c, "message.stored")
+
+	// Second is rejected — and must name the message it rejected.
+	rejected := uuid.New()
+	h.handleSend(c, sendEnvelope(t, rejected, sender, recipient))
+
+	ev := drainType(t, c, "error")
+	if ev.Code != "rate_limited" {
+		t.Fatalf("code = %q, want rate_limited", ev.Code)
+	}
+	if ev.MessageID != rejected.String() {
+		t.Fatalf("rate_limited id = %q, want %q — an unattributable rejection is the defect", ev.MessageID, rejected)
+	}
+}
+
+func TestHandleSend_StoreFailure_CarriesMessageID(t *testing.T) {
+	store := newFakeStore()
+	store.storeErr = context.DeadlineExceeded
+	h := newTestHub(store)
+
+	sender, recipient := uuid.New(), uuid.New()
+	msgID := uuid.New()
+	c := newTestClient(sender)
+	h.add(c)
+
+	h.handleSend(c, sendEnvelope(t, msgID, sender, recipient))
+
+	ev := drainType(t, c, "error")
+	if ev.Code != "store_failed" {
+		t.Fatalf("code = %q, want store_failed", ev.Code)
+	}
+	if ev.MessageID != msgID.String() {
+		t.Fatalf("store_failed id = %q, want %q", ev.MessageID, msgID)
+	}
+}
+
+// A malformed envelope must still consume a permit: parsing now happens before
+// the budget check, and a malformed frame must not be a free pass.
+func TestHandleSend_MalformedEnvelope_StillConsumesPermit(t *testing.T) {
+	h := newLimitedTestHub(newFakeStore(), 1)
+
+	sender, recipient := uuid.New(), uuid.New()
+	c := newTestClient(sender)
+	h.add(c)
+
+	// Burn the only permit on a frame that does not parse.
+	h.handleSend(c, clientEvent{Type: "message.send", Envelope: json.RawMessage(`{`)})
+	if ev := drainType(t, c, "error"); ev.Code != "bad_envelope" {
+		t.Fatalf("code = %q, want bad_envelope", ev.Code)
+	}
+
+	// A well-formed send now finds the budget spent.
+	h.handleSend(c, sendEnvelope(t, uuid.New(), sender, recipient))
+	if ev := drainType(t, c, "error"); ev.Code != "rate_limited" {
+		t.Fatalf("code = %q, want rate_limited — a malformed frame escaped the limiter", ev.Code)
+	}
+}
+
+// A header that does not parse must not make the relay reflect arbitrary
+// client-supplied bytes back as a message id.
+func TestHandleSend_MalformedID_EchoesNothing(t *testing.T) {
+	h := newTestHub(newFakeStore())
+
+	sender := uuid.New()
+	c := newTestClient(sender)
+	h.add(c)
+
+	env, err := json.Marshal(envelopeHeader{
+		ID:          "../../etc/passwd",
+		RecipientID: uuid.New().String(),
+		SenderID:    sender.String(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.handleSend(c, clientEvent{Type: "message.send", Envelope: env})
+
+	ev := drainType(t, c, "error")
+	if ev.Code != "bad_envelope" {
+		t.Fatalf("code = %q, want bad_envelope", ev.Code)
+	}
+	if ev.MessageID != "" {
+		t.Fatalf("id = %q, want empty — a non-UUID id must not be reflected", ev.MessageID)
+	}
+}
