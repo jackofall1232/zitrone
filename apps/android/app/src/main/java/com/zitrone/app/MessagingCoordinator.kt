@@ -429,6 +429,22 @@ class MessagingCoordinator(
             // Handed to the relay — but honestly still just SENDING. The tick waits for the relay's
             // message.stored (→SENT) and the recipient's message.delivered (→DELIVERED); see
             // [MessageState].
+            //
+            // THE SEND TIMEOUT IS ARMED HERE, AND NOWHERE ELSE (0.10.1 review round 2, both lenses
+            // found the P1 this fixes). It used to be armed in `addOutgoing`, i.e. when the bubble
+            // was created — which for an ATTACHMENT is before the blob upload, so the 90 s window
+            // included an unbounded upload (OkHttp's writeTimeout is per-write, not whole-body, so
+            // a slow 11 MiB body is never cut off). The timer then fired while attempt #1 was still
+            // uploading, showed a FALSE FAILED with a retry affordance, and a user who took it got
+            // two independently encrypted envelopes under one id — a real double delivery once the
+            // first was acked and its row deleted.
+            //
+            // Arming at the handoff makes the window exactly what the design always claimed: time
+            // spent WAITING FOR THE RELAY'S RECEIPT, with no local work inside it. It is also the
+            // single place both the text and attachment paths pass through, so neither can be armed
+            // and forgotten. Retries re-enter here and get their own window; nothing arms on
+            // `addOutgoing` or `retryable` any more.
+            messages.armSendTimeout(messageId)
             return true
         }
         // The socket was down: the send did not reach the relay. The ratchet advance is already
@@ -2346,10 +2362,14 @@ class MessagingCoordinator(
         // the bubble showed SENDING forever — no failure, no retry, no error. The relay now echoes
         // the id on `rate_limited` / `store_failed` / `bad_envelope`.
         //
-        // **A null id is the normal, correct, pre-0.10.1 path, not a failure.** The send budget is
-        // checked before the envelope is parsed, so a `rate_limited` frame legitimately may carry no
-        // id; `message_id` is `omitempty` server-side and WsClient normalises absent/empty to null.
-        // Guessing which send it was would be worse than saying nothing.
+        // **A null id is a correct path, not a failure — but it is RARER than this comment used to
+        // claim** (round 2, Grok). The earlier wording said the budget is checked before the envelope
+        // is parsed so `rate_limited` "frequently" carries no id. That described the PRE-MERGE relay.
+        // The merged `handleSend` unmarshals the header FIRST and then rate-limits, so a normal
+        // rate-limited send DOES carry its id. An unattributable rejection now means the header or
+        // the UUID failed to parse — plus lost frames and older relays. `message_id` is `omitempty`
+        // server-side and WsClient normalises absent/empty to null. Guessing which send it was would
+        // still be worse than saying nothing, and the send timeout is what bounds the null case.
         //
         // **The id is the relay's claim, never proof — and the relay is conceded in the threat
         // model.** It can echo any well-formed UUID it likes. What contains that is structural and

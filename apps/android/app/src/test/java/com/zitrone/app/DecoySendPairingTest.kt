@@ -1464,10 +1464,25 @@ class DecoySendPairingTest {
                 1,
                 Regex("return true").findAll(body).count(),
             )
-            assertEquals(
+            // ROUND 2 of 0.10.1: this asserted `if(ws.sendMessage(envelope)) { return true` as one
+            // adjacent token run, which made it fail the moment the handoff branch did anything
+            // besides return — as it now must, because the send timeout is armed there (the P1 fix:
+            // arming at the handoff rather than at bubble creation, so the window contains no local
+            // work). **Adjacency was never the property.** The property is OWNERSHIP: exactly one
+            // `return true`, and it belongs to the ws.sendMessage branch. That is pinned by position
+            // instead — after the handoff test, before the failure tail — so statements may be added
+            // inside the branch but `return true` cannot escape it.
+            assertTrue(
+                "$tail no longer tests the handoff with ws.sendMessage",
+                "if(ws.sendMessage(envelope))" in body,
+            )
+            // Brace-walked, so this is the branch's real body rather than a position guess: the one
+            // `return true` must live INSIDE the handoff branch. Statements may precede it (the send
+            // timeout is armed there), but it cannot escape the branch.
+            val handoffBranch = bodyOf(body, "if(ws.sendMessage(envelope))")
+            assertTrue(
                 "$tail returns true from somewhere other than the ws.sendMessage branch",
-                1,
-                Regex("if\\(ws\\.sendMessage\\(envelope\\)\\) \\{ return true").findAll(body).count(),
+                "return true" in handoffBranch,
             )
         }
     }
@@ -1538,8 +1553,7 @@ class DecoySendPairingTest {
         // above because both constrain the same function body, and together they say the thing
         // neither says alone: the cover-traffic yield fires on the CODE, the user-facing failure
         // fires on the ID, and neither is nested inside the other. A rejection the relay could not
-        // attribute (the send budget is checked before the envelope is parsed, so `rate_limited`
-        // legitimately may carry no id) must STILL take cover off — folding the yield inside
+        // attribute must STILL take cover off — folding the yield inside
         // `if (messageId != null)` would silently drop the one reactive signal the relay gives us
         // about the shared send budget, in exactly the case where it matters most.
         //

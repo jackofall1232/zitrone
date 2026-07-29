@@ -330,6 +330,7 @@ class MessageRepositoryTest {
         // it WITHOUT the relay's cooperation, which is what makes it survive a relay rollback.
         val repo = repository()
         repo.addOutgoing(message("m1", isMine = true))
+        repo.armSendTimeout("m1") // what publishOutgoing does at the socket handoff
 
         advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS - 1)
         assertEquals(
@@ -350,6 +351,7 @@ class MessageRepositoryTest {
             // message the relay is holding.
             val repo = repository()
             repo.addOutgoing(message("m1", isMine = true))
+            repo.armSendTimeout("m1")
             repo.markSent("m1")
 
             advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS * 10)
@@ -361,11 +363,13 @@ class MessageRepositoryTest {
     fun `a retry gets a fresh timeout rather than inheriting the first attempt's`() = runTest {
         val repo = repository()
         repo.addOutgoing(message("m1", isMine = true))
+        repo.armSendTimeout("m1")
         advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS + 1)
         assertEquals(MessageState.FAILED, repo.conversationMessages("c1").single().state)
 
         repo.retryable("m1")
         assertEquals(MessageState.SENDING, repo.conversationMessages("c1").single().state)
+        repo.armSendTimeout("m1") // the retry's own handoff
 
         advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS - 1)
         assertEquals(
@@ -382,11 +386,90 @@ class MessageRepositoryTest {
         // Why the window can afford to be tight: firing early is self-correcting.
         val repo = repository()
         repo.addOutgoing(message("m1", isMine = true))
+        repo.armSendTimeout("m1")
         advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS + 1)
         assertEquals(MessageState.FAILED, repo.conversationMessages("c1").single().state)
 
         repo.markSent("m1")
 
+        assertEquals(MessageState.SENT, repo.conversationMessages("c1").single().state)
+    }
+
+    @Test
+    fun `no timeout is armed before the send is handed off, so local work is never timed`() =
+        runTest {
+            // Round 2, BOTH lenses, the P1. Arming used to happen in `addOutgoing` — i.e. when the
+            // bubble appeared, which for an attachment is BEFORE an unbounded blob upload. The timer
+            // then failed a send that was still uploading, showed a retry affordance on a live send,
+            // and a user who took it double-delivered under one id. The window must contain no local
+            // work at all: creating a bubble arms nothing.
+            val repo = repository()
+            repo.addOutgoing(message("m1", isMine = true))
+
+            advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS * 3)
+
+            assertEquals(
+                "a bubble with no handoff yet must not be failed by the send timeout",
+                MessageState.SENDING,
+                repo.conversationMessages("c1").single().state,
+            )
+        }
+
+    @Test
+    fun `clearAll disarms send timeouts, so none outlives the session`() = runTest {
+        // Round 2, P3. clearAll cancelled the TTL, read-burn and reveal timers but not this one, so a
+        // send timeout outlived vault lock / logout / revocation / confirmed deletion by up to 90s.
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+        repo.armSendTimeout("m1")
+
+        repo.clearAll()
+        repo.addOutgoing(message("m1", isMine = true)) // a fresh session re-adds the same id
+
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS * 2)
+
+        assertEquals(
+            "a timer from the cleared session fired into the new one",
+            MessageState.SENDING,
+            repo.conversationMessages("c1").single().state,
+        )
+    }
+
+    @Test
+    fun `re-arming replaces the timer and restarts the window`() = runTest {
+        // Round 2, P3 (second half) — but read what this does and does NOT cover.
+        //
+        // COVERED: re-arming replaces the deadline, so the message fails on the SECOND window rather
+        // than the first, and the surviving timer is still tracked well enough for a receipt to
+        // disarm it.
+        //
+        // NOT COVERED, and the mutation sweep proved it: the DISOWN RACE that motivated the
+        // conditional `remove(messageId, job)`. Making that removal unconditional again broke no
+        // test, because re-arming cancels the old job and a single-threaded virtual clock therefore
+        // never runs the old job's tail concurrently with the new one. The guard is kept as a
+        // declared residual — see the comment at the removal site — not because this test verifies
+        // it.
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+        repo.armSendTimeout("m1")
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS / 2)
+        repo.armSendTimeout("m1") // re-armed mid-window: the old handle must not outlive this
+
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS / 2 + 1)
+        assertEquals(
+            "the replaced timer fired on the ORIGINAL deadline",
+            MessageState.SENDING,
+            repo.conversationMessages("c1").single().state,
+        )
+
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS / 2 + 1)
+        assertEquals(MessageState.FAILED, repo.conversationMessages("c1").single().state)
+
+        // …and the surviving timer is still tracked, so a receipt can still disarm it.
+        repo.retryable("m1")
+        repo.armSendTimeout("m1")
+        repo.markSent("m1")
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS * 2)
         assertEquals(MessageState.SENT, repo.conversationMessages("c1").single().state)
     }
 
