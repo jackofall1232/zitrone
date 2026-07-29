@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "project_name": "Zitrone",
-  "current_goal": "0.10.0-beta decoy traffic — U4 MERGED to main (a8f49090, --no-ff, explicit maintainer instruction 2026-07-29) after converging at the 6-round cap: 24 findings, all upheld and fixed. Post-merge build on main: 800 tests / 0 failures / 3 skipped, exit 0. The cover exchange is now two-sided and live in the codebase. NOT pushed: origin/main is 12 commits behind local main; push permission not given.",
-  "current_phase": "U1-U4 merged to main (U4 at a8f49090). Remaining 0.10.0 work per spec §5: U6 owes the storage-format disclosure DELIVERY (release notes + SECURITY_MODEL.md) before 0.10.0 ships. Queued for 0.11.0 polish (maintainer-approved): production-diagnostics rescope (RAM-only in release, BootDiagnostics debug-only); behavioural isSyntheticSender test is a polish candidate.",
+  "current_goal": "0.10.0-beta SHIPPED 2026-07-29 (vc21, a0d7598b): cover traffic is live on Android. U1-U4 merged; U6 disclosure delivered BEFORE the cut (SECURITY_MODEL §storage-format + shipped decoy-traffic section + CHANGELOG). GH prerelease v0.10.0-beta targets d955391b, APK sha256 fa183f30…c877db, signer cert 6c7f92a7…892753 verified both sides, served asset byte-identical, onion mirror staged, website /download/beta live on the new version + checksum.",
+  "current_phase": "0.10.0-beta CUT AND LIVE. Next per release strategy: 0.11.0 = the polish round (FINAL ALPHA), then the flip to a true beta / V1 candidate. 0.11.0 queue in todos.md: production-diagnostics rescope (RAM-only in release, BootDiagnostics debug-only), behavioural isSyntheticSender test, plus standing hygiene (CI SAST, release-apk.yml shell injection, website web-overclaim).",
   "active_agent": null,
   "last_agent": "claude",
   "last_updated": "2026-07-29",
@@ -13,8 +13,8 @@
   "last_event_processed": null,
   "pending_event_count": 0,
   "review_response_required": false,
-  "ci_status": "local only — post-merge verification ON MAIN: :app:testDebugUnitTest :app:assembleDebug --rerun-tasks, BUILD SUCCESSFUL, Gradle exit 0, 800 tests / 0 failures / 0 errors / 3 skipped.",
+  "ci_status": "local only — release verification: keystore cert continuity checked BEFORE build; :app:assembleRelease BUILD SUCCESSFUL exit 0 in 3m36s; apksigner cert digest matches anchor; aapt2 badging vc21/0.10.0-beta; GitHub-served APK downloaded and byte-identical (fa183f30…c877db); website build exit 0 with new version+checksum baked and zero 0.9.4 refs; live site confirmed serving v0.10.0-beta.",
   "execution_active": false,
   "execution_stop_reason": null,
-  "next_recommended_action": "Next 0.10.0 step per spec §5 and todos.md: U6 (docs/disclosure unit — storage-format disclosure delivery, §2.4/§2.3 residual honesty, no code). Before or alongside: decide whether to push main to origin (12 commits unpushed; needs explicit permission). No version bump until the maintainer calls the 0.10.0 cut."
+  "next_recommended_action": "0.10.0 is out. Remaining 0.10.0-adjacent: NONE blocking. Open the 0.11.0 polish round when the maintainer calls it — the queue is in todos.md, led by the production-diagnostics rescope (maintainer-approved 2026-07-29). Ops follow-ups NOT part of any unit: (a) the onion mirror serves the newest staged APK on next request — worth a live fetch check now that 0.10.0 is the first version actually served to the onion; (b) verify the box fixes hold under the next reviewer run (ci-gradle + box-level gradle.properties + 4G swap, all added 2026-07-29)."
 }

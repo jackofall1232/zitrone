@@ -3381,3 +3381,49 @@ its own unit in the 0.11.0 polish round, not part of 0.10.0.
 **NOT pushed** — `origin/main` is 12 commits behind local `main` (everything from the U4 spec
 commit `c18e94b6` through the merge). Push is a separate per-action permission and has not been
 given.
+
+## 2026-07-29 — 0.10.0-beta CUT AND PUBLISHED (vc21) — cover traffic is live
+
+Maintainer instruction: publish, cut, flip. Sequence run: **U6 disclosure delivered FIRST**
+(`b3485353`) rather than shipping past the project's own gate — `SECURITY_MODEL.md` gains the
+ratified §4.1 storage-format wording verbatim plus a shipped-status decoy-traffic section with its
+limits declared (dead air uncovered, control channel uncovered, relay conceded, relay-visible
+residuals pointed at the spec, `-beta` stated as a continuity label over pre-beta builds); the same
+text carries the CHANGELOG entry. Then bump to `0.10.0-beta`/vc21 (`d955391b`), push, signed build,
+release, flip (`a0d7598b`).
+
+**Artefact:** `zitrone-v0.10.0-beta.apk`, sha256
+`fa183f309e3aae89cc667a7939bcec131a2913a1dc798bb1058ff52c73c877db`, signer cert
+`6c7f92a7…892753` (continuity anchor, verified against the keystore BEFORE building and against
+the APK after), embedded vc21/0.10.0-beta confirmed via aapt2. GitHub prerelease targets the exact
+built commit `d955391b`; the APK GitHub actually serves was downloaded and is byte-identical.
+Onion mirror staged with the same binary + regenerated SHA256SUMS.
+
+**⚠️ THE NEAR-MISS WORTH KEEPING.** The first signed build was KILLED (empty log, no output) and
+an `app-release.apk` was sitting in `outputs/` **dated 2026-07-27 — predating the entire U4
+merge**. Any check of the form "does the APK exist?" would have passed and shipped a binary that
+did not match its own tag. It was deleted rather than reused and the release was rebuilt from
+scratch. **A stale artefact in a build-output directory is indistinguishable from a fresh one by
+existence alone; check mtime against HEAD's commit date, or delete before building.**
+
+**Why the build died — and the correction that matters more than the fix.** Reported first as
+"no swap"; the maintainer corrected the diagnosis and was right: **overcommit, not swap**. Three
+JVMs from TWO UNRELATED PROJECTS were already resident (Gradle 8.7 daemon 2.8 G + its Kotlin
+daemon 1.2 G + an idle Gradle 9.4.1 daemon 0.9 G) leaving R8 — the most allocation-hungry step we
+run — under 2.7 G of headroom. Load 56 with 164 MB free is direct-reclaim/D-state pileup, not swap
+exhaustion; swap would only change what happens AFTER the pileup starts. Compounding: 12.6 GB of
+leaked reviewer Gradle homes in `/tmp` had the root disk at 96%.
+
+**zitrone's own `-Xmx2048m` was ALREADY set and was not the problem — nothing bounded the SUM, and
+nothing stopped two projects' builds from overlapping.** Fixes, in leverage order, all box-level in
+`$GRADLE_USER_HOME/gradle.properties` (which OUTRANKS per-project files, correct because the
+failure was cross-project): build JVM `-Xmx2g` + `MaxMetaspaceSize=512m`; **`kotlin.daemon.jvmargs`
+`-Xmx1g` — measured unbounded at 915 MB and NOT reachable by `org.gradle.jvmargs`, and it spawns
+even under `--no-daemon`**; idle-daemon reap 3 h → 15 min; `workers.max=2` against the projects'
+`parallel=true` on 4 vCPU. New `/usr/local/bin/ci-gradle` serializes every build under `flock`,
+calls `--stop` after, and refuses below the 5 G disk floor. **Measured during the live rebuild: R8
+stays IN-PROCESS (build JVM RSS 2.65 G), it does not fork — so the cap belongs on the build JVM.**
+4 GB swap added at `/swapfile` (local disk, `swappiness=10`, `nofail`) as a pressure valve only;
+it has used 512 KB since.
+
+Post-fix rebuild: BUILD SUCCESSFUL in 3m36s, box at 6.0 G available.

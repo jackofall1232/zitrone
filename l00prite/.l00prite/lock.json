@@ -1,12 +1,12 @@
 {
  "schema_version": 1,
- "lock_id": "lock-20260729T-u4-merge",
+ "lock_id": "lock-20260729T-0100-cut",
  "owner_agent": null,
  "owner_session": null,
- "acquired_at": "2026-07-29T03:00:00Z",
- "expires_at": "2026-07-29T04:00:00Z",
- "ttl_seconds": 3600,
- "purpose": "Record U4 merge to main in ledger/state; released",
+ "acquired_at": "2026-07-29T13:00:00Z",
+ "expires_at": "2026-07-29T14:30:00Z",
+ "ttl_seconds": 5400,
+ "purpose": "0.10.0-beta cut: U6 disclosure, bump vc21, signed build, GH release, website flip, box-capacity fixes; released",
  "protected_paths": [
   "ledger.md",
   "memory.md",
