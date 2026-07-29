@@ -90,7 +90,7 @@ type blobUploadRequest struct {
 // JWT-authenticated (RequireAuth runs first); the account is used only to gate
 // admission and is never associated with the stored blob.
 func (h *Handlers) DepositBlob(c *fiber.Ctx) error {
-	if !h.blobLimit.Allow(c.IP()) {
+	if !h.blobLimit.Allow(h.clientKey.key(c)) {
 		return errJSON(c, fiber.StatusTooManyRequests, "rate_limited")
 	}
 	var req blobUploadRequest
@@ -135,7 +135,7 @@ type blobRedeemRequest struct {
 // configured BlobTTLHours fallback (default 1 week) — the server never held the
 // AEAD key, so deletion is the shred.
 func (h *Handlers) RedeemBlob(c *fiber.Ctx) error {
-	if !h.blobLimit.Allow(c.IP()) {
+	if !h.blobLimit.Allow(h.clientKey.key(c)) {
 		return errJSON(c, fiber.StatusTooManyRequests, "rate_limited")
 	}
 	var req blobRedeemRequest

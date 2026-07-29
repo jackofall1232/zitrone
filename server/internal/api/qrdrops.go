@@ -76,7 +76,7 @@ type qrDropDepositRequest struct {
 // DepositDrop does. The burn_hash is stored so a later /burn can match the token
 // preimage without the server ever seeing the preimage on deposit.
 func (h *Handlers) DepositQrDrop(c *fiber.Ctx) error {
-	if !h.qrDropLimit.Allow(c.IP()) {
+	if !h.qrDropLimit.Allow(h.clientKey.key(c)) {
 		return errJSON(c, fiber.StatusTooManyRequests, "rate_limited")
 	}
 	var req qrDropDepositRequest
@@ -138,7 +138,7 @@ type qrDropFetchRequest struct {
 // by the TTL janitor. Missing, expired, and already-burned are all 404 and
 // indistinguishable — a prober must not learn whether a drop exists.
 func (h *Handlers) FetchQrDrop(c *fiber.Ctx) error {
-	if !h.qrDropLimit.Allow(c.IP()) {
+	if !h.qrDropLimit.Allow(h.clientKey.key(c)) {
 		return errJSON(c, fiber.StatusTooManyRequests, "rate_limited")
 	}
 	var req qrDropFetchRequest
@@ -180,7 +180,7 @@ type qrDropBurnRequest struct {
 // and expired are all 404 and indistinguishable — a prober must not learn whether
 // a drop exists.
 func (h *Handlers) BurnQrDrop(c *fiber.Ctx) error {
-	if !h.qrDropLimit.Allow(c.IP()) {
+	if !h.qrDropLimit.Allow(h.clientKey.key(c)) {
 		return errJSON(c, fiber.StatusTooManyRequests, "rate_limited")
 	}
 	var req qrDropBurnRequest
