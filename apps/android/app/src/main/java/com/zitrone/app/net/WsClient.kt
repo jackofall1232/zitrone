@@ -134,9 +134,11 @@ class WsClient(
          * envelope is parsed, so a `rate_limited` frame may carry no id at all). Handle it by
          * falling back to the connection-level path, not by guessing which send it was.
          *
-         * **The id is the relay's claim, not proof.** The relay is conceded in the threat model
-         * and can echo any well-formed UUID, so a receiver must check the id against sends it
-         * actually owns before acting on it.
+         * **The id is the relay's claim, not proof.** The relay is conceded in the threat model and
+         * can echo any well-formed UUID, so a receiver must bound what acting on it can do. Note
+         * what that does NOT mean: there is no ownership check anywhere on this path, and this
+         * kdoc used to imply one (round 1, both lenses). The bound is the receiving repository's
+         * state CAS, not an identity test.
          */
         fun onServerError(code: String, message: String, messageId: String?)
     }

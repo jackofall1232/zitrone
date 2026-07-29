@@ -2352,14 +2352,23 @@ class MessagingCoordinator(
         // Guessing which send it was would be worse than saying nothing.
         //
         // **The id is the relay's claim, never proof — and the relay is conceded in the threat
-        // model.** It can echo any well-formed UUID it likes. Two structural facts contain that,
-        // and neither depends on the relay behaving: `markFailed` no-ops on an id the repository
-        // does not hold, and a COVER envelope never creates a Message row at all, so a cover frame's
-        // rejection cannot surface to the user by construction. The remaining case — the relay
-        // echoing the id of a message that IS ours — is bounded by the CAS inside `markFailed`
-        // (SENDING/SENT and ours only), so the worst it can do is fail a send it could equally have
-        // dropped outright. Marking a delivered message failed is what the CAS exists to prevent.
-        if (messageId != null) messages.markFailed(messageId)
+        // model.** It can echo any well-formed UUID it likes. What contains that is structural and
+        // does not depend on the relay behaving:
+        //  - `markFailedByRelay` no-ops on an id the repository does not hold, and a COVER envelope
+        //    never creates a Message row at all, so a cover frame's rejection cannot surface to the
+        //    user by construction;
+        //  - it accepts SENDING **only**, so an error naming a message the relay already told us it
+        //    STORED is ignored — the receipt wins over a contradicting error;
+        //  - and if a spurious error does fail a send that actually succeeded, a later
+        //    `message.stored` / `message.delivered` now HEALS it rather than being latched out.
+        //
+        // **Ownership is NOT enforced here and this comment must not claim it is** (round 1, both
+        // lenses caught the earlier wording). No `isMine` check exists in the CAS; what makes an
+        // incoming message unreachable is that `addIncoming` forces DELIVERED, which the SENDING
+        // precondition excludes. That is a property of the production call graph, not of the type —
+        // `addOutgoing` would accept `isMine = false` with the default SENDING state if some future
+        // caller passed one.
+        if (messageId != null) messages.markFailedByRelay(messageId)
     }
 
     private companion object {

@@ -81,7 +81,16 @@ class MessageRepository(
     fun markSent(messageId: String) {
         update(
             messageId,
-            precondition = { it.state == MessageState.SENDING },
+            // FAILED is accepted so a real receipt can HEAL a false failure (0.10.1 review round 1,
+            // both lenses). A relay-attributed error can mark a send FAILED; if the relay then says
+            // it stored that very message, the receipt is the ground truth and the error was a lie,
+            // a duplicate, or stale. Before this, FAILED was terminal against receipts, so a single
+            // spurious error left a STORED message displayed as failed forever and a retry
+            // double-delivered it. Healing forward is strictly more honest than latching a failure
+            // the relay itself contradicts.
+            precondition = {
+                it.state == MessageState.SENDING || it.state == MessageState.FAILED
+            },
             transform = { it.copy(state = MessageState.SENT) },
         )
     }
@@ -105,7 +114,10 @@ class MessageRepository(
         val updated = update(
             messageId,
             precondition = {
-                it.state == MessageState.SENDING || it.state == MessageState.SENT
+                // FAILED accepted for the same reason as [markSent] (0.10.1 review round 1): a
+                // delivery receipt contradicts an earlier error outright, and the receipt wins.
+                it.state == MessageState.SENDING || it.state == MessageState.SENT ||
+                    it.state == MessageState.FAILED
             },
             transform = {
                 it.copy(state = MessageState.DELIVERED, deliveredAtMs = it.deliveredAtMs ?: clock())
@@ -126,19 +138,45 @@ class MessageRepository(
         update(
             messageId,
             precondition = {
-                // THIS STATE CHECK IS ALSO THE BOUND ON A RELAY-SUPPLIED ID (0.10.1). This became
-                // reachable from `onServerError`'s `message_id` — a value the RELAY chooses, and
-                // the relay is conceded in the threat model — rather than only from our own send
-                // path. An echoed id can therefore name anything, including an incoming message.
+                // LOCAL failures only — every caller is the device observing first-hand that the
+                // send did not happen. A RELAY-attributed rejection does NOT come through here:
+                // that is [markFailedByRelay], which is narrower (SENDING only) because an error
+                // naming a message the relay already said it STORED is a claim we do not believe.
                 //
-                // An `isMine` clause was written here for that case and then REMOVED, because it
-                // was unreachable: `addIncoming` forces `state = DELIVERED`, so no incoming message
-                // is ever SENDING/SENT and this line already excludes every one of them. The
-                // mutation sweep is what proved it — deleting `isMine` broke no test, including the
-                // test written for it, which was passing off this check the whole time. An
-                // unreachable guard with a test that cannot fail is worse than no guard.
+                // An `isMine` clause was written here when this looked like the relay's entry point
+                // and then REMOVED, because it was unreachable: `addIncoming` forces
+                // `state = DELIVERED`, so no incoming message is ever SENDING/SENT and this line
+                // already excludes every one of them. The mutation sweep proved it — deleting
+                // `isMine` broke no test, including the test written for it, which was passing off
+                // this check the whole time. An unreachable guard with a test that cannot fail is
+                // worse than no guard. Note this is a property of the production call graph, not of
+                // the type: `addOutgoing` would accept `isMine = false` at the default SENDING state.
                 it.state == MessageState.SENDING || it.state == MessageState.SENT
             },
+            transform = { it.copy(state = MessageState.FAILED) },
+        )
+    }
+
+    /**
+     * A **relay-attributed** rejection — `onServerError` carrying a `message_id` (0.10.1).
+     *
+     * **Deliberately narrower than [markFailed]: SENDING only, never SENT.** `SENT` means the relay
+     * told us it stored this exact message; an error naming it afterwards contradicts the relay's
+     * own receipt, and the receipt is the one of the two we should believe. Accepting SENT here let
+     * a hostile lie, a duplicate frame, or a redeploy mismatch mark a STORED message failed — and
+     * because the user's only recovery is retry-under-the-same-id, that produced a genuine double
+     * delivery of a message that was never lost. Both review lenses found this independently in
+     * round 1; it was strictly worse than the relay simply dropping the send, which at least leaves
+     * an honest SENT.
+     *
+     * [markFailed] keeps the wider SENDING/SENT window because its callers are LOCAL failures — the
+     * blob upload threw, the socket was down at hand-off — where the device knows first-hand that
+     * the send did not happen and no relay claim is in play.
+     */
+    fun markFailedByRelay(messageId: String) {
+        update(
+            messageId,
+            precondition = { it.state == MessageState.SENDING },
             transform = { it.copy(state = MessageState.FAILED) },
         )
     }

@@ -1549,13 +1549,24 @@ class DecoySendPairingTest {
         val errorBody = bodyOf(code, "override fun onServerError(")
         assertTrue(
             "the user-facing failure attribution is gone — a rejected send shows SENDING forever",
-            "if(messageId != null) messages.markFailed(messageId)" in errorBody,
+            "if(messageId != null) messages.markFailedByRelay(messageId)" in errorBody,
         )
+        val yieldAt = errorBody.indexOf("if(code == ERROR_RATE_LIMITED)")
+        val attributeAt = errorBody.indexOf("if(messageId != null)")
         assertTrue(
             "the cover yield is now nested inside the attribution: an UNATTRIBUTABLE rejection " +
                 "would no longer take cover off, which is the case the relay produces most",
-            errorBody.indexOf("if(code == ERROR_RATE_LIMITED)") <
-                errorBody.indexOf("if(messageId != null)"),
+            yieldAt in 0 until attributeAt,
+        )
+        // ORDER ALONE IS NOT THE PROPERTY (round 1, both lenses). `if (messageId == null) return`
+        // inserted ABOVE both statements keeps every pinned substring present and the indices in
+        // the right order, while defeating the exact guarantee this claims: an unattributable
+        // rejection would return before the yield. So nothing may short-circuit ahead of the yield
+        // — the yield has to be the first thing the handler does.
+        assertFalse(
+            "something can return before the cover yield, so an unattributable rejection would " +
+                "skip it — the yield must be unconditional, not merely first in source order",
+            errorBody.take(yieldAt).contains("return"),
         )
 
         // The yield must be the FIRST thing the seam does, and the drain must never see it.

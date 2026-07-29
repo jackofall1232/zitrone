@@ -284,6 +284,45 @@ class MessageRepositoryTest {
         }
 
     @Test
+    fun `a relay-attributed failure cannot touch a message the relay said it stored`() = runTest {
+        // Round 1, BOTH lenses. `markFailed` accepted SENT, so a hostile lie, a duplicated frame,
+        // or a relay/client version mismatch could mark a message FAILED that the relay had already
+        // told us it STORED. The user's only recovery is retry-under-the-same-id, so that produced
+        // a real double delivery of a message that was never lost — strictly worse than the relay
+        // simply dropping it, which at least leaves an honest SENT.
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+        repo.markSent("m1") // the relay said: stored
+
+        repo.markFailedByRelay("m1")
+
+        assertEquals(
+            "a receipt outranks an error that contradicts it",
+            MessageState.SENT,
+            repo.conversationMessages("c1").single().state,
+        )
+    }
+
+    @Test
+    fun `a real receipt heals a message a spurious error failed`() = runTest {
+        // The other half of the same defect: FAILED used to be terminal against receipts, so one
+        // spurious error latched a delivered message as failed forever. A receipt is ground truth.
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+        repo.markFailedByRelay("m1")
+        assertEquals(MessageState.FAILED, repo.conversationMessages("c1").single().state)
+
+        repo.markSent("m1")
+        assertEquals(MessageState.SENT, repo.conversationMessages("c1").single().state)
+
+        repo.addOutgoing(message("m2", isMine = true))
+        repo.markFailedByRelay("m2")
+        repo.markDelivered("m2")
+        val byId = repo.conversationMessages("c1").associateBy { it.id }
+        assertEquals(MessageState.DELIVERED, byId.getValue("m2").state)
+    }
+
+    @Test
     fun `a failed message is retryable and a retry re-enters as a normal send`() = runTest {
         // The rejection path has to end somewhere the user can act: FAILED is the state the bubble
         // renders with "!" + retry, and `retryable` is what arms it. Pinning the round trip here
