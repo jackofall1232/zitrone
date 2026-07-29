@@ -3427,3 +3427,31 @@ stays IN-PROCESS (build JVM RSS 2.65 G), it does not fork — so the cap belongs
 it has used 512 KB since.
 
 Post-fix rebuild: BUILD SUCCESSFUL in 3m36s, box at 6.0 G available.
+
+## 2026-07-29 — 0.10.0 FIELD CONFIRMATION (maintainer, on CX23 + device)
+
+Maintainer deployed the relay and reports: **server working, messages sending with no delay, onion
+up to date.** Recorded as the first real-world signal on 0.10.0.
+
+**What this confirms.** The relay deploy from `main` is healthy and the onion mirror is serving the
+current build — so `ad80919b` (bump `currentAPK` + `mirrorAssets`, rebuild required) reached the
+box and worked; the mirror is no longer advertising 0.8.2 into a hidden download section. 0.10.0 is
+now genuinely the first version served to the onion.
+
+**What it does NOT yet confirm, and the record should not pretend otherwise.** "No delay" is
+evidence for **R-U3-1** (*a real send is never blocked, failed, materially delayed, reordered, or
+made less durable by cover traffic*) **only if cover traffic was actually enabled on the sending
+vault.** If it was not, no cover frames were generated, the send choke point ran its uncovered path,
+and the observation says nothing about the requirement — it is a healthy-relay result, not a
+cover-traffic result. **One question settles it and is owed at the start of the next session: was
+cover traffic enabled on the vault that sent?**
+
+Second-order, worth knowing before anyone upgrades this to "R-U3-1 confirmed in the field": absence
+of *perceptible* delay is not absence of delay. The pairing adds a randomised per-send delay to the
+COVER frame only, and the real frame goes first by construction — so the design predicts exactly
+this observation whether or not the mechanism is engaged, which is why the enabled/disabled question
+is the whole of the evidential value. A measured latency comparison (cover on vs off) is what would
+actually test it, and none has been run.
+
+**Standing project rule applied:** a clean field observation is the absence of a symptom, not the
+presence of a proof — same discipline as "a CLEAN from any lens is not a proof".

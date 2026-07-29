@@ -1,12 +1,12 @@
 {
  "schema_version": 1,
- "lock_id": "lock-20260729T-0100-cut",
+ "lock_id": "lock-20260729T-0100-fieldconfirm",
  "owner_agent": null,
  "owner_session": null,
- "acquired_at": "2026-07-29T13:00:00Z",
- "expires_at": "2026-07-29T14:30:00Z",
- "ttl_seconds": 5400,
- "purpose": "0.10.0-beta cut: U6 disclosure, bump vc21, signed build, GH release, website flip, box-capacity fixes; released",
+ "acquired_at": "2026-07-29T14:00:00Z",
+ "expires_at": "2026-07-29T15:00:00Z",
+ "ttl_seconds": 3600,
+ "purpose": "Record maintainer field confirmation of 0.10.0; released",
  "protected_paths": [
   "ledger.md",
   "memory.md",
