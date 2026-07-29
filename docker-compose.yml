@@ -19,6 +19,10 @@ services:
       MAX_PREKEYS_PER_USER: ${MAX_PREKEYS_PER_USER:-100}
       MESSAGE_TTL_UNDELIVERED_HOURS: ${MESSAGE_TTL_UNDELIVERED_HOURS:-72}
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      # Per-account WebSocket send budget. 200, not 100, because a covered send
+      # (0.10.0-beta cover traffic) is two frames on one authenticated socket
+      # and is charged twice. Tunable without a rebuild.
+      SEND_RATE_PER_MINUTE: ${SEND_RATE_PER_MINUTE:-200}
       TOR_ENABLED: ${TOR_ENABLED:-false}
       ONION_ADDRESS: ${ONION_ADDRESS:-}
     volumes:
