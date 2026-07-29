@@ -323,6 +323,84 @@ class MessageRepositoryTest {
     }
 
     @Test
+    fun `a send with no receipt fails on the timeout instead of hanging forever`() = runTest {
+        // Round 1 item 2, maintainer's chosen fix. An unattributable rejection (the relay checks
+        // its budget before parsing, so rate_limited often carries no id) used to leave the bubble
+        // SENDING with no escape: only FAILED is clickable and the store is RAM-only. This bounds
+        // it WITHOUT the relay's cooperation, which is what makes it survive a relay rollback.
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS - 1)
+        assertEquals(
+            "failing early would turn a merely-slow Tor circuit into a duplicate send",
+            MessageState.SENDING,
+            repo.conversationMessages("c1").single().state,
+        )
+
+        advanceTimeBy(2)
+        assertEquals(MessageState.FAILED, repo.conversationMessages("c1").single().state)
+    }
+
+    @Test
+    fun `the relay taking a message disarms the timeout, and delivery may then take as long as it likes`() =
+        runTest {
+            // The timer is on the RELAY'S RECEIPT, never on delivery. A stored message waiting for
+            // an offline peer is normal and must never be failed — that would be a lie about a
+            // message the relay is holding.
+            val repo = repository()
+            repo.addOutgoing(message("m1", isMine = true))
+            repo.markSent("m1")
+
+            advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS * 10)
+
+            assertEquals(MessageState.SENT, repo.conversationMessages("c1").single().state)
+        }
+
+    @Test
+    fun `a retry gets a fresh timeout rather than inheriting the first attempt's`() = runTest {
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS + 1)
+        assertEquals(MessageState.FAILED, repo.conversationMessages("c1").single().state)
+
+        repo.retryable("m1")
+        assertEquals(MessageState.SENDING, repo.conversationMessages("c1").single().state)
+
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS - 1)
+        assertEquals(
+            "the retry must get its own full window, not a stale or already-elapsed one",
+            MessageState.SENDING,
+            repo.conversationMessages("c1").single().state,
+        )
+        advanceTimeBy(2)
+        assertEquals(MessageState.FAILED, repo.conversationMessages("c1").single().state)
+    }
+
+    @Test
+    fun `a late relay receipt heals a message the timeout already failed`() = runTest {
+        // Why the window can afford to be tight: firing early is self-correcting.
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS + 1)
+        assertEquals(MessageState.FAILED, repo.conversationMessages("c1").single().state)
+
+        repo.markSent("m1")
+
+        assertEquals(MessageState.SENT, repo.conversationMessages("c1").single().state)
+    }
+
+    @Test
+    fun `an incoming message is never given a send timeout`() = runTest {
+        val repo = repository()
+        repo.addIncoming(message("theirs"))
+
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS * 3)
+
+        assertEquals(MessageState.DELIVERED, repo.conversationMessages("c1").single().state)
+    }
+
+    @Test
     fun `a failed message is retryable and a retry re-enters as a normal send`() = runTest {
         // The rejection path has to end somewhere the user can act: FAILED is the state the bubble
         // renders with "!" + retry, and `retryable` is what arms it. Pinning the round trip here

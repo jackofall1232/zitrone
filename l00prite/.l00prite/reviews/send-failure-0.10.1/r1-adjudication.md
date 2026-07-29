@@ -47,3 +47,39 @@ build**, and a redeploy from `main` silently reverts the production relay to att
 discriminated**, restores checksum-verified. The sweep also found a defect in my OWN round-0 work —
 an `isMine` guard that was unreachable, with a test that passed off a different check entirely and
 could not fail; both were removed rather than kept for comfort.
+
+---
+
+## Item 2 RESOLVED — maintainer chose the send timeout (2026-07-29)
+
+Implemented in `MessageRepository`: an outgoing message awaiting the relay's `message.stored` is
+failed after **`SEND_TIMEOUT_MS` = 90 s**, armed on `addOutgoing` and re-armed on `retryable`,
+disarmed on every path that moves the message off SENDING.
+
+**It times the relay's RECEIPT, not delivery** — once SENT, the relay has the message and it may
+wait indefinitely for an offline peer without being failed. **It needs no cooperation from the
+relay**, which is the property that made this the right option: it works against the relay as it
+exists in this repo, and survives a rollback or an older deployment.
+
+90 s is set for the slowest transport rather than the fastest (a fresh Tor circuit or I2P tunnel can
+take tens of seconds before the first frame moves), and it can afford to be generous because the
+round-1 healing fix makes an early fire **self-correcting**: a late `message.stored` heals the
+bubble forward via `markSent`.
+
+**Five behavioural tests** (timeout fires; SENT disarms it and delivery may then take forever; a
+retry gets a fresh window; a late receipt heals a timed-out send; incoming mail is never armed).
+
+### The mutation sweep found a second redundant-guard case, and it is declared rather than hidden
+
+**M8 (drop the `markSent` cancel) and M9 (widen the timer's CAS) EACH SURVIVED ALONE. Only M10 —
+both removed together — failed a test.** The two guards mask each other, so no single mutation on a
+single-threaded virtual clock can discriminate them.
+
+Unlike the round-0 `isMine` case, **this redundancy is kept**, because the guards are not equivalent
+under concurrency: the cancel is the common path, but it can lose the race against a job already
+past its delay, and the SENDING-only CAS is then the last line. The comment at the cancel site says
+exactly that and is explicitly forbidden from being upgraded into a correctness claim. Recorded so a
+future reader does not "simplify" one away on the evidence of a surviving single mutation.
+
+**Round-1 totals: 10 mutations applied, 8 discriminated singly, 2 discriminated only as a pair (and
+that pairing is the finding).** 813 tests / 0 failures / 3 skipped, `assembleDebug` exit 0.
