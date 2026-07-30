@@ -241,8 +241,8 @@ export default function HowToPage() {
         <h2 id="lemon-drops">Lemon drops: QR dead drops</h2>
         <p>
           A lemon drop is a message sealed into a one-time QR code instead of sent to a contact. The
-          relay hosts the encrypted drop; whoever scans the QR with the right device opens it —
-          once.
+          relay hosts the encrypted drop, sealed to one recipient&apos;s keys; only the device it
+          was sealed for can open it — once.
         </p>
         <p>
           The feature is <strong>off by default</strong>. Enable it under{" "}
@@ -255,9 +255,14 @@ export default function HowToPage() {
             small proof-of-work deposit before the relay accepts the drop.
           </li>
           <li>
-            <strong>The QR image IS the capability.</strong> Whoever holds that image holds the
-            drop. Print it, hand it over, send it through another channel — but treat the image
-            itself as the secret it is.
+            <strong>The QR is a pointer, not a key — that is the point.</strong> The drop is
+            sealed to one recipient&apos;s keys, so the image can travel in the open: printed,
+            posted on a wall, sent through a channel you don&apos;t trust. Anyone can scan it, but
+            any device other than the sealed-for one just sees a calm explanatory screen — it
+            cannot read the message, and it cannot burn it either (the relay&apos;s fetch is
+            non-destructive, and destroying a drop requires a token that only successful
+            decryption reveals). What the image does give away is that a drop exists — and on a
+            phone without Zitrone, its link opens this website.
           </li>
           <li>
             <strong>One-time open</strong> — opening consumes the drop, and the app then asks the
@@ -275,7 +280,7 @@ export default function HowToPage() {
         <Shot
           src="05-lemon-drop.png"
           alt="A sealed lemon drop shown as a QR code with its burn deadline"
-          caption="A sealed drop. The QR is the whole capability — whoever holds this image can claim the message, once, before the deadline."
+          caption="A sealed drop. Anyone can scan it — only the device it was sealed for can open it, once, before the deadline."
         />
 
         <h2 id="network">Network: I2P, Tor, and the clearnet warning</h2>

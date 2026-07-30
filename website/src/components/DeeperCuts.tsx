@@ -28,7 +28,7 @@ const CUTS = [
   {
     label: "Lemon drops",
     description:
-      "Seal a message into a one-time QR dead drop. The QR image is the entire capability, opening it consumes it, and a drop unclaimed by its deadline burns on the relay.",
+      "Seal a message into a one-time QR dead drop that hides in plain sight: anyone can scan it, only the device it was sealed for can open it. Opening consumes it, and a drop unclaimed by its deadline burns on the relay.",
     href: "/how-to#lemon-drops",
   },
   {

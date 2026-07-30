@@ -145,7 +145,7 @@ tracked disclosure item for 0.11.0.
 | Feature | What it does | How the user reaches it |
 |---|---|---|
 | **Seal a QR drop** | Encrypts a message into a one-time QR "drop" hosted on the relay, which burns if unclaimed by a deadline the sender picks. Sealing solves a deposit proof-of-work. | Chat → droplet button in the compose bar. **Off by default** — enable via Settings → Privacy → *Lemon-drop compose button*. |
-| **Save/share the sealed drop** | Produces a QR image containing the drop link, to print or send. The image *is* the capability. | After sealing → the sealed-drop screen. |
+| **Save/share the sealed drop** | Produces a QR image containing the drop link, to print or send. The image is a **pointer, not a key**: the drop is sealed to one recipient's keys, the relay's fetch is non-destructive (`ApiClient.fetchQrDrop`), and burning requires a token recovered from *inside* the decrypted drop (`ApiClient.burnQrDrop`) — so a non-recipient holding the image can neither read nor destroy the drop. It reveals only that a drop exists. | After sealing → the sealed-drop screen. |
 | **Scan a drop** | Opens a drop sealed for this device. | Chat list → scan icon in the top bar. |
 | **One-time open** | Opening consumes the drop; the app then asks the relay to destroy it. | Automatic on open. |
 | **Advocacy veil** | When a scanned drop is not for this device (or is unknown), shows an explanatory screen rather than an error. | Automatic on scanning a foreign/unknown drop. |

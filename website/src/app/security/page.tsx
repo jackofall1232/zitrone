@@ -165,11 +165,16 @@ export default function SecurityPage() {
         <h2 id="lemon-drops">Lemon drops — QR dead drops</h2>
         <p>
           A message can be sealed into a one-time QR &quot;drop&quot; hosted on the relay instead of
-          sent to a contact: the QR image is the entire capability, opening it consumes it, and a
-          drop unclaimed by its sender-chosen deadline is destroyed. Sealing a drop solves a small
-          proof-of-work deposit, so the relay can&apos;t be flooded with them for free. The feature
-          is off by default; the <a href="/how-to#lemon-drops">how-to page</a> covers enabling and
-          using it.
+          sent to a contact. The drop is sealed to one recipient&apos;s keys, and the QR is a
+          pointer to it, not a key: anyone can scan the image, but only the device it was sealed
+          for can open it — anyone else gets an explanatory screen and can neither read the message
+          nor destroy it (the fetch is non-destructive on the relay, and burning requires a token
+          that only successful decryption reveals). That is what lets a drop hide in plain sight —
+          printed, posted, passed through a channel you don&apos;t trust. Opening consumes it, and
+          a drop unclaimed by its sender-chosen deadline is destroyed. Sealing a drop solves a
+          small proof-of-work deposit, so the relay can&apos;t be flooded with them for free. The
+          feature is off by default; the <a href="/how-to#lemon-drops">how-to page</a> covers
+          enabling and using it.
         </p>
 
         <h2 id="cover-traffic">Cover traffic</h2>
