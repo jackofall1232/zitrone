@@ -1,0 +1,1 @@
+I'll review the orphaned-blob fix on the send path read-only: memoized deposits (5a), the abandon endpoint (5b), and the abandon-vs-retry race. Starting from the protocol docs and the listed files.Pulling the attachment crypto, coordinator deposit/abandon paths, and server blob handlers next.Reading MessagingCoordinator deposit/abandon/retry paths and the related tests.

@@ -1,0 +1,1 @@
+I'll conduct a read-only adversarial review of the four capacity/leak fixes. Starting with the protocol docs and the listed files.Next I'll trace refresh-token rotation, envelope/blob TTL paths, and the client `flushSendRatchet` retry path that bounds item 2.
