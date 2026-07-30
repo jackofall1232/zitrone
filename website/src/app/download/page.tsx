@@ -11,7 +11,7 @@ import { ANDROID_BETA_PUBLISHED, GITHUB_URL, SELF_HOSTING_DOC } from "@/lib/link
 export const metadata: Metadata = {
   title: "Download — Zitrone",
   description:
-    "Get Zitrone for Android, iOS, or Linux desktop. Or self-host the whole thing — it's open source.",
+    "Get Zitrone for Android — a sideloaded beta with a verifiable checksum. Other clients are in development. Or self-host the relay — it's open source.",
 };
 
 function StoreBadge({ store, line1 }: { store: string; line1: string }) {
@@ -38,23 +38,22 @@ export default function DownloadPage() {
           Get the app
         </h1>
         <p className="mt-6 text-lg leading-relaxed text-ink-secondary">
-          Several ways to run Zitrone — mobile or Linux desktop. And, if you count running
-          the entire thing yourself, one more — which we encourage.
+          One client ships today: <strong className="text-ink-primary">Android</strong>, as a
+          sideloaded beta you can verify byte-for-byte. Everything else is in development — we list
+          it that way rather than pretend. And if you count running the entire relay yourself,
+          there&apos;s one more way — which we encourage.
         </p>
 
-        {/* App stores */}
+        {/* Android — the shipped client */}
         <section className="mt-16">
           <h2 className="font-display text-2xl font-semibold tracking-display text-ink-primary">
-            iOS and Android
+            Android — available now (beta)
           </h2>
           <p className="mt-3 leading-relaxed text-ink-secondary">
-            The mobile apps aren&apos;t in the stores yet. The badges below will light up when they
-            are — segments and all.
+            Zitrone isn&apos;t in any app store yet. The Android app is distributed as a signed,
+            sideloaded APK — from GitHub Releases or a Tor onion mirror — with a SHA-256 checksum so
+            you can verify exactly what you&apos;re installing.
           </p>
-          <div className="mt-6 flex flex-wrap gap-4">
-            <StoreBadge line1="Coming soon to the" store="App Store" />
-            <StoreBadge line1="Coming soon to" store="Google Play" />
-          </div>
           {/* Deliberately version-agnostic: the beta page owns version and
               checksum details (they come from lib/links.ts there). Label and
               copy reflect whether a build actually exists yet — no overclaim. */}
@@ -67,7 +66,7 @@ export default function DownloadPage() {
             </div>
             <div className="mt-1 font-display text-base font-semibold text-ink-primary">
               {ANDROID_BETA_PUBLISHED
-                ? "Android beta — sideload while we finish Play Store review"
+                ? "Android beta — sideloaded, not in any app store yet"
                 : "Android beta — not yet available to download"}
             </div>
             <div className="mt-1 text-sm leading-relaxed text-ink-secondary">
@@ -76,61 +75,21 @@ export default function DownloadPage() {
                 : "No public build has been cut yet. See what a beta install will involve, and track releases on GitHub."}
             </div>
           </Link>
+          <div className="mt-6 flex flex-wrap gap-4">
+            <StoreBadge line1="Not yet on" store="Google Play" />
+          </div>
         </section>
 
-        {/* Linux desktop */}
+        {/* Other platforms — honest tiers */}
         <section className="mt-16">
           <h2 className="font-display text-2xl font-semibold tracking-display text-ink-primary">
-            Linux — .deb, .AppImage, .rpm
+            iOS, desktop, and web
           </h2>
           <p className="mt-3 leading-relaxed text-ink-secondary">
-            A native desktop app built with Tauri — no bundled Chromium, just a small Rust backend.
-            The <span className="text-ink-primary">.deb</span> is the primary package for Debian,
-            Ubuntu, Kali Linux, Parrot OS, and Pop!_OS. The{" "}
-            <span className="text-ink-primary">.AppImage</span> is universal — it runs on any distro
-            without installing. An <span className="text-ink-primary">.rpm</span> is also produced
-            for Fedora and RHEL (community-supported).
-          </p>
-          <div className="mt-6 flex flex-wrap gap-4">
-            <a
-              href={`${GITHUB_URL}/releases/latest`}
-              className="w-52 rounded-md border border-line bg-bg-elevated px-5 py-3 text-left transition duration-base ease-brand hover:border-lemon hover:text-lemon"
-            >
-              <div className="font-mono text-[10px] uppercase tracking-wide text-ink-muted">
-                Debian · Ubuntu · Kali
-              </div>
-              <div className="font-display text-base font-semibold text-ink-primary">
-                Download .deb
-              </div>
-            </a>
-            <a
-              href={`${GITHUB_URL}/releases/latest`}
-              className="w-52 rounded-md border border-line bg-bg-elevated px-5 py-3 text-left transition duration-base ease-brand hover:border-lemon hover:text-lemon"
-            >
-              <div className="font-mono text-[10px] uppercase tracking-wide text-ink-muted">
-                Any Linux distro
-              </div>
-              <div className="font-display text-base font-semibold text-ink-primary">
-                Download .AppImage
-              </div>
-            </a>
-            <a
-              href={`${GITHUB_URL}/releases/latest`}
-              className="w-52 rounded-md border border-line bg-bg-elevated px-5 py-3 text-left transition duration-base ease-brand hover:border-lemon hover:text-lemon"
-            >
-              <div className="font-mono text-[10px] uppercase tracking-wide text-ink-muted">
-                Fedora · RHEL (community)
-              </div>
-              <div className="font-display text-base font-semibold text-ink-primary">
-                Download .rpm
-              </div>
-            </a>
-          </div>
-          <p className="mt-5 leading-relaxed text-ink-secondary">
-            Screenshot protection on the desktop app is a focus-loss blur overlay. It&apos;s
-            best-effort: Linux has no universal way to hard-block screen capture on Wayland or X11.
-            For an OS-level hard block on message content, the Android app is the platform that
-            provides it.
+            In development, behind Android — none of them is available to download today. Android is
+            the reference implementation; the other clients follow it, and this page will offer them
+            only when they actually ship. If a site or store offers you a Zitrone build for these
+            platforms today, it isn&apos;t ours.
           </p>
         </section>
 

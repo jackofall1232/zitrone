@@ -39,6 +39,12 @@ export function Footer() {
             Security Model
           </Link>
           <Link
+            href="/how-to"
+            className="text-ink-secondary transition duration-base hover:text-lemon"
+          >
+            How-to Guide
+          </Link>
+          <Link
             href="/privacy"
             className="text-ink-secondary transition duration-base hover:text-lemon"
           >

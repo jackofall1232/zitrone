@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { Audiences } from "@/components/Audiences";
+import { DeeperCuts } from "@/components/DeeperCuts";
 import { Features } from "@/components/Features";
 import { Hero } from "@/components/Hero";
 import { HowItWorks } from "@/components/HowItWorks";
@@ -17,6 +18,7 @@ export default function HomePage() {
       <Features />
       <HowItWorks />
       <Audiences />
+      <DeeperCuts />
       <PlatformBadges />
       <OpenSourceCallout />
     </main>

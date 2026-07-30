@@ -34,6 +34,12 @@ export function Nav() {
           >
             Security
           </Link>
+          <Link
+            href="/how-to"
+            className="hidden text-ink-secondary transition duration-base hover:text-lemon sm:block"
+          >
+            How-to
+          </Link>
           <a
             href={GITHUB_URL}
             target="_blank"

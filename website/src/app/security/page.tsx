@@ -10,7 +10,7 @@ import { AUDIT_LOG, GITHUB_URL, SECURITY_MODEL_DOC, SECURITY_POLICY } from "@/li
 export const metadata: Metadata = {
   title: "Security — Zitrone",
   description:
-    "How Zitrone works under the hood: Signal Protocol, on-device keys, a server that stores almost nothing, screenshot protection, and optional Tor routing.",
+    "How Zitrone works under the hood: Signal Protocol, a passphrase-sealed vault, a server that stores almost nothing, screenshot protection, cover traffic, and I2P/Tor routing.",
 };
 
 export default function SecurityPage() {
@@ -43,9 +43,9 @@ export default function SecurityPage() {
           your history is probably already gone anyway.
         </p>
         <p>
-          The implementations are established libraries, not homemade:{" "}
-          <code>libsodium.js</code> and <code>libsignal-client</code> (the latter on iOS and
-          Android).
+          The implementations are established libraries, not homemade: the shipped Android client
+          uses <code>libsignal-android</code>, and the reference crypto for the in-development
+          clients is built on <code>libsodium</code>.
         </p>
 
         <h2 id="keys">Key generation and storage</h2>
@@ -77,19 +77,51 @@ export default function SecurityPage() {
         <p>Where your keys live depends on your platform:</p>
         <ul>
           <li>
-            <strong>iOS</strong> — Secure Enclave and Keychain, biometric-protected.
+            <strong>Android</strong> (shipping) — everything lives inside the passphrase-sealed
+            vault described in the next section. Biometric unlock, where enabled, wraps the vault
+            key through the Android Keystore System, hardware-backed where the device supports it.
           </li>
           <li>
-            <strong>Android</strong> — Android Keystore System, hardware-backed where the device
-            supports it.
+            <strong>iOS</strong> (in development, not yet released) — planned to use the Secure
+            Enclave and Keychain, biometric-protected.
           </li>
           <li>
-            <strong>Linux</strong> — the Secret Service API (GNOME Keyring on GNOME, KWallet on
-            KDE). On minimal desktops with no Secret Service daemon, an Argon2id+AES-256-GCM
-            encrypted file fallback is used. Either way the vault is encrypted before it reaches the
-            storage layer.
+            <strong>Linux</strong> (in development, not yet released) — planned to use the Secret
+            Service API (GNOME Keyring on GNOME, KWallet on KDE), with an Argon2id+AES-256-GCM
+            encrypted-file fallback on minimal desktops. Either way the vault is encrypted before it
+            reaches the storage layer.
           </li>
         </ul>
+
+        <h2 id="vault">The vault — and plausible deniability</h2>
+        <p>
+          On Android, everything Zitrone holds — keys, contacts, messages — lives inside a single
+          encrypted vault image, sealed under a passphrase you set at first launch. The unlock key
+          is derived on-device with Argon2id; nothing about the vault ever reaches a server, which
+          is also why the passphrase is <strong>unrecoverable</strong>: there is no reset and
+          nothing on our side to recover.
+        </p>
+        <p>
+          The vault image has a fixed number of slots, and an unused slot is uniformly random filler
+          — byte-indistinguishable from a used one. The number of vaults on a device is never stored
+          anywhere. That structure exists for a reason: Zitrone supports a{" "}
+          <strong>second, plausibly-deniable vault</strong> — a fully independent identity behind a
+          different passphrase, with no cryptographic evidence that it exists. There is deliberately
+          no UI for it anywhere in the app; the complete instructions, and the sharp edges you must
+          read before relying on it, live on <a href="/how-to#second-vault">the how-to page</a>.
+        </p>
+
+        <h2 id="pucker-burn">Pucker Burn — the duress password</h2>
+        <p>
+          A separate password that, entered at the lock screen, erases everything Zitrone holds on
+          the device — every vault, preferences, keystore entries, caches — and closes the app. Set
+          it under Settings → Account. Two properties are deliberate: the app offers{" "}
+          <strong>no readback anywhere</strong> — it cannot tell you whether a burn password is set,
+          because that answer would itself prove a duress credential exists — and consequently,{" "}
+          <strong>forgetting it is unrecoverable</strong>. A burn is device-local: it does not
+          delete your account on the relay. An armed device is byte-indistinguishable from an
+          unarmed one.
+        </p>
 
         <h2 id="server">What the server stores (and doesn&apos;t)</h2>
         <p>
@@ -104,6 +136,7 @@ export default function SecurityPage() {
           <li>Your public identity key (Curve25519)</li>
           <li>Your public prekeys (one-time and signed)</li>
           <li>Encrypted message envelopes in transit — blob only</li>
+          <li>Encrypted attachment blobs — opaque, held under a token hash (see below)</li>
           <li>Delivery receipts — a hash of the message ID, nothing else</li>
           <li>Account creation timestamp</li>
         </ul>
@@ -117,10 +150,44 @@ export default function SecurityPage() {
           <li>Any logs that identify users — access logs are disabled outright</li>
         </ul>
         <p>
-          Transport is WebSocket over TLS 1.3 with certificate pinning on every platform. Typing
-          indicators and read receipts travel as encrypted signals too — the server can&apos;t even
-          tell whether you&apos;ve read something. Deleting your account purges everything: prekeys,
-          pending envelopes, the account record. Irreversibly.
+          Attachments are <strong>blind blobs</strong>: a file is encrypted with its own key on your
+          device and uploaded to the relay, which stores it under a hash of a token it never sees.
+          The token and the key travel inside the ratchet-encrypted message — the relay holds
+          ciphertext it cannot decrypt and cannot even look up without the token.
+        </p>
+        <p>
+          Transport is WebSocket over TLS 1.3, with certificate pinning in the shipped Android
+          client. Typing indicators and read receipts travel as encrypted signals too — the server
+          can&apos;t even tell whether you&apos;ve read something. Deleting your account purges
+          everything: prekeys, pending envelopes, the account record. Irreversibly.
+        </p>
+
+        <h2 id="lemon-drops">Lemon drops — QR dead drops</h2>
+        <p>
+          A message can be sealed into a one-time QR &quot;drop&quot; hosted on the relay instead of
+          sent to a contact: the QR image is the entire capability, opening it consumes it, and a
+          drop unclaimed by its sender-chosen deadline is destroyed. Sealing a drop solves a small
+          proof-of-work deposit, so the relay can&apos;t be flooded with them for free. The feature
+          is off by default; the <a href="/how-to#lemon-drops">how-to page</a> covers enabling and
+          using it.
+        </p>
+
+        <h2 id="cover-traffic">Cover traffic</h2>
+        <p>
+          The Android client emits synthetic traffic so that a passive network observer — an ISP, a
+          hostile Wi-Fi network — cannot pick out a real send by its timing. Every real send is
+          paired with a cover frame of the same length, in unpredictable order, with a randomized
+          delay. Two things are deliberate about it. First, <strong>it has no UI at all</strong> —
+          no toggle, no indicator, nothing in Settings — because a visible switch would itself be a
+          signal. Second,{" "}
+          <strong>
+            a real message is never delayed, reordered, blocked, or made less durable to produce
+            cover
+          </strong>
+          ; under any contention, cover yields and the real send proceeds. Honest limits: cover is
+          paired with real sends, so periods when you send nothing are not covered — dead air is not
+          disguised. And it does not hide who talks to whom from the relay itself, which sees
+          envelope routing regardless.
         </p>
 
         <h2 id="screenshots">Screenshot protection, by platform</h2>
@@ -134,12 +201,12 @@ export default function SecurityPage() {
             <strong>Android</strong> (shipping) — <code>FLAG_SECURE</code> on every screen with
             message content. This is an OS-level hard block: screenshots and screen recordings come
             out black. The strongest protection of the three. On top of that, every chat carries an
-            <strong>identity watermark</strong>: a faint, tiled lattice of <em>your own</em> identity
-            fingerprint painted behind the messages, so anything photographed off the screen is
-            visibly marked as yours. It is deliberately visible — a deterrent nobody can see deters
-            nobody — and it is always on, with no toggle. It is drawn on your device and reported
-            nowhere: it marks a leak for whoever later looks at the image, not for us. We have no
-            telemetry and no way to know a screenshot happened.
+            <strong>identity watermark</strong>: a faint, tiled lattice of <em>your own</em>{" "}
+            identity fingerprint painted behind the messages, so anything photographed off the
+            screen is visibly marked as yours. It is deliberately visible — a deterrent nobody can
+            see deters nobody — and it is always on, with no toggle. It is drawn on your device and
+            reported nowhere: it marks a leak for whoever later looks at the image, not for us. We
+            have no telemetry and no way to know a screenshot happened.
           </li>
           <li>
             <strong>iOS</strong> (in development, not yet released) — screen recording is detected
@@ -151,9 +218,9 @@ export default function SecurityPage() {
             <strong>Linux (desktop app)</strong> (in development, not yet released) — a focus-loss
             blur overlay: the moment the window loses focus or visibility, the message list is
             blurred and desaturated, plus the same identity watermark described under Android. This
-            is best-effort: Linux exposes no
-            universal API to hard-block screen capture on either Wayland or X11, and we won&apos;t
-            pretend otherwise. Android remains the platform with a true OS-level hard block.
+            is best-effort: Linux exposes no universal API to hard-block screen capture on either
+            Wayland or X11, and we won&apos;t pretend otherwise. Android remains the platform with a
+            true OS-level hard block.
           </li>
         </ul>
         <p>
@@ -162,18 +229,35 @@ export default function SecurityPage() {
           otherwise.
         </p>
 
-        <h2 id="tor">Tor routing</h2>
+        <h2 id="network">The network layer: I2P, Tor, clearnet</h2>
         <p>
           Network-level metadata — who connected, from where — is the hardest thing for any
-          messenger to hide. Zitrone keeps stored metadata minimal, and for the network layer it
-          offers optional Tor routing: Orbot integration on iOS and Android, and a local Tor daemon
-          (or Tor Browser&apos;s port) on the Linux desktop app. It&apos;s opt-in, not on by
-          default, because it trades latency for anonymity and that should be your call.
+          messenger to hide. Zitrone keeps stored metadata minimal, and on the wire it resolves its
+          transport in a fixed order:
         </p>
+        <ul>
+          <li>
+            <strong>I2P first, on by default.</strong> When the official I2P app is installed, the
+            Android client routes through its local proxy automatically. Without the I2P app the
+            setting is inert — Settings shows an install link when it&apos;s missing.
+          </li>
+          <li>
+            <strong>Tor, opt-in.</strong> Routing through Orbot&apos;s local SOCKS proxy. Slower,
+            more private than clearnet; requires Orbot.
+          </li>
+          <li>
+            <strong>Clearnet, as a warned fallback.</strong> When neither router is available, the
+            client connects directly — and the connection status in Settings says so explicitly,
+            including that clearnet exposes your IP address. Message content stays end-to-end
+            encrypted on every transport; what the transport changes is who can see that you
+            connected.
+          </li>
+        </ul>
 
         <h2 id="open-source">Open source and audit history</h2>
         <p>
-          Everything — the encryption, the server, all three apps — is open source under AGPL-3.0 at{" "}
+          Everything — the encryption, the server, the shipped Android app and the in-development
+          clients — is open source under AGPL-3.0 at{" "}
           <a href={GITHUB_URL}>github.com/jackofall1232/zitrone</a>. The AGPL means anyone running a
           modified Zitrone as a service must publish their changes. No silent forks with weakened
           crypto.
@@ -187,7 +271,8 @@ export default function SecurityPage() {
         </p>
         <p>
           For the full technical treatment — threat model, transport details, the works — read the{" "}
-          <a href={SECURITY_MODEL_DOC}>security model documentation</a>.
+          <a href={SECURITY_MODEL_DOC}>security model documentation</a>. For a hands-on walkthrough
+          of every shipped feature, see <a href="/how-to">the how-to guide</a>.
         </p>
       </article>
     </main>
