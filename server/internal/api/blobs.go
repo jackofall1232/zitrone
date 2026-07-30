@@ -134,6 +134,40 @@ type blobRedeemRequest struct {
 // same token returns 404. Unfetched blobs are purged by the janitor at the
 // configured BlobTTLHours fallback (default 1 week) — the server never held the
 // AEAD key, so deletion is the shred.
+// AbandonBlob lets a DEPOSITOR destroy a blob it is giving up on, so an orphan
+// does not wait out its TTL (0.10.2 item 5b).
+//
+// **KEYED ON THE TOKEN, NOT THE BLOB ID — deliberately.** The blob id is public
+// (see [RedeemBlob]: knowing it is explicitly not enough to redeem), so an
+// id-keyed delete would hand a destruction capability to a public value and let
+// anyone who saw an id destroy someone's attachment. Requiring the token means
+// only a party that could already redeem-and-burn the blob can abandon it, which
+// grants no new power. Revealing the token here is acceptable precisely because
+// the blob is being destroyed in the same breath.
+//
+// Authenticated, because only a depositor has a reason to call it. The response
+// never says whether a row existed — same opacity as redemption — so this cannot
+// probe which ids are live.
+func (h *Handlers) AbandonBlob(c *fiber.Ctx) error {
+	if !h.blobLimit.Allow(h.clientKey.key(c)) {
+		return errJSON(c, fiber.StatusTooManyRequests, "rate_limited")
+	}
+	var req blobRedeemRequest
+	if err := c.BodyParser(&req); err != nil {
+		return errJSON(c, fiber.StatusBadRequest, "bad_request")
+	}
+	token, err := base64.StdEncoding.DecodeString(req.Token)
+	if err != nil || len(token) != blobTokenBytes {
+		return errJSON(c, fiber.StatusBadRequest, "bad_token")
+	}
+	blobID := sha256.Sum256(token)
+	if err := h.store.AbandonBlob(c.Context(), blobID[:]); err != nil {
+		return errJSON(c, fiber.StatusInternalServerError, "store_failed")
+	}
+	// 204 whether or not a row was there: a caller learns nothing about liveness.
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
 func (h *Handlers) RedeemBlob(c *fiber.Ctx) error {
 	if !h.blobLimit.Allow(h.clientKey.key(c)) {
 		return errJSON(c, fiber.StatusTooManyRequests, "rate_limited")

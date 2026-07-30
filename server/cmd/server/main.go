@@ -115,6 +115,9 @@ func main() {
 	// capability, so the relay cannot link a fetch to an account (see blobs.go).
 	v1.Post("/blobs", handlers.RequireAuth, handlers.DepositBlob)
 	v1.Post("/blobs/redeem", handlers.RedeemBlob)
+	// Depositor-only cleanup of an orphan (0.10.2 item 5b) — token-keyed, so it
+	// grants no capability the blob id alone would.
+	v1.Post("/blobs/abandon", handlers.RequireAuth, handlers.AbandonBlob)
 
 	// QR dead drops (lemon drops) — anonymous, unauthenticated. Proof-of-work on
 	// deposit stands in for auth; fetch is blind and NON-destructive (a wrong scan

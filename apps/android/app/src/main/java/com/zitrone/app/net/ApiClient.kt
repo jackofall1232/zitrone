@@ -268,6 +268,27 @@ class ApiClient(
     }
 
     /**
+     * Give up on a blob we uploaded, so it does not wait out its TTL (0.10.2 item 5b).
+     *
+     * The upload happens BEFORE the envelope is published, so a send that dies in between leaves a
+     * blob nothing will ever fetch — up to 8 MiB held for the full TTL. This reclaims it on the two
+     * routes the client actually knows about: a non-durable ratchet flush, and a contact deleted
+     * mid-send. A crash cannot call it, so the TTL remains the backstop for that route.
+     *
+     * **Keyed on the TOKEN, not the blob id.** The blob id is public; the token is the capability.
+     * Sending it is acceptable here only because the blob is being destroyed in the same request.
+     *
+     * **Best-effort by design — see the call sites: failures are swallowed.** This runs on paths that
+     * are ALREADY failing, and letting cleanup turn a failed send into a crash, or delay the user's
+     * feedback, would be a worse defect than the orphan it reclaims. The TTL still collects anything
+     * this misses.
+     */
+    suspend fun abandonBlob(blobTokenBase64: String) {
+        val body = JSONObject().apply { put("token", blobTokenBase64) }
+        execute(post("/api/v1/blobs/abandon", body))
+    }
+
+    /**
      * POST /api/v1/blobs/redeem — present the token; receive the blob; the blob
      * is destroyed in the same operation (single-use; a replay returns 404). NO
      * authentication: the token is the capability, and an unauthenticated fetch

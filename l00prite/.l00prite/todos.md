@@ -1632,10 +1632,31 @@ by compiler-enforced design (D2c), so the upload cannot move inside it.
 > deniability surface**; it rides alongside the attachment bytes the message already retains in
 > memory for retry.
 
-**5b. An authenticated abandon/DELETE endpoint** for the known-failure paths (a) non-durable flush and
-(b) contact-deleted-mid-send, so the client reclaims immediately instead of waiting out the TTL.
-Id-only, authenticated, no linkage revealed — the depositor already knows the id. Crash (route c)
-remains TTL-bounded, now at 96 h rather than 168 h (item 2).
+**5b. An authenticated abandon endpoint — BUILT 2026-07-30.** `POST /api/v1/blobs/abandon`,
+authenticated, rate-limited on the blob bucket, 204 whether or not a row existed so it cannot probe
+liveness. Client: `ApiClient.abandonBlob` called from `abandonBlobQuietly` on route (a) the
+non-durable flush and route (c) the catch-all throw.
+
+> **⚠️ DEVIATION FROM THE SPEC, deliberate: it is keyed on the TOKEN, not the blob id.** The spec said
+> "id-only … the depositor already knows the id". **The blob id is PUBLIC** — `RedeemBlob`'s own
+> comment says knowing it "is not enough to redeem" — so an **id-keyed delete would hand a destruction
+> capability to a public value**, letting anyone who ever saw an id destroy someone's attachment.
+> Requiring the token means only a party that could already redeem-and-burn can abandon, which grants
+> no new power; revealing the token is acceptable because the blob dies in the same request.
+
+**Route (b), contact-deleted-mid-send, is NOT covered** and that is a known gap: the check lives
+inside `publishOutgoing`, which is non-suspending by compiler-enforced design (D2c), so an abandon
+call cannot be made from there. Routes (a) and (c) are covered; **(b) and crash remain TTL-bounded**,
+now 96 h rather than 168 h (item 2).
+
+**Best-effort by design:** every call site is an already-failing send, so failures are swallowed —
+cleanup that threw would turn a failed send into a crash, and cleanup that blocked would delay the
+user's "!" indicator. Both are worse than the orphan. The TTL stays the backstop regardless, because
+a crash cannot call this at all.
+
+**Test scope, honestly:** auth-required and malformed-token paths are covered behaviourally; the
+store-touching path is not unit-tested because `Handlers` holds a concrete `*db.Store` and would need
+a database.
 
 **Net: retry amplification eliminated, known failures reclaimed, crash orphans bounded — with no
 change to the send-path ordering 0.10.1 just hardened.**

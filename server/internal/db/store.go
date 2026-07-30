@@ -304,6 +304,22 @@ func (s *Store) RedeemBlob(ctx context.Context, blobID []byte) ([]byte, error) {
 	return ciphertext, err
 }
 
+// AbandonBlob deletes a blob its DEPOSITOR is giving up on, keyed by the blob id
+// the caller proved it holds the token for (0.10.2 item 5b).
+//
+// WHY THIS EXISTS. A blob is uploaded BEFORE the envelope is published, so three
+// routes leave one with nothing that will ever fetch it: a non-durable ratchet
+// flush, a contact deleted mid-send, and any throw between. Before this only the
+// TTL reclaimed them — and one blob is up to 8,454,180 B, roughly 545 accounts'
+// worth of disk, with ~2,079 orphans enough to exhaust the box.
+//
+// Deliberately says nothing about whether a row existed, so it cannot be used to
+// probe which blob ids are live.
+func (s *Store) AbandonBlob(ctx context.Context, blobID []byte) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM blobs WHERE blob_id = $1`, blobID)
+	return err
+}
+
 // PurgeExpiredBlobs deletes blobs past their TTL whether collected or not.
 func (s *Store) PurgeExpiredBlobs(ctx context.Context, now time.Time) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM blobs WHERE expires_at <= $1`, now)

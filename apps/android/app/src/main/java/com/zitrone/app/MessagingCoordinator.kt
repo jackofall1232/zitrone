@@ -412,6 +412,27 @@ class MessagingCoordinator(
     }
 
     /**
+     * Ask the relay to drop a blob we are giving up on — **and never let that fail anything**
+     * (0.10.2 item 5b).
+     *
+     * Every call site is a send that has ALREADY failed. Cleanup that threw would turn a failed send
+     * into a crash; cleanup that blocked would delay the user's "!" indicator. Both are worse defects
+     * than the orphan being reclaimed, so failures are swallowed and **the TTL remains the backstop**
+     * — which it has to be regardless, because a crash is one of the orphan routes and cannot call
+     * this at all.
+     *
+     * A null token means there is nothing to abandon: the deposit never happened, or was already
+     * released on a terminal outcome.
+     */
+    private fun abandonBlobQuietly(tokenBase64: String?) {
+        if (tokenBase64 == null) return
+        scope.launch {
+            runCatching { api.abandonBlob(tokenBase64) }
+                .onFailure { if (it is CancellationException) throw it }
+        }
+    }
+
+    /**
      * Whether [contactId] is still a live roster entry. Used by the send/deliver
      * publish tails: a send is always to an existing conversation, so a `false`
      * here means the contact was torn down mid-send and nothing may be deposited
@@ -1430,6 +1451,11 @@ class MessagingCoordinator(
             ) {
                 diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
                 messages.markFailed(messageId)
+                // ROUTE (a) — item 5b. The blob is already deposited by this point and this send is
+                // over, so nothing will ever fetch it: reclaim it rather than leave up to 8 MiB to
+                // wait out the full TTL. Abandoning cannot strand a later attempt, because item 5a
+                // memoises the token — a retry re-deposits under the SAME blob id.
+                abandonBlobQuietly(b64(blob.token))
                 return@runCatching
             }
             // The NON-SUSPENDING publish tail (see [publishOutgoing]), called directly and FIRST. If
@@ -1443,6 +1469,10 @@ class MessagingCoordinator(
             if (e is CancellationException) throw e
             // Upload throw or transport error — the attachment never made it out.
             messages.markFailed(messageId)
+            // ROUTE (c) — item 5b, best effort. If the throw came AFTER a successful deposit the blob
+            // is an orphan; if before, there is nothing to delete and the relay's 204 says so without
+            // revealing which. The memo is the only place the token survives this far.
+            abandonBlobQuietly(attachmentDeposits[messageId]?.token?.let(::b64))
             val bodySuffix = (e as? ApiClient.ApiException)?.responseBody
                 ?.let { " server_error=$it" }
                 .orEmpty()
