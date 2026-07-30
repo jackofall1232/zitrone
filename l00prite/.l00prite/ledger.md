@@ -3641,3 +3641,49 @@ deanonymisation risk **needed no code** because it only ever existed in a reject
 composition defect *inside the remediation for a composition defect*, twice, and a privacy defect in a
 step written as hygiene. **Reviewing plans is cheaper than reviewing code and catches a class code review
 structurally cannot.**
+
+## 2026-07-30 — 0.10.2 item 5: v5 REJECTED, and the pass invalidated the PREMISE all five plans shared.
+
+**Five plans, five rejections, zero code.** The v5 pass did something the previous four could not: it
+rejected not the plan but **the decision underneath every plan.**
+
+**B1, ALL FIVE LENSES INDEPENDENTLY, SAME MECHANISM: the reversal trades a DB-ENFORCED cap for a
+BEST-EFFORT NETWORK one.** On the current tree, `blobId = sha256(token)` plus the memoized token plus
+`INSERT … ON CONFLICT (blob_id) DO NOTHING` means **k retries of one message can only ever occupy ONE
+row — with no network call, no bearer, no limiter budget, and no surviving session required.** Every
+plan v1–v5 deleted that and replaced it with one row per *attempt*, reclaimed only if k authenticated
+POSTs each return 204 before the session ends. On the metric item 5 exists for, that **lowers the
+exhaustion bar by a factor of k, in exactly the correlated-outage regime that produces retries across
+the user base at once.**
+
+**"Reverse 5a" was the error.** It was decided at the top of this arc, built on five times, and never
+challenged — including by me, across five designs. 5a's memoization was not the problem; it was the
+mechanism providing the guarantee.
+
+**v6 is small, and it is the reframing: STOP REPLACING WHAT THE TREE ALREADY OWNS CORRECTLY.**
+`attachmentDeposits` is *already* a per-message registry with three retirement points, released on every
+terminal outcome, pinned by a test. v1–v5 each proposed to replace it with a state machine, a flush, a
+queue or a registry, and each died on a route the replacement could not see. **v6 adds two bits to the
+existing memo and changes one branch. No registry, no queue, no state machine, no teardown, no storm.**
+
+- **M1 — IDEMPOTENT REDEPOSIT: treat a 409 on a memoized-token deposit as SUCCESS.** One branch. Safety
+  verified end to end: our own 256-bit token ⇒ our own row; `digest`/`size` are **plaintext**-derived and
+  attempt-independent; the nonce travels inside the box; the key is memoized. **It also fixes a live UX
+  defect nobody in five rounds had named — today the FIRST RETRY TAP OF EVERY ATTACHMENT is guaranteed
+  to fail on a 409.** It keeps the server-enforced cap and deletes the motivation for the entire arc.
+- **M2 — a `published` bit**, set non-suspending inside `publishOutgoing` at `ws.sendMessage == true`,
+  read at every abandon site. M3 made structural instead of documentary.
+
+**Two more findings worth keeping.** M1×M3 as written never retired `ENQUEUED`/`CONFIRMED` — the two
+states covering *every successful send* — and each retained entry is the blob **redemption token** for a
+deliberately unauthenticated `RedeemBlob`, so v5 would have held, for a whole session, proof an
+attachment was sent **plus the live capability to fetch-and-burn it**, after the tree would have dropped
+both. And the shared 60/min bucket is **accidentally self-limiting** today: an abandon storm 429s the
+deposit too, so no extra row is minted. Splitting the buckets *creates* the "deposits land while abandons
+429" state that manufactures k rows — so item 2 is a prerequisite that also makes B1 easier to reach, and
+must be **deployed**, not merely merged.
+
+**Method result for the whole arc: 30 review agents, 5 design passes, 5 rejected plans, ZERO code written
+and nothing unwound.** The last pass overturned a premise the maintainer and the agent had both held
+since the beginning — which no amount of implementation review would ever have surfaced, because the
+code would have been correct against a wrong design.
