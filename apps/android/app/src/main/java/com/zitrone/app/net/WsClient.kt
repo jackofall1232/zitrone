@@ -130,8 +130,10 @@ class WsClient(
          * absent or empty value means *unattributable*, never a message whose id is `""`.
          *
          * **A null id is not an error path.** It is the pre-0.10.1 behaviour and stays correct:
-         * some rejections genuinely cannot be attributed (the send budget is checked before the
-         * envelope is parsed, so a `rate_limited` frame may carry no id at all). Handle it by
+         * some rejections genuinely cannot be attributed — a header or UUID that fails to parse,
+         * a lost frame, an older relay. **Not, as this said before, because the budget is checked
+         * ahead of parsing:** the merged `handleSend` parses the header FIRST and then rate-limits,
+         * so an ordinary rate-limited send DOES carry its id. Handle a null by
          * falling back to the connection-level path, not by guessing which send it was.
          *
          * **The id is the relay's claim, not proof.** The relay is conceded in the threat model and

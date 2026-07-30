@@ -324,10 +324,12 @@ class MessageRepositoryTest {
 
     @Test
     fun `a send with no receipt fails on the timeout instead of hanging forever`() = runTest {
-        // Round 1 item 2, maintainer's chosen fix. An unattributable rejection (the relay checks
-        // its budget before parsing, so rate_limited often carries no id) used to leave the bubble
-        // SENDING with no escape: only FAILED is clickable and the store is RAM-only. This bounds
-        // it WITHOUT the relay's cooperation, which is what makes it survive a relay rollback.
+        // Round 1 item 2, maintainer's chosen fix. An unattributable rejection used to leave the
+        // bubble SENDING with no escape: only FAILED is clickable and the store is RAM-only. This
+        // bounds it WITHOUT the relay's cooperation, which is what makes it survive a relay
+        // rollback — and that, not the frequency of unattributable rejections, is the justification.
+        // (The merged relay parses the header before rate-limiting, so an ordinary rate_limited DOES
+        // carry its id; what remains unattributable is parse failures, lost frames, older relays.)
         val repo = repository()
         repo.addOutgoing(message("m1", isMine = true))
         repo.armSendTimeout("m1") // what publishOutgoing does at the socket handoff

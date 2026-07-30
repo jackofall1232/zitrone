@@ -43,11 +43,15 @@ class ServerErrorRouterTest {
 
     @Test
     fun `an UNATTRIBUTABLE rate_limited still yields cover`() {
-        // THE CASE THAT MATTERS MOST. The relay cannot always name the message — the id is echoed
-        // only for a well-formed UUID, and is `omitempty`, so absent and empty both arrive as null.
-        // The budget is contended either way, so cover must still stand down. Making the yield
-        // conditional on the id would drop the one reactive signal the relay gives us in exactly the
-        // case it is most likely to arrive.
+        // The relay cannot always name the message — the id is echoed only for a well-formed UUID
+        // and is `omitempty`, so absent and empty both arrive as null. The budget is contended either
+        // way, so cover must still stand down: making the yield conditional on the id would drop the
+        // one reactive signal the relay gives us about the shared send budget.
+        //
+        // NOT because this case is the likely one — that claim was stale even as this file was
+        // written (round 3). The merged `handleSend` parses the header before rate-limiting, so an
+        // ordinary rate-limited send DOES carry its id. This path covers parse failures, lost frames
+        // and older relays: rarer, but the yield still has to fire.
         val c = route(ERROR_RATE_LIMITED, null)
 
         assertEquals(listOf("yield"), c.order)

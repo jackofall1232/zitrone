@@ -1484,6 +1484,23 @@ class DecoySendPairingTest {
                 "$tail returns true from somewhere other than the ws.sendMessage branch",
                 "return true" in handoffBranch,
             )
+
+            // ROUND 3, the cheaper seam one lens named as still unexploited. The round-2 P1 was
+            // arming the send timeout at BUBBLE CREATION, which for an attachment put an unbounded
+            // blob upload inside the 90 s window. The fix moved arming into this branch — and until
+            // now nothing pinned that it stayed here. This lives beside the ownership assertion
+            // because it constrains the same brace-walked branch, and it is the one wiring fact a
+            // behavioural repository test cannot reach: MessageRepositoryTest can prove
+            // `addOutgoing` does NOT arm (and does), but only source can show WHERE arming moved to.
+            if (tail == "publishOutgoing") {
+                assertTrue(
+                    "the send timeout is no longer armed at the socket handoff. If it moved back to " +
+                        "addOutgoing the 90 s window contains an unbounded blob upload again, and a " +
+                        "timer firing mid-upload offers retry on a live send — two envelopes under " +
+                        "one id, which double-delivers once the first is acked and its row deleted",
+                    "messages.armSendTimeout(messageId)" in handoffBranch,
+                )
+            }
         }
     }
 
