@@ -1234,3 +1234,56 @@ change regress?". **Read the roster AND the prompting guide before choosing a le
 
 **Rule:** for Kimi, an agent from a shell uses `moon`. `kimi` interactive + plan mode + `/yolo` is a
 human-driven invocation and cannot be delegated. Partial `-p` output is notes, never a review.
+
+## 2026-07-30 — TWO FAILURE CLASSES, TWO REMEDIES. The second is the one review has to be built for.
+
+From the 0.10.2 item-5 design passes. Both plans I wrote were rejected, but **the two failures were not
+the same kind of failure**, and conflating them would produce the wrong countermeasure.
+
+**Class 1 — errors of REASONING.** v1's composition defect (fresh-per-attempt secrets plus a
+single-slot memo making attempts 1…N−1 unreclaimable on an unenumerated route) and v2's
+mutually-unimplementable steps 4 and 5. Both were mistakes I could **in principle** have caught by
+thinking harder: the facts were in front of me and the inference was wrong. **These respond to more
+careful reasoning** — to enumerating routes exhaustively, to tracing each step against the next, to
+demanding arithmetic instead of reading a claim.
+
+**Class 2 — things I WAS NOT THINKING ABOUT AT ALL.** v2's "use a non-shared OkHttp client for the
+abandon call." I wrote it as **hygiene**. There was **no moment where the threat model came up**,
+because nothing about "use a separate client for cleanup" *looks* like it touches the threat model. It
+would have egressed the request over the **default network** — the device's real IP reaching a
+**conceded** relay seconds after an attachment send, time-correlated — or on I2P failed to resolve
+`.b32.i2p` at all. **Thinking harder about my justification would not have found it, because my
+justification never went near the transport.**
+
+**The remedies are different, and only one of them is "be more careful":**
+
+| | Class 1 (bad inference) | Class 2 (blind spot) |
+|---|---|---|
+| Found by | rigour, adversarial self-review, arithmetic falsification | **a reader looking at SOURCE, not at my reasoning** |
+| Caught here by | lenses tracing my steps pairwise | a lens that had opened `CertificatePinning.kt` |
+| Prevented by | better process on my side | **cannot be prevented on my side** |
+
+**This is the argument for review by someone reading the source rather than reading the plan's own
+logic.** A reviewer who evaluates my justification can only ever find class 1. Class 2 requires
+somebody with the actual file open, and no amount of care in the plan substitutes for it.
+
+**The rule that came out of it is written generally, not as the instance:** per-call HTTP options come
+from `transport.client.newBuilder()`, re-derived on every transport swap — **never an independently
+built client** — because the transport client is what carries Tor SOCKS or the I2P socket factory and
+the pinner. That survives past this fix and past this feature.
+
+## …and I raised an alarm about U3 and was WRONG. Stated plainly, because the result is stronger than a null.
+
+Having discovered that `limitedParallelism(1)` serialises execution **slices**, not coroutines, I
+warned that U3's cover-traffic confinement reasoning might be built on the same misunderstanding —
+"if that's in U3's foundations, it's bigger than item 5." **It is not. I was wrong.**
+
+U3's argument does not merely happen to hold: its claims are scoped to a **suspension-free slice**, and
+that scoping is **compiler-enforced** by `publishOutgoing`/`publishReceipt` being non-suspending
+`private fun`s, with **real Mutexes** (`withSessionLock`, `DecoySendPairing`'s teardown Mutex) wherever
+cross-suspension exclusion is genuinely required. Seven rounds of adversarial review built something
+that **survived a correction to the reasoning underneath it**.
+
+**That is a stronger result than "no findings," and it only appears if you go looking to falsify your
+own foundation.** Recorded so the next person to find a shaky premise checks the foundation rather than
+assuming it, and so this particular alarm is not re-raised.
