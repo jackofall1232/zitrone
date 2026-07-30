@@ -1,12 +1,12 @@
 {
  "schema_version": 1,
- "lock_id": "lock-20260730T-b3-lesson",
+ "lock_id": "lock-20260730T-close",
  "owner_agent": null,
  "owner_session": null,
- "acquired_at": "2026-07-30T05:00:00Z",
- "expires_at": "2026-07-30T06:00:00Z",
+ "acquired_at": "2026-07-30T06:00:00Z",
+ "expires_at": "2026-07-30T07:00:00Z",
  "ttl_seconds": 3600,
- "purpose": "Record the two-failure-classes lesson and the U3 admission; released",
+ "purpose": "Close the session; released",
  "protected_paths": [
   "ledger.md",
   "memory.md",

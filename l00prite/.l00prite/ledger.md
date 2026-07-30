@@ -3603,3 +3603,41 @@ falsification** rather than reading a claim is what killed v1's TTL invariant an
 figure; **naming the least-confident sequence** got it broken deliberately both times instead of
 missed; and **design-time review catches composition defects that per-fix review structurally cannot
 see** — including a composition defect *inside the remediation for a composition defect*.
+
+## 2026-07-30 — 0.10.2 item 5: FIVE plans, FOUR rejections, ZERO code. Session closed with the fifth pass in flight.
+
+**Twenty-four review agents across four completed design passes. Every plan was rejected before a line
+of item-5 code was written, so nothing was ever unwound.** The fifth pass (`wa22i00rm`) was launched at
+session close; its verdict is unread and **must be read before implementing**.
+
+**The v4 pass named what all four failures shared, and it is the reusable finding:**
+
+> **The client tried to DECIDE, at teardown, using state it CANNOT OBSERVE, with a call it CANNOT
+> COMPLETE, after DESTROYING the record that would let it try again.** Patch any one and the other three
+> kill the plan.
+
+**Why each died, in one line each:** v1 would have *regressed* the disk metric item 5 exists to bound,
+via a non-throwing exit nobody enumerated. v2's coroutine-local flag was unreadable by cleanup running
+on a foreign stack — **and it contained a deanonymisation defect in a step added for tidiness.** v3
+mistook an OkHttp enqueue receipt for relay ownership and lost a reclaim the tree already performs. v4
+retired the token *before* the abandon was confirmed, turning a self-healing residual into k permanent
+8 MiB rows.
+
+**The sharpest single ruling:** `ENQUEUED` must **never** be abandoned — not a tunable default, an
+invariant. `WsClient.disconnect()` closes **gracefully** (queued frames are written) *and* nulls the
+socket, after which the identity guard rejects `message.stored`. **The teardown makes delivery more
+likely and acknowledgement impossible**, so excluding `CONFIRMED` excludes nothing: the ambiguity is
+manufactured by the teardown itself. One branch is an orphan; the other is silent, permanent destruction
+of delivered content. The "symmetric tradeoff" framing both the maintainer and the agent had accepted
+was simply wrong.
+
+**Three item-5-INDEPENDENT fixes landed this session**, all found by the design passes: the blob deposit
+now has a per-call `callTimeout` (there was none anywhere; a half-open circuit left a bubble at SENDING
+**forever** with retry refused by the CAS — worse than the orphan it caused); two stale confinement
+comments were deleted (code correct in both, the sentences were traps); and the standalone-client
+deanonymisation risk **needed no code** because it only ever existed in a rejected plan.
+
+**Method note worth keeping:** four passes, four rejections, zero rework. Design-time review caught a
+composition defect *inside the remediation for a composition defect*, twice, and a privacy defect in a
+step written as hygiene. **Reviewing plans is cheaper than reviewing code and catches a class code review
+structurally cannot.**
