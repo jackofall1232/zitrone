@@ -1200,3 +1200,37 @@ of THIS FEATURE do here?" before "what does the rest of this file do here?"
 **Also:** the requirement did not catch it either. R-U4-3 said "adds no durable-state writer",
 meaning vault sections; a diagnostics log is durable state by any honest reading. A requirement
 scoped to the mechanism you were thinking about will not cover the one you were not.
+
+## 2026-07-30 — I used `kimi -p` for a review after it is documented TWICE as not finishing
+
+**What happened.** Asked to bring Kimi K3 in as a third lens on 0.10.2 item 5, I dispatched
+`KIMI_MODEL_THINKING_EFFORT=high kimi -p "$(cat …)"`. That is the one shell-drivable Kimi mode, and it
+is **the mode recorded as not completing** — in `/root/.claude/CLAUDE.md` under a heading that says so
+in capitals ("⚠️ THE INVOCATION THAT ACTUALLY WORKS"), and again in this repo's own ledger reviewer
+roster: *"Kimi completes only in the interactive CLI (plan mode + `/yolo`); `kimi -p` does not
+finish."* Two prior whole-unit attempts had died mid-work with no verdict (~10 KB at `max`, ~87 KB at
+`high`). Mine reached 16.7 KB with no verdict before I killed it.
+
+**Knowledge did not prevent it — I quoted the risk while doing it anyway.** I told the maintainer in
+the same message that "`kimi -p` has died mid-work twice on this box without producing a verdict" and
+dispatched it regardless, because the maintainer's phrasing ("Kimi k3 is an agent on this box") pointed
+at the agent and I resolved the conflict toward the instruction in front of me rather than the
+instruction on file. **The recorded procedure is not advice to weigh against a fresh instruction; it
+is the thing to raise the conflict about.** The correct move was to say "the record says `-p` will not
+finish, so this needs you at a terminal or the `moon` path" BEFORE spending the run.
+
+**What went right, and is worth keeping as procedure.** Because an agentic CLI in a shared tree has
+already cost real work on this box, I committed everything first so the tree was clean at dispatch,
+and put an explicit read-only instruction at the top of the prompt. Verified afterwards:
+`git status` shows **only the two files I created myself** — Kimi wrote nothing. The precaution cost
+one commit and made the "did it mutate the tree?" question answerable in one command instead of
+arguable.
+
+**Also learned:** `l00prite/.l00prite/reviews/KIMI-PROMPTING.md` exists and I had not read it. It
+answers the `ask` vs `--diff` question for Moonshot directly — **`ask` with explicit full files, "and
+it isn't close"**, because adversarial unit review needs the unchanged 90% (the caller that was
+correct before, the invariant established 200 lines above the hunk) while `--diff` answers "did this
+change regress?". **Read the roster AND the prompting guide before choosing a lens invocation.**
+
+**Rule:** for Kimi, an agent from a shell uses `moon`. `kimi` interactive + plan mode + `/yolo` is a
+human-driven invocation and cannot be delegated. Partial `-p` output is notes, never a review.
