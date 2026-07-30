@@ -131,7 +131,9 @@ class WsClient(
          *
          * **A null id is not an error path.** It is the pre-0.10.1 behaviour and stays correct:
          * some rejections genuinely cannot be attributed — a header or UUID that fails to parse,
-         * a lost frame, an older relay. **Not, as this said before, because the budget is checked
+         * an error code the relay does not attribute, or an older relay. **Not a lost frame**
+         * (round 4): if the frame never reaches the relay there is no error event at all, so this
+         * callback does not fire and the send timeout is what covers it. **Not, as this said before, because the budget is checked
          * ahead of parsing:** the merged `handleSend` parses the header FIRST and then rate-limits,
          * so an ordinary rate-limited send DOES carry its id. Handle a null by
          * falling back to the connection-level path, not by guessing which send it was.

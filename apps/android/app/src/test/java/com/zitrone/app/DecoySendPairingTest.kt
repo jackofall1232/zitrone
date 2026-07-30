@@ -1500,6 +1500,20 @@ class DecoySendPairingTest {
                         "one id, which double-delivers once the first is acked and its row deleted",
                     "messages.armSendTimeout(messageId)" in handoffBranch,
                 )
+                // EXCLUSIVITY, not just presence (round 4). Presence alone left the pin green while
+                // arming was ALSO added elsewhere — `retryable`, say, which runs before re-encryption
+                // and the unbounded upload — reinstating the round-2 P1 with every guard passing.
+                // "Armed here" is only half the invariant; "and nowhere else" is the other half.
+                val armCalls = allMainSources().sumOf { (_, source) ->
+                    Regex("armSendTimeout\\(").findAll(normalised(source)).count()
+                }
+                assertEquals(
+                    "armSendTimeout must be called from EXACTLY ONE place in production (the handoff " +
+                        "branch above) plus its own declaration. A second call site can start the " +
+                        "window before the send exists — which is precisely the round-2 P1",
+                    2,
+                    armCalls,
+                )
             }
         }
     }
@@ -1558,8 +1572,10 @@ class DecoySendPairingTest {
         // It used to pin the routing itself — the exact statement `if(code == ERROR_RATE_LIMITED)
         // coverTraffic.onRelayRateLimited()` inside onServerError, plus the attribution below it and
         // their order. Both blind reviewers ruled that insufficient (a source match cannot see a
-        // behavioural regression that keeps the same text, and it did not catch round 2's P1), so the
-        // routing moved into [routeServerError] and is covered by ServerErrorRouterTest for real.
+        // behavioural regression that keeps the same text), so the routing moved into
+        // [routeServerError] and is covered by ServerErrorRouterTest for real. NOT because it "did
+        // not catch round 2's P1" — that justification was offered and then refuted (round 4): the
+        // P1 was arm-at-addOutgoing timing, caught by a constructible MessageRepository test.
         //
         // What a behavioural test on the router CANNOT see is whether production wires it, and wires
         // it to the right collaborators. That is what remains here.

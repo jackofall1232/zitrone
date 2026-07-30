@@ -14,9 +14,11 @@ import org.junit.Test
  *
  * Until this existed the two decisions below were pinned only by matching source text inside
  * `MessagingCoordinator.onServerError`, because nothing in the suite can construct that class. A
- * source tripwire cannot catch a behavioural regression that keeps the same substrings, cannot catch
- * a listener that is never installed, and — the argument that settled it — **did not catch round 2's
- * P1**. These tests exercise the real function.
+ * source tripwire cannot catch a behavioural regression that keeps the same substrings, and cannot
+ * catch a listener that is never installed. **It is NOT true that the missing harness let round 2's
+ * P1 escape** — that claim was argued and then refuted (round 4): the P1 was arm-at-`addOutgoing`
+ * timing, caught by a constructible `MessageRepository` test. These tests exercise the real
+ * function, which is justification enough.
  */
 class ServerErrorRouterTest {
 
@@ -50,8 +52,10 @@ class ServerErrorRouterTest {
         //
         // NOT because this case is the likely one — that claim was stale even as this file was
         // written (round 3). The merged `handleSend` parses the header before rate-limiting, so an
-        // ordinary rate-limited send DOES carry its id. This path covers parse failures, lost frames
-        // and older relays: rarer, but the yield still has to fire.
+        // ordinary rate-limited send DOES carry its id. This path covers parse failures, unattributed
+        // error codes and older relays: rarer, but the yield still has to fire. It does NOT cover a
+        // lost frame (round 4) — a frame the relay never processed produces no error event, so nothing
+        // reaches this router and only the send timeout bounds it.
         val c = route(ERROR_RATE_LIMITED, null)
 
         assertEquals(listOf("yield"), c.order)

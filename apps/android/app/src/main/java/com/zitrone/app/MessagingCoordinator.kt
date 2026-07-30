@@ -2346,9 +2346,16 @@ class MessagingCoordinator(
         //
         // THE ROUTING ITSELF LIVES IN [routeServerError] (0.10.1 review round 2). It used to be two
         // statements here, guarded only by a source tripwire, because nothing in the suite can
-        // construct a MessagingCoordinator. Both blind reviewers ruled that insufficient — one on the
-        // evidence that the missing harness is what let round 2's P1 escape — and both proposed this
-        // same extraction rather than a Robolectric harness. The two decisions and their
+        // construct a MessagingCoordinator. Both blind reviewers ruled that insufficient and both
+        // proposed this same extraction rather than a Robolectric harness.
+        //
+        // ONE JUSTIFICATION THAT WAS OFFERED FOR IT IS FALSE, and is corrected here rather than left
+        // to teach the wrong lesson (round 4): the extraction was partly argued on "the missing
+        // harness is what let round 2's P1 escape". It did not. That P1 was arm-at-addOutgoing
+        // timing, caught by a MessageRepository behavioural test with no coordinator harness
+        // involved, and this extraction would not have caught it either. The extraction earns its
+        // place on routing behaviour alone — which it does cover, and which was previously only
+        // pattern-matched. The two decisions and their
         // independence (the yield fires on the CODE, the failure on the ID, neither nested in the
         // other) are now covered by behavioural tests instead of by matching source text.
         //
@@ -2368,8 +2375,7 @@ class MessagingCoordinator(
         /** Logcat tag for boot-stage transport diagnostics — see class kdoc. */
         const val TAG = "ZitroneBoot"
 
-        /** The relay's `message.send` throttle code (`server/internal/ws/hub.go`). */
-
+        /** Boot-retry backoff base — doubled per attempt up to [MAX_BACKOFF_MS]. */
         const val BASE_BACKOFF_MS = 1_000L
         const val MAX_BACKOFF_MS = 60_000L
         const val MAX_BACKOFF_SHIFT = 6

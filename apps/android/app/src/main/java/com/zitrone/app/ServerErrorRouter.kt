@@ -10,8 +10,10 @@ package com.zitrone.app
  * be tested for BEHAVIOUR rather than pinned by a source tripwire (0.10.1 review round 2).
  *
  * **Why this file exists.** Both blind reviewers ruled that a source tripwire cannot cover this
- * logic, and one of them made the argument from evidence rather than principle: **the absence of a
- * behavioural harness here is what let round 2's P1 escape.** `MessagingCoordinator` cannot be
+ * logic. (One argued it from evidence — that the absent harness let round 2's P1 escape — and
+ * **that argument was later refuted and is false**: the P1 was arm-at-`addOutgoing` timing, caught
+ * by a constructible `MessageRepository` test, and this extraction would not have caught it. The
+ * file earns its place on routing behaviour alone.) `MessagingCoordinator` cannot be
  * constructed in a JVM test — it needs `Context`, `NotificationScheduler`, `SignalProtocolManager`
  * and more, which is Robolectric-scale for reasons that have nothing to do with error routing. Both
  * reviewers independently proposed this same seam instead of a full application harness, so the two
