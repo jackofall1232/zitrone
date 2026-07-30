@@ -213,9 +213,9 @@ func TestBlobAbandon_RejectsMalformedToken(t *testing.T) {
 	h := newBlobHandlers(t, nil)
 	app := blobTestApp(t, h)
 	for name, token := range map[string]string{
-		"too short":   b64([]byte("short")),
-		"not base64":  "!!!not-base64!!!",
-		"empty":       "",
+		"too short":  b64([]byte("short")),
+		"not base64": "!!!not-base64!!!",
+		"empty":      "",
 	} {
 		t.Run(name, func(t *testing.T) {
 			status, _ := postJSON(t, app, "/api/v1/blobs/abandon", fiber.Map{
