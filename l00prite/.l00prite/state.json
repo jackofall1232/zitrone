@@ -2,7 +2,7 @@
   "schema_version": 2,
   "project_name": "Zitrone",
   "current_goal": "v0.10.3-beta SHIPPED 2026-07-30 (vc23): attachment blob reclaim. GH prerelease live at tag v0.10.3-beta, APK sha256 9c1ce6e9...b9c5c3, signer cert 6c7f92a7...892753 (unchanged since 0.10.0), GitHub-served asset verified BYTE-IDENTICAL to the locally built and onion-staged binary. Website /download/beta flipped. CI green (CI + burn byte-for-byte gate).",
-  "current_phase": "0.10.3 released. \u26a0\ufe0f ONION MIRROR NOT YET SERVING IT \u2014 onion.go's currentAPK/mirrorAssets are bumped in code but the RELAY MUST BE REDEPLOYED and the new APK staged server-side before the mirror advertises 0.10.3; until then it serves 0.10.2. This is the standing 'onion mirror is a CODE allowlist' rule.",
+  "current_phase": "v0.10.3-beta live. CX23 DEPLOY of the 0.10.2 relay work DONE 2026-07-30 (deployed 755e558b, verified: per-client keying active, refresh_tokens 150->32, effective_cache_size 4GB->2560MB, 8443 not publicly reachable, 0 log errors, blobs 0 rows). \u26a0\ufe0f ONION MIRROR STILL NOT SERVING AN APK: deployed code names the 0.10.2 APK which is not staged, so the index renders 'not staged on this mirror' (graceful, no broken link). Forward fix = redeploy at main >= aa8876c7 AND stage zitrone-v0.10.3-beta.apk (9c1ce6e9...b9c5c3).",
   "active_agent": null,
   "last_agent": "claude",
   "last_updated": "2026-07-30",
@@ -16,5 +16,5 @@
   "ci_status": "GREEN on the release commit aa8876c7: CI success, Android burn byte-for-byte gate success. link-check initially failed on a 404 for the not-yet-published release asset (sequencing: bump and website flip were combined into ONE commit; prior releases split them), re-run after publishing. Release verification: cert continuity checked BEFORE build; stale 0.10.2 APK found in outputs and deleted first; badging vc23/0.10.3-beta; GitHub-served asset byte-identical (cmp) to onion-staged.",
   "execution_active": false,
   "execution_stop_reason": null,
-  "next_recommended_action": "CX23 TRIP \u2014 now carries TWO items: (1) 0.10.2 relay work still owed (rebuild relay, docker compose up -d --force-recreate postgres for effective_cache_size, prod blob-count check); (2) NEW \u2014 redeploy the relay with the 0.10.3 onion.go and stage zitrone-v0.10.3-beta.apk server-side, or the onion mirror keeps serving 0.10.2. Then: 0.10.1 coordinator-harness debt, 0.11.0 polish round. Deliberately NOT reclaimed by 0.10.3 and documented as such: burn routes, clearAll, stop(), non-durable-flush route."
+  "next_recommended_action": "ONION MIRROR REDEPLOY \u2014 the only CX23 item still open: redeploy the relay at main (>= aa8876c7, which changes onion.go's currentAPK to 0.10.3) and stage zitrone-v0.10.3-beta.apk server-side; sha must be 9c1ce6e9e0bc64582e02faf10202198c837882a7ede55a83b2c25ace78b9c5c3. NOTE: /api/v1/blobs/abandon is now live AND called by shipped v0.10.3-beta clients (contact-deleted-mid-send route only); it shares blobLimit (60/min) with deposit and redeem. Then: 0.10.1 coordinator-harness debt, 0.11.0 polish round (FINAL ALPHA)."
 }

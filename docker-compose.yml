@@ -47,9 +47,15 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     # PLANNER TUNING, DECLARED HERE ON PURPOSE (0.10.2 item 4). effective_cache_size
-    # was set live on the box at 4GiB, which is more cache than the 3.73GiB host
-    # physically has — so the planner was told to expect backing it could never get
-    # and biased toward index scans it cannot serve from cache. The capacity analysis
+    # was 4GiB — which is more cache than the 3.73GiB host physically has, so the
+    # planner was told to expect backing it could never get and biased toward index
+    # scans it cannot serve from cache.
+    #
+    # CORRECTED 2026-07-30 during the CX23 deploy: an earlier version of this comment
+    # said 4GiB "was set live on the box". It was not. `postgresql.auto.conf` is
+    # header-only — nothing ever ALTERed it — so 4GB was simply PostgreSQL 16's
+    # compiled-in default. The tuning below is still right and still needed; only the
+    # account of where the old value came from was wrong. Verified on the box. The capacity analysis
     # puts the prekey working set into cache-miss territory from ~10^4 accounts, i.e.
     # wrong in the direction that will start to matter.
     #

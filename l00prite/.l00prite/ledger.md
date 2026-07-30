@@ -3843,3 +3843,59 @@ check passed. Publishing fixed it. **Next release: bump first, publish, then fli
 `main`'s CI had been **red since `3861a2f5`** — `test -z "$(gofmt -l .)"` failing on
 `internal/api/blobs_test.go` over whitespace alignment in a map literal. Every Go test passed, so
 nothing was broken, but the pipeline was red and would have stayed red through this release cut.
+
+## 2026-07-30 — CX23 DEPLOY of 0.10.2 relay work — DONE and verified (maintainer, deployed `755e558b`)
+
+**All four 0.10.2 relay items are live.** Rollback image tagged `sublemonable-server:pre-0.10.2`.
+The deployer caught that the brief's premise was stale (`feat/0.10.2-capacity-fixes` doesn't exist in
+that checkout; the work reached `main` via `0.10.2-snapshot` → `60386c1`) and re-verified against a
+freshly fetched `origin/main` rather than a stale local tree — the right instinct, and it is why the
+verification means anything.
+
+**Verified on the box, read rather than assumed:** `/healthz` 200 local and public; **per-client
+keying active (1 trusted proxy address)** — read from the live log, which closes the CX23 P2-interim
+question; 8443 unreachable from the public IP (listener bound to 127.0.0.1 only); `refresh_tokens`
+**150 → 32**, janitor purging 118 expired with 0 left; `effective_cache_size` **4GB → 2560MB**
+confirmed with a real query, not just healthz; unmatched route 404; **zero** log errors across the DB
+bounce; 16G available of 38G.
+
+`--no-deps` on the server rebuild was the correct call: postgres's resolved config had changed, so a
+plain `compose up` would have bounced the DB *incidentally* during step 1 instead of *deliberately*
+in step 2. `.env` was checked for overrides that would silently no-op the work — no `BLOB_TTL_HOURS`
+override, and `MESSAGE_TTL_UNDELIVERED_HOURS=72`, so the enforced 96 > 72 margin is intact.
+
+### Honest gaps the deployer stated rather than implied
+
+- **Items 2 and 3 have no runtime evidence** — nothing probeable exercises them. Item 3 was verified
+  *at source* instead (`NewHub`'s third param lands in the field `hub.go` reads; query direction
+  `created_at >= $2` is correct). Stating that plainly is worth more than a green checkmark.
+- **`blobs`: 0 rows, 0 bytes.** So the disk-pressure motivation for 0.10.3's reclaim is, in
+  production today, entirely theoretical. The fix is about correctness, not a live incident.
+
+### Reconciliation — two report claims went stale mid-deploy, because 0.10.3 shipped during it
+
+1. **"0.10.3 touches zero server or compose files" — true of the merge (`01ba1b08`), false of the
+   release commit.** `aa8876c7` changes `server/cmd/server/onion.go` (`currentAPK` +
+   `mirrorAssets`). The deployed `755e558b` therefore carries `currentAPK =
+   zitrone-v0.10.2-beta.apk`; `main` carries `0.10.3-beta`.
+2. **"Nothing shipped calls `/blobs/abandon`" — was true at 0.10.2, is now false.** v0.10.3-beta
+   published ~19:15 and calls abandon on the contact-deleted-mid-send route. The endpoint is live AND
+   reachable from a shipped client. Note it shares `blobLimit` with deposit/redeem at 60/min, so
+   abandons draw from the upload bucket — no burst risk at one-per-message, but not free either.
+
+### Onion mirror — still owed, and the target moved
+
+At the deployed SHA the mirror advertises nothing: `currentAPK` names the 0.10.2 APK, which is not
+staged (APKs are untracked and bind-mounted). It **degrades gracefully** — "not staged on this
+mirror", no broken link, no 500 — and 0.10.0 still 200s. The forward fix is now a redeploy at
+`main` (≥ `aa8876c7`) **plus** staging `zitrone-v0.10.3-beta.apk`
+(`9c1ce6e9e0bc64582e02faf10202198c837882a7ede55a83b2c25ace78b9c5c3`). 0.10.2 remains in the
+allowlist, so staging it too would also resolve.
+
+### Corrected in-repo from this deploy
+
+`docker-compose.yml` claimed `effective_cache_size` "was set live on the box at 4GiB". It was not —
+`postgresql.auto.conf` is header-only, so 4GB was PostgreSQL 16's compiled-in default. The tuning is
+still correct; only the account of the old value's origin was wrong. Also noted: oldest expired token
+was 2026-07-09 (not 07-02), and the blobs size query needs `ciphertext` — there is no `payload`
+column.
