@@ -3808,3 +3808,38 @@ discarded.
 
 **No version bump, nothing deployed, nothing merged.** The CX23 trip owed for 0.10.2 is unaffected
 and still outstanding.
+
+## 2026-07-30 — v0.10.3-beta SHIPPED (vc23, `aa8876c7`, tag `v0.10.3-beta`)
+
+Attachment blob reclaim, live as a GitHub prerelease. APK sha256
+`9c1ce6e9e0bc64582e02faf10202198c837882a7ede55a83b2c25ace78b9c5c3`, signer cert
+`6c7f92a7…892753` (unchanged since 0.10.0). **The GitHub-served asset was downloaded and `cmp`-ed
+byte-for-byte against the locally built and onion-staged binary — identical.** Website flipped. CI
+and the Android burn byte-for-byte gate both green on the release commit.
+
+**⚠️ THE ONION MIRROR IS NOT YET SERVING 0.10.3.** `onion.go`'s `currentAPK` and `mirrorAssets` are
+bumped in code, but the mirror is a CODE ALLOWLIST — the relay must be redeployed and the APK staged
+server-side. Until then it advertises 0.10.2. This is the standing rule and it is now owed on the
+same CX23 trip as the 0.10.2 relay work.
+
+### Two release-hygiene lessons, both near-misses
+
+**1. The stale-APK trap fired a second time — and this build had a second, independent way to look
+wrong.** A 0.10.2 APK from 15:20 was sitting in `app/build/outputs/apk/release/`; it was deleted
+before building, per the rule from the 0.10.0 near-miss. Then the new APK came out at **exactly the
+same byte size as 0.10.2's** (33,069,186) — coincidence, since 0.10.3 is mostly comments plus one
+small class, but indistinguishable by eye from a stale artifact. **Neither filename nor size is
+evidence.** Resolved by sha256 (different) and `aapt2 badging` (vc23 / 0.10.3-beta), which is why
+both are in the procedure.
+
+**2. Combining the version bump and the website flip into ONE commit puts `link-check` in a
+guaranteed transient failure.** Prior releases split them (`d16470dc` bump, then `86586d08` flip)
+precisely because `links.ts` points at a release asset that does not exist until the release is
+published. The failing check was exactly and only `github-release-assets` (404); the onion mirror
+check passed. Publishing fixed it. **Next release: bump first, publish, then flip the website.**
+
+### Also fixed en route
+
+`main`'s CI had been **red since `3861a2f5`** — `test -z "$(gofmt -l .)"` failing on
+`internal/api/blobs_test.go` over whitespace alignment in a map literal. Every Go test passed, so
+nothing was broken, but the pipeline was red and would have stayed red through this release cut.
