@@ -264,7 +264,13 @@ class ApiClient(
             put("blob_id", blobIdBase64)
             put("ciphertext", ciphertextBase64)
         }
-        execute(post("/api/v1/blobs", body))
+        // BOUNDED (0.10.2 design review, B5). This is the one call that writes a multi-megabyte body,
+        // so it is where an unresumed continuation does the most damage: no throw means no
+        // markFailed, so the bubble sticks at SENDING forever and retry is refused by the CAS.
+        // Generous on purpose — the deadline has to clear a fresh Tor circuit plus an 8 MiB body on a
+        // slow mobile link, because a deadline that fires on a merely-slow upload converts a working
+        // send into a failed one, and a user retry after that can double-deliver.
+        execute(post("/api/v1/blobs", body), callTimeoutMs = BLOB_UPLOAD_TIMEOUT_MS)
     }
 
     /**
@@ -444,13 +450,32 @@ class ApiClient(
             .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
 
-    private suspend fun execute(req: Request): JSONObject =
+    /**
+     * @param callTimeoutMs an optional WHOLE-CALL deadline for this one request (0.10.2 design
+     * review, B5). There is no `callTimeout` on either shared client and `readTimeout` is
+     * deliberately 0 for the WebSocket, so a half-open circuit after a large body is written leaves
+     * `suspendCancellableCoroutine` **never resumed**: no throw, therefore no failure handling
+     * anywhere upstream. For an attachment deposit that means the bubble sticks at SENDING forever
+     * and `MessageRepository.retryable`'s CAS then refuses a retry — the user cannot even try again.
+     *
+     * **Applied to the CALL, not by building a client.** `Call.timeout()` is per-call, so this needs
+     * no `OkHttpClient` of its own — which matters beyond convenience: a separately built client
+     * would not carry the live transport's Tor SOCKS proxy, I2P socket factory, loopback DNS
+     * override or certificate pinner, and would egress over the DEFAULT network. That is a
+     * deanonymisation defect, not a style question. Never build a client here; if per-call options
+     * ever need more than `Call.timeout()` offers, derive them with
+     * `transport.client.newBuilder()`.
+     */
+    private suspend fun execute(req: Request, callTimeoutMs: Long? = null): JSONObject =
         suspendCancellableCoroutine { continuation ->
             // Use the client captured alongside this request's URL (request()
             // tagged it), so a transport swap between build and execute can't
             // pair a mismatched client/URL. Fallback covers any request not
             // built via request() — there are none today.
             val call = (req.tag(OkHttpClient::class.java) ?: transport.client).newCall(req)
+            if (callTimeoutMs != null) {
+                call.timeout().timeout(callTimeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+            }
             continuation.invokeOnCancellation { call.cancel() }
             call.enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
@@ -498,6 +523,19 @@ class ApiClient(
     }
 
     companion object {
+        /**
+         * Whole-call deadline for an attachment blob deposit (0.10.2 design review, B5).
+         *
+         * **10 minutes is deliberately generous, and erring long is the safe direction.** It must
+         * clear a fresh Tor circuit or I2P tunnel plus a body up to `BLOB_MAX_BYTES` (8 MiB) on a slow
+         * mobile link — perhaps 80-160 s of transfer at 50-100 KiB/s before any setup cost. A deadline
+         * that fires on a merely-slow upload converts a working send into a failed one, and a user
+         * retry after that can double-deliver; a deadline that is too long only delays the honest
+         * failure. What matters is that a bound EXISTS: without one, a half-open circuit never resumes
+         * the continuation, nothing throws, and the bubble stays SENDING forever with retry refused.
+         */
+        const val BLOB_UPLOAD_TIMEOUT_MS = 10 * 60 * 1000L
+
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
         /** Defensive cap on the error body surfaced in [ApiException.responseBody]. */
