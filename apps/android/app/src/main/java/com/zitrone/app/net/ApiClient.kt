@@ -297,12 +297,22 @@ class ApiClient(
      * deleted nothing; a 401 (bearer expired mid-teardown) and a dropped response do the same. There
      * is no restore-on-failure, so the blob then survives at a relay that has seen its token.
      *
-     * **Do NOT justify this with "the relay already knows whose blob it is." It does not.** That was
-     * the round-2 finding: `DepositBlob` is authenticated, but the relay states — and `StoreBlob`'s
-     * signature confirms, taking no account id — that the account "is never associated with the
-     * stored blob". The blob store is BLIND. So an abandon is strictly more disclosive than a
-     * deposit: it carries the redemption capability inside an authenticated request, from which a
-     * logging or compromised relay could transiently derive account → token → `sha256(token)`.
+     * **State the linkage precisely — two rounds of review went back and forth on it.** Round 1 said
+     * "deposit already links account to blob id" (false about what is *stored*). Round 2 corrected
+     * it to "the relay does not know whose blob it is" (false about what is *observed*). Both were
+     * wrong in opposite directions. The truth has two halves and needs both:
+     *
+     * - **The persisted store is blind.** `StoreBlob` takes only (blob id, ciphertext, expiry) — no
+     *   account column exists in the `blobs` schema. A relay that follows its own code retains no
+     *   account↔blob association.
+     * - **The request-handling relay nonetheless observes one, transiently.** `RequireAuth` resolves
+     *   the JWT before `DepositBlob` reads `blob_id`, so a *logging or compromised* relay can see
+     *   account → blob id at deposit — and account → token at abandon, from which the blob id
+     *   follows as `sha256(token)`.
+     *
+     * So abandon is more disclosive than deposit in KIND (it hands over the redemption capability,
+     * not merely an identifier), not in whether a linkage is observable at all. Reason about a
+     * logging relay consistently for both calls or neither.
      *
      * What makes it tolerable is narrower and worth stating exactly, because it is the whole
      * argument: the relay **already holds the ciphertext** (no new read capability — and it cannot

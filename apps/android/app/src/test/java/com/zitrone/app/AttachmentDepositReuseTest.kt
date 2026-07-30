@@ -188,10 +188,19 @@ class AttachmentDepositWiringTest {
     /**
      * Remove `//` line comments and block comments so the pins above match CODE, not prose.
      *
-     * Crude on purpose: it will also chew a `//` inside a string literal (a URL, say). That is
-     * harmless here — these assertions look only for specific call patterns, and mangling an
-     * unrelated string cannot manufacture one. Being wrong in the direction of matching LESS is the
-     * safe direction for a tripwire.
+     * Crude, and round-3 review named both ways it can be wrong — recorded rather than papered over,
+     * because the previous version of this kdoc claimed mangling "cannot manufacture" a match and
+     * that was false:
+     *
+     * - **False alarm:** a `//` inside a string literal (a URL) eats the rest of that line, so
+     *   `log("https://x"); releaseDeposit(messageId)` would lose a real call and fail the count.
+     * - **False green:** a literal like `"releaseDeposit/* x */(messageId)"` strips to the exact
+     *   pattern, manufacturing a match that is not a call.
+     *
+     * Both require a construction that does not occur in `MessagingCoordinator` and would be
+     * obvious in review if introduced. Accepted for a source-text tripwire whose job is to notice a
+     * release point being deleted; if this file ever gains such a literal, replace this with a real
+     * parse rather than widening the regex.
      */
     private fun stripComments(code: String): String = code
         .replace(Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL), "")

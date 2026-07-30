@@ -504,9 +504,9 @@ class MessagingCoordinator(
             // outlives the session, it can fire after the bearer is gone and take a 401 with the
             // token already in the request body — disclosed, with nothing deleted. Tolerable because
             // the relay already holds the ciphertext and can drop any row at will, so it gains no
-            // read or destructive capability. NOT because "it already knows whose blob it is" — the
-            // blob store is BLIND and it does not; see ApiClient.abandonBlob's kdoc, which round-2
-            // review corrected on exactly this point.
+            // read or destructive capability. The account↔blob linkage argument is subtler than two
+            // earlier versions of this comment claimed in opposite directions — see
+            // ApiClient.abandonBlob's kdoc, which states both halves.
             //
             // Bounded by BLOB_ABANDON_TIMEOUT_MS, so it cannot park forever on a half-open circuit.
             runCatching { api.abandonBlob(b64(memo.token)) }
@@ -1618,12 +1618,15 @@ class MessagingCoordinator(
             // ROUTE (c) — item 5b, best effort. If the throw came AFTER a successful deposit the blob
             // is an orphan; if before, there is nothing to delete and the relay's 204 says so without
             // revealing which. The memo is the only place the token survives this far.
-            // STILL NOT WIRED. Same as the route above, plus one hazard specific to this site that
-            // 0.10.3 does NOT remove: this reads the SHARED memo after arbitrary suspension, so it
-            // can name a LATER attempt's token rather than its own. settleDecision's state check
-            // does not help here — the id is the same, so the decision is about the right message
-            // but potentially the wrong blob. Any future wiring must capture the token before
-            // suspending, not re-read the memo after.
+            // STILL NOT WIRED, same as the route above — plus a hazard for whoever wires it. Stated
+            // as a CONSTRAINT ON FUTURE WORK, not as a description of this code: an earlier version
+            // of this comment asserted in the present tense that the route "reads the shared memo
+            // after suspension", and round-3 review correctly objected that it reads
+            // attachmentDeposits nowhere at all. The hazard is real but conditional — if this is
+            // ever wired by looking the memo up here, that lookup happens AFTER arbitrary
+            // suspension and can return a LATER attempt's token. settleDecision would not catch it:
+            // the message id is the same, so the decision would be about the right message and the
+            // wrong blob. Capture the token before suspending; do not re-read the map after.
             val bodySuffix = (e as? ApiClient.ApiException)?.responseBody
                 ?.let { " server_error=$it" }
                 .orEmpty()
