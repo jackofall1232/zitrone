@@ -186,3 +186,23 @@ mechanism 3 makes `ENQUEUED` conditional precisely because that distinction matt
 **Is "exactly one party receives the entry" enough when that party may be the less-informed one, or does
 the flush need to defer to a still-live owner — and if so, how does it know one exists, given there is
 no join?**
+
+**THE ASYMMETRY, PRECISELY — and this is a design question with a real tradeoff, not a fact to look up.**
+Atomic removal guarantees exactly one decider. Mechanism 3 makes `ENQUEUED` conditional because
+enqueued-but-unconfirmed is genuinely unknown. But **the two parties do not hold the same information
+about that unknown**: the owner is about to learn whether its send succeeded; the flush never will. So a
+race the flush wins resolves the question using **strictly less information than the other party was
+seconds from having.**
+
+Whether that is a defect depends entirely on what the flush does with `ENQUEUED`, and both options are
+blind in one direction:
+
+- **Flush abandons on `ENQUEUED`** → risks destroying a blob whose send was about to be **confirmed**.
+- **Flush does not abandon** → leaks an orphan whose send was about to **fail**.
+
+**Neither is data loss in the destroy-a-live-blob sense, provided `CONFIRMED` is excluded** — which it
+is. But **one of those two choices is being made blind, every single time**, and v4 currently does not
+say which. **THE PLAN MUST STATE WHICH AND WHY, and the reviewers should rule on whether the choice is
+right rather than merely consistent.** The asymmetry is what makes this hard: it cannot be resolved by
+tightening atomicity, because atomicity is already total — it can only be resolved by choosing which
+error to prefer, or by giving the flush information it does not currently have.
