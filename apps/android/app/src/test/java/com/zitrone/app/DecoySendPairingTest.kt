@@ -1464,11 +1464,57 @@ class DecoySendPairingTest {
                 1,
                 Regex("return true").findAll(body).count(),
             )
-            assertEquals(
-                "$tail returns true from somewhere other than the ws.sendMessage branch",
-                1,
-                Regex("if\\(ws\\.sendMessage\\(envelope\\)\\) \\{ return true").findAll(body).count(),
+            // ROUND 2 of 0.10.1: this asserted `if(ws.sendMessage(envelope)) { return true` as one
+            // adjacent token run, which made it fail the moment the handoff branch did anything
+            // besides return — as it now must, because the send timeout is armed there (the P1 fix:
+            // arming at the handoff rather than at bubble creation, so the window contains no local
+            // work). **Adjacency was never the property.** The property is OWNERSHIP: exactly one
+            // `return true`, and it belongs to the ws.sendMessage branch. That is pinned by position
+            // instead — after the handoff test, before the failure tail — so statements may be added
+            // inside the branch but `return true` cannot escape it.
+            assertTrue(
+                "$tail no longer tests the handoff with ws.sendMessage",
+                "if(ws.sendMessage(envelope))" in body,
             )
+            // Brace-walked, so this is the branch's real body rather than a position guess: the one
+            // `return true` must live INSIDE the handoff branch. Statements may precede it (the send
+            // timeout is armed there), but it cannot escape the branch.
+            val handoffBranch = bodyOf(body, "if(ws.sendMessage(envelope))")
+            assertTrue(
+                "$tail returns true from somewhere other than the ws.sendMessage branch",
+                "return true" in handoffBranch,
+            )
+
+            // ROUND 3, the cheaper seam one lens named as still unexploited. The round-2 P1 was
+            // arming the send timeout at BUBBLE CREATION, which for an attachment put an unbounded
+            // blob upload inside the 90 s window. The fix moved arming into this branch — and until
+            // now nothing pinned that it stayed here. This lives beside the ownership assertion
+            // because it constrains the same brace-walked branch, and it is the one wiring fact a
+            // behavioural repository test cannot reach: MessageRepositoryTest can prove
+            // `addOutgoing` does NOT arm (and does), but only source can show WHERE arming moved to.
+            if (tail == "publishOutgoing") {
+                assertTrue(
+                    "the send timeout is no longer armed at the socket handoff. If it moved back to " +
+                        "addOutgoing the 90 s window contains an unbounded blob upload again, and a " +
+                        "timer firing mid-upload offers retry on a live send — two envelopes under " +
+                        "one id, which double-delivers once the first is acked and its row deleted",
+                    "messages.armSendTimeout(messageId)" in handoffBranch,
+                )
+                // EXCLUSIVITY, not just presence (round 4). Presence alone left the pin green while
+                // arming was ALSO added elsewhere — `retryable`, say, which runs before re-encryption
+                // and the unbounded upload — reinstating the round-2 P1 with every guard passing.
+                // "Armed here" is only half the invariant; "and nowhere else" is the other half.
+                val armCalls = allMainSources().sumOf { (_, source) ->
+                    Regex("armSendTimeout\\(").findAll(normalised(source)).count()
+                }
+                assertEquals(
+                    "armSendTimeout must be called from EXACTLY ONE place in production (the handoff " +
+                        "branch above) plus its own declaration. A second call site can start the " +
+                        "window before the send exists — which is precisely the round-2 P1",
+                    2,
+                    armCalls,
+                )
+            }
         }
     }
 
@@ -1521,18 +1567,41 @@ class DecoySendPairingTest {
             "webSocket?.queueSize() ?: 0L" in normalised(appSource("net/WsClient.kt")),
         )
 
-        // The relay's only statement about the shared send budget must reach the seam. `rate_limited`
-        // is a wire constant of the server (server/internal/ws/hub.go), so it is pinned literally.
+        // ROUND 2 of 0.10.1: THIS TRIPWIRE IS NOW REDUCED TO WIRING, deliberately.
+        //
+        // It used to pin the routing itself — the exact statement `if(code == ERROR_RATE_LIMITED)
+        // coverTraffic.onRelayRateLimited()` inside onServerError, plus the attribution below it and
+        // their order. Both blind reviewers ruled that insufficient (a source match cannot see a
+        // behavioural regression that keeps the same text), so the routing moved into
+        // [routeServerError] and is covered by ServerErrorRouterTest for real. NOT because it "did
+        // not catch round 2's P1" — that justification was offered and then refuted (round 4): the
+        // P1 was arm-at-addOutgoing timing, caught by a constructible MessageRepository test.
+        //
+        // What a behavioural test on the router CANNOT see is whether production wires it, and wires
+        // it to the right collaborators. That is what remains here.
         val code = normalised(coordinatorSource())
+        val errorBody = bodyOf(code, "override fun onServerError(")
         assertTrue(
-            "the relay's rate_limited no longer reaches cover traffic, so the one reactive signal " +
-                "about the per-account send budget is dropped on the floor again",
-            "if(code == ERROR_RATE_LIMITED) coverTraffic.onRelayRateLimited()" in
-                bodyOf(code, "override fun onServerError("),
+            "onServerError no longer delegates to the router, so the routing it reimplements is " +
+                "untested again — the exact position round 2 ruled unacceptable",
+            "routeServerError(" in errorBody,
         )
         assertTrue(
-            "the rate_limited wire code drifted from the server's",
-            "const val ERROR_RATE_LIMITED = \"rate_limited\"" in code,
+            "the cover seam is not wired into the router, so a rate_limited would no longer take " +
+                "cover off the send path",
+            "yieldCover = { coverTraffic.onRelayRateLimited() }" in errorBody,
+        )
+        assertTrue(
+            "the router is not wired to the RELAY-attributed failure entry point. markFailed's " +
+                "wider CAS accepts SENT, which would let a relay error contradict a receipt the " +
+                "relay itself already gave us — the round-1 P1, reintroduced through the wiring",
+            "failByRelay = messages::markFailedByRelay" in errorBody,
+        )
+        assertTrue(
+            "the rate_limited wire code drifted from the server's (server/internal/ws/hub.go)",
+            allMainSources().any { (_, source) ->
+                "const val ERROR_RATE_LIMITED = \"rate_limited\"" in normalised(source)
+            },
         )
 
         // The yield must be the FIRST thing the seam does, and the drain must never see it.

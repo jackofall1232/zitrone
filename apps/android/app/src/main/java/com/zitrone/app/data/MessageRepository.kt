@@ -48,6 +48,7 @@ class MessageRepository(
     val messages: StateFlow<Map<String, List<Message>>> = _messages.asStateFlow()
 
     private val ttlJobs = ConcurrentHashMap<String, Job>()
+    private val sendTimeoutJobs = ConcurrentHashMap<String, Job>()
     private val readBurnJobs = ConcurrentHashMap<String, Job>()
     private val revealJobs = ConcurrentHashMap<String, Job>()
 
@@ -59,6 +60,11 @@ class MessageRepository(
 
     fun addOutgoing(message: Message) {
         upsert(message)
+        // NO send timeout armed here (0.10.1 review round 2, P1 from both lenses). The bubble exists
+        // before the send does — for an attachment, before an unbounded blob upload — so a window
+        // starting here timed local work and produced a FALSE FAILED on a still-live send, which a
+        // retry then double-delivered. The coordinator arms it at the socket handoff instead; see
+        // [armSendTimeout].
     }
 
     /** Incoming messages are delivered the moment they arrive. */
@@ -73,17 +79,39 @@ class MessageRepository(
 
     /**
      * The relay stored our envelope (`message.stored`) — advance to SENT (one
-     * tick, "the relay has it"). Guarded to SENDING inside the CAS: monotonic,
-     * so an out-of-order stored ack can never downgrade a message that already
-     * reached DELIVERED/READ, and it can never resurrect a BURNING/removed or
-     * FAILED message.
+     * tick, "the relay has it"). Still monotonic against the states above it: an
+     * out-of-order stored ack cannot downgrade a message that already reached
+     * DELIVERED/READ, and cannot resurrect a BURNING or removed one.
+     *
+     * **It DOES accept FAILED, deliberately — see the precondition** (0.10.1 review round 1). This
+     * kdoc used to say a receipt "can never resurrect a FAILED message", which is now the opposite
+     * of the fix: a receipt outranks an error or timeout that contradicts it. Round 2 flagged the
+     * stale wording precisely because someone "restoring monotonicity" from this comment would
+     * reintroduce the P1 latch it was written to remove.
      */
     fun markSent(messageId: String) {
         update(
             messageId,
-            precondition = { it.state == MessageState.SENDING },
+            // FAILED is accepted so a real receipt can HEAL a false failure (0.10.1 review round 1,
+            // both lenses). A relay-attributed error can mark a send FAILED; if the relay then says
+            // it stored that very message, the receipt is the ground truth and the error was a lie,
+            // a duplicate, or stale. Before this, FAILED was terminal against receipts, so a single
+            // spurious error left a STORED message displayed as failed forever and a retry
+            // double-delivered it. Healing forward is strictly more honest than latching a failure
+            // the relay itself contradicts.
+            precondition = {
+                it.state == MessageState.SENDING || it.state == MessageState.FAILED
+            },
             transform = { it.copy(state = MessageState.SENT) },
         )
+        // HYGIENE PLUS RACE-SAFETY, and the two are NOT the same thing. In the common path this
+        // cancel is what stops the timer; under concurrency it can LOSE the race (the job may
+        // already be past its delay and about to run), and then the SENDING-only CAS in the timer
+        // body is the last line. Each masks the other under single mutation — deleting either
+        // alone changed no observable state, and only deleting BOTH failed a test. That redundancy
+        // is deliberate defence-in-depth rather than an accident, and it is recorded here because
+        // the sweep cannot otherwise tell the two apart on a single-threaded virtual clock.
+        cancelSendTimeout(messageId)
     }
 
     /**
@@ -95,9 +123,11 @@ class MessageRepository(
      * ([addIncoming], unchanged).
      *
      * Guarded inside the CAS: allows SENDING→DELIVERED directly (a lost
-     * `message.stored` must not block DELIVERED) and SENT→DELIVERED, but is
-     * monotonic — it will not regress READ→DELIVERED on an out-of-order frame,
-     * nor resurrect a BURNING/removed or FAILED message. scheduleTtl only fires
+     * `message.stored` must not block DELIVERED), SENT→DELIVERED, and
+     * **FAILED→DELIVERED deliberately** (round 1's healing fix — a delivery receipt outranks an
+     * error or timeout that contradicts it; the old wording here denied this). Still monotonic
+     * otherwise: it will not regress READ→DELIVERED on an out-of-order frame, nor resurrect a
+     * BURNING/removed message. scheduleTtl only fires
      * on the one real transition (update returns non-null), so a duplicate
      * receipt cannot double-arm the timer.
      */
@@ -105,12 +135,16 @@ class MessageRepository(
         val updated = update(
             messageId,
             precondition = {
-                it.state == MessageState.SENDING || it.state == MessageState.SENT
+                // FAILED accepted for the same reason as [markSent] (0.10.1 review round 1): a
+                // delivery receipt contradicts an earlier error outright, and the receipt wins.
+                it.state == MessageState.SENDING || it.state == MessageState.SENT ||
+                    it.state == MessageState.FAILED
             },
             transform = {
                 it.copy(state = MessageState.DELIVERED, deliveredAtMs = it.deliveredAtMs ?: clock())
             },
         )
+        cancelSendTimeout(messageId)
         updated?.let(::scheduleTtl)
     }
 
@@ -126,10 +160,49 @@ class MessageRepository(
         update(
             messageId,
             precondition = {
+                // LOCAL failures only — every caller is the device observing first-hand that the
+                // send did not happen. A RELAY-attributed rejection does NOT come through here:
+                // that is [markFailedByRelay], which is narrower (SENDING only) because an error
+                // naming a message the relay already said it STORED is a claim we do not believe.
+                //
+                // An `isMine` clause was written here when this looked like the relay's entry point
+                // and then REMOVED, because it was unreachable: `addIncoming` forces
+                // `state = DELIVERED`, so no incoming message is ever SENDING/SENT and this line
+                // already excludes every one of them. The mutation sweep proved it — deleting
+                // `isMine` broke no test, including the test written for it, which was passing off
+                // this check the whole time. An unreachable guard with a test that cannot fail is
+                // worse than no guard. Note this is a property of the production call graph, not of
+                // the type: `addOutgoing` would accept `isMine = false` at the default SENDING state.
                 it.state == MessageState.SENDING || it.state == MessageState.SENT
             },
             transform = { it.copy(state = MessageState.FAILED) },
         )
+        cancelSendTimeout(messageId)
+    }
+
+    /**
+     * A **relay-attributed** rejection — `onServerError` carrying a `message_id` (0.10.1).
+     *
+     * **Deliberately narrower than [markFailed]: SENDING only, never SENT.** `SENT` means the relay
+     * told us it stored this exact message; an error naming it afterwards contradicts the relay's
+     * own receipt, and the receipt is the one of the two we should believe. Accepting SENT here let
+     * a hostile lie, a duplicate frame, or a redeploy mismatch mark a STORED message failed — and
+     * because the user's only recovery is retry-under-the-same-id, that produced a genuine double
+     * delivery of a message that was never lost. Both review lenses found this independently in
+     * round 1; it was strictly worse than the relay simply dropping the send, which at least leaves
+     * an honest SENT.
+     *
+     * [markFailed] keeps the wider SENDING/SENT window because its callers are LOCAL failures — the
+     * blob upload threw, the socket was down at hand-off — where the device knows first-hand that
+     * the send did not happen and no relay claim is in play.
+     */
+    fun markFailedByRelay(messageId: String) {
+        update(
+            messageId,
+            precondition = { it.state == MessageState.SENDING },
+            transform = { it.copy(state = MessageState.FAILED) },
+        )
+        cancelSendTimeout(messageId)
     }
 
     /**
@@ -145,6 +218,8 @@ class MessageRepository(
             precondition = { it.state == MessageState.FAILED },
             transform = { it.copy(state = MessageState.SENDING) },
         )
+        // No timeout armed here either: a retry re-enters the ordinary send path and is armed at its
+        // own handoff, so the window again covers only time spent awaiting the relay.
 
     /**
      * Marks an incoming message read. Burn-on-read messages flip to READ
@@ -273,6 +348,7 @@ class MessageRepository(
      */
     fun burn(messageId: String, notifyPeer: Boolean) {
         ttlJobs.remove(messageId)?.cancel()
+        cancelSendTimeout(messageId)
         // A pending read-burn racing this burn (burn-all, remote burn, TTL)
         // must not fire a second burn after its grace window.
         readBurnJobs.remove(messageId)?.cancel()
@@ -309,6 +385,12 @@ class MessageRepository(
 
     /** Wipes everything decrypted from memory (logout / session revoked). */
     fun clearAll() {
+        // Send timeouts included (0.10.1 review round 2, P3): they were omitted, so a timer armed
+        // for an in-flight send outlived vault lock, logout, revocation and confirmed deletion —
+        // holding a coroutine and a map entry for up to 90 s past the session it belonged to. The
+        // CAS meant no visible state change, but "disarmed on lock" was simply false.
+        sendTimeoutJobs.values.forEach(Job::cancel)
+        sendTimeoutJobs.clear()
         ttlJobs.values.forEach(Job::cancel)
         ttlJobs.clear()
         readBurnJobs.values.forEach(Job::cancel)
@@ -339,6 +421,62 @@ class MessageRepository(
             readBurnJobs.remove(messageId)
             burn(messageId, notifyPeer = true)
         }
+    }
+
+    /**
+     * Arm the send timeout for an outgoing message that is still awaiting the relay's
+     * `message.stored` (0.10.1 review round 1, item 2 — maintainer chose the timeout).
+     *
+     * **Why this exists at all.** A rejection the relay cannot attribute to a message used to
+     * leave the bubble on SENDING with no way out: only FAILED is
+     * clickable in the UI and this store is RAM-only, so nothing short of process death recovered
+     * it. This closes that hole **without depending on the relay at all**, which also makes it the
+     * only recovery that survives a relay rollback or a client talking to an older deployment.
+     *
+     * **It times the relay's RECEIPT, never delivery.** Once a message reaches SENT the relay has
+     * it, and it may then sit for days while the peer is offline — that is normal and must never
+     * be failed. So the timer is armed on SENDING, cancelled the moment anything moves the message
+     * off SENDING, and fires through a SENDING-only CAS so a receipt that wins the race no-ops it.
+     *
+     * **A timeout that fires early is self-correcting**, which is what lets the window stay
+     * relatively tight: if the `message.stored` arrives afterwards, [markSent] accepts FAILED and
+     * heals the bubble forward. Erring early costs a bubble that briefly shows "!"; erring long
+     * costs a user staring at a spinner for a send that is already dead.
+     */
+    fun armSendTimeout(messageId: String) {
+        sendTimeoutJobs.remove(messageId)?.cancel()
+        sendTimeoutJobs[messageId] = scope.launch {
+            delay(SEND_TIMEOUT_MS)
+            update(
+                messageId,
+                // SENDING only: SENT means the relay acknowledged and this timer is moot; FAILED,
+                // DELIVERED, BURNING or removed all mean something else already decided.
+                precondition = { it.state == MessageState.SENDING },
+                transform = { it.copy(state = MessageState.FAILED) },
+            )
+            // CONDITIONAL removal — drop OUR handle only (round 2, P3). The unconditional
+            // `remove(messageId)` here would delete a REPLACEMENT installed by a retry that re-armed
+            // between this CAS and this line, leaving that timer live but untracked, so no later
+            // cancel or clearAll could reach it.
+            // CONDITIONAL — drop OUR handle only. Under real concurrency (this class is documented
+            // as hit from the main thread AND several dispatchers) a job that is already past its
+            // `delay` can be running this tail while a retry re-arms on another thread; an
+            // unconditional `remove(messageId)` would delete the REPLACEMENT's handle and leave that
+            // timer live but untracked, so no later cancel or clearAll could reach it.
+            //
+            // NO TEST HERE DISCRIMINATES THIS (round 2 sweep: removing the condition broke nothing).
+            // Re-arming cancels the old job, so on a single-threaded virtual clock the old job never
+            // reaches this line at all — the interleaving cannot be expressed. Same class as the
+            // cancel-vs-CAS redundancy above, and kept for the same reason: reachable under real
+            // threading, not merely defensive. It needs a controllable dispatcher with a barrier
+            // between delay completion and this tail, which is the harness this unit still owes.
+            coroutineContext[Job]?.let { sendTimeoutJobs.remove(messageId, it) }
+        }
+    }
+
+    /** The send is no longer awaiting a receipt — disarm. Idempotent. */
+    private fun cancelSendTimeout(messageId: String) {
+        sendTimeoutJobs.remove(messageId)?.cancel()
     }
 
     private fun scheduleTtl(message: Message) {
@@ -417,6 +555,7 @@ class MessageRepository(
     }
 
     private fun remove(messageId: String) {
+        cancelSendTimeout(messageId)
         ttlJobs.remove(messageId)?.cancel()
         revealJobs.remove(messageId)?.cancel()
         _messages.update { current ->
@@ -449,5 +588,19 @@ class MessageRepository(
          * (not idle-reset): backgrounding the app does not pause it.
          */
         const val IMAGE_REVEAL_MS = 10_000L
+
+        /**
+         * How long an outgoing message may sit awaiting the relay's `message.stored` before it is
+         * called failed (0.10.1). **This times the RELAY'S RECEIPT, not delivery** — a message the
+         * relay has taken can wait indefinitely for an offline peer without being failed.
+         *
+         * 90 s is chosen for the slowest transport we support rather than the fastest: a fresh Tor
+         * circuit or an I2P tunnel can take tens of seconds to establish before the first frame
+         * moves at all, and failing a send that was merely slow is the worse error — the user
+         * retries and the peer gets it twice. It can afford to be this generous precisely because
+         * a stuck bubble is now bounded at all, which it previously was not, and because an early
+         * fire self-corrects: [markSent] accepts FAILED, so a late `message.stored` heals it.
+         */
+        const val SEND_TIMEOUT_MS = 90_000L
     }
 }

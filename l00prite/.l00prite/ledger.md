@@ -3549,6 +3549,7 @@ synthetic peer — a linkage the relay must not hold).
 
 Verified after merge: `go build` / `go vet` / `go test ./...` all pass, six packages ok.
 
+<<<<<<< HEAD
 ## 2026-07-30 — 0.10.2 item 5: TWO design passes, TWO rejections, ZERO code written. Stopped by the maintainer.
 
 **The method is the result here.** Ten agents across two five-agent passes reviewed a *plan* rather
@@ -3687,3 +3688,48 @@ must be **deployed**, not merely merged.
 and nothing unwound.** The last pass overturned a premise the maintainer and the agent had both held
 since the beginning — which no amount of implementation review would ever have surfaced, because the
 code would have been correct against a wrong design.
+=======
+## 2026-07-30 — 0.10.1 MERGED to `main` (`a7d66e87`, PR #64) on maintainer instruction
+
+**A rejected send no longer shows `SENDING` forever.** Four paired-blind rounds, every finding upheld
+and fixed, all nine CI checks green, 821 tests / 0 failures.
+
+**The arc, because the pattern is the reusable part — EVERY fix delta produced a finding, four rounds
+running:**
+
+- **Round 1** (Codex 1 P1 / Grok 2 P2): both lenses independently found that a relay-attributed
+  failure could permanently falsify a send that SUCCEEDED. Fixed by splitting the entry point
+  (`markFailedByRelay`, SENDING only) and making receipts HEAL FAILED.
+- **Round 2** (both 1 P1): **round 1's own fix caused it.** The send timeout was armed at bubble
+  creation, so for an attachment the 90 s window contained an unbounded blob upload (OkHttp's
+  `writeTimeout` is per-write, not whole-body). It fired mid-upload, offered retry on a live send, and
+  a user taking it produced two envelopes under one id — real double delivery once the first was acked
+  and its row deleted. Fixed by arming at the socket handoff.
+- **Round 3** (both 0 P1 / 0 P2, same P3): the finding was a stale comment **round 2 had claimed to
+  fix and missed** — `WsClient`'s kdoc — and the stale rationale had been propagated into a file
+  written the same day.
+- **Round 4** (both 0 P1 / 0 P2): the round-3 arming pin was **presence-only**, so dual-arming would
+  reinstate the round-2 P1 with every guard green. Plus "lost frames" wrongly listed as a null-id
+  source, four places still teaching a refuted causal story, and a kdoc orphaned by the extraction
+  onto `BASE_BACKOFF_MS`.
+
+**THE HARNESS SPLIT — three rounds, then RESOLVED at round 4 to "debt to schedule, not a merge gate".**
+One lens had ruled it a merge blocker on the grounds that the absent coordinator harness let round 2's
+P1 escape. **That premise was refuted and the refutation verified against our own record:** round 2's
+mutation was caught by a `MessageRepository` test with no coordinator harness involved, and the
+`ServerErrorRouter` extraction would not have caught it either. Both lenses then converged, and both
+named the same remaining seam without wanting Robolectric.
+
+**What landed:** relay attribution carried and normalised at the wire boundary; `routeServerError`
+extracted as a pure function with behavioural tests (yield on the CODE, failure on the ID, neither
+nested); `markFailedByRelay` narrow so a receipt outranks a contradicting error; receipts heal FAILED;
+a 90 s timeout armed at the handoff, exclusivity-pinned; comment corrections throughout.
+
+**Declared residuals, classing confirmed by both lenses:** no constructible `MessagingCoordinator`
+(wiring asserted, not tested — **the harness is now scheduled debt**); two guards protecting races a
+single-threaded virtual clock cannot express, kept as reachable under real threading (contrast round
+0's `isMine`, deleted as unreachable by construction); no end-to-end attachment-upload/timer test.
+
+**No version bump, nothing deployed.** 0.10.1 is client-only, so no relay redeploy is implied by this
+merge — the CX23 trip owed for 0.10.2 items 1–4 is unaffected and still outstanding.
+>>>>>>> main

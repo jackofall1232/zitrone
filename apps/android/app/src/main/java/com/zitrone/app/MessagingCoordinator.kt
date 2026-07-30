@@ -419,26 +419,10 @@ class MessagingCoordinator(
         attachmentDeposits.remove(messageId)
     }
 
-    /**
-     * Ask the relay to drop a blob we are giving up on — **and never let that fail anything**
-     * (0.10.2 item 5b).
-     *
-     * Every call site is a send that has ALREADY failed. Cleanup that threw would turn a failed send
-     * into a crash; cleanup that blocked would delay the user's "!" indicator. Both are worse defects
-     * than the orphan being reclaimed, so failures are swallowed and **the TTL remains the backstop**
-     * — which it has to be regardless, because a crash is one of the orphan routes and cannot call
-     * this at all.
-     *
-     * A null token means there is nothing to abandon: the deposit never happened, or was already
-     * released on a terminal outcome.
-     */
-    private fun abandonBlobQuietly(tokenBase64: String?) {
-        if (tokenBase64 == null) return
-        scope.launch {
-            runCatching { api.abandonBlob(tokenBase64) }
-                .onFailure { if (it is CancellationException) throw it }
-        }
-    }
+    // NOTE: `abandonBlobQuietly` was removed with its two call sites above. `ApiClient.abandonBlob`
+    // and the relay's `AbandonBlob` endpoint remain as DORMANT infrastructure — unreachable from the
+    // client, so they cannot trigger the P1, and ready for v6 to wire correctly.
+
 
     /**
      * Whether [contactId] is still a live roster entry. Used by the send/deliver
@@ -493,6 +477,22 @@ class MessagingCoordinator(
             // Handed to the relay — but honestly still just SENDING. The tick waits for the relay's
             // message.stored (→SENT) and the recipient's message.delivered (→DELIVERED); see
             // [MessageState].
+            //
+            // THE SEND TIMEOUT IS ARMED HERE, AND NOWHERE ELSE (0.10.1 review round 2, both lenses
+            // found the P1 this fixes). It used to be armed in `addOutgoing`, i.e. when the bubble
+            // was created — which for an ATTACHMENT is before the blob upload, so the 90 s window
+            // included an unbounded upload (OkHttp's writeTimeout is per-write, not whole-body, so
+            // a slow 11 MiB body is never cut off). The timer then fired while attempt #1 was still
+            // uploading, showed a FALSE FAILED with a retry affordance, and a user who took it got
+            // two independently encrypted envelopes under one id — a real double delivery once the
+            // first was acked and its row deleted.
+            //
+            // Arming at the handoff makes the window exactly what the design always claimed: time
+            // spent WAITING FOR THE RELAY'S RECEIPT, with no local work inside it. It is also the
+            // single place both the text and attachment paths pass through, so neither can be armed
+            // and forgotten. Retries re-enter here and get their own window; nothing arms on
+            // `addOutgoing` or `retryable` any more.
+            messages.armSendTimeout(messageId)
             return true
         }
         // The socket was down: the send did not reach the relay. The ratchet advance is already
@@ -1488,7 +1488,13 @@ class MessagingCoordinator(
                 // over, so nothing will ever fetch it: reclaim it rather than leave up to 8 MiB to
                 // wait out the full TTL. Abandoning cannot strand a later attempt, because item 5a
                 // memoises the token — a retry re-deposits under the SAME blob id.
-                abandonBlobQuietly(b64(blob.token))
+                // ABANDON DISABLED HERE — the confirmed P1, unfixed (0.10.2 item 5, all review
+                // rounds). Attempt 1's abandon is fire-and-forget; a retry then re-deposits under
+                // the SAME memoized id, publishes its envelope, and the stale abandon deletes the
+                // blob underneath it — the recipient gets a permanent UNAVAILABLE for a message
+                // that arrived. The 409-as-success fix makes this MORE reachable, not less: the
+                // retry now succeeds where it used to fail, so it reaches publish. Re-enable only
+                // with v6's `published` bit, which is what makes an abandon attempt-aware.
                 return@runCatching
             }
             // The NON-SUSPENDING publish tail (see [publishOutgoing]), called directly and FIRST. If
@@ -1505,7 +1511,9 @@ class MessagingCoordinator(
             // ROUTE (c) — item 5b, best effort. If the throw came AFTER a successful deposit the blob
             // is an orphan; if before, there is nothing to delete and the relay's 204 says so without
             // revealing which. The memo is the only place the token survives this far.
-            abandonBlobQuietly(attachmentDeposits[messageId]?.token?.let(::b64))
+            // ABANDON DISABLED HERE for the same reason as the route above, and additionally
+            // because this reads the SHARED memo after arbitrary suspension, so it can name a
+            // later attempt's token rather than its own.
             val bodySuffix = (e as? ApiClient.ApiException)?.responseBody
                 ?.let { " server_error=$it" }
                 .orEmpty()
@@ -2436,21 +2444,35 @@ class MessagingCoordinator(
         }
     }
 
-    override fun onServerError(code: String, message: String) {
-        // Server error codes carry no user data; v1 surfaces them only as
-        // connection state, never as raw strings.
+    override fun onServerError(code: String, message: String, messageId: String?) {
+        // Server error codes carry no user data; v1 surfaces them only as connection state, never as
+        // raw strings.
         //
-        // `rate_limited` is the relay refusing a `message.send` for volume, and it is the ONE signal
-        // the relay gives about the shared per-account send budget. Spec §4.3 R-U3-1 makes cover
-        // traffic the half that yields when a resource is contended, so it goes straight to the cover
-        // seam. No message id is needed for that: cover does not have to know WHICH frame was
-        // refused, or what the limit is, only that it must stop competing for it.
+        // THE ROUTING ITSELF LIVES IN [routeServerError] (0.10.1 review round 2). It used to be two
+        // statements here, guarded only by a source tripwire, because nothing in the suite can
+        // construct a MessagingCoordinator. Both blind reviewers ruled that insufficient and both
+        // proposed this same extraction rather than a Robolectric harness.
         //
-        // This is NOT the user-facing half of the defect. Attributing a rejection to the message it
-        // rejected — so the send can be marked failed and retried instead of showing SENDING forever
-        // — needs the relay to carry the message id on the error, which it does not; that is tracked
-        // separately and is a pre-existing bug in shipped code, not a decoy-traffic one.
-        if (code == ERROR_RATE_LIMITED) coverTraffic.onRelayRateLimited()
+        // ONE JUSTIFICATION THAT WAS OFFERED FOR IT IS FALSE, and is corrected here rather than left
+        // to teach the wrong lesson (round 4): the extraction was partly argued on "the missing
+        // harness is what let round 2's P1 escape". It did not. That P1 was arm-at-addOutgoing
+        // timing, caught by a MessageRepository behavioural test with no coordinator harness
+        // involved, and this extraction would not have caught it either. The extraction earns its
+        // place on routing behaviour alone — which it does cover, and which was previously only
+        // pattern-matched. The two decisions and their
+        // independence (the yield fires on the CODE, the failure on the ID, neither nested in the
+        // other) are now covered by behavioural tests instead of by matching source text.
+        //
+        // What is left here is WIRING, which is what the reduced tripwire pins: this must delegate,
+        // and it must pass the cover seam and the relay-attributed failure entry point — not, say,
+        // `markFailed`, whose wider CAS would let an error contradict a receipt the relay already
+        // gave us.
+        routeServerError(
+            code = code,
+            messageId = messageId,
+            yieldCover = { coverTraffic.onRelayRateLimited() },
+            failByRelay = messages::markFailedByRelay,
+        )
     }
 
     private companion object {
@@ -2460,9 +2482,7 @@ class MessagingCoordinator(
         /** Logcat tag for boot-stage transport diagnostics — see class kdoc. */
         const val TAG = "ZitroneBoot"
 
-        /** The relay's `message.send` throttle code (`server/internal/ws/hub.go`). */
-        const val ERROR_RATE_LIMITED = "rate_limited"
-
+        /** Boot-retry backoff base — doubled per attempt up to [MAX_BACKOFF_MS]. */
         const val BASE_BACKOFF_MS = 1_000L
         const val MAX_BACKOFF_MS = 60_000L
         const val MAX_BACKOFF_SHIFT = 6

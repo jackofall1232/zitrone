@@ -1,5 +1,6 @@
 {
  "schema_version": 1,
+<<<<<<< HEAD
  "lock_id": "lock-20260730T-v5",
  "owner_agent": null,
  "owner_session": null,
@@ -7,6 +8,15 @@
  "expires_at": "2026-07-30T08:00:00Z",
  "ttl_seconds": 3600,
  "purpose": "Record the v5 verdict and v6 reframing; released",
+=======
+ "lock_id": "lock-20260730T-0101-merge",
+ "owner_agent": null,
+ "owner_session": null,
+ "acquired_at": "2026-07-30T01:00:00Z",
+ "expires_at": "2026-07-30T02:00:00Z",
+ "ttl_seconds": 3600,
+ "purpose": "Record the 0.10.1 merge and close the review loop; released",
+>>>>>>> main
  "protected_paths": [
   "ledger.md",
   "memory.md",

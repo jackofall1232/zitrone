@@ -105,10 +105,14 @@ interface CoverTraffic {
      * shared per-account send budget is contended.**
      *
      * R-U3-1 makes cover traffic the half that yields when a resource is contended, so this exists to
-     * take cover off. It is deliberately **not** an error-handling hook: the relay's `rate_limited`
-     * carries no message id, so nothing here can attribute the rejection to a message, retry it, or
-     * surface it — that is a separate, pre-existing defect in shipped code (`onServerError` has always
-     * been empty) which needs a relay-side change and is tracked on its own.
+     * take cover off. It is deliberately **not** an error-handling hook, and that separation
+     * OUTLIVED the reason it was first written down. The original reason was that `rate_limited`
+     * carried no message id at all, so nothing here *could* attribute a rejection. **That is no
+     * longer true** — as of the relay-side change the id rides `message_id` on `rate_limited` /
+     * `store_failed` / `bad_envelope`, and `MessagingCoordinator.onServerError` now marks the
+     * rejected send FAILED (0.10.1). The separation stands on its own merits instead: the yield
+     * must fire even for a rejection the relay could NOT attribute, so it cannot be made
+     * conditional on an id being present, and cover traffic must never surface anything to a user.
      *
      * **This is why the client-side budget defence is sound after all.** It was ruled unsound on the
      * reasoning that `sendLimit` is a server constant the relay never communicates — true, and it
