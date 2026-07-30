@@ -205,7 +205,61 @@ These are polish candidates, verified in source — not speculation.
 
 ---
 
-## 13. What does NOT exist (so it is not mistaken for a gap)
+## 13. Marketing-mockup audit (checked 2026-07-30)
+
+A feature-list mockup was checked against source. **12 of 14 items verify as shipped in the Android
+client.** Two do not, and both are the kind that read as available when they are not.
+
+| Mockup item | Status | Evidence |
+|---|---|---|
+| Signal Protocol | ✅ Shipped | `libsignal-android`, Double Ratchet + X3DH |
+| End-to-end Encryption | ✅ Shipped | §4 |
+| No Phone Number | ✅ Shipped | Account IDs only; no phone field anywhere in the client |
+| Ephemeral Messages | ✅ Shipped | §6, TTL timers |
+| Burn After Read | ✅ Shipped | §6 |
+| Zero-Knowledge Server | ✅ Shipped | Blind blob store; relay holds ciphertext it cannot decrypt |
+| Screenshot Protection | ✅ Shipped | `FLAG_SECURE`, unconditional (§11) |
+| Tor Support | ✅ Shipped | §9, Orbot SOCKS |
+| I2P Support | ✅ Shipped | §9, I2P app HTTP proxy |
+| Dead-Drop Messaging | ✅ Shipped | §8, lemon drops |
+| Plausible Deniability Vault | ✅ Shipped | §2, triple-entry ceremony |
+| Decoy / Cover Traffic | ✅ Shipped | §11, since 0.10.0 |
+| **Multi-Hop Relay** | ⚠️ **Server only — not in the shipped client** | see below |
+| **Invisible Watermarking** | ⚠️ **Shipped but misnamed** | see below |
+
+### Multi-Hop Relay — real, but not reachable by a user today
+
+The relay implements it (`server/internal/relay/onion.go`: peels exactly one layer, learns only the
+next hop, never logs the previous one) and the web carrier has the onion encryption
+(`packages/crypto/src/onion.ts`). **The Android client never calls `/relay/forward`.** It is also
+gated server-side on `RELAY_PRIVATE_KEY`, which is blank in `.env.example`.
+
+`data/ConnectionMode.kt` describes STANDARD / STEALTH / GHOST modes — STEALTH as *"Tor routing +
+3-hop onion relay + decoy traffic"* — and has **zero references anywhere outside its own file**. No
+UI, no settings, nothing in `MainActivity`. A user on 0.10.3 gets a single relay hop regardless of
+anything they can touch.
+
+Two follow-ups for the polish pass:
+- Decide whether `ConnectionMode` is scaffolding for 0.11.0 or abandoned. While it sits unreferenced
+  it will keep generating claims like this one.
+- Its STANDARD description also claims **Sealed Sender**, which is **not implemented anywhere in the
+  repo** — not client, not server. That string is the only place the feature "exists".
+
+### Invisible Watermarking — the name inverts the feature
+
+The watermark is **deliberately visible**. From `FingerprintWatermark.kt`: *"a faint,
+toroidally-tiled diagonal lattice of the VIEWER'S OWN 60-hex identity fingerprint… anyone
+photographing the screen is consciously reminded that what they capture is marked as theirs."* It is
+a deterrent, always on, with no toggle by design.
+
+A deterrent nobody can see deters nobody. Calling it "invisible" does not oversell it so much as
+describe a different feature — and invites the reading that Zitrone steganographically marks message
+*content*, which it does not do. Suggested rename: **Identity Watermarking**, or **Screen-Capture
+Watermark**.
+
+---
+
+## 14. What does NOT exist (so it is not mistaken for a gap)
 
 - **No *setup flow* for the second vault** — and that absence is the feature, not a gap (§2). The
   `decoy/` package is cover traffic and is unrelated to vaults.
