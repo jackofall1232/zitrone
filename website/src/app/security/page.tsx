@@ -125,24 +125,33 @@ export default function SecurityPage() {
 
         <h2 id="screenshots">Screenshot protection, by platform</h2>
         <p>
-          Each platform allows a different level of protection, so we&apos;re specific about it:
+          Each platform allows a different level of protection, so we&apos;re specific about it.
+          Zitrone ships on <strong>Android</strong> today — the iOS and Linux clients below are in
+          development and not yet available for download.
         </p>
         <ul>
           <li>
-            <strong>Android</strong> — <code>FLAG_SECURE</code> on every screen with message
-            content. This is an OS-level hard block: screenshots and screen recordings come out
-            black. The strongest protection of the three.
+            <strong>Android</strong> (shipping) — <code>FLAG_SECURE</code> on every screen with
+            message content. This is an OS-level hard block: screenshots and screen recordings come
+            out black. The strongest protection of the three. On top of that, every chat carries an
+            <strong>identity watermark</strong>: a faint, tiled lattice of <em>your own</em> identity
+            fingerprint painted behind the messages, so anything photographed off the screen is
+            visibly marked as yours. It is deliberately visible — a deterrent nobody can see deters
+            nobody — and it is always on, with no toggle. It is drawn on your device and reported
+            nowhere: it marks a leak for whoever later looks at the image, not for us. We have no
+            telemetry and no way to know a screenshot happened.
           </li>
           <li>
-            <strong>iOS</strong> — screen recording is detected in real time and the message list is
-            blurred immediately. Screenshots can&apos;t be prevented on iOS — the API only fires
-            after the fact — so we detect them, warn you, and log the event locally on your device.
+            <strong>iOS</strong> (in development, not yet released) — screen recording is detected
+            in real time and the message list is blurred immediately. Screenshots can&apos;t be
+            prevented on iOS — the API only fires after the fact — so we detect them, warn you, and
+            log the event locally on your device.
           </li>
           <li>
-            <strong>Linux (desktop app)</strong> — a focus-loss blur overlay: the moment the window
-            loses focus or visibility, the message list is blurred and desaturated. On top of that,
-            every conversation carries an invisible watermark encoding the recipient and timestamp —
-            if a screenshot leaks, it identifies who leaked it. This is best-effort: Linux exposes no
+            <strong>Linux (desktop app)</strong> (in development, not yet released) — a focus-loss
+            blur overlay: the moment the window loses focus or visibility, the message list is
+            blurred and desaturated, plus the same identity watermark described under Android. This
+            is best-effort: Linux exposes no
             universal API to hard-block screen capture on either Wayland or X11, and we won&apos;t
             pretend otherwise. Android remains the platform with a true OS-level hard block.
           </li>

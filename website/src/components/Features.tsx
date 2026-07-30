@@ -33,8 +33,8 @@ const FEATURES: Feature[] = [
     visual: <BurnVisual />,
   },
   {
-    headline: "Screenshots? We blur those.",
-    body: "Android blocks them entirely. iOS and browser blur your messages the instant a screenshot is attempted. We also watermark every conversation — if something leaks, we know who did it.",
+    headline: "Screenshots? Android blocks them cold.",
+    body: "FLAG_SECURE on every screen with message content — screenshots and screen recordings come out black, at the OS level, always on. Every chat also carries your own identity fingerprint as a faint watermark, so anything photographed off the screen is visibly marked as yours. That watermark is painted on your device and never leaves it — we can't see it, because we can't see anything.",
     visual: <ScreenshotVisual />,
   },
   {
