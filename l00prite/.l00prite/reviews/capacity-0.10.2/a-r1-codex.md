@@ -3938,3 +3938,856 @@ exec
     75	    expires_at TIMESTAMPTZ NOT NULL,
 docs/RELEASING_RELAY.md:46:- `BLOB_MAX_BYTES` (default 8 MiB) and `BLOB_TTL_HOURS` (default 168 / 1 week
 
+codex
+So far, items 1 and 4 hold under the actual database/image contracts: refresh consumption and purge are competing atomic deletes with the same strict expiry boundary, janitor errors do not short-circuit later passes, and the Postgres image deliberately forwards command arguments through initialization before `exec postgres`; `-c` has higher precedence than `postgresql.auto.conf`. The risky surface is the TTL configuration and Android lifecycle, which I’m narrowing to concrete reachable loss cases.
+exec
+/bin/bash -lc "nl -ba docker-compose.yml | sed -n '45,100p'; nl -ba server/internal/ws/hub_test.go | sed -n '1,180p'; rg -n \"PendingEnvelopes|PurgeExpiredRefreshTokens|PurgeExpiredEnvelopes|envelopeTTL|BlobTTLHours|MessageTTLUndeliveredHours\" server --glob '*_test.go'; rg -n \"fun lock|coordinator.*close|close\\(\\)|scope.cancel|cancel\\(\\)\" apps/android/app/src/main/java/com/zitrone/app/ZitroneApp.kt apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt | head -n 160; nl -ba apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt | sed -n '360,510p'" in /root/zitrone
+ succeeded in 0ms:
+    45	
+    46	  postgres:
+    47	    image: postgres:16-alpine
+    48	    restart: unless-stopped
+    49	    # PLANNER TUNING, DECLARED HERE ON PURPOSE (0.10.2 item 4). effective_cache_size
+    50	    # was set live on the box at 4GiB, which is more cache than the 3.73GiB host
+    51	    # physically has — so the planner was told to expect backing it could never get
+    52	    # and biased toward index scans it cannot serve from cache. The capacity analysis
+    53	    # puts the prekey working set into cache-miss territory from ~10^4 accounts, i.e.
+    54	    # wrong in the direction that will start to matter.
+    55	    #
+    56	    # 2.5GiB (2560MB) is ~67% of host RAM, leaving room for the server, the overlay
+    57	    # sidecars and the page cache itself. Command-line settings override both
+    58	    # postgresql.conf and postgresql.auto.conf, so this supersedes whatever ALTER
+    59	    # SYSTEM left in the volume and is reproducible on a fresh box instead of being
+    60	    # a hand-edit nobody can see from the repo.
+    61	    command:
+    62	      - postgres
+    63	      - -c
+    64	      - effective_cache_size=2560MB
+    65	    environment:
+    66	      POSTGRES_USER: sub
+    67	      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sub}
+    68	      POSTGRES_DB: zitrone
+    69	    volumes:
+    70	      - pg-data:/var/lib/postgresql/data
+    71	    healthcheck:
+    72	      test: ["CMD-SHELL", "pg_isready -U sub -d zitrone"]
+    73	      interval: 5s
+    74	      timeout: 3s
+    75	      retries: 10
+    76	    # No published port — only the server container reaches the database.
+    77	
+    78	volumes:
+    79	  pg-data:
+     1	// Zitrone — Copyright (C) 2026 Zitrone contributors
+     2	// Licensed under the GNU Affero General Public License v3.0 or later.
+     3	// See the LICENSE file in the repository root for full license text.
+     4	// SPDX-License-Identifier: AGPL-3.0-only
+     5	
+     6	package ws
+     7	
+     8	import (
+     9		"context"
+    10		"encoding/json"
+    11		"testing"
+    12		"time"
+    13	
+    14		"github.com/google/uuid"
+    15	
+    16		"github.com/zitrone/server/internal/db"
+    17		"github.com/zitrone/server/internal/ratelimit"
+    18	)
+    19	
+    20	// fakeStore is an in-memory stand-in for *db.Store. It deliberately keeps no
+    21	// notion of a message's sender — the hub never asks for one, and the honest
+    22	// send-state receipts must not introduce such a lookup (zero-knowledge).
+    23	type fakeStore struct {
+    24		storeErr error
+    25		stored   map[uuid.UUID]uuid.UUID // envelope id -> recipient
+    26		deleted  []uuid.UUID
+    27		receipts [][]byte
+    28	}
+    29	
+    30	func newFakeStore() *fakeStore {
+    31		return &fakeStore{stored: make(map[uuid.UUID]uuid.UUID)}
+    32	}
+    33	
+    34	func (f *fakeStore) PendingEnvelopes(ctx context.Context, recipientID uuid.UUID, cutoff time.Time) ([]db.PendingEnvelope, error) {
+    35		return nil, nil
+    36	}
+    37	
+    38	func (f *fakeStore) CountOneTimePrekeys(ctx context.Context, accountID uuid.UUID) (int, error) {
+    39		// Above the low watermark so register() never emits prekey.low in tests.
+    40		return prekeyLowWatermark + 1, nil
+    41	}
+    42	
+    43	func (f *fakeStore) StoreEnvelope(ctx context.Context, id, recipientID uuid.UUID, payload []byte) error {
+    44		if f.storeErr != nil {
+    45			return f.storeErr
+    46		}
+    47		f.stored[id] = recipientID
+    48		return nil
+    49	}
+    50	
+    51	func (f *fakeStore) DeleteEnvelope(ctx context.Context, id, recipientID uuid.UUID) error {
+    52		f.deleted = append(f.deleted, id)
+    53		return nil
+    54	}
+    55	
+    56	func (f *fakeStore) RecordDeliveryReceipt(ctx context.Context, messageIDHash []byte) error {
+    57		f.receipts = append(f.receipts, messageIDHash)
+    58		return nil
+    59	}
+    60	
+    61	// newTestHub builds a hub over a fake store with rate limiting disabled.
+    62	func newTestHub(store Store) *Hub {
+    63		return NewHub(store, ratelimit.New(1000, time.Minute, false), 72*time.Hour)
+    64	}
+    65	
+    66	// newTestClient creates a client whose send() path only touches its outbox
+    67	// (no websocket conn), so tests can read emitted frames directly.
+    68	func newTestClient(id uuid.UUID) *Client {
+    69		return &Client{
+    70			accountID: id,
+    71			outbox:    make(chan serverEvent, 64),
+    72			done:      make(chan struct{}),
+    73		}
+    74	}
+    75	
+    76	// add registers a client in the hub without triggering the DB-backed
+    77	// register() side effects (deliverPending / checkPrekeyStock).
+    78	func (h *Hub) add(c *Client) {
+    79		h.mu.Lock()
+    80		h.clients[c.accountID] = c
+    81		h.mu.Unlock()
+    82	}
+    83	
+    84	// drainType returns the first buffered frame of the given type, or fails.
+    85	func drainType(t *testing.T, c *Client, typ string) serverEvent {
+    86		t.Helper()
+    87		for {
+    88			select {
+    89			case ev := <-c.outbox:
+    90				if ev.Type == typ {
+    91					return ev
+    92				}
+    93			default:
+    94				t.Fatalf("no %q frame emitted to %s", typ, c.accountID)
+    95				return serverEvent{}
+    96			}
+    97		}
+    98	}
+    99	
+   100	func mustNoFrame(t *testing.T, c *Client) {
+   101		t.Helper()
+   102		select {
+   103		case ev := <-c.outbox:
+   104			t.Fatalf("unexpected frame emitted: %+v", ev)
+   105		default:
+   106		}
+   107	}
+   108	
+   109	func sendEnvelope(t *testing.T, id, sender, recipient uuid.UUID) clientEvent {
+   110		t.Helper()
+   111		env, err := json.Marshal(envelopeHeader{
+   112			ID:          id.String(),
+   113			RecipientID: recipient.String(),
+   114			SenderID:    sender.String(),
+   115		})
+   116		if err != nil {
+   117			t.Fatal(err)
+   118		}
+   119		return clientEvent{Type: "message.send", Envelope: env}
+   120	}
+   121	
+   122	// (a) After a valid message.send, the SENDER connection receives a
+   123	// message.stored carrying the envelope's own id.
+   124	func TestHandleSend_EmitsStoredToSender(t *testing.T) {
+   125		store := newFakeStore()
+   126		h := newTestHub(store)
+   127	
+   128		sender := uuid.New()
+   129		recipient := uuid.New() // offline
+   130		msgID := uuid.New()
+   131	
+   132		c := newTestClient(sender)
+   133		h.add(c)
+   134	
+   135		h.handleSend(c, sendEnvelope(t, msgID, sender, recipient))
+   136	
+   137		ev := drainType(t, c, "message.stored")
+   138		if ev.MessageID != msgID.String() {
+   139			t.Fatalf("message.stored id = %q, want %q", ev.MessageID, msgID.String())
+   140		}
+   141		// Emitted even though the recipient is offline.
+   142		if _, ok := store.stored[msgID]; !ok {
+   143			t.Fatalf("envelope was not stored")
+   144		}
+   145	}
+   146	
+   147	// A failed store must NOT emit message.stored — only the error frame.
+   148	func TestHandleSend_StoreFailure_NoStored(t *testing.T) {
+   149		store := newFakeStore()
+   150		store.storeErr = context.DeadlineExceeded
+   151		h := newTestHub(store)
+   152	
+   153		sender := uuid.New()
+   154		c := newTestClient(sender)
+   155		h.add(c)
+   156	
+   157		h.handleSend(c, sendEnvelope(t, uuid.New(), sender, uuid.New()))
+   158	
+   159		ev := drainType(t, c, "error")
+   160		if ev.Code != "store_failed" {
+   161			t.Fatalf("error code = %q, want store_failed", ev.Code)
+   162		}
+   163		// No message.stored should be buffered.
+   164		for {
+   165			select {
+   166			case e := <-c.outbox:
+   167				if e.Type == "message.stored" {
+   168					t.Fatalf("message.stored emitted despite store failure")
+   169				}
+   170			default:
+   171				return
+   172			}
+   173		}
+   174	}
+   175	
+   176	// (b) A recipient's message.received is relayed to the addressed peer (the
+   177	// sender) as message.delivered, carrying the same message_id and peer_id set
+   178	// to the relayer's (recipient's) account id.
+   179	func TestHandleReceived_RelaysDeliveredToSender(t *testing.T) {
+   180		h := newTestHub(newFakeStore())
+server/internal/config/config_test.go:43:			if cfg.BlobTTLHours != tc.wantTTL {
+server/internal/config/config_test.go:44:				t.Errorf("BlobTTLHours = %d, want %d", cfg.BlobTTLHours, tc.wantTTL)
+server/internal/config/config_test.go:64:	if cfg.BlobTTLHours != 24 {
+server/internal/config/config_test.go:65:		t.Errorf("BlobTTLHours = %d, want 24", cfg.BlobTTLHours)
+server/internal/api/blobs_test.go:66:		BlobTTLHours:     168, // 1-week unfetched fallback
+server/internal/ws/hub_test.go:34:func (f *fakeStore) PendingEnvelopes(ctx context.Context, recipientID uuid.UUID, cutoff time.Time) ([]db.PendingEnvelope, error) {
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:854:        linkJob?.cancel()
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1014:                    ticker.cancel()
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1752:                        // (retries exhausted / scope cancelled / process killed) leaves the peer
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1927:            linkJob?.cancel()
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:2371:        linkJob?.cancel()
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:2639:     * runtime.close() first): the removal NEVER touched live state, so the delete did not take and
+apps/android/app/src/main/java/com/zitrone/app/ZitroneApp.kt:959:        // Teardown: stop the coordinator THEN close the runtime (final reseal + state
+apps/android/app/src/main/java/com/zitrone/app/ZitroneApp.kt:961:        // runtime.close() (the reseal + key-material wipe) runs in a finally so a
+apps/android/app/src/main/java/com/zitrone/app/ZitroneApp.kt:969:                    it.runtime.close()
+apps/android/app/src/main/java/com/zitrone/app/ZitroneApp.kt:1255:     * Do NOT confuse with `runtime.close()` / `signalStore.wipe()`, which RESEAL the image (keeping the
+apps/android/app/src/main/java/com/zitrone/app/ZitroneApp.kt:1754:        // the heap with no reseal or wipe — so reseal + wipe it via runtime.close() (idempotent)
+apps/android/app/src/main/java/com/zitrone/app/ZitroneApp.kt:1920:            runCatching { rt.close() }
+apps/android/app/src/main/java/com/zitrone/app/ZitroneApp.kt:1956:            // revocation runs runtime.close() while this delete is mid-seal) makes
+apps/android/app/src/main/java/com/zitrone/app/ZitroneApp.kt:1988: * teardown mid-delete (forced logout / revocation running runtime.close()) UNWINDS cooperatively
+   360	     *
+   361	     * That is the property the post-round-2 epoch guards were emulating by hand
+   362	     * and getting wrong under a multi-threaded dispatcher: with confinement, any
+   363	     * "check the contact still exists → mutate" tail written **without a
+   364	     * suspension in the middle** is atomic with respect to a concurrent
+   365	     * [deleteContact], so a delete can never slip between the check and the
+   366	     * publish. Blocking work that must not stall this one worker (the network
+   367	     * prekey fetch; nothing else) suspends off it as usual. The crypto teardown
+   368	     * in [deleteContact] deliberately runs ON this worker (a background IO-pool
+   369	     * thread, never main) as a short, non-suspending local commit, so it is
+   370	     * mutually exclusive with any same-contact encrypt/decrypt rather than
+   371	     * racing them across threads — which is why deletion needs no session lock
+   372	     * and cannot be stalled behind an in-flight send's network fetch.
+   373	     *
+   374	     * IO (not Default) because this worker performs blocking disk commits
+   375	     * (EncryptedSharedPreferences); `limitedParallelism(1)` still gives the
+   376	     * single-worker confinement guarantee.
+   377	     */
+   378	    @OptIn(ExperimentalCoroutinesApi::class)
+   379	    private val confined = Dispatchers.IO.limitedParallelism(1)
+   380	
+   381	    /**
+   382	     * Per-message attachment deposit secrets, so a RETRY reuses one blob instead of orphaning the
+   383	     * previous one (0.10.2 item 5a).
+   384	     *
+   385	     * `AttachmentCrypto.encrypt` drew a fresh token per call and `blobId = sha256(token)`, so every
+   386	     * 0.10.1 retry uploaded a NEW blob and left the old one to its full TTL — N retries = N × up to
+   387	     * 8 MiB, and blobs are the dimension that actually threatens the box (~2,079 orphans exhaust
+   388	     * CX23's free space, one blob ≈ 545 accounts' worth of disk).
+   389	     *
+   390	     * **Only the 96-byte secrets are held, never the box.** Holding the 8 MiB ciphertext to force
+   391	     * byte-identical re-uploads would trade a disk orphan for a heap leak, on bytes the message
+   392	     * ALREADY retains in memory for retry. It is unnecessary anyway: whichever attempt's bytes the
+   393	     * relay keeps carry their own nonce, so a stable key opens either.
+   394	     *
+   395	     * **Per-process is sufficient, and is the smaller surface.** `MessageRepository` is RAM-only, so
+   396	     * a retry only ever happens inside one process lifetime — a crash takes the bubble and leaves
+   397	     * nothing to retry. So this needs no vault scoping, no durable state, and adds no deniability
+   398	     * surface. Entries are released the moment the send stops being retryable; see [releaseDeposit].
+   399	     */
+   400	    private class AttachmentDeposit(val token: ByteArray, val key: ByteArray)
+   401	
+   402	    private val attachmentDeposits = ConcurrentHashMap<String, AttachmentDeposit>()
+   403	
+   404	    /**
+   405	     * Drop a message's memoized deposit secrets. Called on every terminal outcome — the relay took it
+   406	     * (SENT), the recipient got it, the local copy was discarded, or it burned. **Without this the
+   407	     * map grows for the process's lifetime**, which is the heap-leak side of the trade this fix
+   408	     * exists to avoid. Idempotent.
+   409	     */
+   410	    private fun releaseDeposit(messageId: String) {
+   411	        attachmentDeposits.remove(messageId)
+   412	    }
+   413	
+   414	    /**
+   415	     * Ask the relay to drop a blob we are giving up on — **and never let that fail anything**
+   416	     * (0.10.2 item 5b).
+   417	     *
+   418	     * Every call site is a send that has ALREADY failed. Cleanup that threw would turn a failed send
+   419	     * into a crash; cleanup that blocked would delay the user's "!" indicator. Both are worse defects
+   420	     * than the orphan being reclaimed, so failures are swallowed and **the TTL remains the backstop**
+   421	     * — which it has to be regardless, because a crash is one of the orphan routes and cannot call
+   422	     * this at all.
+   423	     *
+   424	     * A null token means there is nothing to abandon: the deposit never happened, or was already
+   425	     * released on a terminal outcome.
+   426	     */
+   427	    private fun abandonBlobQuietly(tokenBase64: String?) {
+   428	        if (tokenBase64 == null) return
+   429	        scope.launch {
+   430	            runCatching { api.abandonBlob(tokenBase64) }
+   431	                .onFailure { if (it is CancellationException) throw it }
+   432	        }
+   433	    }
+   434	
+   435	    /**
+   436	     * Whether [contactId] is still a live roster entry. Used by the send/deliver
+   437	     * publish tails: a send is always to an existing conversation, so a `false`
+   438	     * here means the contact was torn down mid-send and nothing may be deposited
+   439	     * or published for it.
+   440	     */
+   441	    private fun contactExists(contactId: String): Boolean =
+   442	        conversations.findByContact(contactId) != null
+   443	
+   444	    /**
+   445	     * THE PUBLISH TAIL for [deliverText] and the attachment control payload — **a non-suspending
+   446	     * method, and that is the whole point of it being a method at all.**
+   447	     *
+   448	     * On the confinement worker this `contactExists → ws.sendMessage` check→deposit must be atomic
+   449	     * against `deleteContact`: the durable flush (whose transient-retry backoff SUSPENDS) completes
+   450	     * strictly BEFORE this runs, because a suspension between the check and the send would let a
+   451	     * queued delete interleave and publish ciphertext to a just-deleted contact (D2c round 6). So a
+   452	     * contact torn down before this point drops the envelope AND the local plaintext, and one torn
+   453	     * down after it was still live when we deposited.
+   454	     *
+   455	     * **Why it is a `private fun` rather than four inline lines:** a non-suspending function body
+   456	     * cannot contain a suspension point, so the rule above is enforced by the compiler at every
+   457	     * caller instead of by a comment each caller has to keep repeating. Cover traffic used to buy
+   458	     * that enforcement by taking the tail as a `() -> Unit` (0.10.0 U3); the tail moved back out to
+   459	     * the caller in fix round 3 so that no cover-traffic instruction sits between the durability
+   460	     * barrier and `ws.sendMessage`, and this method is what kept the enforcement. It is a member of
+   461	     * the send path, not of the cover-traffic seam, and it would stay exactly as it is if cover
+   462	     * traffic were deleted.
+   463	     *
+   464	     * **Returns whether the envelope was actually HANDED TO THE RELAY** (U3 fix round 4). It used to
+   465	     * return `Unit`, which collapsed three outcomes — discarded because the contact was deleted,
+   466	     * refused because the socket was down, and genuinely handed off — into one the caller could not
+   467	     * tell apart. The caller ran cover traffic in all three, so two of them put a decoy on the wire
+   468	     * with **no real frame behind it**: a frame the user never generated, which is the same
+   469	     * marked-pair defect as an unpaired real frame with the sign flipped. Hence the guard on the
+   470	     * cover call at all three call sites.
+   471	     */
+   472	    private fun publishOutgoing(
+   473	        envelope: MessageEnvelope,
+   474	        contactId: String,
+   475	        messageId: String,
+   476	    ): Boolean {
+   477	        if (!contactExists(contactId)) {
+   478	            diag("send: contact deleted mid-send — dropping local copy")
+   479	            messages.discard(messageId)
+   480	            // Contact deleted mid-send: the local copy is gone, so nothing will retry this id.
+   481	            releaseDeposit(messageId)
+   482	            return false
+   483	        }
+   484	        if (ws.sendMessage(envelope)) {
+   485	            // Handed to the relay — but honestly still just SENDING. The tick waits for the relay's
+   486	            // message.stored (→SENT) and the recipient's message.delivered (→DELIVERED); see
+   487	            // [MessageState].
+   488	            return true
+   489	        }
+   490	        // The socket was down: the send did not reach the relay. The ratchet advance is already
+   491	        // durable, so a retry advances cleanly. Connection state only — never the envelope.
+   492	        diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
+   493	        messages.markFailed(messageId)
+   494	        return false
+   495	    }
+   496	
+   497	    /**
+   498	     * THE PUBLISH TAIL for read receipts — the same non-suspending contract as [publishOutgoing]
+   499	     * and the same `true` = "handed to the relay" result,
+   500	     * with the receipt's own failure handling: a receipt for a just-deleted contact is dropped (no
+   501	     * post-delete ciphertext) and NOT queued, while a socket-down receipt is queued for the
+   502	     * reconnect flush because the messages are already READ locally and will never re-enter
+   503	     * [onMessagesSeen].
+   504	     */
+   505	    private fun publishReceipt(
+   506	        envelope: MessageEnvelope,
+   507	        contactId: String,
+   508	        messageIds: List<String>,
+   509	    ): Boolean {
+   510	        if (!contactExists(contactId)) {
+
+exec
+/bin/bash -lc "nl -ba apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt | sed -n '2320,2395p'; nl -ba apps/android/app/src/main/java/com/zitrone/app/ZitroneApp.kt | sed -n '920,990p'; rg -n \"MessagingCoordinator\\(|stop\\(\\).*Messaging|coordinator.stop|stopCoordinator|messagingCoordinator\" apps/android/app/src/main/java/com/zitrone/app/ZitroneApp.kt | head -n 100; rg -n \"private val scope|CoroutineScope\" apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt | head -n 30" in /root/zitrone
+ succeeded in 0ms:
+  2320	                // generating another — a fresh batch per failure would pile orphaned private
+  2321	                // halves into the fixed-capacity vault. Publishing publics whose privates a crash
+  2322	                // could roll back would hand peers bundles we can't complete X3DH for.
+  2323	                if (flushBeforePreKeyPublish {
+  2324	                        diag("prekey: top-up reseal not durable — upload skipped, retries on next low signal")
+  2325	                    }
+  2326	                ) {
+  2327	                    // TWO-PHASE attempted marker (round 8, Codex): mark the batch ATTEMPTED and
+  2328	                    // reseal that durable BEFORE the request leaves — a lost response / crash
+  2329	                    // after the upload must never re-serve possibly-consumed ids (the relay
+  2330	                    // re-inserts a consumed id). The ordering keeps the flush-gated skip above
+  2331	                    // re-servable: the flag is only ever durable for a batch whose request was
+  2332	                    // genuinely about to exist. A non-durable second flush skips the upload too
+  2333	                    // (the RAM-only flag rolls back on crash → safe re-serve; in-process it
+  2334	                    // conservatively generates a fresh batch next signal).
+  2335	                    signal.markOneTimePreKeyUploadAttempted()
+  2336	                    if (flushBeforePreKeyPublish {
+  2337	                            diag("prekey: attempted-marker reseal not durable — upload deferred")
+  2338	                        }
+  2339	                    ) {
+  2340	                        api.uploadPreKeys(oneTimePreKeys)
+  2341	                        signal.confirmOneTimePreKeysUploaded()
+  2342	                    }
+  2343	                }
+  2344	            }
+  2345	        }
+  2346	    }
+  2347	
+  2348	    override fun onSessionRevoked() {
+  2349	        // A revoke must NOT clear tokens or tear the session down while a delete is PENDING (round
+  2350	        // 16, R15-P2). "Pending" is the DURABLE intent marker's lifetime — from its durable write
+  2351	        // until a confirmed destroy() retires it — which persists across DEFINITE_FAILURE /
+  2352	        // AMBIGUOUS / confirmed-not-durable exits AND process restart, long after this coroutine
+  2353	        // ends. Stripping the vault-backed tokens in that window would strand a completed- (or
+  2354	        // ambiguously-) deleted account: the next-unlock reconcile could no longer authenticate the
+  2355	        // idempotent 404. `deleteInFlight` additionally covers the sub-window before the intent
+  2356	        // marker is durable. The delete flow owns teardown (CONFIRMED → destroy; not-confirmed →
+  2357	        // keep the session, a later 401 / reconcile handles the stale session), so during a pending
+  2358	        // delete this revoke is a no-op. Server-side deletion itself commonly triggers this revoke.
+  2359	        if (deleteInFlight || intentMarkerPresent()) return
+  2360	        // Fast, thread-safe teardown on the socket callback thread: stop the
+  2361	        // relink loop, drop tokens, and — BEFORE the UI is bounced to the gate —
+  2362	        // synchronously cancel every armed reminder job. Re-fire jobs run on
+  2363	        // the container scope (not the confined dispatcher), so one at its
+  2364	        // boundary could otherwise alert AFTER the user sees the logged-out
+  2365	        // state but before the queued cleanup below runs.
+  2366	        _linking.value = false
+  2367	        acceptingDeliveries = false
+  2368	        // R-U3-5 step 1 on the revoke path too: the tokens are about to go, so a send admitted from
+  2369	        // here on could only fail — and [onForcedLogout] below runs the real teardown.
+  2370	        acceptingSends = false
+  2371	        linkJob?.cancel()
+  2372	        api.clearTokens()
+  2373	        notificationScheduler.cancelAll()
+  2374	        // Second, SERIALIZED cancel behind any message.deliver work already
+  2375	        // queued on the confined dispatcher: those queued deliveries would
+  2376	        // otherwise re-add messages and re-arm reminder state AFTER the
+  2377	        // synchronous cancel above. Queued last, this block runs once they
+  2378	        // have drained, so nothing they armed survives either. (A delivery
+  2379	        // processed in between may still post one content-free alert — that
+  2380	        // message genuinely arrived before logout completed; no timer
+  2381	        // outlives this block.)
+  2382	        scope.launch(confined) {
+  2383	            messages.clearAll()
+  2384	            notificationScheduler.cancelAll()
+  2385	        }
+  2386	        onForcedLogout?.invoke()
+  2387	    }
+  2388	
+  2389	    override fun onAuthExpired() {
+  2390	        // Token rejected mid-session. Wait for any in-flight boot to finish
+  2391	        // (it's the one that just connected), THEN re-run the boot sequence —
+  2392	        // registration is skipped (account exists), so this re-mints a fresh
+  2393	        // session + socket. Latching via join() avoids the race where start()
+  2394	        // no-ops against a still-active linkJob and the relink is lost.
+  2395	        val current = linkJob
+   920	     * once [publishSession] hands a resolved [VaultOpen] to [UnlockController].
+   921	     */
+   922	    private val _session = MutableStateFlow<SessionContainer?>(null)
+   923	    val session: StateFlow<SessionContainer?> = _session.asStateFlow()
+   924	
+   925	    private val lemonDropVeilController = LemonDropVeilController(
+   926	        scope = scope,
+   927	        isUnlocked = { _session.value != null },
+   928	        probe = { qrId ->
+   929	            _session.value?.lemonDropRedeemer?.probe(qrId)
+   930	                ?: LemonDropRedeemer.ProbeResult.Advocacy(LemonDropScanOutcome.UNKNOWN)
+   931	        },
+   932	    )
+   933	
+   934	    val lemonDropVeil: MutableStateFlow<LemonDropVeil?> get() = lemonDropVeilController.veil
+   935	
+   936	    /** Handle a scanned `/d/{id}` — see [LemonDropVeilController.onScan]. */
+   937	    fun onLemonDropLink(qrId: String) = lemonDropVeilController.onScan(qrId)
+   938	
+   939	    /** Dismiss the veil and invalidate any in-flight/queued scan. */
+   940	    fun dismissLemonDropVeil() = lemonDropVeilController.dismiss()
+   941	
+   942	    /** Drop a plaintext-bearing [LemonDropVeil.Delivered] when the Activity stops. */
+   943	    fun clearDeliveredLemonDropVeil() = lemonDropVeilController.clearDelivered()
+   944	
+   945	    /**
+   946	     * The session-per-unlock lifecycle. Builds a fresh vault-backed [SessionContainer]
+   947	     * over the CURRENT transport from a resolved [VaultOpen], and tears it down (with a
+   948	     * final vault reseal via `runtime.close`) on lock. See [UnlockController].
+   949	     */
+   950	    val unlockController = UnlockController<SessionContainer>(
+   951	        newSessionScope = { CoroutineScope(SupervisorJob() + Dispatchers.Default) },
+   952	        // The vault path always builds via unlock(prepared) with a resolved VaultOpen; a
+   953	        // no-arg unlock has no VaultOpen to consume and is unused on this install.
+   954	        buildSession = { error("vault install builds sessions via unlock(prepared)") },
+   955	        publish = { published ->
+   956	            synchronized(transportLock) { _session.value = published }
+   957	            if (published == null) lemonDropVeilController.onLocked()
+   958	        },
+   959	        // Teardown: stop the coordinator THEN close the runtime (final reseal + state
+   960	        // wipe), under transportLock. The imageStore itself stays open (device half).
+   961	        // runtime.close() (the reseal + key-material wipe) runs in a finally so a
+   962	        // throw from coordinator.stop() can NEVER skip the wipe — otherwise a lock
+   963	        // would leave the slot key + decrypted plaintext resident in the heap.
+   964	        stopSession = {
+   965	            synchronized(transportLock) {
+   966	                try {
+   967	                    it.coordinator.stop()
+   968	                } finally {
+   969	                    it.runtime.close()
+   970	                }
+   971	            }
+   972	        },
+   973	        afterPublish = ::onSessionPublished,
+   974	    )
+   975	
+   976	    /**
+   977	     * D3 idle auto-lock. Locks the vault through the SAME [unlockController] teardown after the
+   978	     * user's device-level timeout once the app is backgrounded — it only LOCKS (reseal + teardown),
+   979	     * never DELETES, so it adds no writer to the vault-delete / auth state. Registered on the
+   980	     * process lifecycle at construction (on the main thread, in Application.onCreate).
+   981	     */
+   982	    val vaultLockManager = VaultLockManager(
+   983	        scope = scope,
+   984	        timeoutSeconds = { deviceSettings.autoLockTimeoutSeconds },
+   985	        sessionLive = { _session.value != null },
+   986	        terminalWipe = { unlockController.isTerminalWipe() },
+   987	        lock = { unlockController.lock() },
+   988	        // Uninterrupted-sequence guard (0.9.2 triple-entry, spec §3): backgrounding the app breaks any
+   989	        // in-progress triple-entry ritual. Reset UNCONDITIONALLY on every onStop (independent of the
+   990	        // auto-lock decision, which is session-gated — the ritual runs at the LOCK screen with no live
+962:        // throw from coordinator.stop() can NEVER skip the wipe — otherwise a lock
+967:                    it.coordinator.stop()
+1884:            coordinator = MessagingCoordinator(
+43:import kotlinx.coroutines.CoroutineScope
+101:    private val scope: CoroutineScope,
+
+exec
+/bin/bash -lc "rg -n \"fun stop\\(\" apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt; nl -ba apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt | sed -n '820,875p'; nl -ba apps/android/app/src/main/java/com/zitrone/app/ZitroneApp.kt | sed -n '1860,1905p'; rg -n \"class UnlockController|fun lock\\(\" apps/android/app/src/main/java/com/zitrone/app -g '*.kt' | head -n 40" in /root/zitrone
+ succeeded in 0ms:
+848:    fun stop() {
+   820	                // auth expiry comes back through onAuthExpired().
+   821	                runCatching {
+   822	                    signal.rotateSignedPreKeyIfNeeded()?.let { rotated ->
+   823	                        // Prekey durability barrier (see the register path): the rotation just STORED
+   824	                        // the new signed prekey's PRIVATE half — reseal it DURABLE before publishing
+   825	                        // its PUBLIC half. On a non-durable flush do NOT upload. The retry is REAL
+   826	                        // (round 8): generation marks the id upload-pending, and
+   827	                        // rotateSignedPreKeyIfNeeded re-serves that stored record on every boot
+   828	                        // until the confirm below retires it — the age gate alone would never
+   829	                        // retry (createdAt was already bumped at generation).
+   830	                        if (flushBeforePreKeyPublish {
+   831	                                diag("boot: signed-prekey reseal not durable — rotation upload skipped, retries next boot")
+   832	                            }
+   833	                        ) {
+   834	                            api.uploadPreKeys(emptyList(), rotated)
+   835	                            signal.confirmSignedPreKeyUploaded()
+   836	                        }
+   837	                    }
+   838	                }
+   839	                return
+   840	            }
+   841	            // Delay from the CURRENT attempt (0-based) so the first retry waits
+   842	            // the 1s base, not 2s — then advance (matches WsClient's backoff).
+   843	            delay(min(MAX_BACKOFF_MS, BASE_BACKOFF_MS shl min(attempt, MAX_BACKOFF_SHIFT)))
+   844	            attempt += 1
+   845	        }
+   846	    }
+   847	
+   848	    fun stop() {
+   849	        _linking.value = false
+   850	        acceptingDeliveries = false
+   851	        // R-U3-5 step 1, and it must come FIRST: no new real send is admitted from here on, so the
+   852	        // set of sends the teardown below has to serialise behind is closed rather than growing.
+   853	        acceptingSends = false
+   854	        linkJob?.cancel()
+   855	        // Steps 2–4, ON THE CONFINED WORKER and blocking until they have run — see
+   856	        // [CoverTrafficWorker] for why the dispatch is the whole point. The helper skips the
+   857	        // dispatch when teardown has already happened, because [deleteAccountAndWipe] tears cover
+   858	        // traffic down on the worker and only THEN calls back into a lock() that lands here —
+   859	        // dispatching onto the worker from a caller the worker is itself waiting on would stall for
+   860	        // the whole bound before falling back.
+   861	        coverWorker.runTerminalConfined(::coverTeardown)
+   862	        // Teardown hook: drop all pending re-fire jobs + fire state so nothing
+   863	        // carries across an identity switch (see NotificationScheduler).
+   864	        notificationScheduler.cancelAll()
+   865	        // Owed post-ack side effects die with the session: a receipt, notification, or blob
+   866	        // redemption must never fire for a locked/logged-out/burned account, and nothing
+   867	        // carries across an identity switch (see PendingPostAckLedger).
+   868	        pendingPostAck.clear()
+   869	    }
+   870	
+   871	    /**
+   872	     * Steps 2–4 of the R-U3-5 teardown lifecycle: **the only place in this class that stops cover
+   873	     * traffic and invalidates the transport.**
+   874	     *
+   875	     * The disconnect is passed IN rather than called beside the drain, because getting the order
+  1860	                                registrationId = signalManager.localRegistrationId(),
+  1861	                                identityKeySerialized = signalManager.localIdentitySerialized(),
+  1862	                            )
+  1863	                        }
+  1864	                    },
+  1865	                    recipient = { DecoyAuthStore(rt).accountId },
+  1866	                    send = wsClient::sendMessage,
+  1867	                    pressure = coverPressure,
+  1868	                    provision = {
+  1869	                        DecoyAccountProvisioner.forRuntime(
+  1870	                            runtime = rt,
+  1871	                            relay = relayFactory(),
+  1872	                            powSolver = RegistrationPowSolver(),
+  1873	                        ).provisionIfNeeded()
+  1874	                        // Provisioning is lazy, so the synthetic account can APPEAR mid-session —
+  1875	                        // this is the call that opens its socket the first time. Idempotent; the
+  1876	                        // start below covers a vault that already had an account at unlock.
+  1877	                        inbound?.start()
+  1878	                    },
+  1879	                )
+  1880	            } ?: CoverTraffic.NONE
+  1881	            // U4's teardown is bound to U3's rather than left to two call sites to remember: the
+  1882	            // synthetic socket must not outlive the real session. See DecoyInboundSession.bindTo.
+  1883	            coverTraffic = inbound?.bindTo(pairing) ?: pairing
+  1884	            coordinator = MessagingCoordinator(
+  1885	                appContext = app,
+  1886	                scope = scope,
+  1887	                signal = signalManager,
+  1888	                api = apiClient,
+  1889	                ws = wsClient,
+  1890	                messages = messageRepository,
+  1891	                conversations = conversationRepository,
+  1892	                settings = settings,
+  1893	                diagnostics = bootDiagnostics,
+  1894	                notificationScheduler = notificationScheduler,
+  1895	                vaultContactDelete = ::deleteContactAtomically,
+  1896	                // Flush-before-ack barrier (D2c, absorbs D4): the coordinator reseals the receiving
+  1897	                // ratchet durably before acking each inbound delivery. rt is the live runtime.
+  1898	                flushBeforeAck = rt::flushBeforeAck,
+  1899	                // Two-phase deletion markers (round 13): intent before the server delete, confirmed
+  1900	                // only after the server confirms gone; clear-intent abandons a definite failure.
+  1901	                persistDeleteIntent = persistDeleteIntent,
+  1902	                persistServerDeleteConfirmed = persistServerDeleteConfirmed,
+  1903	                intentMarkerPresent = intentMarkerPresent,
+  1904	                // U3: wraps the publish tail of every outbound envelope. MessagingCoordinator.stop()
+  1905	                // is what tears it down, which is why the coordinator owns the reference.
+apps/android/app/src/main/java/com/zitrone/app/UnlockController.kt:41:class UnlockController<S : Any>(
+apps/android/app/src/main/java/com/zitrone/app/UnlockController.kt:107:    fun lock() {
+
+exec
+/bin/bash -lc "nl -ba apps/android/app/src/main/java/com/zitrone/app/UnlockController.kt | sed -n '35,135p'" in /root/zitrone
+ succeeded in 0ms:
+    35	 * @param publish sets the observable session slot (the [AppContainer] StateFlow).
+    36	 * @param stopSession the canonical session stop (coordinator.stop()).
+    37	 * @param afterPublish runs once, with the session already live, right after it is
+    38	 *   published: it re-applies the transport (closing the build-vs-publish race —
+    39	 *   see [AppContainer.applyTransport]) and drains any queued lemon-drop scan.
+    40	 */
+    41	class UnlockController<S : Any>(
+    42	    private val newSessionScope: () -> CoroutineScope,
+    43	    private val buildSession: (CoroutineScope) -> S,
+    44	    private val publish: (S?) -> Unit,
+    45	    private val stopSession: (S) -> Unit,
+    46	    private val afterPublish: () -> Unit,
+    47	    private val drainTimeoutMs: Long = 2_000,
+    48	) {
+    49	    private val lock = Any()
+    50	    private var current: S? = null
+    51	    private var sessionScope: CoroutineScope? = null
+    52	    // @Volatile so [isTerminalWipe] can read it WITHOUT taking [lock] — that read happens on the
+    53	    // main thread (VaultLockManager.onStop), and a background lockCurrent() can hold [lock] while
+    54	    // blocked up to drainTimeoutMs in runBlocking; a synchronized read would then stall the main
+    55	    // thread → ANR. Writes stay under [lock] (they are compound with other state); the volatile
+    56	    // guarantees the lock-free reader sees them.
+    57	    @Volatile private var terminalWipe = false
+    58	
+    59	    /**
+    60	     * Build + publish the session if none is live, from the default [buildSession].
+    61	     * Idempotent. Refused while a terminal wipe is in progress (see
+    62	     * [beginTerminalWipe]) — the UI's normal routing retries once the wipe's
+    63	     * completion lifts the gate.
+    64	     */
+    65	    fun unlock() = unlock(buildSession)
+    66	
+    67	    /**
+    68	     * As [unlock], but from a caller-[prepared] factory that already carries resolved
+    69	     * credentials — D2c's vault path resolves the [com.zitrone.app.crypto.vault.VaultOpen]
+    70	     * OFF the monitor (Argon2id / biometric happen before this call), then hands the build
+    71	     * in here. Same monitor, same idempotence + terminal-wipe refusal as [unlock].
+    72	     *
+    73	     * A REFUSED build (terminal wipe in progress, or a session already live) never invokes
+    74	     * [prepared], so the credential it closes over would be abandoned — [onRefused] runs
+    75	     * instead so the caller wipes the unused VaultOpen. On an accepted build [prepared] owns
+    76	     * the arrays (VaultSession consumes them); [onRefused] is not called.
+    77	     */
+    78	    fun unlock(prepared: (CoroutineScope) -> S, onRefused: () -> Unit = {}) {
+    79	        synchronized(lock) {
+    80	            if (terminalWipe) return onRefused()
+    81	            if (current != null) return onRefused()
+    82	            val scope = newSessionScope()
+    83	            val session = try {
+    84	                prepared(scope)
+    85	            } catch (t: Throwable) {
+    86	                // Spec §4: a FAILED build must wipe the VaultOpen it was handed and must not
+    87	                // strand the freshly created scope. `onRefused` performs the caller's wipe (safe
+    88	                // even if VaultSession already consumed the arrays — a re-wipe of zeroed bytes is
+    89	                // a no-op); the partial session's own runtime, if any was built, is resealed+wiped
+    90	                // by SessionContainer's construction guard before this throw reaches here.
+    91	                scope.cancel()
+    92	                onRefused()
+    93	                throw t
+    94	            }
+    95	            sessionScope = scope
+    96	            current = session
+    97	            publish(session)
+    98	            // AFTER publish, inside the lock so it cannot interleave with a
+    99	            // teardown: afterPublish reconciles a transport change that landed
+   100	            // mid-build (applyTransport saw a null session) and drains a scan
+   101	            // queued while locked — both need the now-live slot.
+   102	            afterPublish()
+   103	        }
+   104	    }
+   105	
+   106	    /** Tear down + null the live session if any. Idempotent. */
+   107	    fun lock() {
+   108	        synchronized(lock) { lockCurrent() }
+   109	    }
+   110	
+   111	    /**
+   112	     * [lock], but ONLY if [expected] is still the live session. Teardown
+   113	     * callbacks capture the session they belong to (the forced-logout wiring,
+   114	     * the account-delete completion); a detached callback firing late — e.g. the
+   115	     * NonCancellable account wipe finishing after a concurrent revocation
+   116	     * already tore its session down and the user re-unlocked — must not tear
+   117	     * down the innocent successor session (Codex PR #45 r1).
+   118	     */
+   119	    fun lockIf(expected: S) {
+   120	        synchronized(lock) { if (current === expected) lockCurrent() }
+   121	    }
+   122	
+   123	    private fun lockCurrent() {
+   124	        val session = current ?: return
+   125	        try {
+   126	            stopSession(session)
+   127	        } catch (t: Throwable) {
+   128	            // Teardown must complete even if stopSession throws (D2c: runtime.close()'s final
+   129	            // reseal can throw NotDurable/IO — but it has ALREADY wiped its secrets in a finally).
+   130	            // Swallowing here keeps the ordered teardown going so a dead runtime is never left
+   131	            // published with `current` still set (which would let the next unlock "succeed" onto a
+   132	            // closed runtime and then crash on first use).
+   133	        }
+   134	        val job = sessionScope?.coroutineContext?.get(Job)
+   135	        sessionScope?.cancel()
+
+exec
+/bin/bash -lc "nl -ba apps/android/app/src/main/java/com/zitrone/app/UnlockController.kt | sed -n '123,160p'" in /root/zitrone
+ succeeded in 0ms:
+   123	    private fun lockCurrent() {
+   124	        val session = current ?: return
+   125	        try {
+   126	            stopSession(session)
+   127	        } catch (t: Throwable) {
+   128	            // Teardown must complete even if stopSession throws (D2c: runtime.close()'s final
+   129	            // reseal can throw NotDurable/IO — but it has ALREADY wiped its secrets in a finally).
+   130	            // Swallowing here keeps the ordered teardown going so a dead runtime is never left
+   131	            // published with `current` still set (which would let the next unlock "succeed" onto a
+   132	            // closed runtime and then crash on first use).
+   133	        }
+   134	        val job = sessionScope?.coroutineContext?.get(Job)
+   135	        sessionScope?.cancel()
+   136	        // cancel() returns immediately and cancellation is cooperative: work
+   137	        // already running — a decrypt persisting a ratchet update — would race a
+   138	        // successor session over the SAME legacy stores (concurrent ratchet
+   139	        // mutations can permanently break a contact's session — Codex PR #45
+   140	        // r2). Wait, bounded, for the scope to drain before a successor can
+   141	        // build. The bound covers the realistic window (store writes are
+   142	        // ms-scale); a coroutine stuck in uninterruptible network I/O can
+   143	        // overrun it — a residual, accepted for D2b since production lock()
+   144	        // callers are background threads and an unlock() racing this blocks on
+   145	        // the monitor for at most the bound. D2c's VaultRuntime serializes all
+   146	        // store access through one lock, retiring this race class outright.
+   147	        if (job != null) {
+   148	            runBlocking { withTimeoutOrNull(drainTimeoutMs) { job.join() } }
+   149	        }
+   150	        publish(null)
+   151	        current = null
+   152	        sessionScope = null
+   153	    }
+   154	
+   155	    /**
+   156	     * Gate [unlock] shut for the duration of a terminal (account-delete) wipe: a
+   157	     * successor session built while the shared legacy stores are being cleared
+   158	     * underneath it would hold stale roster/auth state with vanished crypto
+   159	     * (Codex PR #45 r2). The wipe runs NonCancellable and its completion calls
+   160	     * [endTerminalWipe], so the gate always lifts.
+
+codex
+# FINDINGS
+
+- **R1-1, P1, `server/internal/config/config.go:136–142`** — The stated blob/envelope TTL invariant is not enforced. A supported deployment can set `MESSAGE_TTL_UNDELIVERED_HOURS=120` while blobs remain at the 96-hour default, or explicitly set any positive `BLOB_TTL_HOURS`, including the test-sanctioned 24 hours. Send an attachment, leave the recipient offline past the blob TTL but below the envelope TTL, then reconnect: the envelope is delivered while `RedeemBlob` returns 404. Outcome: a deliverable message permanently loses its attachment. Tests miss it because `config_test.go:53–69` explicitly accepts `BLOB_TTL_HOURS=24` and never tests the cross-setting relationship.
+
+- **R1-2, P1, `server/internal/config/config.go:66–83`** — Even the default 96/72-hour arithmetic relies on a nonexistent finite upload→send bound. Android uploads at `MessagingCoordinator.kt:1420`, then suspends again in `flushSendRatchet` before publishing at `:1445–1467`. Backgrounding can freeze the process after the upload while also preventing the auto-lock timer from running. After more than 24 hours, thaw scheduling can resume the send continuation before lock teardown, publishing an envelope whose blob is expired or has less than 72 hours remaining. Outcome: a live attachment is unavailable during the envelope’s delivery window. Ordinary 0.10.1 retry is safe because it re-deposits a fresh blob; explicit lock/unlock cancels the session scope and does not resume the send. Tests miss Android process-freeze/resume timing entirely and no test establishes a maximum upload→publish delay.
+
+- **R1-3, P1, `server/internal/ws/hub.go:93–95`** — `MESSAGE_TTL_UNDELIVERED_HOURS` accepts zero or negative values. With `0`, a recipient reconnecting immediately after an offline envelope was stored queries with `created_at >= time.Now()` and receives nothing; the next janitor pass deletes it. A negative value excludes even future-skewed rows. Outcome: deliverable messages are silently dropped. Tests always construct the hub with 72 hours and the config tests do not validate message TTL.
+
+# CONFIRM-OR-REFUTE
+
+1. **Refresh-token purge: confirmed.** `<=` matches consumption’s strict `> now()` boundary. Both operations are atomic competing deletes; no separate validity-check/use gap exists. A purge failure is logged and subsequent janitor passes still execute.
+
+2. **96-hour blob TTL: refuted.** Arithmetic under the stated formula leaves 23 h 50 min. Since delivery is now strictly TTL-filtered, janitor lag is not actually part of blob fetchability, yielding 24 hours—but neither bound is guaranteed. The configuration also does not enforce even the numeric relationship.
+
+3. **Pending-envelope cutoff: boundary confirmed, validation refuted.** For the same cutoff, delivery uses `>=` and purge uses `<`, so there is no boundary hole or overlap. Both containers share the host clock, making ordinary app/database clock skew negligible. Zero/negative TTL remains a reachable destructive configuration.
+
+4. **Postgres command: confirmed.** The official image treats these as server arguments after initialization, so `POSTGRES_*` handling and init scripts remain intact. Command-line `-c` overrides configuration files including `postgresql.auto.conf`. `effective_cache_size` is a planner estimate, not allocated memory; 2.5 GiB is defensible but should be validated against the live workload.
+
+# MISSING CONTEXT
+
+No production compose overlays, actual PostgreSQL planner statistics, or measured Android freeze/resume trace were available. I did not execute tests because the request prohibited commands that create files or other state.
+
+VERDICT: FINDINGS (3 P1, 0 P2, 0 P3)
+tokens used
+83,938
+# FINDINGS
+
+- **R1-1, P1, `server/internal/config/config.go:136–142`** — The stated blob/envelope TTL invariant is not enforced. A supported deployment can set `MESSAGE_TTL_UNDELIVERED_HOURS=120` while blobs remain at the 96-hour default, or explicitly set any positive `BLOB_TTL_HOURS`, including the test-sanctioned 24 hours. Send an attachment, leave the recipient offline past the blob TTL but below the envelope TTL, then reconnect: the envelope is delivered while `RedeemBlob` returns 404. Outcome: a deliverable message permanently loses its attachment. Tests miss it because `config_test.go:53–69` explicitly accepts `BLOB_TTL_HOURS=24` and never tests the cross-setting relationship.
+
+- **R1-2, P1, `server/internal/config/config.go:66–83`** — Even the default 96/72-hour arithmetic relies on a nonexistent finite upload→send bound. Android uploads at `MessagingCoordinator.kt:1420`, then suspends again in `flushSendRatchet` before publishing at `:1445–1467`. Backgrounding can freeze the process after the upload while also preventing the auto-lock timer from running. After more than 24 hours, thaw scheduling can resume the send continuation before lock teardown, publishing an envelope whose blob is expired or has less than 72 hours remaining. Outcome: a live attachment is unavailable during the envelope’s delivery window. Ordinary 0.10.1 retry is safe because it re-deposits a fresh blob; explicit lock/unlock cancels the session scope and does not resume the send. Tests miss Android process-freeze/resume timing entirely and no test establishes a maximum upload→publish delay.
+
+- **R1-3, P1, `server/internal/ws/hub.go:93–95`** — `MESSAGE_TTL_UNDELIVERED_HOURS` accepts zero or negative values. With `0`, a recipient reconnecting immediately after an offline envelope was stored queries with `created_at >= time.Now()` and receives nothing; the next janitor pass deletes it. A negative value excludes even future-skewed rows. Outcome: deliverable messages are silently dropped. Tests always construct the hub with 72 hours and the config tests do not validate message TTL.
+
+# CONFIRM-OR-REFUTE
+
+1. **Refresh-token purge: confirmed.** `<=` matches consumption’s strict `> now()` boundary. Both operations are atomic competing deletes; no separate validity-check/use gap exists. A purge failure is logged and subsequent janitor passes still execute.
+
+2. **96-hour blob TTL: refuted.** Arithmetic under the stated formula leaves 23 h 50 min. Since delivery is now strictly TTL-filtered, janitor lag is not actually part of blob fetchability, yielding 24 hours—but neither bound is guaranteed. The configuration also does not enforce even the numeric relationship.
+
+3. **Pending-envelope cutoff: boundary confirmed, validation refuted.** For the same cutoff, delivery uses `>=` and purge uses `<`, so there is no boundary hole or overlap. Both containers share the host clock, making ordinary app/database clock skew negligible. Zero/negative TTL remains a reachable destructive configuration.
+
+4. **Postgres command: confirmed.** The official image treats these as server arguments after initialization, so `POSTGRES_*` handling and init scripts remain intact. Command-line `-c` overrides configuration files including `postgresql.auto.conf`. `effective_cache_size` is a planner estimate, not allocated memory; 2.5 GiB is defensible but should be validated against the live workload.
+
+# MISSING CONTEXT
+
+No production compose overlays, actual PostgreSQL planner statistics, or measured Android freeze/resume trace were available. I did not execute tests because the request prohibited commands that create files or other state.
+
+VERDICT: FINDINGS (3 P1, 0 P2, 0 P3)

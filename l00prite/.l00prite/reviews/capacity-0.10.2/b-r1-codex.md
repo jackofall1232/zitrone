@@ -1579,3 +1579,984 @@ exec
 
 codex
 The core ordering concern is real in source: cleanup is launched independently, while retries re-use the same deletion capability and blob ID. I’m now checking whether confinement, UI state transitions, or relay SQL accidentally closes that race, and auditing every memo terminal path.
+exec
+/bin/bash -lc "nl -ba server/internal/api/blobs.go | sed -n '80,210p'; nl -ba server/internal/db/store.go | sed -n '270,330p'; nl -ba apps/android/app/src/main/java/com/zitrone/app/net/ApiClient.kt | sed -n '240,305p'; nl -ba server/cmd/server/main.go | sed -n '95,130p'; rg -n \"val scope|CoroutineScope|onMessageBurned|messages\\.discard|discard\\(|removeMessage|deleteMessage|burnMessage|onRemoteBurn|markFailed|retryable\" apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt" in /root/zitrone
+ succeeded in 0ms:
+    80		}
+    81		return c.Next()
+    82	}
+    83	
+    84	type blobUploadRequest struct {
+    85		BlobID     string `json:"blob_id"`
+    86		Ciphertext string `json:"ciphertext"`
+    87	}
+    88	
+    89	// DepositBlob accepts an encrypted attachment for anonymous one-shot pickup.
+    90	// JWT-authenticated (RequireAuth runs first); the account is used only to gate
+    91	// admission and is never associated with the stored blob.
+    92	func (h *Handlers) DepositBlob(c *fiber.Ctx) error {
+    93		if !h.blobLimit.Allow(h.clientKey.key(c)) {
+    94			return errJSON(c, fiber.StatusTooManyRequests, "rate_limited")
+    95		}
+    96		var req blobUploadRequest
+    97		if err := c.BodyParser(&req); err != nil {
+    98			return errJSON(c, fiber.StatusBadRequest, "bad_request")
+    99		}
+   100		blobID, err := base64.StdEncoding.DecodeString(req.BlobID)
+   101		if err != nil || len(blobID) != blobIDBytes {
+   102			return errJSON(c, fiber.StatusBadRequest, "bad_blob_id")
+   103		}
+   104		ciphertext, err := base64.StdEncoding.DecodeString(req.Ciphertext)
+   105		if err != nil || len(ciphertext) == 0 {
+   106			return errJSON(c, fiber.StatusBadRequest, "bad_ciphertext")
+   107		}
+   108		// The app-wide BodyLimit bounds the raw request, but the decoded ciphertext
+   109		// must still fit the configured cap (plaintext cap + padding/AEAD slack).
+   110		if len(ciphertext) > BlobEffectiveCap(h.cfg) {
+   111			return errJSON(c, fiber.StatusRequestEntityTooLarge, "payload_too_large")
+   112		}
+   113	
+   114		expiresAt := time.Now().Add(time.Duration(h.cfg.BlobTTLHours) * time.Hour)
+   115		if err := h.store.StoreBlob(c.Context(), blobID, ciphertext, expiresAt); err != nil {
+   116			if errors.Is(err, db.ErrBlobExists) {
+   117				return errJSON(c, fiber.StatusConflict, "blob_exists")
+   118			}
+   119			return errJSON(c, fiber.StatusInternalServerError, "store_failed")
+   120		}
+   121		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+   122			"expires_at": expiresAt.UTC().Format(time.RFC3339),
+   123		})
+   124	}
+   125	
+   126	type blobRedeemRequest struct {
+   127		Token string `json:"token"`
+   128	}
+   129	
+   130	// RedeemBlob returns an attachment and DESTROYS the blob in the same statement
+   131	// (fetch-and-burn). No auth: possession of the one-time token is the entire
+   132	// capability — the relay derives the blob ID from the token preimage, so it
+   133	// cannot link this fetch to any account. Single use: a second attempt with the
+   134	// same token returns 404. Unfetched blobs are purged by the janitor at the
+   135	// configured BlobTTLHours fallback (default 1 week) — the server never held the
+   136	// AEAD key, so deletion is the shred.
+   137	// AbandonBlob lets a DEPOSITOR destroy a blob it is giving up on, so an orphan
+   138	// does not wait out its TTL (0.10.2 item 5b).
+   139	//
+   140	// **KEYED ON THE TOKEN, NOT THE BLOB ID — deliberately.** The blob id is public
+   141	// (see [RedeemBlob]: knowing it is explicitly not enough to redeem), so an
+   142	// id-keyed delete would hand a destruction capability to a public value and let
+   143	// anyone who saw an id destroy someone's attachment. Requiring the token means
+   144	// only a party that could already redeem-and-burn the blob can abandon it, which
+   145	// grants no new power. Revealing the token here is acceptable precisely because
+   146	// the blob is being destroyed in the same breath.
+   147	//
+   148	// Authenticated, because only a depositor has a reason to call it. The response
+   149	// never says whether a row existed — same opacity as redemption — so this cannot
+   150	// probe which ids are live.
+   151	func (h *Handlers) AbandonBlob(c *fiber.Ctx) error {
+   152		if !h.blobLimit.Allow(h.clientKey.key(c)) {
+   153			return errJSON(c, fiber.StatusTooManyRequests, "rate_limited")
+   154		}
+   155		var req blobRedeemRequest
+   156		if err := c.BodyParser(&req); err != nil {
+   157			return errJSON(c, fiber.StatusBadRequest, "bad_request")
+   158		}
+   159		token, err := base64.StdEncoding.DecodeString(req.Token)
+   160		if err != nil || len(token) != blobTokenBytes {
+   161			return errJSON(c, fiber.StatusBadRequest, "bad_token")
+   162		}
+   163		blobID := sha256.Sum256(token)
+   164		if err := h.store.AbandonBlob(c.Context(), blobID[:]); err != nil {
+   165			return errJSON(c, fiber.StatusInternalServerError, "store_failed")
+   166		}
+   167		// 204 whether or not a row was there: a caller learns nothing about liveness.
+   168		return c.SendStatus(fiber.StatusNoContent)
+   169	}
+   170	
+   171	func (h *Handlers) RedeemBlob(c *fiber.Ctx) error {
+   172		if !h.blobLimit.Allow(h.clientKey.key(c)) {
+   173			return errJSON(c, fiber.StatusTooManyRequests, "rate_limited")
+   174		}
+   175		var req blobRedeemRequest
+   176		if err := c.BodyParser(&req); err != nil {
+   177			return errJSON(c, fiber.StatusBadRequest, "bad_request")
+   178		}
+   179		token, err := base64.StdEncoding.DecodeString(req.Token)
+   180		if err != nil || len(token) != blobTokenBytes {
+   181			return errJSON(c, fiber.StatusBadRequest, "bad_token")
+   182		}
+   183		// The relay derives the blob ID from the token preimage — knowing the ID
+   184		// alone (which is public) is not enough to redeem.
+   185		blobID := sha256.Sum256(token)
+   186		ciphertext, err := h.store.RedeemBlob(c.Context(), blobID[:])
+   187		if err != nil {
+   188			// Missing, already redeemed, or expired are all 404 and indistinguishable
+   189			// (token validity stays opaque). A real store failure is a 500 so genuine
+   190			// incidents are not hidden behind a "not found".
+   191			if errors.Is(err, db.ErrNoRows) {
+   192				return errJSON(c, fiber.StatusNotFound, "not_found")
+   193			}
+   194			return errJSON(c, fiber.StatusInternalServerError, "store_failed")
+   195		}
+   196		return c.JSON(fiber.Map{
+   197			"ciphertext": base64.StdEncoding.EncodeToString(ciphertext),
+   198		})
+   199	}
+   270	
+   271	// PurgeExpiredDrops deletes drops past their TTL whether collected or not.
+   272	func (s *Store) PurgeExpiredDrops(ctx context.Context, now time.Time) (int64, error) {
+   273		tag, err := s.pool.Exec(ctx, `DELETE FROM drops WHERE expires_at <= $1`, now)
+   274		return tag.RowsAffected(), err
+   275	}
+   276	
+   277	// ── blind blob store (attachments) ───────────────────────────────────────────
+   278	
+   279	// StoreBlob stores an encrypted attachment under a blob ID (hash of a one-time
+   280	// token). No sender/recipient is recorded — the table has no column for it. A
+   281	// duplicate blob ID is rejected so a token cannot be silently overwritten.
+   282	func (s *Store) StoreBlob(ctx context.Context, blobID, ciphertext []byte, expiresAt time.Time) error {
+   283		tag, err := s.pool.Exec(ctx, `
+   284			INSERT INTO blobs (blob_id, ciphertext, expires_at)
+   285			VALUES ($1, $2, $3) ON CONFLICT (blob_id) DO NOTHING`,
+   286			blobID, ciphertext, expiresAt)
+   287		if err != nil {
+   288			return err
+   289		}
+   290		if tag.RowsAffected() == 0 {
+   291			return ErrBlobExists
+   292		}
+   293		return nil
+   294	}
+   295	
+   296	// RedeemBlob returns and destroys a blob in a single statement — single-use by
+   297	// design. A second redemption of the same token hits no row and returns
+   298	// pgx.ErrNoRows, which the handler maps to 404. Expired blobs are not returned.
+   299	func (s *Store) RedeemBlob(ctx context.Context, blobID []byte) ([]byte, error) {
+   300		var ciphertext []byte
+   301		err := s.pool.QueryRow(ctx, `
+   302			DELETE FROM blobs WHERE blob_id = $1 AND expires_at > now()
+   303			RETURNING ciphertext`, blobID).Scan(&ciphertext)
+   304		return ciphertext, err
+   305	}
+   306	
+   307	// AbandonBlob deletes a blob its DEPOSITOR is giving up on, keyed by the blob id
+   308	// the caller proved it holds the token for (0.10.2 item 5b).
+   309	//
+   310	// WHY THIS EXISTS. A blob is uploaded BEFORE the envelope is published, so three
+   311	// routes leave one with nothing that will ever fetch it: a non-durable ratchet
+   312	// flush, a contact deleted mid-send, and any throw between. Before this only the
+   313	// TTL reclaimed them — and one blob is up to 8,454,180 B, roughly 545 accounts'
+   314	// worth of disk, with ~2,079 orphans enough to exhaust the box.
+   315	//
+   316	// Deliberately says nothing about whether a row existed, so it cannot be used to
+   317	// probe which blob ids are live.
+   318	func (s *Store) AbandonBlob(ctx context.Context, blobID []byte) error {
+   319		_, err := s.pool.Exec(ctx, `DELETE FROM blobs WHERE blob_id = $1`, blobID)
+   320		return err
+   321	}
+   322	
+   323	// PurgeExpiredBlobs deletes blobs past their TTL whether collected or not.
+   324	func (s *Store) PurgeExpiredBlobs(ctx context.Context, now time.Time) (int64, error) {
+   325		tag, err := s.pool.Exec(ctx, `DELETE FROM blobs WHERE expires_at <= $1`, now)
+   326		return tag.RowsAffected(), err
+   327	}
+   328	
+   329	// ── QR dead drops ("lemon drops"): non-destructive fetch + burn-by-preimage ───
+   330	
+   240	            put("one_time_prekeys", JSONArray().apply {
+   241	                oneTimePreKeys.forEach { put(it.toJson()) }
+   242	            })
+   243	            signedPreKey?.let { put("signed_prekey", it.toJson()) }
+   244	        }
+   245	        execute(post("/api/v1/prekeys", body))
+   246	    }
+   247	
+   248	    /** GET /api/v1/prekeys/count — server-side prekey stock. */
+   249	    suspend fun preKeyCount(): Int {
+   250	        val json = execute(request("/api/v1/prekeys/count").get().build())
+   251	        return json.getInt("count")
+   252	    }
+   253	
+   254	    /**
+   255	     * POST /api/v1/blobs — deposit an encrypted attachment blob (JWT-auth;
+   256	     * upload metadata is no more revealing than message.send). The blob ID is
+   257	     * SHA-256(token), so the relay never sees the token until redemption — the
+   258	     * same blindness construction as dead drops. A 409 (duplicate blob_id) or
+   259	     * any other non-2xx surfaces as an [ApiException] so the send fails cleanly.
+   260	     * Both arguments are STANDARD base64 (see crypto/AttachmentCrypto).
+   261	     */
+   262	    suspend fun uploadBlob(blobIdBase64: String, ciphertextBase64: String) {
+   263	        val body = JSONObject().apply {
+   264	            put("blob_id", blobIdBase64)
+   265	            put("ciphertext", ciphertextBase64)
+   266	        }
+   267	        execute(post("/api/v1/blobs", body))
+   268	    }
+   269	
+   270	    /**
+   271	     * Give up on a blob we uploaded, so it does not wait out its TTL (0.10.2 item 5b).
+   272	     *
+   273	     * The upload happens BEFORE the envelope is published, so a send that dies in between leaves a
+   274	     * blob nothing will ever fetch — up to 8 MiB held for the full TTL. This reclaims it on the two
+   275	     * routes the client actually knows about: a non-durable ratchet flush, and a contact deleted
+   276	     * mid-send. A crash cannot call it, so the TTL remains the backstop for that route.
+   277	     *
+   278	     * **Keyed on the TOKEN, not the blob id.** The blob id is public; the token is the capability.
+   279	     * Sending it is acceptable here only because the blob is being destroyed in the same request.
+   280	     *
+   281	     * **Best-effort by design — see the call sites: failures are swallowed.** This runs on paths that
+   282	     * are ALREADY failing, and letting cleanup turn a failed send into a crash, or delay the user's
+   283	     * feedback, would be a worse defect than the orphan it reclaims. The TTL still collects anything
+   284	     * this misses.
+   285	     */
+   286	    suspend fun abandonBlob(blobTokenBase64: String) {
+   287	        val body = JSONObject().apply { put("token", blobTokenBase64) }
+   288	        execute(post("/api/v1/blobs/abandon", body))
+   289	    }
+   290	
+   291	    /**
+   292	     * POST /api/v1/blobs/redeem — present the token; receive the blob; the blob
+   293	     * is destroyed in the same operation (single-use; a replay returns 404). NO
+   294	     * authentication: the token is the capability, and an unauthenticated fetch
+   295	     * means the relay cannot link a redemption to any account. Returns the
+   296	     * ciphertext as STANDARD base64. A 404 (expired or already redeemed) is an
+   297	     * [ApiException] with code 404 — callers surface it as "unavailable", not a
+   298	     * crash.
+   299	     */
+   300	    suspend fun redeemBlob(tokenBase64: String): String {
+   301	        val body = JSONObject().put("token", tokenBase64)
+   302	        val json = execute(post("/api/v1/blobs/redeem", body, authenticated = false))
+   303	        return json.getString("ciphertext")
+   304	    }
+   305	
+    95		// this re-imposes the pre-attachment 512 KiB cap on every other route (413).
+    96		app.Use(handlers.BodyLimitGuard)
+    97	
+    98		v1 := app.Group("/api/v1")
+    99		v1.Post("/register", handlers.Register)
+   100		v1.Post("/session", handlers.CreateSession)
+   101		v1.Post("/session/refresh", handlers.RefreshSession)
+   102		v1.Delete("/session", handlers.RequireAuth, handlers.DeleteSession)
+   103		v1.Get("/users/:id/prekey", handlers.RequireAuth, handlers.GetPrekeyBundle)
+   104		v1.Post("/prekeys", handlers.RequireAuth, handlers.UploadPrekeys)
+   105		v1.Get("/prekeys/count", handlers.RequireAuth, handlers.PrekeyCount)
+   106		v1.Delete("/account", handlers.RequireAuth, handlers.DeleteAccount)
+   107	
+   108		// Dead drops (v1.5) — anonymous, unauthenticated. Proof-of-work on deposit
+   109		// stands in for auth; redemption is gated only by the one-time token.
+   110		v1.Post("/drops", handlers.DepositDrop)
+   111		v1.Post("/drops/redeem", handlers.RedeemDrop)
+   112	
+   113		// Blind blob store (attachments, 0.7.0-beta). Upload is JWT-authenticated as spam
+   114		// control; redemption is unauthenticated — the one-time token is the entire
+   115		// capability, so the relay cannot link a fetch to an account (see blobs.go).
+   116		v1.Post("/blobs", handlers.RequireAuth, handlers.DepositBlob)
+   117		v1.Post("/blobs/redeem", handlers.RedeemBlob)
+   118		// Depositor-only cleanup of an orphan (0.10.2 item 5b) — token-keyed, so it
+   119		// grants no capability the blob id alone would.
+   120		v1.Post("/blobs/abandon", handlers.RequireAuth, handlers.AbandonBlob)
+   121	
+   122		// QR dead drops (lemon drops) — anonymous, unauthenticated. Proof-of-work on
+   123		// deposit stands in for auth; fetch is blind and NON-destructive (a wrong scan
+   124		// must not burn the drop for the real recipient); burn destroys the row only
+   125		// for a client that knows the burn-token preimage carried inside the plaintext
+   126		// (see qrdrops.go).
+   127		v1.Post("/qr-drops", handlers.DepositQrDrop)
+   128		v1.Post("/qr-drops/fetch", handlers.FetchQrDrop)
+   129		v1.Post("/qr-drops/burn", handlers.BurnQrDrop)
+   130	
+apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt:8:import kotlinx.coroutines.CoroutineScope
+apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt:41:    private val scope: CoroutineScope,
+apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt:55:    var onMessageBurned: ((Message) -> Unit)? = null
+apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt:123:     * FAILED is terminal until [retryable].
+apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt:125:    fun markFailed(messageId: String) {
+apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt:142:    fun retryable(messageId: String): Message? =
+apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt:289:        if (notifyPeer) onMessageBurned?.invoke(burning)
+apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt:306:    fun onRemoteBurn(messageId: String) {
+apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt:433:    fun discard(messageId: String) = remove(messageId)
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:43:import kotlinx.coroutines.CoroutineScope
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:101:    private val scope: CoroutineScope,
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:398:     * surface. Entries are released the moment the send stops being retryable; see [releaseDeposit].
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:479:            messages.discard(messageId)
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:493:        messages.markFailed(messageId)
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:597:        messages.onMessageBurned = { message ->
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:599:                ws.burnMessage(message.id, conversation.contactId)
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1123:     * false tick. markFailed on an id whose bubble was never added (an encrypt
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1231:                messages.markFailed(messageId)
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1246:            messages.markFailed(messageId)
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1453:                messages.markFailed(messageId)
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1471:            messages.markFailed(messageId)
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1494:            val message = messages.retryable(messageId) ?: return@launch
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1496:                messages.markFailed(messageId)
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1503:                    messages.markFailed(messageId)
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1740:                        burnIds.forEach { ws.burnMessage(it, contactId) }
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1771:                                    burnIds.forEach { ws.burnMessage(it, contactId) }
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1809:            // roster entry still resolves the peer for onMessageBurned.
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:2099:                    // entry above keeps them retryable on the duplicate path). D4 absorbed.
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:2138:                    // keeps it retryable on the duplicate path). D4 absorbed.
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:2173:                // keeps them retryable on the duplicate path). D4 absorbed.
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:2266:    override fun onMessageBurned(messageId: String) {
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:2267:        messages.onRemoteBurn(messageId)
+
+exec
+/bin/bash -lc "nl -ba apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt | sed -n '80,120p'; nl -ba apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt | sed -n '570,615p'; nl -ba apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt | sed -n '110,155p'; nl -ba apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt | sed -n '250,325p'; nl -ba apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt | sed -n '410,445p'; nl -ba apps/android/app/src/test/java/com/zitrone/app/AttachmentDepositReuseTest.kt | sed -n '1,190p'; nl -ba server/internal/api/blobs_test.go | sed -n '180,285p'" in /root/zitrone
+ succeeded in 0ms:
+    80	 * account unregistered and offline forever (see [start]).
+    81	 *
+    82	 * The ONE exception to the no-logging rule is transport diagnostics: the
+    83	 * boot-stage markers in [bootstrapLoop], the socket-lifecycle lines in
+    84	 * [WsClient], and the send-path stage markers in [sendText] (e.g.
+    85	 * "firing POST /api/v1/register", "session minted", "X3DH session
+    86	 * established") plus the transport exception class/message on failure
+    87	 * (connect errors, HTTP status codes, certificate-pin mismatches). All of
+    88	 * these strings are compile-time constants or exception metadata — no
+    89	 * message content, keys, tokens, account ids, or envelope fields ever flow
+    90	 * through them, so nothing sensitive can leak. Without it, a
+    91	 * certificate-pinning failure or a dead relay is indistinguishable from
+    92	 * airplane mode — the app retries forever with no signal anywhere, client
+    93	 * or server (v1.5.3 shipped exactly that failure on the send path).
+    94	 *
+    95	 * Each such line goes to logcat AND to [BootDiagnostics] (an app-private,
+    96	 * capped, on-device file surfaced in Settings → Diagnostics), so a user with
+    97	 * no access to `adb` can still read and share the exact failure. See [diag].
+    98	 */
+    99	class MessagingCoordinator(
+   100	    private val appContext: Context,
+   101	    private val scope: CoroutineScope,
+   102	    private val signal: SignalProtocolManager,
+   103	    private val api: ApiClient,
+   104	    private val ws: WsClient,
+   105	    private val messages: MessageRepository,
+   106	    private val conversations: ConversationRepository,
+   107	    private val settings: SettingsRepository,
+   108	    private val diagnostics: BootDiagnostics,
+   109	    private val notificationScheduler: NotificationScheduler,
+   110	    /**
+   111	     * Vault-only atomic contact-delete (D2c). When non-null (the vault path), it removes the
+   112	     * contact's crypto records + roster entry + tombstone in ONE runtime.mutate + ONE durable
+   113	     * flush (VaultSignalProtocolStore atomicity contract :222-231) and returns the
+   114	     * [ContactDeleteOutcome] — DURABLE, APPLIED_UNCONFIRMED (removal sticks, flush pending), or
+   115	     * NOT_APPLIED (a closed-runtime race meant the removal never touched live state — the delete
+   116	     * did not take). [deleteContact] then burns messages and commits the in-memory removal. Null on
+   117	     * the legacy path, which keeps its unchanged per-store delete sequence.
+   118	     */
+   119	    private val vaultContactDelete: (suspend (conversationId: String, contactId: String, at: Long) -> ContactDeleteOutcome)? = null,
+   120	    /**
+   570	        pendingPostAck.settle(envelopeId)?.let { owed ->
+   571	            // Delivery receipt to the SENDER (peer-routed by the relay → their
+   572	            // message.delivered). senderId comes from the decrypted envelope; the relay never
+   573	            // stored it, preserving zero-knowledge. Best-effort: a dropped receipt just means
+   574	            // the sender stays at SENT, never worse. Sent even for a since-burned message —
+   575	            // it WAS displayed, so DELIVERED is the truthful sender state.
+   576	            if (owed.sendReceipt) ws.sendReceived(envelopeId, owed.senderId)
+   577	            // Staleness gate (round 8): a duplicate can land the durable ack long after display
+   578	            // (offline gap) — if the message has since TTL-burned out of RAM, a "New message"
+   579	            // alert would be a phantom and the redeemed bytes would have no placeholder to land
+   580	            // in ([MessageRepository.attachmentLoaded] keys on the message), so both are skipped.
+   581	            if (!messages.exists(envelopeId)) return
+   582	            // Content-free notification: always just "New message". The scheduler
+   583	            // rate-limits + re-fires it per conversation.
+   584	            if (owed.notify) notificationScheduler.onIncomingMessage(owed.conversationId)
+   585	            // One-shot blob redemption — this settling is what keeps it reachable when the
+   586	            // durable ack only lands on the duplicate path (round 7, Codex :1237).
+   587	            owed.attachment?.let { redeemAttachment(envelopeId, it) }
+   588	        }
+   589	    }
+   590	
+   591	    init {
+   592	        ws.listener = this
+   593	        // Local burns (burn-on-read / burn-all) propagate to the other side.
+   594	        // The server routes the burn by peer_id, so resolve the conversation's
+   595	        // contact; a burn for an already-removed conversation has no peer to
+   596	        // notify and is dropped.
+   597	        messages.onMessageBurned = { message ->
+   598	            conversations.find(message.conversationId)?.let { conversation ->
+   599	                ws.burnMessage(message.id, conversation.contactId)
+   600	            }
+   601	        }
+   602	        // Re-send read receipts that missed a dead socket whenever the
+   603	        // connection comes (back) up.
+   604	        scope.launch(confined) {
+   605	            ws.connectionState.collect { state ->
+   606	                if (state == WsClient.ConnectionState.CONNECTED) flushPendingReceipts()
+   607	            }
+   608	        }
+   609	    }
+   610	
+   611	    /**
+   612	     * Boot sequence: identity -> registration (first run) -> challenge-signed
+   613	     * session -> WebSocket. Safe to call repeatedly (single-flight), safe to
+   614	     * fail offline. Retries the whole sequence on a capped exponential backoff
+   615	     * until it succeeds, so registration and connection come up automatically
+   110	            transform = {
+   111	                it.copy(state = MessageState.DELIVERED, deliveredAtMs = it.deliveredAtMs ?: clock())
+   112	            },
+   113	        )
+   114	        updated?.let(::scheduleTtl)
+   115	    }
+   116	
+   117	    /**
+   118	     * The send never reached the relay (blob upload threw, or the socket was
+   119	     * down at hand-off) — flip to FAILED so the bubble shows "!" + retry rather
+   120	     * than a dishonest "sent". Guarded to the pre-delivery states (SENDING/SENT)
+   121	     * inside the CAS: a late failure signal can never overwrite a message that
+   122	     * actually reached DELIVERED/READ, nor resurrect a BURNING/removed one.
+   123	     * FAILED is terminal until [retryable].
+   124	     */
+   125	    fun markFailed(messageId: String) {
+   126	        update(
+   127	            messageId,
+   128	            precondition = {
+   129	                it.state == MessageState.SENDING || it.state == MessageState.SENT
+   130	            },
+   131	            transform = { it.copy(state = MessageState.FAILED) },
+   132	        )
+   133	    }
+   134	
+   135	    /**
+   136	     * Arm a FAILED message for a user-initiated retry: flip it back to SENDING
+   137	     * and return it (with its retained in-memory [Message.text] /
+   138	     * [Message.attachment] bytes) so the coordinator can re-encrypt and re-send
+   139	     * under the SAME message id. Returns null when the message is not FAILED
+   140	     * (already sent, burned, or removed) so a stray retry tap is a no-op.
+   141	     */
+   142	    fun retryable(messageId: String): Message? =
+   143	        update(
+   144	            messageId,
+   145	            precondition = { it.state == MessageState.FAILED },
+   146	            transform = { it.copy(state = MessageState.SENDING) },
+   147	        )
+   148	
+   149	    /**
+   150	     * Marks an incoming message read. Burn-on-read messages flip to READ
+   151	     * immediately but stay visible for [BURN_ON_READ_DELAY_MS] before the
+   152	     * burn fires (and notifies the peer) — see the class kdoc.
+   153	     *
+   154	     * @return true when THIS call transitioned a regular (non-burn) incoming
+   155	     *   message to READ — the one moment a read receipt should fire. Repeat
+   250	            update(
+   251	                messageId,
+   252	                precondition = { it.attachment != null },
+   253	                transform = { it.copy(attachment = it.attachment!!.copy(revealed = false)) },
+   254	            )
+   255	            burn(messageId, notifyPeer = true)
+   256	        }
+   257	    }
+   258	
+   259	    /** The peer's read receipt arrived — flip our outgoing copy to READ. */
+   260	    fun onPeerRead(messageId: String) {
+   261	        update(
+   262	            messageId,
+   263	            precondition = {
+   264	                it.isMine && it.state != MessageState.BURNING && it.state != MessageState.READ
+   265	            },
+   266	            transform = { it.copy(state = MessageState.READ) },
+   267	        )
+   268	    }
+   269	
+   270	    /**
+   271	     * Burns a message: flips it to BURNING so the UI plays the particle
+   272	     * dissolve (600ms, upward), then removes it permanently.
+   273	     */
+   274	    fun burn(messageId: String, notifyPeer: Boolean) {
+   275	        ttlJobs.remove(messageId)?.cancel()
+   276	        // A pending read-burn racing this burn (burn-all, remote burn, TTL)
+   277	        // must not fire a second burn after its grace window.
+   278	        readBurnJobs.remove(messageId)?.cancel()
+   279	        // A remote burn / TTL / burn-all racing an image reveal cancels the
+   280	        // pending reveal timer so it can't burn a second time after this one.
+   281	        revealJobs.remove(messageId)?.cancel()
+   282	        // Guard inside the CAS: racing burns (remote + local) win the flip
+   283	        // to BURNING exactly once, so the peer is never notified twice.
+   284	        val burning = update(
+   285	            messageId,
+   286	            precondition = { it.state != MessageState.BURNING },
+   287	            transform = { it.copy(state = MessageState.BURNING) },
+   288	        ) ?: return
+   289	        if (notifyPeer) onMessageBurned?.invoke(burning)
+   290	        scope.launch {
+   291	            // Let the particle dissolve finish before the message ceases to
+   292	            // exist (matches ui.theme.Motion.DurationDramaticMs — 600ms).
+   293	            delay(BURN_ANIMATION_MS)
+   294	            remove(messageId)
+   295	        }
+   296	    }
+   297	
+   298	    /** Burns every message in a conversation (the "burn all" header action). */
+   299	    fun burnAll(conversationId: String, notifyPeer: Boolean = true) {
+   300	        conversationMessages(conversationId)
+   301	            .filter { it.state != MessageState.BURNING }
+   302	            .forEach { burn(it.id, notifyPeer) }
+   303	    }
+   304	
+   305	    /** Remote side destroyed a message — mirror it locally, no echo back. */
+   306	    fun onRemoteBurn(messageId: String) {
+   307	        burn(messageId, notifyPeer = false)
+   308	    }
+   309	
+   310	    /** Wipes everything decrypted from memory (logout / session revoked). */
+   311	    fun clearAll() {
+   312	        ttlJobs.values.forEach(Job::cancel)
+   313	        ttlJobs.clear()
+   314	        readBurnJobs.values.forEach(Job::cancel)
+   315	        readBurnJobs.clear()
+   316	        revealJobs.values.forEach(Job::cancel)
+   317	        revealJobs.clear()
+   318	        _messages.value = emptyMap()
+   319	    }
+   320	
+   321	    // -----------------------------------------------------------------------
+   322	
+   323	    /**
+   324	     * Burn-on-read, phase one: the message is READ (visible, counting down),
+   325	     * and the actual burn — including the peer notification that acts as the
+   410	            val transformed = transform(message)
+   411	            applied = transformed
+   412	            current.toMutableMap().apply {
+   413	                put(conversationId, list.toMutableList().also { it[index] = transformed })
+   414	            }
+   415	        }
+   416	        return applied
+   417	    }
+   418	
+   419	    private fun remove(messageId: String) {
+   420	        ttlJobs.remove(messageId)?.cancel()
+   421	        revealJobs.remove(messageId)?.cancel()
+   422	        _messages.update { current ->
+   423	            current.mapValues { (_, list) -> list.filterNot { it.id == messageId } }
+   424	        }
+   425	    }
+   426	
+   427	    /**
+   428	     * Immediately drop a message with no burn animation and no peer signal.
+   429	     * Used when an outbound send is abandoned because its contact was deleted
+   430	     * mid-send: the envelope was never deposited, so the local plaintext (and
+   431	     * any attachment bytes) must not linger in the repository either.
+   432	     */
+   433	    fun discard(messageId: String) = remove(messageId)
+   434	
+   435	    companion object {
+   436	        /** Duration of the burn particle dissolve before hard removal. */
+   437	        const val BURN_ANIMATION_MS = 600L
+   438	
+   439	        /**
+   440	         * How long a burn-on-read message stays readable after it is first
+   441	         * seen. The window is the read time — burning at first render gave
+   442	         * the recipient zero time to read anything.
+   443	         */
+   444	        const val BURN_ON_READ_DELAY_MS = 5_000L
+   445	
+     1	// Zitrone — Copyright (C) 2026 Zitrone contributors
+     2	// Licensed under the GNU Affero General Public License v3.0 or later.
+     3	// See the LICENSE file in the repository root for full license text.
+     4	// SPDX-License-Identifier: AGPL-3.0-only
+     5	
+     6	package com.zitrone.app
+     7	
+     8	import com.zitrone.app.crypto.AttachmentCrypto
+     9	import org.junit.Assert.assertArrayEquals
+    10	import org.junit.Assert.assertEquals
+    11	import org.junit.Assert.assertFalse
+    12	import org.junit.Assert.assertThrows
+    13	import org.junit.Assert.assertTrue
+    14	import org.junit.Test
+    15	
+    16	/**
+    17	 * One blob per message across retries (0.10.2 item 5a) — the crypto half, tested where it can be
+    18	 * tested without constructing `MessagingCoordinator`.
+    19	 *
+    20	 * The defect: `encrypt` drew a fresh token per call and `blobId = sha256(token)`, so every 0.10.1
+    21	 * retry deposited a NEW blob and left the previous one to its full TTL. Blobs are the dimension that
+    22	 * threatens the box — one is up to 8,454,180 B, roughly 545 accounts' worth of disk.
+    23	 */
+    24	class AttachmentDepositReuseTest {
+    25	
+    26	    private val plain = ByteArray(4096) { (it % 251).toByte() }
+    27	
+    28	    @Test
+    29	    fun `a fresh encrypt draws new secrets every time, so two messages never collide`() {
+    30	        val a = AttachmentCrypto.encrypt(plain)
+    31	        val b = AttachmentCrypto.encrypt(plain)
+    32	
+    33	        assertFalse("two messages must not share a blob id", a.blobId.contentEquals(b.blobId))
+    34	        assertFalse("two messages must not share a token", a.token.contentEquals(b.token))
+    35	        assertFalse("two messages must not share a key", a.key.contentEquals(b.key))
+    36	    }
+    37	
+    38	    @Test
+    39	    fun `reusing the token and key keeps blobId stable, so a retry cannot orphan the first blob`() {
+    40	        val first = AttachmentCrypto.encrypt(plain)
+    41	
+    42	        val retry = AttachmentCrypto.encrypt(plain, first.token, first.key)
+    43	
+    44	        assertArrayEquals("the retry must deposit to the SAME row", first.blobId, retry.blobId)
+    45	        assertArrayEquals(first.token, retry.token)
+    46	        assertArrayEquals(first.key, retry.key)
+    47	    }
+    48	
+    49	    @Test
+    50	    fun `the box still differs per attempt, and that is deliberately safe`() {
+    51	        // Byte-identity is NOT the goal and forcing it would be the dangerous option: a derived nonce
+    52	        // over `MessagePadding`'s random fill means a repeated (key, nonce) pair over DIFFERING
+    53	        // plaintext, the one GCM failure that is catastrophic. A fresh nonce under a reused key is the
+    54	        // ordinary safe construction, and it is sufficient because `ON CONFLICT DO NOTHING` keeps
+    55	        // whichever attempt landed first while the nonce travels INSIDE the box.
+    56	        val first = AttachmentCrypto.encrypt(plain)
+    57	        val retry = AttachmentCrypto.encrypt(plain, first.token, first.key)
+    58	
+    59	        assertFalse(
+    60	            "a derived/reused nonce would be key+nonce reuse over differing padded plaintext",
+    61	            first.box.contentEquals(retry.box),
+    62	        )
+    63	    }
+    64	
+    65	    @Test
+    66	    fun `either attempt's stored bytes open under the shared key, which is why the box need not match`() {
+    67	        // The property that lets us hold 96 bytes instead of 8 MiB: the relay keeps ONE of the two
+    68	        // boxes and we cannot control which, so both must be openable with the memoized key.
+    69	        val first = AttachmentCrypto.encrypt(plain)
+    70	        val retry = AttachmentCrypto.encrypt(plain, first.token, first.key)
+    71	
+    72	        for ((label, box) in listOf("first" to first.box, "retry" to retry.box)) {
+    73	            val opened = AttachmentCrypto.decrypt(retry.key, box, retry.sha256, plain.size)
+    74	            assertArrayEquals("$label attempt's stored bytes must open under the shared key", plain, opened)
+    75	        }
+    76	    }
+    77	
+    78	    @Test
+    79	    fun `half-reuse is refused, because both of its outcomes are defects`() {
+    80	        // token-only → stable blobId with a NEW key: the relay keeps attempt 1's bytes while the
+    81	        // envelope carries attempt 2's key, so the recipient sees corruption rather than a failure.
+    82	        // key-only → a NEW blobId with the old key: a fresh orphan, which is the thing being fixed.
+    83	        assertThrows(IllegalArgumentException::class.java) {
+    84	            AttachmentCrypto.encrypt(plain, ByteArray(32), null)
+    85	        }
+    86	        assertThrows(IllegalArgumentException::class.java) {
+    87	            AttachmentCrypto.encrypt(plain, null, ByteArray(32))
+    88	        }
+    89	    }
+    90	
+    91	    @Test
+    92	    fun `the token is never derivable from anything the relay sees`() {
+    93	        // blobId = sha256(token) and the token IS the redemption capability, while the message id is
+    94	        // cleartext to the relay for routing. So the token must stay a random draw that callers
+    95	        // MEMOIZE — never a derivation. Two encrypts of identical input under no reuse must differ,
+    96	        // which is the observable form of "not derived from the input".
+    97	        val a = AttachmentCrypto.encrypt(plain)
+    98	        val b = AttachmentCrypto.encrypt(plain)
+    99	
+   100	        assertEquals(32, a.token.size)
+   101	        assertTrue(
+   102	            "a token derived from message content or id would repeat for identical input",
+   103	            !a.token.contentEquals(b.token),
+   104	        )
+   105	    }
+   106	}
+   107	
+   108	/**
+   109	 * The WIRING half — pinned against source, because it cannot be pinned against behaviour.
+   110	 *
+   111	 * The round-2 mutation sweep for this item proved the gap: deleting the coordinator's reuse (going
+   112	 * back to `AttachmentCrypto.encrypt(bytes)`) broke **nothing**, because every behavioural test above
+   113	 * exercises `AttachmentCrypto` directly and nothing in the suite can construct a
+   114	 * `MessagingCoordinator` (it needs `Context`, `NotificationScheduler`, `SignalProtocolManager`…).
+   115	 *
+   116	 * So this is the same split 0.10.1 landed on: behaviour where behaviour is reachable, source for the
+   117	 * wiring. Declared rather than implied — the honest description is that the crypto is tested and the
+   118	 * wiring is asserted.
+   119	 */
+   120	class AttachmentDepositWiringTest {
+   121	
+   122	    private fun coordinator(): String {
+   123	        var dir: java.io.File? = java.io.File(System.getProperty("user.dir") ?: ".").absoluteFile
+   124	        while (dir != null) {
+   125	            val candidate = java.io.File(dir, "src/main/java/com/zitrone/app/MessagingCoordinator.kt")
+   126	            if (candidate.isFile) return candidate.readText()
+   127	            dir = dir.parentFile
+   128	        }
+   129	        throw AssertionError("MessagingCoordinator.kt not found from ${System.getProperty("user.dir")}")
+   130	    }
+   131	
+   132	    @Test
+   133	    fun `the attachment encrypt reuses the memoized deposit secrets`() {
+   134	        assertTrue(
+   135	            "a retry draws fresh secrets again, so every retry orphans the previous blob — up to " +
+   136	                "8 MiB each, held for the full TTL",
+   137	            "AttachmentCrypto.encrypt(bytes, memo?.token, memo?.key)" in coordinator(),
+   138	        )
+   139	    }
+   140	
+   141	    @Test
+   142	    fun `the deposit is memoized on the first attempt`() {
+   143	        assertTrue(
+   144	            "nothing is stored, so a retry has no secrets to reuse and the reuse above is dead code",
+   145	            "attachmentDeposits[messageId] = AttachmentDeposit(blob.token, blob.key)" in coordinator(),
+   146	        )
+   147	    }
+   148	
+   149	    @Test
+   150	    fun `the memo is released on every terminal outcome, so it cannot become a heap leak`() {
+   151	        // The trade this fix must NOT make: disk orphans for unbounded heap. Three release points —
+   152	        // the relay took it, the recipient got it, the local copy was discarded.
+   153	        val code = coordinator()
+   154	        assertEquals(
+   155	            "a release point was lost; the deposit map then grows for the process's lifetime",
+   156	            3,
+   157	            Regex("releaseDeposit\\(messageId\\)").findAll(code).count(),
+   158	        )
+   159	    }
+   160	}
+   180		app := blobTestApp(t, h)
+   181		status, _ := postJSON(t, app, "/api/v1/blobs/redeem", fiber.Map{
+   182			"token": b64([]byte("short")),
+   183		}, "")
+   184		if status == fiber.StatusUnauthorized {
+   185			t.Fatal("redeem must not require authentication")
+   186		}
+   187		if status != fiber.StatusBadRequest {
+   188			t.Fatalf("wrong-length token: got %d, want 400", status)
+   189		}
+   190	}
+   191	
+   192	// ── abandon (0.10.2 item 5b) ─────────────────────────────────────────────────
+   193	
+   194	// Abandon is DEPOSITOR-ONLY: unlike redemption it requires auth, because only a
+   195	// party that deposited a blob has a reason to destroy one.
+   196	func TestBlobAbandon_RequiresAuth(t *testing.T) {
+   197		h := newBlobHandlers(t, nil)
+   198		app := blobTestApp(t, h)
+   199		status, _ := postJSON(t, app, "/api/v1/blobs/abandon", fiber.Map{
+   200			"token": b64(bytes.Repeat([]byte("t"), blobTokenBytes)),
+   201		}, "")
+   202		if status != fiber.StatusUnauthorized {
+   203			t.Fatalf("abandon without auth: got %d, want 401", status)
+   204		}
+   205	}
+   206	
+   207	// KEYED ON THE TOKEN, NOT THE BLOB ID — the invariant that keeps this from being
+   208	// a destruction capability handed to a public value. The blob id is public (see
+   209	// RedeemBlob), so an id-keyed delete would let anyone who saw an id destroy
+   210	// someone's attachment. A wrong-length token is refused before any store access,
+   211	// which is what proves the token is what this endpoint consumes.
+   212	func TestBlobAbandon_RejectsMalformedToken(t *testing.T) {
+   213		h := newBlobHandlers(t, nil)
+   214		app := blobTestApp(t, h)
+   215		for name, token := range map[string]string{
+   216			"too short":   b64([]byte("short")),
+   217			"not base64":  "!!!not-base64!!!",
+   218			"empty":       "",
+   219		} {
+   220			t.Run(name, func(t *testing.T) {
+   221				status, _ := postJSON(t, app, "/api/v1/blobs/abandon", fiber.Map{
+   222					"token": token,
+   223				}, bearer(t, h.issuer))
+   224				if status != fiber.StatusBadRequest {
+   225					t.Fatalf("%s: got %d, want 400", name, status)
+   226				}
+   227			})
+   228		}
+   229	}
+   230	
+   231	// ── body-limit guard (no database required) ──────────────────────────────────
+   232	
+   233	// bigBody builds a request body larger than the default 512 KiB cap.
+   234	func bigBody() []byte { return bytes.Repeat([]byte("A"), maxDefaultBody+1024) }
+   235	
+   236	// The guard rejects an oversized Content-Length on a non-blob route with 413,
+   237	// even though the app-level BodyLimit is raised for blob uploads.
+   238	func TestBodyLimitGuard_RejectsLargeNonBlobRoute(t *testing.T) {
+   239		h := newBlobHandlers(t, nil)
+   240		app := fiber.New(fiber.Config{BodyLimit: BlobBodyLimit(h.cfg)})
+   241		app.Use(h.BodyLimitGuard)
+   242		app.Post("/api/v1/register", func(c *fiber.Ctx) error { return c.SendStatus(fiber.StatusOK) })
+   243	
+   244		req := httptest.NewRequest(fiber.MethodPost, "/api/v1/register", bytes.NewReader(bigBody()))
+   245		resp, err := app.Test(req, -1)
+   246		if err != nil {
+   247			t.Fatal(err)
+   248		}
+   249		if resp.StatusCode != fiber.StatusRequestEntityTooLarge {
+   250			t.Fatalf("large body on non-blob route: got %d, want 413", resp.StatusCode)
+   251		}
+   252	}
+   253	
+   254	// The guard exempts the blob upload route: an oversized body passes through to
+   255	// the handler. Uses a stub terminal handler so no store or auth is needed — this
+   256	// isolates the guard, proving it (not the BodyLimit) enforces the default cap.
+   257	func TestBodyLimitGuard_AllowsLargeBlobUpload(t *testing.T) {
+   258		h := newBlobHandlers(t, nil)
+   259		app := fiber.New(fiber.Config{BodyLimit: BlobBodyLimit(h.cfg)})
+   260		app.Use(h.BodyLimitGuard)
+   261		app.Post("/api/v1/blobs", func(c *fiber.Ctx) error { return c.SendStatus(fiber.StatusOK) })
+   262	
+   263		req := httptest.NewRequest(fiber.MethodPost, "/api/v1/blobs", bytes.NewReader(bigBody()))
+   264		resp, err := app.Test(req, -1)
+   265		if err != nil {
+   266			t.Fatal(err)
+   267		}
+   268		if resp.StatusCode != fiber.StatusOK {
+   269			t.Fatalf("large blob upload blocked by guard: got %d, want 200", resp.StatusCode)
+   270		}
+   271	}
+   272	
+   273	// ── round-trip / replay / duplicate (integration, needs Postgres) ────────────
+   274	
+   275	// These exercise the store, so they run only when DATABASE_URL points at a live
+   276	// Postgres and skip otherwise — mirroring the rest of the suite, which is
+   277	// DB-less. When run, they cover deposit+redeem round-trip, single-use replay
+   278	// (404), and duplicate blob_id (409).
+   279	func TestBlobStore_RoundTripReplayDuplicate(t *testing.T) {
+   280		dsn := os.Getenv("DATABASE_URL")
+   281		if dsn == "" {
+   282			t.Skip("DATABASE_URL not set; skipping blob store integration test")
+   283		}
+   284		ctx := context.Background()
+   285		store, err := db.Open(ctx, dsn)
+
+exec
+/bin/bash -lc "git branch --show-current; git status --short; rg -n \"burnAll\\(|clearAll\\(|deleteContact\\(\" apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt apps/android/app/src/main/java/com/zitrone/app --glob '*.kt' | head -80" in /root/zitrone
+ succeeded in 0ms:
+feat/0.10.2-capacity-fixes
+ M l00prite/.l00prite/reviews/capacity-0.10.2/a-r1-codex.md
+ M l00prite/.l00prite/reviews/capacity-0.10.2/b-r1-codex.md
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1688:    fun deleteContact(conversationId: String, onComplete: (() -> Unit)? = null) {
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1727:                    messages.burnAll(conversationId, notifyPeer = false)
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1810:            messages.burnAll(conversationId, notifyPeer = true)
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1935:            messages.clearAll()
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1936:            conversations.clearAll()
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:2383:            messages.clearAll()
+apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt:299:    fun burnAll(conversationId: String, notifyPeer: Boolean = true) {
+apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt:311:    fun clearAll() {
+apps/android/app/src/main/java/com/zitrone/app/data/ConversationRepository.kt:314:    fun clearAll() {
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1688:    fun deleteContact(conversationId: String, onComplete: (() -> Unit)? = null) {
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1727:                    messages.burnAll(conversationId, notifyPeer = false)
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1810:            messages.burnAll(conversationId, notifyPeer = true)
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1935:            messages.clearAll()
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1936:            conversations.clearAll()
+apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:2383:            messages.clearAll()
+apps/android/app/src/main/java/com/zitrone/app/MainActivity.kt:1646:                session.coordinator.deleteContact(conversation.id)
+apps/android/app/src/main/java/com/zitrone/app/MainActivity.kt:1677:                    onBurnAll = { session.messageRepository.burnAll(conversation.id) },
+
+codex
+# FINDINGS
+
+## P1 — Delayed abandon can delete a later successful retry deposit
+
+Files: [MessagingCoordinator.kt](/root/zitrone/apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1454), [MessagingCoordinator.kt](/root/zitrone/apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1472), [store.go](/root/zitrone/server/internal/db/store.go:318)
+
+Reachable sequence:
+
+1. Attempt 1 uploads blob `R`, then its ratchet flush fails and asynchronously launches abandon A1.
+2. Retry 1 runs before A1 deletes `R`. Upload returns 409 because `StoreBlob` uses `ON CONFLICT DO NOTHING`; this failure launches abandon A2.
+3. A1 deletes `R`.
+4. Retry 2 uploads a fresh box under `R`, durably flushes, and publishes its envelope.
+5. Delayed A2 executes unconditional `DELETE WHERE blob_id = R`, deleting Retry 2’s blob.
+6. Recipient gets an envelope whose attachment permanently returns 404.
+
+The same underlying hazard exists whenever multiple cleanup requests for the reused token overlap later attempts. Confinement serializes sends, but `scope.launch` cleanup is outside that ordering.
+
+Fix belongs primarily in the client/design: do not abandon a token while its message remains retryable. Route (a) should probably not abandon at all. A relay conditional-delete scheme would require an unambiguous deposit-generation identifier; token/blob ID alone cannot distinguish attempts.
+
+Tests miss it because coordinator behavior is not tested: [AttachmentDepositReuseTest.kt](/root/zitrone/apps/android/app/src/test/java/com/zitrone/app/AttachmentDepositReuseTest.kt:108) only asserts source strings. Relay tests do not exercise abandon/redeposit concurrency or the store-backed endpoint.
+
+## P2 — Deposit memo survives reachable message-removal paths
+
+Files: [MessagingCoordinator.kt](/root/zitrone/apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:402), [MessagingCoordinator.kt](/root/zitrone/apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:597), [MessageRepository.kt](/root/zitrone/apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt:274), [MessageRepository.kt](/root/zitrone/apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt:310)
+
+A failed attachment remains memoized for retry. The user can then burn it, burn the conversation, delete the contact, or clear the repository/session. Those paths remove the message but never call `releaseDeposit`. Repeating failed attachment sends followed by burn/removal grows `attachmentDeposits` for the process lifetime.
+
+The three release points are therefore incomplete. `onMessageStored`, `onMessageDelivered`, and the special mid-send discard do not cover all terminal local removals.
+
+The test merely counts three textual calls at [AttachmentDepositReuseTest.kt](/root/zitrone/apps/android/app/src/test/java/com/zitrone/app/AttachmentDepositReuseTest.kt:149); it cannot establish that all terminal transitions are covered.
+
+## P3 — Comments incorrectly claim route (b) is covered
+
+[ApiClient.kt](/root/zitrone/apps/android/app/src/main/java/com/zitrone/app/net/ApiClient.kt:273) says cleanup handles non-durable flush and contact deletion. Actual call sites cover non-durable flush and exception paths; `publishOutgoing` releases the memo without abandoning the blob when the contact is gone.
+
+Tests do not validate call-site semantics.
+
+# CONFIRM-OR-REFUTE
+
+- 5a token hazard: confirmed safe. Token remains a random 256-bit draw and is not derived from relay-visible message data.
+- 5a key reuse: safe under the stated construction. Each attempt gets an independent 96-bit random GCM nonce. Reusing one AES-256 key for a handful of encryptions does not materially weaken confidentiality, forward secrecy, or tag security. The catastrophic case—same key and nonce over differing padded plaintext—is avoided.
+- Holding the box: unnecessary. Either stored box carries its own nonce and opens with the stable key. The memo actually contains 64 raw secret bytes, not 96; map/key/object overhead adds more, but no ciphertext is retained by this map.
+- Wrong-message reuse: no practical cross-message route found; the map is keyed by locally generated UUID. The real lifetime problem is missing terminal releases.
+- Token-keyed abandon: sound relative to ID-keyed deletion. An ID-keyed endpoint would expose deletion to anyone knowing the public blob ID. Sending the token gives the conceded relay no meaningful new plaintext capability: it already controls deletion and still lacks the attachment AES key.
+- Abandon-versus-retry race: confirmed, but a single abandon and single retry are serialized indirectly by row uniqueness—retry either conflicts before deletion or inserts after it. The permanent-deletion race becomes reachable with multiple outstanding abandons, as detailed above.
+- Quiet failure swallowing: correct in isolation. It prevents cleanup from replacing or delaying the original failure. The defect is launching destructive cleanup without binding its lifetime to the failed attempt.
+- R-U3-1: cover ordering itself is unchanged. However, retry correctness is broken by adjacent asynchronous cleanup; a real retry can fail with 409 or publish an attachment later deleted by cleanup. This is not caused by producing cover, but it violates the broader send-path safety expected for retries.
+
+# RESIDUAL CLASSING
+
+- Route (b): genuinely remains open and TTL-bounded, but “non-suspending publish” does not make it technically uncoverable—`abandonBlobQuietly` itself is non-suspending, or `publishOutgoing` could return a richer result. It is correctly disclosed, but substantively remains a P2 residual, not mere hygiene.
+- Crash cleanup: unavoidable client-side; TTL backstop is appropriate.
+- Missing store-backed abandon test: correctly classed as test debt.
+- Coordinator wiring asserted rather than behavior-tested: material test debt and the direct reason both findings survived.
+
+# MISSING CONTEXT
+
+No missing source context blocked the review. The requested branch is checked out. The worktree already contained unrelated modified review files; none were touched.
+
+VERDICT: FINDINGS (1 P1, 1 P2, 1 P3)
+tokens used
+58,352
+# FINDINGS
+
+## P1 — Delayed abandon can delete a later successful retry deposit
+
+Files: [MessagingCoordinator.kt](/root/zitrone/apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1454), [MessagingCoordinator.kt](/root/zitrone/apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:1472), [store.go](/root/zitrone/server/internal/db/store.go:318)
+
+Reachable sequence:
+
+1. Attempt 1 uploads blob `R`, then its ratchet flush fails and asynchronously launches abandon A1.
+2. Retry 1 runs before A1 deletes `R`. Upload returns 409 because `StoreBlob` uses `ON CONFLICT DO NOTHING`; this failure launches abandon A2.
+3. A1 deletes `R`.
+4. Retry 2 uploads a fresh box under `R`, durably flushes, and publishes its envelope.
+5. Delayed A2 executes unconditional `DELETE WHERE blob_id = R`, deleting Retry 2’s blob.
+6. Recipient gets an envelope whose attachment permanently returns 404.
+
+The same underlying hazard exists whenever multiple cleanup requests for the reused token overlap later attempts. Confinement serializes sends, but `scope.launch` cleanup is outside that ordering.
+
+Fix belongs primarily in the client/design: do not abandon a token while its message remains retryable. Route (a) should probably not abandon at all. A relay conditional-delete scheme would require an unambiguous deposit-generation identifier; token/blob ID alone cannot distinguish attempts.
+
+Tests miss it because coordinator behavior is not tested: [AttachmentDepositReuseTest.kt](/root/zitrone/apps/android/app/src/test/java/com/zitrone/app/AttachmentDepositReuseTest.kt:108) only asserts source strings. Relay tests do not exercise abandon/redeposit concurrency or the store-backed endpoint.
+
+## P2 — Deposit memo survives reachable message-removal paths
+
+Files: [MessagingCoordinator.kt](/root/zitrone/apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:402), [MessagingCoordinator.kt](/root/zitrone/apps/android/app/src/main/java/com/zitrone/app/MessagingCoordinator.kt:597), [MessageRepository.kt](/root/zitrone/apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt:274), [MessageRepository.kt](/root/zitrone/apps/android/app/src/main/java/com/zitrone/app/data/MessageRepository.kt:310)
+
+A failed attachment remains memoized for retry. The user can then burn it, burn the conversation, delete the contact, or clear the repository/session. Those paths remove the message but never call `releaseDeposit`. Repeating failed attachment sends followed by burn/removal grows `attachmentDeposits` for the process lifetime.
+
+The three release points are therefore incomplete. `onMessageStored`, `onMessageDelivered`, and the special mid-send discard do not cover all terminal local removals.
+
+The test merely counts three textual calls at [AttachmentDepositReuseTest.kt](/root/zitrone/apps/android/app/src/test/java/com/zitrone/app/AttachmentDepositReuseTest.kt:149); it cannot establish that all terminal transitions are covered.
+
+## P3 — Comments incorrectly claim route (b) is covered
+
+[ApiClient.kt](/root/zitrone/apps/android/app/src/main/java/com/zitrone/app/net/ApiClient.kt:273) says cleanup handles non-durable flush and contact deletion. Actual call sites cover non-durable flush and exception paths; `publishOutgoing` releases the memo without abandoning the blob when the contact is gone.
+
+Tests do not validate call-site semantics.
+
+# CONFIRM-OR-REFUTE
+
+- 5a token hazard: confirmed safe. Token remains a random 256-bit draw and is not derived from relay-visible message data.
+- 5a key reuse: safe under the stated construction. Each attempt gets an independent 96-bit random GCM nonce. Reusing one AES-256 key for a handful of encryptions does not materially weaken confidentiality, forward secrecy, or tag security. The catastrophic case—same key and nonce over differing padded plaintext—is avoided.
+- Holding the box: unnecessary. Either stored box carries its own nonce and opens with the stable key. The memo actually contains 64 raw secret bytes, not 96; map/key/object overhead adds more, but no ciphertext is retained by this map.
+- Wrong-message reuse: no practical cross-message route found; the map is keyed by locally generated UUID. The real lifetime problem is missing terminal releases.
+- Token-keyed abandon: sound relative to ID-keyed deletion. An ID-keyed endpoint would expose deletion to anyone knowing the public blob ID. Sending the token gives the conceded relay no meaningful new plaintext capability: it already controls deletion and still lacks the attachment AES key.
+- Abandon-versus-retry race: confirmed, but a single abandon and single retry are serialized indirectly by row uniqueness—retry either conflicts before deletion or inserts after it. The permanent-deletion race becomes reachable with multiple outstanding abandons, as detailed above.
+- Quiet failure swallowing: correct in isolation. It prevents cleanup from replacing or delaying the original failure. The defect is launching destructive cleanup without binding its lifetime to the failed attempt.
+- R-U3-1: cover ordering itself is unchanged. However, retry correctness is broken by adjacent asynchronous cleanup; a real retry can fail with 409 or publish an attachment later deleted by cleanup. This is not caused by producing cover, but it violates the broader send-path safety expected for retries.
+
+# RESIDUAL CLASSING
+
+- Route (b): genuinely remains open and TTL-bounded, but “non-suspending publish” does not make it technically uncoverable—`abandonBlobQuietly` itself is non-suspending, or `publishOutgoing` could return a richer result. It is correctly disclosed, but substantively remains a P2 residual, not mere hygiene.
+- Crash cleanup: unavoidable client-side; TTL backstop is appropriate.
+- Missing store-backed abandon test: correctly classed as test debt.
+- Coordinator wiring asserted rather than behavior-tested: material test debt and the direct reason both findings survived.
+
+# MISSING CONTEXT
+
+No missing source context blocked the review. The requested branch is checked out. The worktree already contained unrelated modified review files; none were touched.
+
+VERDICT: FINDINGS (1 P1, 1 P2, 1 P3)
