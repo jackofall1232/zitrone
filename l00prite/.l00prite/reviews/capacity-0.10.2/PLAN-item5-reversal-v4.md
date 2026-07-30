@@ -38,9 +38,21 @@ was wrong was three mechanisms inside it:
 unlike v3's claimed one.
 
 - **Exactly two callers of `abandonBlob` exist in the process.** (a) The depositing coroutine, at
-  whichever exit it reaches. (b) The **terminal reclaim flush** (mechanism 2), which by construction
-  runs only when no send coroutine remains. They are **mutually exclusive in time**, so there is no
-  second writer and no race between them — that must be verified, not assumed (see the gate).
+  whichever exit it reaches. (b) The **terminal reclaim flush** (mechanism 2).
+  **They are NOT mutually exclusive in time — that claim was checked at source and is FALSE.**
+  `coordinator.stop()` sets `acceptingSends = false`, cancels only `linkJob`, and then dispatches the
+  terminal task onto the confined worker, blocking until *that task* runs. It **stop-accepts-new; it
+  does not join in-flight send coroutines** (the file's only `join()` belongs to `onAuthExpired`'s
+  relink latch). And it cannot: `limitedParallelism(1)` serialises execution **slices**, not
+  coroutines, so a send suspended in `uploadBlob` has yielded the worker and the terminal task runs
+  in a slice beside it. **Cancel would not help either** — a cancelled coroutine still runs its
+  `finally`, so an exit path that abandons is still a live writer. Only a join is exclusion, and
+  there is none.
+- **THE SAFETY ARGUMENT IS THEREFORE ATOMIC REMOVAL, NOT TEMPORAL EXCLUSION.** Every decision is a
+  single atomic `remove`-and-decide, so **exactly one party ever receives a given entry**. Two live
+  writers cannot both act on it: not double-abandon, and — because `CONFIRMED` is excluded and only
+  the receiver of the entry may act — not destroy-a-live-blob. This is the property to test; the
+  time-ordering story was decoration and is deleted.
 - **Every foreign-stack cleanup MARKS and returns no-abandon.** Burn, remote burn, TTL burn, read-burn,
   reveal burn, discard, contact delete, `clearAll` — each atomically sets a `cleanupRequested` bit on
   matching entries and abandons **nothing**. One bit, not a lifecycle state.
@@ -146,6 +158,12 @@ it being fixed.
 - **Relay malice** — conceded. This removes only *self-inflicted* deletion.
 - **No `markFailed` on disconnect paths** — recorded above, needs its own change, and item 5 must not
   depend on it.
+- **Flush-then-late-deposit orphan (new, from verifying the drain claim).** Because `stop()` does not
+  join in-flight sends, the terminal flush can atomically take an `UPLOADING` entry and abandon it
+  (correct — unknown means abandon), after which the still-suspended upload completes and deposits
+  bytes that **no registry entry covers**. TTL-bounded, and **not** data loss: the envelope for that
+  attempt was never handed off. Listed because it is reachable, it is created by this design, and the
+  honest comparison against the current tree has to include it.
 
 **The claim, narrow and checkable:** every orphan route the client knows about at the moment it fails is
 reclaimed by the party that created it, and the residue is crash, duress silence, unreachable network,
@@ -155,10 +173,16 @@ one that matters.
 
 ## THE SEQUENCE I AM LEAST CONFIDENT ABOUT
 
-**Mechanism 1's claim that the two abandon callers are mutually exclusive in time.** It rests on
-`coordinator.stop()` draining or excluding in-flight send coroutines before the terminal flush runs. **I
-have not verified that.** If a send coroutine can still be mid-flight when the flush executes, both
-writers are live simultaneously and single-writer is false — which would make the terminal flush a
-second writer abandoning an entry whose owner is about to act on it, reintroducing the destroy-a-live-blob
-shape at teardown. **Read `stop()`'s drain semantics and say whether exclusion holds, is merely likely,
-or is absent.**
+*(The previous entry here — that the two abandon callers are mutually exclusive in time — was checked
+at source and is FALSE. It has been corrected in mechanism 1 rather than left as an open question,
+and the orphan it creates is now in the residual list.)*
+
+**Whether atomic removal is sufficient once BOTH writers are known to be live.** The argument is that
+a single `remove`-and-decide hands each entry to exactly one party, so no entry is acted on twice. But
+the two writers observe **different** things: the owner knows what its own upload did; the flush knows
+only the recorded state. So a flush that wins the race for an `ENQUEUED` entry decides on
+"enqueued-but-unconfirmed" **without knowing whether the owner is about to learn the send failed** — and
+mechanism 3 makes `ENQUEUED` conditional precisely because that distinction matters.
+**Is "exactly one party receives the entry" enough when that party may be the less-informed one, or does
+the flush need to defer to a still-live owner — and if so, how does it know one exists, given there is
+no join?**
