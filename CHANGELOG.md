@@ -7,6 +7,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.3-beta] - 2026-07-30
+
+**Unsent attachments no longer leave their data on the relay.** When a conversation
+is deleted while an attachment is still being sent, the uploaded file is now
+reclaimed immediately instead of sitting on the relay until it expired. Nothing you
+sent successfully is affected — the reclaim happens only when the file provably
+never left your device for anyone else.
+
+That last guarantee is the whole of this release. Deleting an attachment that *had*
+already reached the relay would silently destroy a file the recipient could still
+open, showing them a permanent "unavailable" while your own copy was already gone —
+invisible to both of you. Five previous designs for this were rejected for failing
+that test in different ways. This one is built so the situation cannot arise rather
+than being detected and handled.
+
+**Cleanup can no longer hang.** The reclaim request now has its own deadline, so a
+half-open connection cannot leave it waiting indefinitely.
+
+**Known limits, stated plainly.** Reclaim currently covers one route — a contact
+deleted mid-send. Attachments orphaned by other routes, including burned messages
+and interrupted sends, still wait out the relay's normal expiry rather than being
+reclaimed early. No message content, key handling, or delivery behaviour changed.
+
 ## [0.10.2-beta] - 2026-07-30
 
 **Attachment retries work again.** A blob's storage id is derived from a token

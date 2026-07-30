@@ -278,11 +278,53 @@ class ApiClient(
      *
      * The upload happens BEFORE the envelope is published, so a send that dies in between leaves a
      * blob nothing will ever fetch — up to 8 MiB held for the full TTL. This reclaims it on the two
-     * routes the client actually knows about: a non-durable ratchet flush, and a contact deleted
-     * mid-send. A crash cannot call it, so the TTL remains the backstop for that route.
+     * route the client actually wires: a contact deleted mid-send. (The non-durable-ratchet-flush
+     * route is NOT wired — round-2 review caught this kdoc still claiming it. See the two
+     * "STILL NOT WIRED" comments in MessagingCoordinator.deliverAttachment for why; orphans on that
+     * route wait out the blob TTL.). A crash cannot call it, so the TTL remains the backstop for that route.
      *
      * **Keyed on the TOKEN, not the blob id.** The blob id is public; the token is the capability.
      * Sending it is acceptable here only because the blob is being destroyed in the same request.
+     *
+     * **⚠️ THE DISCLOSURE INVARIANT — the rule the next contributor will otherwise break.**
+     * **A token may be transmitted only when the row it names is provably unreferenced and
+     * unrecreatable.** In this design the relay never learns a blob token: `RedeemBlob` is
+     * unauthenticated *because the token IS the capability*, and sending one here is conceded only
+     * because the blob is *intended* to die in the same breath.
+     *
+     * **That intent is not a guarantee, and the kdoc used to overclaim it.** Verified at source: the
+     * relay rate-limits BEFORE parsing the body, so a 429 returns having received the token and
+     * deleted nothing; a 401 (bearer expired mid-teardown) and a dropped response do the same. There
+     * is no restore-on-failure, so the blob then survives at a relay that has seen its token.
+     *
+     * **State the linkage precisely — two rounds of review went back and forth on it.** Round 1 said
+     * "deposit already links account to blob id" (false about what is *stored*). Round 2 corrected
+     * it to "the relay does not know whose blob it is" (false about what is *observed*). Both were
+     * wrong in opposite directions. The truth has two halves and needs both:
+     *
+     * - **The persisted store is blind.** `StoreBlob` takes only (blob id, ciphertext, expiry) — no
+     *   account column exists in the `blobs` schema. A relay that follows its own code retains no
+     *   account↔blob association.
+     * - **The request-handling relay nonetheless observes one, transiently.** `RequireAuth` resolves
+     *   the JWT before `DepositBlob` reads `blob_id`, so a *logging or compromised* relay can see
+     *   account → blob id at deposit — and account → token at abandon, from which the blob id
+     *   follows as `sha256(token)`.
+     *
+     * So abandon is more disclosive than deposit in KIND (it hands over the redemption capability,
+     * not merely an identifier), not in whether a linkage is observable at all. Reason about a
+     * logging relay consistently for both calls or neither.
+     *
+     * What makes it tolerable is narrower and worth stating exactly, because it is the whole
+     * argument: the relay **already holds the ciphertext** (no new read capability — and it cannot
+     * decrypt it in any case, the key travels in the ratchet-encrypted envelope) and **can drop any
+     * row unilaterally** (no new destructive capability). It gains a transient linkage it is not
+     * supposed to keep, in exchange for the blob usually dying. **If this endpoint ever becomes
+     * unauthenticated, or the relay ever persists an account↔blob association, re-open this.**
+     * Never call this speculatively, and never for a blob an envelope may still name.
+     *
+     * **Bounded (0.10.3 C1).** Without a deadline this shares the deposit's failure mode: both
+     * shared clients set `readTimeout(0)`, so a half-open circuit parks the continuation forever and
+     * nothing upstream runs. All five judging lenses named the omission independently.
      *
      * **Best-effort by design — see the call sites: failures are swallowed.** This runs on paths that
      * are ALREADY failing, and letting cleanup turn a failed send into a crash, or delay the user's
@@ -291,7 +333,7 @@ class ApiClient(
      */
     suspend fun abandonBlob(blobTokenBase64: String) {
         val body = JSONObject().apply { put("token", blobTokenBase64) }
-        execute(post("/api/v1/blobs/abandon", body))
+        execute(post("/api/v1/blobs/abandon", body), callTimeoutMs = BLOB_ABANDON_TIMEOUT_MS)
     }
 
     /**
@@ -535,6 +577,14 @@ class ApiClient(
          * the continuation, nothing throws, and the bubble stays SENDING forever with retry refused.
          */
         const val BLOB_UPLOAD_TIMEOUT_MS = 10 * 60 * 1000L
+
+        /**
+         * Whole-call deadline for an abandon (0.10.3 C1). Far shorter than the deposit's: the body is
+         * a single token, so there is no large upload to clear — only a round trip. Erring short is
+         * safe here in a way it is not for the deposit, because a timed-out abandon leaves an orphan
+         * the janitor collects, whereas a timed-out deposit strands a message.
+         */
+        const val BLOB_ABANDON_TIMEOUT_MS = 30 * 1000L
 
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 

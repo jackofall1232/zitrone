@@ -148,13 +148,61 @@ class AttachmentDepositWiringTest {
 
     @Test
     fun `the memo is released on every terminal outcome, so it cannot become a heap leak`() {
-        // The trade this fix must NOT make: disk orphans for unbounded heap. Three release points —
-        // the relay took it, the recipient got it, the local copy was discarded.
-        val code = coordinator()
+        // The trade this fix must NOT make: disk orphans for unbounded heap.
+        //
+        // **The three sites changed in 0.10.3 and this count did not notice — corrected here.** The
+        // pin was written for: relay took it / recipient got it / local copy discarded. 0.10.3
+        // replaced the third with `settleAttachment(messageId)` and added a release inside
+        // settleAttachment's RELEASE_ONLY branch. Net count stayed 3, so this test stayed green
+        // while its stated invariant became false — a source-pinning tripwire surviving a refactor
+        // that changed its meaning, which is the exact failure it exists to prevent.
+        //
+        // So pin the SITES, not just the total. A bare count cannot tell "moved" from "lost".
+        // Comments are STRIPPED before matching. Round-2 review found the obvious hole in the first
+        // version: `// settleAttachment(messageId)` still satisfies a substring check, so commenting
+        // out the reclamation path left every assertion green. A source-text pin that cannot tell
+        // code from a comment pins nothing.
+        val code = stripComments(coordinator())
         assertEquals(
-            "a release point was lost; the deposit map then grows for the process's lifetime",
+            "a release point was lost or added; the deposit map then grows for the process's lifetime",
             3,
-            Regex("releaseDeposit\\(messageId\\)").findAll(code).count(),
+            Regex("releaseDeposit\\s*\\(\\s*messageId\\s*\\)").findAll(code).count(),
+        )
+        // The terminal outcome that no longer releases directly — it routes through the settle
+        // decision, which may RELEASE_ONLY or ABANDON. If this reverts to a bare releaseDeposit,
+        // the blob stops being reclaimable and 0.10.3's whole point is lost.
+        assertTrue(
+            "the contact-deleted-mid-send path must route through settleAttachment, not release directly",
+            Regex("settleAttachment\\s*\\(\\s*messageId\\s*\\)").containsMatchIn(code),
+        )
+        // The release that settleAttachment owns. Losing it turns every handed-off attachment into
+        // a permanent memo entry — the heap-leak side of the trade.
+        assertTrue(
+            "settleAttachment's RELEASE_ONLY branch must still release the memo",
+            Regex(
+                "RELEASE_ONLY\\s*\\)\\s*\\{\\s*releaseDeposit\\s*\\(\\s*messageId\\s*\\)",
+            ).containsMatchIn(code),
         )
     }
+
+    /**
+     * Remove `//` line comments and block comments so the pins above match CODE, not prose.
+     *
+     * Crude, and round-3 review named both ways it can be wrong — recorded rather than papered over,
+     * because the previous version of this kdoc claimed mangling "cannot manufacture" a match and
+     * that was false:
+     *
+     * - **False alarm:** a `//` inside a string literal (a URL) eats the rest of that line, so
+     *   `log("https://x"); releaseDeposit(messageId)` would lose a real call and fail the count.
+     * - **False green:** a literal like `"releaseDeposit/* x */(messageId)"` strips to the exact
+     *   pattern, manufacturing a match that is not a call.
+     *
+     * Both require a construction that does not occur in `MessagingCoordinator` and would be
+     * obvious in review if introduced. Accepted for a source-text tripwire whose job is to notice a
+     * release point being deleted; if this file ever gains such a literal, replace this with a real
+     * parse rather than widening the regex.
+     */
+    private fun stripComments(code: String): String = code
+        .replace(Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL), "")
+        .replace(Regex("//[^\n]*"), "")
 }

@@ -500,6 +500,18 @@ class MessageRepository(
      */
     fun exists(messageId: String): Boolean = find(messageId) != null
 
+    /**
+     * The message's current state, or null when no such message exists (sent-and-acked, discarded,
+     * burned, or its contact torn down). Added for 0.10.3's attachment settle decision, which needs
+     * to distinguish "still retryable" from "gone" before it may reclaim a blob.
+     *
+     * Deliberately returns only the state and NOT the [Message]: the private [find] stays private so
+     * no caller acquires a handle to the retained plaintext/attachment bytes just to ask a question
+     * about lifecycle. Widening [find] instead would have been the smaller diff and the larger
+     * surface.
+     */
+    fun stateOf(messageId: String): MessageState? = find(messageId)?.state
+
     private fun find(messageId: String): Message? =
         _messages.value.values.asSequence().flatten().firstOrNull { it.id == messageId }
 
