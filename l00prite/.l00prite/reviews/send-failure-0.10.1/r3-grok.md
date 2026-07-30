@@ -1,0 +1,1 @@
+I'll perform a read-only adversarial review of the round-2 fixes against source. Starting with protocol context and the scoped files.Source is under `apps/android/`. Reading the round-2 fix surfaces and related tests.
