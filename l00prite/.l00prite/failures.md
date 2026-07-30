@@ -1287,3 +1287,23 @@ that **survived a correction to the reasoning underneath it**.
 **That is a stronger result than "no findings," and it only appears if you go looking to falsify your
 own foundation.** Recorded so the next person to find a shaky premise checks the foundation rather than
 assuming it, and so this particular alarm is not re-raised.
+
+## `ci-gradle` from the wrong cwd is a FALSE GREEN, not an error — 2026-07-30
+
+`ci-gradle` requires `./gradlew` in the current directory and otherwise prints
+`ci-gradle: no ./gradlew in <dir> — run from the project directory` and exits **without running
+anything**. That message matches none of the usual result greps (`^e: `, `FAILED`, `BUILD`), so a
+pipeline like `ci-gradle test | grep -cE FAILED` reports **0 failures** and a run filtered to
+`BUILD|FAILED` prints **nothing at all**. Both read as success.
+
+This fired **twice in one session** during the 0.10.3 mutation testing, and the first time it
+produced the worst possible artifact: **three mutations "surviving"** — i.e. a report that the new
+test was worthless — when in fact the test never ran. Re-run correctly, all three were caught.
+
+**Rule: a mutation run that reports a SURVIVOR must be disbelieved until the same harness is shown
+to produce a FAILURE for a mutation you know is fatal.** A survivor and a no-op are indistinguishable
+by exit code here. Always include a baseline (`expect BUILD SUCCESSFUL`) and a restore-check in the
+same script, and grep for `no ./gradlew` alongside the result patterns.
+
+The Bash tool's working directory persists between calls, so a `cd` in an earlier command silently
+changes where a later one runs — which is exactly how this happened both times.
