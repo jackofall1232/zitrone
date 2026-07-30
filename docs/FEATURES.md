@@ -32,6 +32,7 @@ and user-creatable; see §2.
 |---|---|---|
 | **Create a second vault** | Creates an additional, fully independent vault with its own passphrase, messages and identity, blind-placed in a random slot. It unlocks straight into the new vault, following the ordinary unlock success path. | At the **normal lock screen**, enter the *same never-before-used passphrase three times, consecutively and uninterrupted*. The third identical entry creates it. |
 | **Open a second vault** | Ordinary unlock. Which vault opens depends only on which passphrase you type — the app makes no distinction between them. | Lock screen → type that vault's passphrase. |
+| **Switch vaults** | Not a distinct control (a "switch vault" button would be a discoverable tell). Switching is *lock, then unlock with the other passphrase*. On lock, the live vault's session is fully torn down before any re-unlock. | Background the app so auto-lock fires (Settings → Security → *Auto-lock when backgrounded*; the *Immediate* option locks on backgrounding — there is **no in-app "lock now" button**), then reopen and type the other vault's passphrase. |
 
 **There is deliberately no button, wizard, confirmation dialog, or warning copy for this**, and there
 must not be. `VAULT_ARCHITECTURE.md` §2 is titled "there is no button for the second vault" — a
@@ -129,6 +130,7 @@ which travel inside the ratchet-encrypted message. The relay cannot decrypt an a
 |---|---|---|
 | **Add by QR** | Shows your contact code as a QR for someone to scan. The code contains only your contact ID. | Chat list → FAB → *Add contact* → your code is displayed. |
 | **Scan a contact** | Scans someone's QR, then names them before adding. | Add contact → scan. Rejects your own code with a clear message. |
+| **Add by pasted code / invite link** | Accepts a pasted contact ID, invite link, or raw QR payload — the no-camera path. Bare-UUID/link inputs carry no key to pin, so those contacts start trust-on-first-use until verified. | Add contact → paste field ("Contact ID, invite link, or QR payload"). |
 | **Safety-number verification** | Shows a safety number to compare with the contact over a channel you already trust. | Chat → contact name → *Verify*, or the security badge. |
 | **Delete a contact** | Irreversible: removes the conversation, its messages, and the contact's crypto records, and writes a tombstone. | Chat list → **long-press** a conversation → confirmation dialog. |
 
@@ -183,7 +185,6 @@ tracked disclosure item for 0.11.0.
 | **Dark theme only** | There is no light mode. Settings states this explicitly rather than offering a dead toggle. |
 | **Cover traffic** | The client emits synthetic traffic so real sends are not distinguishable by timing. **Deliberately has no UI and no setting** — no toggle, no indicator, nothing in Settings. A real send is never delayed, reordered, blocked, or made less durable to produce cover. |
 | **Identity Watermarking** | Paints a faint, tiled lattice of the VIEWER'S OWN 60-hex identity fingerprint behind the chat surfaces. A deterrent: anyone photographing the screen is reminded that what they capture is marked as theirs. Always on, no toggle — a toggle would turn a deterrent into a checkbox nobody finds. **Renders locally and reports nothing to anyone.** |
-| **Registration proof-of-work** | The client solves a PoW to register, throttling mass account creation. Surfaced as a progress screen during first setup. |
 
 ---
 
@@ -279,5 +280,12 @@ no telemetry, so there is no "we" and nothing is reported; and `security/page.ts
 - **No cloud backup, sync, or multi-device.** The vault is local; `MessageRepository` is RAM-only, so a
   crash takes undelivered local state with it.
 - **No light mode.**
+- **No registration proof-of-work.** REVERSED by maintainer decision (`d83b9b3a`, 2026-07-29):
+  the relay's registration-challenge endpoint was removed and clientKeyer is the registration
+  rate-limit answer. The client-side solver (`RegistrationPow*.kt`) and its lemon-squeeze progress
+  screen are still in the tree, but against the shipped relay the challenge fetch 404s and the
+  client "registers without proof" — the screen never shows in a real install. Do not document,
+  screenshot, or wizard-step it. (The *deposit* PoW when sealing a lemon drop is a separate,
+  shipped mechanism — §8 — and `server/internal/pow/` stays for it.)
 - **No deployed web or desktop client.** Android is the only shipped client.
 - **No Play Store distribution.** Sideloaded APK via GitHub Releases and the Tor onion mirror.
