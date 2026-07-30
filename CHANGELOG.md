@@ -7,6 +7,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.2-beta] - 2026-07-30
+
+**Attachment retries work again.** A blob's storage id is derived from a token
+memoised per message, so the *first retry tap of any attachment* re-deposited the
+same id, the relay answered "already exists", and the retry failed. Every
+attachment retry was broken. Retrying now succeeds — the relay already holds your
+bytes, which is exactly what the memoised token guarantees.
+
+**Relay capacity and correctness.** Expired refresh tokens are now reclaimed (79%
+of rows on the live relay were expired and stuck). Undelivered envelopes past
+their TTL are no longer delivered. Unfetched attachment blobs are held 96 hours
+rather than a week — deliberately still longer than the message TTL, because a
+blob's clock starts at upload and a message's at send, so equalising them would
+strand attachments. That relationship is now **enforced in code**, not described
+in a comment: a configuration that would deliver a message whose attachment had
+already expired is corrected at startup instead of shipping the inconsistency.
+
+**A send-failure fix that could strand a message.** A stalled upload with no
+response could leave a message showing "sending" forever, with retry refused. It
+is now bounded.
+
+**Storage-format disclosure, unchanged from 0.10.0:**
+
+> **Your vault format is not yet stable.** A future release may require a fresh
+> install, which **erases every vault on the device** — contacts, sessions,
+> settings. There is no migration and no export.
+
+**Maturity, honestly:** `-beta` is a continuity label; by the project's own
+assessment these remain **pre-beta (alpha)** builds.
+
 ## [0.10.0-beta] - 2026-07-29
 
 **Cover traffic ships on Android.** On a vault with cover traffic enabled, every real send is
