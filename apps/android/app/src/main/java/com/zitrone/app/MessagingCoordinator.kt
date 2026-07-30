@@ -1618,15 +1618,23 @@ class MessagingCoordinator(
             // ROUTE (c) — item 5b, best effort. If the throw came AFTER a successful deposit the blob
             // is an orphan; if before, there is nothing to delete and the relay's 204 says so without
             // revealing which. The memo is the only place the token survives this far.
-            // STILL NOT WIRED, same as the route above — plus a hazard for whoever wires it. Stated
-            // as a CONSTRAINT ON FUTURE WORK, not as a description of this code: an earlier version
-            // of this comment asserted in the present tense that the route "reads the shared memo
-            // after suspension", and round-3 review correctly objected that it reads
-            // attachmentDeposits nowhere at all. The hazard is real but conditional — if this is
-            // ever wired by looking the memo up here, that lookup happens AFTER arbitrary
-            // suspension and can return a LATER attempt's token. settleDecision would not catch it:
-            // the message id is the same, so the decision would be about the right message and the
-            // wrong blob. Capture the token before suspending; do not re-read the map after.
+            // STILL NOT WIRED, same as the route above. Two earlier versions of this comment got the
+            // reason wrong in different ways and round-3 review caught both, so state it exactly:
+            //
+            // - It does NOT "read the shared memo after suspension" — this block touches
+            //   attachmentDeposits nowhere at all. That was a present-tense claim about code that
+            //   is not here.
+            // - The memo token is STABLE per message id, not per attempt: the write is conditional
+            //   (`if (memo == null)`), so a retry reuses the same token and names the SAME blob.
+            //   "A later attempt's different token" is unreachable while the memo exists — it
+            //   requires a clearing first, which only happens once the message is terminal.
+            //
+            // So wiring this as settleAttachment-after-markFailed would be DEAD CODE, exactly like
+            // route (a): the message is FAILED at that point and settleDecision SKIPs FAILED. What
+            // settleDecision does not protect is a RAW abandon that bypasses it — that is the
+            // classic same-token P1, and it is the reason this stays unwired rather than being
+            // hand-rolled here. Reclaiming this route needs a settle at the point the message stops
+            // being retryable, which does not exist yet.
             val bodySuffix = (e as? ApiClient.ApiException)?.responseBody
                 ?.let { " server_error=$it" }
                 .orEmpty()

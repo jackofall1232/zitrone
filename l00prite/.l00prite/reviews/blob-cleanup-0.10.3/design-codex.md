@@ -826,7 +826,7 @@ single-threaded virtual clock cannot express, kept as reachable under real threa
 
 **No version bump, nothing deployed.** 0.10.1 is client-only, so no relay redeploy is implied by this
 merge — the CX23 trip owed for 0.10.2 items 1–4 is unaffected and still outstanding.
->>>>>>> main
+<!-- (stray merge marker from the ledger conflict this design quoted; removed 0.10.3) -->
 
 codex
 The project memory confirms the key invariant: the memoised token is already the durable server-side row cap and must remain. I’m now checking the actual ownership transitions and every session-ending path, including whether any existing receipt can safely authorize deletion.
