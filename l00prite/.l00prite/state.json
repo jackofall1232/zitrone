@@ -1,20 +1,20 @@
 {
   "schema_version": 2,
   "project_name": "Zitrone",
-  "current_goal": "0.10.0-beta SHIPPED 2026-07-29 (vc21, a0d7598b): cover traffic is live on Android. U1-U4 merged; U6 disclosure delivered BEFORE the cut (SECURITY_MODEL §storage-format + shipped decoy-traffic section + CHANGELOG). GH prerelease v0.10.0-beta targets d955391b, APK sha256 fa183f30…c877db, signer cert 6c7f92a7…892753 verified both sides, served asset byte-identical, onion mirror staged, website /download/beta live on the new version + checksum.",
-  "current_phase": "0.10.0-beta live. 0.10.1 MERGED (a7d66e87). 0.10.2 on feat/0.10.2-capacity-fixes (LOCAL, unpushed, 24 commits): items 1-4 done incl. two P1 config fixes; three item-5-independent fixes landed (deposit callTimeout, two confinement comments, and the standalone-client risk which needed no code). ITEM 5: five design plans written, FOUR REJECTED by five-agent passes, v5's pass IN FLIGHT at session close. ZERO item-5 code written to any design.",
+  "current_goal": "0.10.3 on fix/0.10.3-blob-settle: attachment blob reclaim \u2014 the sixth design for the problem that rejected five in 0.10.2, and the first to survive review. Three lenses (Codex, Gemini, Kimi K3) each failed to construct an attachment-destruction interleaving; between them they falsified six of my own claims ABOUT it, all since corrected across two review rounds.",
+  "current_phase": "0.10.3 branch complete and merge-ready pending round-3 confirmation. Commits: afee7d5f (implementation, graft of Kimi base + Codex handoff bit + Grok claim discipline), f730cc48 (round-1 claim corrections), a39de04b (round-2 corrections + ledger conflict resolution). Full unit suite green; 5 settleDecision mutations and 2 wiring mutations verified caught. NOT merged, NOT version-bumped, NOT deployed.",
   "active_agent": null,
   "last_agent": "claude",
   "last_updated": "2026-07-30",
   "status": "in_progress",
-  "blocked": true,
-  "blocker_reason": "0.10.2 item 5: FIVE plans, FIVE rejections. The v5 pass invalidated the PREMISE all five shared — 'reverse 5a' was the error. 5a's memoized token is what gives the DB-enforced one-row-per-message cap via ON CONFLICT; every plan traded it for a best-effort network cap. v6 keeps the existing memo, adds two bits, changes one branch.",
+  "blocked": false,
+  "blocker_reason": null,
   "active_event_id": null,
   "last_event_processed": null,
   "pending_event_count": 0,
   "review_response_required": false,
-  "ci_status": "local only — release verification: keystore cert continuity checked BEFORE build; :app:assembleRelease BUILD SUCCESSFUL exit 0 in 3m36s; apksigner cert digest matches anchor; aapt2 badging vc21/0.10.0-beta; GitHub-served APK downloaded and byte-identical (fa183f30…c877db); website build exit 0 with new version+checksum baked and zero 0.9.4 refs; live site confirmed serving v0.10.0-beta. | FIELD 2026-07-29 (maintainer): relay deployed from main and healthy, messages sending with no perceptible delay, onion mirror serving the current build (confirms ad80919b landed). NOT yet an R-U3-1 confirmation — depends on whether cover traffic was enabled on the sending vault; question owed at next session start.",
+  "ci_status": "local: :app:testDebugUnitTest BUILD SUCCESSFUL. Mutation-verified \u2014 settleDecision: handedOff->SKIP, handedOff->ABANDON, FAILED-not-skipped, no-memo->ABANDON, else->SKIP (feature dead) all CAUGHT (the first of those SURVIVED before round 1 strengthened the test). Wiring: reclaim-path-commented-out and RELEASE_ONLY-gutted both CAUGHT. Empirical probe confirmed scope.launch(confined+NonCancellable) runs on an already-cancelled scope.",
   "execution_active": false,
   "execution_stop_reason": null,
-  "next_recommended_action": "v6 PER THE REVIEW, and it is small: (1) IDEMPOTENT REDEPOSIT — treat a 409 on a memoized-token deposit as SUCCESS, one branch in deliverAttachment's upload-blob stage. This ALSO fixes a live UX defect nobody had named: today the FIRST RETRY TAP OF EVERY ATTACHMENT is guaranteed to fail on a 409. It keeps the server-enforced one-row cap and deletes the motivation for the reversal, the registry, the queue, the drain, the backoff and the storm. (2) A `published` BIT set non-suspending inside publishOutgoing at ws.sendMessage==true and read at every abandon site — M3 made structural rather than documentary. (3) Item 1 (abandon on the contact-deleted branch) still ships, but the abandon MUST read attachmentDeposits BEFORE releaseDeposit or it is a silent no-op. (4) Separate AbandonBlob limiter must be DEPLOYED, not merely merged, before any client that bursts abandons — and note the shared bucket is currently ACCIDENTALLY SELF-LIMITING. Then 0.10.2 re-review, CX23 trip, 0.10.1 harness debt, 0.11.0."
+  "next_recommended_action": "HiL MERGE POINT. Awaiting maintainer decision to merge fix/0.10.3-blob-settle to main. After merge: version bump (vc23, 0.10.3-beta), onion.go currentAPK + mirrorAssets, website links.ts, release cut. STILL OWED INDEPENDENTLY: the CX23 trip (rebuild relay for 0.10.2 fixes, force-recreate postgres for effective_cache_size, prod blob-count check); 0.10.1 coordinator-harness debt; 0.11.0 polish round. NOT reclaimed by 0.10.3 and deliberately so: burn routes, clearAll, stop(), and the non-durable-flush route \u2014 all still orphan to blob TTL."
 }
