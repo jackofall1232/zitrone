@@ -288,11 +288,18 @@ class ApiClient(
      * **A token may be transmitted only when the row it names is provably unreferenced and
      * unrecreatable.** In this design the relay never learns a blob token: `RedeemBlob` is
      * unauthenticated *because the token IS the capability*, and sending one here is conceded only
-     * because the blob dies in the same breath. **Every non-deleting outcome breaks that trade** —
-     * a 429 (rate-limited *before* the body is parsed), a 401 after the bearer dies, or a dropped
-     * response all leave a conceded relay holding a live, unauthenticated redemption capability for
-     * a blob that still exists. So never call this speculatively, and never for a blob an envelope
-     * may still name.
+     * because the blob is *intended* to die in the same breath.
+     *
+     * **That intent is not a guarantee, and the kdoc used to overclaim it.** Verified at source: the
+     * relay rate-limits BEFORE parsing the body, so a 429 returns having received the token and
+     * deleted nothing; a 401 (bearer expired mid-teardown) and a dropped response do the same. There
+     * is no restore-on-failure, so the blob then survives at a relay that has seen its token.
+     *
+     * Tolerated, not ignored: `AbandonBlob` is authenticated and `DepositBlob` already links the
+     * account to the blob id, so the relay learns no new linkage and could drop the row unilaterally
+     * anyway — it gains no capability. **If this endpoint ever becomes unauthenticated, that
+     * reasoning collapses.** Never call this speculatively, and never for a blob an envelope may
+     * still name.
      *
      * **Bounded (0.10.3 C1).** Without a deadline this shares the deposit's failure mode: both
      * shared clients set `readTimeout(0)`, so a half-open circuit parks the continuation forever and

@@ -148,13 +148,36 @@ class AttachmentDepositWiringTest {
 
     @Test
     fun `the memo is released on every terminal outcome, so it cannot become a heap leak`() {
-        // The trade this fix must NOT make: disk orphans for unbounded heap. Three release points —
-        // the relay took it, the recipient got it, the local copy was discarded.
+        // The trade this fix must NOT make: disk orphans for unbounded heap.
+        //
+        // **The three sites changed in 0.10.3 and this count did not notice — corrected here.** The
+        // pin was written for: relay took it / recipient got it / local copy discarded. 0.10.3
+        // replaced the third with `settleAttachment(messageId)` and added a release inside
+        // settleAttachment's RELEASE_ONLY branch. Net count stayed 3, so this test stayed green
+        // while its stated invariant became false — a source-pinning tripwire surviving a refactor
+        // that changed its meaning, which is the exact failure it exists to prevent.
+        //
+        // So pin the SITES, not just the total. A bare count cannot tell "moved" from "lost".
         val code = coordinator()
         assertEquals(
-            "a release point was lost; the deposit map then grows for the process's lifetime",
+            "a release point was lost or added; the deposit map then grows for the process's lifetime",
             3,
             Regex("releaseDeposit\\(messageId\\)").findAll(code).count(),
+        )
+        // The terminal outcome that no longer releases directly — it routes through the settle
+        // decision, which may RELEASE_ONLY or ABANDON. If this reverts to a bare releaseDeposit,
+        // the blob stops being reclaimable and 0.10.3's whole point is lost.
+        assertTrue(
+            "the contact-deleted-mid-send path must route through settleAttachment, not release directly",
+            "settleAttachment(messageId)" in code,
+        )
+        // The release that settleAttachment owns. Losing it turns every handed-off attachment into
+        // a permanent memo entry — the heap-leak side of the trade.
+        assertTrue(
+            "settleAttachment's RELEASE_ONLY branch must still release the memo",
+            Regex(
+                "RELEASE_ONLY\\)\\s*\\{\\s*releaseDeposit\\(messageId\\)",
+            ).containsMatchIn(code),
         )
     }
 }

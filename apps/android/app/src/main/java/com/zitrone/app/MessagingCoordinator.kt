@@ -428,14 +428,26 @@ class MessagingCoordinator(
      * Message ids whose envelope has been handed to a socket at least once — **the authoritative,
      * monotone record that forbids abandoning their blob** (0.10.3 C3).
      *
-     * Monotone within a message's life: set in [publishOutgoing]'s success branch, cleared only by
-     * [settleAttachment] once the message is provably finished. A retry re-enters `publishOutgoing`
-     * and re-sets it, so no later incarnation can "un-hand-off" an earlier one. Five design passes
-     * failed by trying to *arbitrate* the race between a retry and a cleanup; this deletes the race
-     * instead, by making "was it ever enqueued?" a question with a durable answer.
+     * Set in [publishOutgoing]'s success branch. A retry re-enters `publishOutgoing` and re-sets it,
+     * so no later incarnation can "un-hand-off" an earlier one. Five design passes failed by trying
+     * to *arbitrate* the race between a retry and a cleanup; this deletes the race instead, by
+     * making "was it ever enqueued?" a question with an answer.
+     *
+     * **Monotone in the direction that matters, NOT absolutely — corrected in round-1 review.** An
+     * earlier version of this kdoc claimed the bit was "cleared only by [settleAttachment]". That
+     * was false the moment [releaseDeposit] began clearing it too (added to stop this set growing
+     * for the process's lifetime). What actually holds is narrower and sufficient: **the bit and the
+     * memo are only ever cleared together**, so a cleared bit always implies a cleared memo, and
+     * `settleDecision` returns SKIP with no memo regardless of what the bit said. Teardown never
+     * clears it.
      *
      * Why a set and not a flag on [AttachmentDeposit]: the deposit is claimed and removed by whoever
-     * settles first, and the handoff fact must outlive that removal to stay monotone.
+     * settles first, and the handoff fact must outlive that removal.
+     *
+     * **Bound:** per-process message count, not zero. [stop] and `clearAll` clear neither this set
+     * nor [attachmentDeposits], so a handed-off-but-never-acked message leaks one id until process
+     * death. Acceptable (ids are small, `MessageRepository` is RAM-only anyway), but it means the
+     * "no unbounded heap growth" claim holds per-process rather than absolutely.
      */
     private val handedOffMessages = ConcurrentHashMap.newKeySet<String>()
 
@@ -472,9 +484,21 @@ class MessagingCoordinator(
         // ABANDON. The claim is the last gate: lose it and another settle already owns this blob.
         val memo = attachmentDeposits.remove(messageId) ?: return
         scope.launch(confined + NonCancellable) {
-            // NonCancellable: teardown is the commonest reason we are here, and a cancelled abandon
-            // would leak the blob it was launched to reclaim. Bounded by BLOB_ABANDON_TIMEOUT_MS, so
-            // this cannot park forever on a half-open circuit.
+            // NonCancellable is DELIBERATE and was challenged in round-1 review. It replaces the Job
+            // element, so this coroutine is not a child of `scope` and still runs when `scope` is
+            // already cancelled — verified empirically, not assumed (one lens asserted the opposite
+            // and was wrong). That is the point: teardown is the commonest reason a settle runs at
+            // all, and a plain scope.launch would yield an immediately-cancelled coroutine that
+            // silently leaks exactly the blob this exists to reclaim.
+            //
+            // ACCEPTED RESIDUAL (recorded so it stays a decision, not an accident): because it
+            // outlives the session, it can fire after the bearer is gone and take a 401 with the
+            // token already in the request body. That is tolerable only because the relay gains
+            // nothing it lacks — `AbandonBlob` is authenticated, `DepositBlob` already links the
+            // account to the blob id, and the relay can drop any row at will. If abandon ever
+            // becomes unauthenticated, re-open this.
+            //
+            // Bounded by BLOB_ABANDON_TIMEOUT_MS, so it cannot park forever on a half-open circuit.
             runCatching { api.abandonBlob(b64(memo.token)) }
                 .onSuccess { diag("attachment: reclaimed unsent blob") }
                 // Swallowed by design: the janitor collects the orphan at the blob TTL, and there is
@@ -529,10 +553,15 @@ class MessagingCoordinator(
         if (!contactExists(contactId)) {
             diag("send: contact deleted mid-send — dropping local copy")
             messages.discard(messageId)
-            // Contact deleted mid-send: the local copy is gone, so nothing will retry this id — and
-            // we are BEFORE the ws.sendMessage below, so no envelope naming this blob ever reached a
-            // socket. That is the one condition under which the deposit may be reclaimed rather than
-            // merely forgotten; settleAttachment re-proves it rather than trusting this comment.
+            // Contact deleted mid-send: the local copy is gone, so nothing will retry this id.
+            //
+            // **This site is NOT "provably never handed off"** — an earlier comment here claimed it
+            // was, and all three review lenses independently falsified it with the same trace:
+            // attempt 1 hands off, the 90 s timeout flips it to FAILED, the user retries, the
+            // contact is deleted mid-retry, and we arrive here with an envelope already enqueued.
+            // Safety comes from [settleAttachment] re-proving the condition against the handoff
+            // record, never from this call site's position. That is precisely why the decision was
+            // extracted into a tested pure function instead of being inlined here.
             settleAttachment(messageId)
             return false
         }

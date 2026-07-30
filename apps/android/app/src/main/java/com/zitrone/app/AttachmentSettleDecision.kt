@@ -42,8 +42,27 @@ import com.zitrone.app.data.MessageState
  *   retry can resurrect it — so the blob is provably unreferenced and unrecreatable, which is the
  *   only condition under which transmitting its token is acceptable (see `ApiClient.abandonBlob`).
  *
- * The `when` is exhaustive over a closed enum, and its full cross-product is covered by
- * `AttachmentSettleDecisionTest` — so a new [MessageState] cannot silently fall into ABANDON.
+ * ## What actually makes this safe (round-1 review, all three lenses)
+ *
+ * Not the call-site position, and not the order of the two removals in `releaseDeposit`. **The
+ * load-bearing invariant is the fresh-token draw in `AttachmentCrypto.encrypt`:**
+ * `val token = reuseToken ?: ByteArray(BLOB_TOKEN_BYTES).also(random::nextBytes)`.
+ *
+ * A memo re-created after any clearing therefore carries a *fresh random* token, hence a different
+ * `blobId`. So a memo that is present names a blob created **after** the last clearing, while any
+ * envelope handed off **before** that clearing named the OLD blob id. Chaining that:
+ *
+ *     memo present AND handoff bit absent  ⇒  no envelope naming the CURRENT blob was ever enqueued
+ *
+ * which is exactly the ABANDON precondition. The bit and the memo are only ever cleared together
+ * (see `releaseDeposit`), and the bit is set in the same non-suspending `confined` tail as
+ * `ws.sendMessage`, so no interleaving separates them. **If anyone ever makes the token derivable
+ * or reused across clearings, this argument collapses and the P1 returns** — that is the line to
+ * defend, and it is why this kdoc names it rather than the call site.
+ *
+ * The `when` is exhaustive over a closed enum, and its full cross-product is pinned as an explicit
+ * decision table by `AttachmentSettleDecisionTest` — so a new [MessageState] cannot silently fall
+ * into ABANDON, and no branch can be mutated without failing a named case.
  */
 enum class SettleAction {
     /** Do nothing: no record, or the message may still be retried. */
