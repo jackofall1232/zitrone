@@ -44,3 +44,21 @@ The unlisted page `/download/beta` links to a GitHub Release asset. To publish a
 
 The page is intentionally **not linked from the nav or sitemap** — share its URL directly with
 testers. Delete `src/app/download/beta/` and the beta block in `src/lib/links.ts` at store launch.
+
+## Beta-signup email delivery (RESEND_API_KEY)
+
+The Play-beta signup form (`/download/beta`) posts to `/api/beta-signup`, which forwards each
+signup as one email to `admin@zitrone.app` — no database anywhere. Delivery uses Resend's HTTP
+API and needs one env var on the Vercel project:
+
+1. Create a free account at https://resend.com and an API key.
+2. Vercel dashboard → the project → **Settings → Environment Variables** → add
+   `RESEND_API_KEY` (Production + Preview), then redeploy.
+3. Optional: verify the `zitrone.app` domain in Resend and set `BETA_SIGNUP_FROM` to e.g.
+   `Zitrone Beta <beta@zitrone.app>`. Until then the route uses Resend's `onboarding@resend.dev`
+   sender, which works out of the box.
+
+Without the key the route answers 503 and the form falls back to a prefilled
+`mailto:admin@zitrone.app` link — signups still arrive, just typed by the tester's own mail app.
+If storage is ever added here, `/privacy` and the form's "no database" copy MUST change in the
+same commit.

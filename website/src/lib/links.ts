@@ -4,6 +4,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 export const GITHUB_URL = "https://github.com/jackofall1232/zitrone";
+// Maintainer contact for beta-tester logistics (Play beta signups land here).
+export const BETA_CONTACT_EMAIL = "admin@zitrone.app";
 export const SECURITY_MODEL_DOC = `${GITHUB_URL}/blob/main/docs/SECURITY_MODEL.md`;
 export const SELF_HOSTING_DOC = `${GITHUB_URL}/blob/main/docs/SELF_HOSTING.md`;
 export const SECURITY_POLICY = `${GITHUB_URL}/blob/main/SECURITY.md`;

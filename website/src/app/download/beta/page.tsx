@@ -5,9 +5,11 @@
 
 import type { Metadata } from "next";
 import Link from "next/link";
+import { BetaSignupForm } from "@/components/BetaSignupForm";
 import { LemonSlice } from "@/components/LemonSlice";
 import {
   ANDROID_BETA_APK_URL,
+  BETA_CONTACT_EMAIL,
   ANDROID_BETA_MIN_OS,
   ANDROID_BETA_PUBLISHED,
   ANDROID_BETA_SHA256,
@@ -38,7 +40,7 @@ export default function AndroidBetaPage() {
           Android beta
         </h1>
         <p className="mt-6 text-lg leading-relaxed text-ink-secondary">
-          A sideloaded build for testers, ahead of the Google Play release. It connects to the{" "}
+          A sideloaded build for testers — Zitrone is not in any app store yet. It connects to the{" "}
           <span className="text-ink-primary">relay.sublemonable.com</span> server and pins that
           server&apos;s certificate — so this build only talks to that relay.
         </p>
@@ -176,6 +178,55 @@ export default function AndroidBetaPage() {
             </section>
           </>
         )}
+
+        {/* Play Store beta signup */}
+        <section className="mt-12">
+          <h2 className="font-display text-2xl font-semibold tracking-display text-ink-primary">
+            Want to test the Play Store beta?
+          </h2>
+          <p className="mt-3 leading-relaxed text-ink-secondary">
+            The sideloaded APK above is great for kicking the tires — but it{" "}
+            <span className="text-ink-primary">doesn&apos;t count as qualified beta testing</span>.
+            For the production release, Google requires testers who install the beta through Google
+            Play itself (which means a Google account on the test device). If you&apos;re up for
+            that, sign up below and you&apos;ll be notified the moment the Play Store beta is
+            available.
+          </p>
+          <div className="mt-5 rounded-md border border-line bg-bg-elevated p-5">
+            <p className="font-display text-sm font-semibold text-ink-primary">
+              What qualified testing means
+            </p>
+            <ul className="mt-3 list-disc space-y-1.5 pl-5 leading-relaxed text-ink-secondary">
+              <li>Install the beta from Google Play when it goes live.</li>
+              <li>
+                Keep it installed on your phone for at least{" "}
+                <span className="text-ink-primary">21 days</span> — continuous install time is what
+                qualifies the test, not a quick look.
+              </li>
+              <li>
+                Report improvements or issues while you test — on{" "}
+                <a
+                  href={GITHUB_ISSUES}
+                  className="text-lemon underline decoration-lemon/40 underline-offset-4 transition duration-base hover:decoration-lemon"
+                >
+                  GitHub Issues
+                </a>{" "}
+                or by replying to the notification email.
+              </li>
+            </ul>
+          </div>
+
+          <BetaSignupForm />
+
+          <p className="mt-4 text-sm leading-relaxed text-ink-muted">
+            Straight talk about this form, because Zitrone never asks for an email in the app: your
+            address is forwarded as a single email to{" "}
+            <span className="text-ink-secondary">{BETA_CONTACT_EMAIL}</span> and stored in no
+            database — the maintainer&apos;s inbox is the entire list. It&apos;s used only to tell
+            you when the Play beta is live, and a reply saying &quot;remove me&quot; is all it takes
+            to be off it.
+          </p>
+        </section>
 
         {/* Feedback */}
         <section className="mt-12">

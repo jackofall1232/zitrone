@@ -30,13 +30,20 @@ export default function PrivacyPage() {
           <li>A random account ID (a UUID — not your name, number, or email)</li>
           <li>Your public keys, so other people can start encrypted sessions with you</li>
           <li>Encrypted message envelopes, held only until delivery, then deleted</li>
+          <li>
+            Encrypted attachment blobs — stored blind, under a hash of a token we never see, until
+            they expire
+          </li>
           <li>Your account creation timestamp</li>
         </ul>
 
         <h2>What we don&apos;t</h2>
         <ul>
           <li>Message content — we can&apos;t read it, so we can&apos;t collect it</li>
-          <li>Your phone number, email, or name — never asked for</li>
+          <li>
+            Your phone number, email, or name — the app never asks for them. (The one voluntary
+            exception is the website&apos;s beta-tester signup — see below.)
+          </li>
           <li>IP addresses or device identifiers</li>
           <li>Contact lists</li>
           <li>
@@ -49,6 +56,14 @@ export default function PrivacyPage() {
         <p>
           No cookies, no analytics, no trackers, no third-party scripts beyond font files. We
           don&apos;t know you visited, and we like it that way.
+        </p>
+        <p>
+          One form on this site collects data, and only if you choose to use it: the beta-tester
+          signup on the download page. It takes your email address, forwards it as a single email
+          to the maintainer (delivery transits our email provider, Resend), and stores it in no
+          database — the maintainer&apos;s inbox is the entire list. It&apos;s used only to tell
+          you when the Play Store beta is available, and a reply asking to be removed is honored
+          immediately.
         </p>
 
         <h2>Deletion</h2>
