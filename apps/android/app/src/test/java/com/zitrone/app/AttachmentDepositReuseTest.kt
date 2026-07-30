@@ -158,26 +158,42 @@ class AttachmentDepositWiringTest {
         // that changed its meaning, which is the exact failure it exists to prevent.
         //
         // So pin the SITES, not just the total. A bare count cannot tell "moved" from "lost".
-        val code = coordinator()
+        // Comments are STRIPPED before matching. Round-2 review found the obvious hole in the first
+        // version: `// settleAttachment(messageId)` still satisfies a substring check, so commenting
+        // out the reclamation path left every assertion green. A source-text pin that cannot tell
+        // code from a comment pins nothing.
+        val code = stripComments(coordinator())
         assertEquals(
             "a release point was lost or added; the deposit map then grows for the process's lifetime",
             3,
-            Regex("releaseDeposit\\(messageId\\)").findAll(code).count(),
+            Regex("releaseDeposit\\s*\\(\\s*messageId\\s*\\)").findAll(code).count(),
         )
         // The terminal outcome that no longer releases directly — it routes through the settle
         // decision, which may RELEASE_ONLY or ABANDON. If this reverts to a bare releaseDeposit,
         // the blob stops being reclaimable and 0.10.3's whole point is lost.
         assertTrue(
             "the contact-deleted-mid-send path must route through settleAttachment, not release directly",
-            "settleAttachment(messageId)" in code,
+            Regex("settleAttachment\\s*\\(\\s*messageId\\s*\\)").containsMatchIn(code),
         )
         // The release that settleAttachment owns. Losing it turns every handed-off attachment into
         // a permanent memo entry — the heap-leak side of the trade.
         assertTrue(
             "settleAttachment's RELEASE_ONLY branch must still release the memo",
             Regex(
-                "RELEASE_ONLY\\)\\s*\\{\\s*releaseDeposit\\(messageId\\)",
+                "RELEASE_ONLY\\s*\\)\\s*\\{\\s*releaseDeposit\\s*\\(\\s*messageId\\s*\\)",
             ).containsMatchIn(code),
         )
     }
+
+    /**
+     * Remove `//` line comments and block comments so the pins above match CODE, not prose.
+     *
+     * Crude on purpose: it will also chew a `//` inside a string literal (a URL, say). That is
+     * harmless here — these assertions look only for specific call patterns, and mangling an
+     * unrelated string cannot manufacture one. Being wrong in the direction of matching LESS is the
+     * safe direction for a tripwire.
+     */
+    private fun stripComments(code: String): String = code
+        .replace(Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL), "")
+        .replace(Regex("//[^\n]*"), "")
 }

@@ -410,17 +410,26 @@ class MessagingCoordinator(
     private val attachmentDeposits = ConcurrentHashMap<String, AttachmentDeposit>()
 
     /**
-     * Drop a message's memoized deposit secrets. Called on every terminal outcome — the relay took it
-     * (SENT), the recipient got it, the local copy was discarded, or it burned. **Without this the
-     * map grows for the process's lifetime**, which is the heap-leak side of the trade this fix
-     * exists to avoid. Idempotent.
+     * Drop a message's memoized deposit secrets. **Without this the map grows for the process's
+     * lifetime**, which is the heap-leak side of the trade this fix exists to avoid. Idempotent.
+     *
+     * **Its call sites, enumerated — an earlier kdoc claimed "every terminal outcome … or it burned"
+     * and round-2 review falsified both halves.** The three sites are: [onMessageStored] (the relay
+     * took it), [onMessageDelivered] (the recipient got it), and [settleAttachment]'s RELEASE_ONLY
+     * branch. A discarded local copy no longer releases directly — it routes through
+     * [settleAttachment], which may reclaim the blob instead of merely forgetting it. **Burn does
+     * NOT release at all**, so a burned attachment's memo and handoff entry survive to process death
+     * (bounded, see [handedOffMessages]); do not skip wiring burn on the belief that this covers it.
      */
     private fun releaseDeposit(messageId: String) {
         attachmentDeposits.remove(messageId)
         // Clear the handoff record too, or it grows for the process's lifetime — the heap-leak side
-        // of the very trade this memo exists to avoid. Safe to clear here and ONLY here alongside the
-        // memo: with no memo, settleDecision returns SKIP whatever the handoff bit said, so dropping
-        // the two together can never turn a RELEASE_ONLY into an ABANDON.
+        // of the very trade this memo exists to avoid. Safe because with no memo settleDecision
+        // returns SKIP whatever the bit said, so dropping the two together can never turn a
+        // RELEASE_ONLY into an ABANDON.
+        //
+        // NOT the only clearer, despite what this comment used to say: settleAttachment clears the
+        // bit itself before branching. See handedOffMessages for the exact enumeration.
         handedOffMessages.remove(messageId)
     }
 
@@ -493,10 +502,11 @@ class MessagingCoordinator(
             //
             // ACCEPTED RESIDUAL (recorded so it stays a decision, not an accident): because it
             // outlives the session, it can fire after the bearer is gone and take a 401 with the
-            // token already in the request body. That is tolerable only because the relay gains
-            // nothing it lacks — `AbandonBlob` is authenticated, `DepositBlob` already links the
-            // account to the blob id, and the relay can drop any row at will. If abandon ever
-            // becomes unauthenticated, re-open this.
+            // token already in the request body — disclosed, with nothing deleted. Tolerable because
+            // the relay already holds the ciphertext and can drop any row at will, so it gains no
+            // read or destructive capability. NOT because "it already knows whose blob it is" — the
+            // blob store is BLIND and it does not; see ApiClient.abandonBlob's kdoc, which round-2
+            // review corrected on exactly this point.
             //
             // Bounded by BLOB_ABANDON_TIMEOUT_MS, so it cannot park forever on a half-open circuit.
             runCatching { api.abandonBlob(b64(memo.token)) }
@@ -1584,13 +1594,14 @@ class MessagingCoordinator(
                 // over, so nothing will ever fetch it: reclaim it rather than leave up to 8 MiB to
                 // wait out the full TTL. Abandoning cannot strand a later attempt, because item 5a
                 // memoises the token — a retry re-deposits under the SAME blob id.
-                // ABANDON DISABLED HERE — the confirmed P1, unfixed (0.10.2 item 5, all review
-                // rounds). Attempt 1's abandon is fire-and-forget; a retry then re-deposits under
-                // the SAME memoized id, publishes its envelope, and the stale abandon deletes the
-                // blob underneath it — the recipient gets a permanent UNAVAILABLE for a message
-                // that arrived. The 409-as-success fix makes this MORE reachable, not less: the
-                // retry now succeeds where it used to fail, so it reaches publish. Re-enable only
-                // with v6's `published` bit, which is what makes an abandon attempt-aware.
+                // STILL NOT WIRED, and the reason CHANGED in 0.10.3 — do not re-read this as the
+                // old P1. That P1 (a stale fire-and-forget abandon deleting the blob a retry had
+                // just re-published under the same memoized id) is now structurally prevented by
+                // settleDecision: it SKIPs SENDING and FAILED, so a retryable message is never
+                // reclaimed. What blocks THIS route is narrower — a non-durable flush leaves the
+                // message retryable, so settleDecision would correctly SKIP it anyway and the call
+                // would be dead code. Wiring it needs a settle at the point the message stops being
+                // retryable, which is a separate change. Orphans here still wait out the blob TTL.
                 return@runCatching
             }
             // The NON-SUSPENDING publish tail (see [publishOutgoing]), called directly and FIRST. If
@@ -1607,9 +1618,12 @@ class MessagingCoordinator(
             // ROUTE (c) — item 5b, best effort. If the throw came AFTER a successful deposit the blob
             // is an orphan; if before, there is nothing to delete and the relay's 204 says so without
             // revealing which. The memo is the only place the token survives this far.
-            // ABANDON DISABLED HERE for the same reason as the route above, and additionally
-            // because this reads the SHARED memo after arbitrary suspension, so it can name a
-            // later attempt's token rather than its own.
+            // STILL NOT WIRED. Same as the route above, plus one hazard specific to this site that
+            // 0.10.3 does NOT remove: this reads the SHARED memo after arbitrary suspension, so it
+            // can name a LATER attempt's token rather than its own. settleDecision's state check
+            // does not help here — the id is the same, so the decision is about the right message
+            // but potentially the wrong blob. Any future wiring must capture the token before
+            // suspending, not re-read the memo after.
             val bodySuffix = (e as? ApiClient.ApiException)?.responseBody
                 ?.let { " server_error=$it" }
                 .orEmpty()

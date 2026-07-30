@@ -278,8 +278,10 @@ class ApiClient(
      *
      * The upload happens BEFORE the envelope is published, so a send that dies in between leaves a
      * blob nothing will ever fetch — up to 8 MiB held for the full TTL. This reclaims it on the two
-     * routes the client actually knows about: a non-durable ratchet flush, and a contact deleted
-     * mid-send. A crash cannot call it, so the TTL remains the backstop for that route.
+     * route the client actually wires: a contact deleted mid-send. (The non-durable-ratchet-flush
+     * route is NOT wired — round-2 review caught this kdoc still claiming it. See the two
+     * "STILL NOT WIRED" comments in MessagingCoordinator.deliverAttachment for why; orphans on that
+     * route wait out the blob TTL.). A crash cannot call it, so the TTL remains the backstop for that route.
      *
      * **Keyed on the TOKEN, not the blob id.** The blob id is public; the token is the capability.
      * Sending it is acceptable here only because the blob is being destroyed in the same request.
@@ -295,11 +297,20 @@ class ApiClient(
      * deleted nothing; a 401 (bearer expired mid-teardown) and a dropped response do the same. There
      * is no restore-on-failure, so the blob then survives at a relay that has seen its token.
      *
-     * Tolerated, not ignored: `AbandonBlob` is authenticated and `DepositBlob` already links the
-     * account to the blob id, so the relay learns no new linkage and could drop the row unilaterally
-     * anyway — it gains no capability. **If this endpoint ever becomes unauthenticated, that
-     * reasoning collapses.** Never call this speculatively, and never for a blob an envelope may
-     * still name.
+     * **Do NOT justify this with "the relay already knows whose blob it is." It does not.** That was
+     * the round-2 finding: `DepositBlob` is authenticated, but the relay states — and `StoreBlob`'s
+     * signature confirms, taking no account id — that the account "is never associated with the
+     * stored blob". The blob store is BLIND. So an abandon is strictly more disclosive than a
+     * deposit: it carries the redemption capability inside an authenticated request, from which a
+     * logging or compromised relay could transiently derive account → token → `sha256(token)`.
+     *
+     * What makes it tolerable is narrower and worth stating exactly, because it is the whole
+     * argument: the relay **already holds the ciphertext** (no new read capability — and it cannot
+     * decrypt it in any case, the key travels in the ratchet-encrypted envelope) and **can drop any
+     * row unilaterally** (no new destructive capability). It gains a transient linkage it is not
+     * supposed to keep, in exchange for the blob usually dying. **If this endpoint ever becomes
+     * unauthenticated, or the relay ever persists an account↔blob association, re-open this.**
+     * Never call this speculatively, and never for a blob an envelope may still name.
      *
      * **Bounded (0.10.3 C1).** Without a deadline this shares the deposit's failure mode: both
      * shared clients set `readTimeout(0)`, so a half-open circuit parks the continuation forever and

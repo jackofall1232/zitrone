@@ -3549,7 +3549,49 @@ synthetic peer — a linkage the relay must not hold).
 
 Verified after merge: `go build` / `go vet` / `go test ./...` all pass, six packages ok.
 
-<<<<<<< HEAD
+## 2026-07-30 — 0.10.1 MERGED to `main` (`a7d66e87`, PR #64) on maintainer instruction
+
+**A rejected send no longer shows `SENDING` forever.** Four paired-blind rounds, every finding upheld
+and fixed, all nine CI checks green, 821 tests / 0 failures.
+
+**The arc, because the pattern is the reusable part — EVERY fix delta produced a finding, four rounds
+running:**
+
+- **Round 1** (Codex 1 P1 / Grok 2 P2): both lenses independently found that a relay-attributed
+  failure could permanently falsify a send that SUCCEEDED. Fixed by splitting the entry point
+  (`markFailedByRelay`, SENDING only) and making receipts HEAL FAILED.
+- **Round 2** (both 1 P1): **round 1's own fix caused it.** The send timeout was armed at bubble
+  creation, so for an attachment the 90 s window contained an unbounded blob upload (OkHttp's
+  `writeTimeout` is per-write, not whole-body). It fired mid-upload, offered retry on a live send, and
+  a user taking it produced two envelopes under one id — real double delivery once the first was acked
+  and its row deleted. Fixed by arming at the socket handoff.
+- **Round 3** (both 0 P1 / 0 P2, same P3): the finding was a stale comment **round 2 had claimed to
+  fix and missed** — `WsClient`'s kdoc — and the stale rationale had been propagated into a file
+  written the same day.
+- **Round 4** (both 0 P1 / 0 P2): the round-3 arming pin was **presence-only**, so dual-arming would
+  reinstate the round-2 P1 with every guard green. Plus "lost frames" wrongly listed as a null-id
+  source, four places still teaching a refuted causal story, and a kdoc orphaned by the extraction
+  onto `BASE_BACKOFF_MS`.
+
+**THE HARNESS SPLIT — three rounds, then RESOLVED at round 4 to "debt to schedule, not a merge gate".**
+One lens had ruled it a merge blocker on the grounds that the absent coordinator harness let round 2's
+P1 escape. **That premise was refuted and the refutation verified against our own record:** round 2's
+mutation was caught by a `MessageRepository` test with no coordinator harness involved, and the
+`ServerErrorRouter` extraction would not have caught it either. Both lenses then converged, and both
+named the same remaining seam without wanting Robolectric.
+
+**What landed:** relay attribution carried and normalised at the wire boundary; `routeServerError`
+extracted as a pure function with behavioural tests (yield on the CODE, failure on the ID, neither
+nested); `markFailedByRelay` narrow so a receipt outranks a contradicting error; receipts heal FAILED;
+a 90 s timeout armed at the handoff, exclusivity-pinned; comment corrections throughout.
+
+**Declared residuals, classing confirmed by both lenses:** no constructible `MessagingCoordinator`
+(wiring asserted, not tested — **the harness is now scheduled debt**); two guards protecting races a
+single-threaded virtual clock cannot express, kept as reachable under real threading (contrast round
+0's `isMine`, deleted as unreachable by construction); no end-to-end attachment-upload/timer test.
+
+**No version bump, nothing deployed.** 0.10.1 is client-only, so no relay redeploy is implied by this
+merge — the CX23 trip owed for 0.10.2 items 1–4 is unaffected and still outstanding.
 ## 2026-07-30 — 0.10.2 item 5: TWO design passes, TWO rejections, ZERO code written. Stopped by the maintainer.
 
 **The method is the result here.** Ten agents across two five-agent passes reviewed a *plan* rather
@@ -3688,48 +3730,81 @@ must be **deployed**, not merely merged.
 and nothing unwound.** The last pass overturned a premise the maintainer and the agent had both held
 since the beginning — which no amount of implementation review would ever have surfaced, because the
 code would have been correct against a wrong design.
-=======
-## 2026-07-30 — 0.10.1 MERGED to `main` (`a7d66e87`, PR #64) on maintainer instruction
 
-**A rejected send no longer shows `SENDING` forever.** Four paired-blind rounds, every finding upheld
-and fixed, all nine CI checks green, 821 tests / 0 failures.
+## 2026-07-30 — 0.10.3: the design survived three lenses; everything I WROTE about it did not
 
-**The arc, because the pattern is the reusable part — EVERY fix delta produced a finding, four rounds
-running:**
+**`fix/0.10.3-blob-settle`.** Attachment blob reclaim — the sixth attempt at the problem that
+rejected five consecutive designs in 0.10.2. It is the first to survive review, and the reason is
+worth recording: **the five rejected designs all tried to ARBITRATE the race between a retry and a
+cleanup. This one deletes the race's precondition instead** — a blob is abandoned only when no
+envelope naming it was ever handed to a socket, and none ever can be.
 
-- **Round 1** (Codex 1 P1 / Grok 2 P2): both lenses independently found that a relay-attributed
-  failure could permanently falsify a send that SUCCEEDED. Fixed by splitting the entry point
-  (`markFailedByRelay`, SENDING only) and making receipts HEAL FAILED.
-- **Round 2** (both 1 P1): **round 1's own fix caused it.** The send timeout was armed at bubble
-  creation, so for an attachment the 90 s window contained an unbounded blob upload (OkHttp's
-  `writeTimeout` is per-write, not whole-body). It fired mid-upload, offered retry on a live send, and
-  a user taking it produced two envelopes under one id — real double delivery once the first was acked
-  and its row deleted. Fixed by arming at the socket handoff.
-- **Round 3** (both 0 P1 / 0 P2, same P3): the finding was a stale comment **round 2 had claimed to
-  fix and missed** — `WsClient`'s kdoc — and the stale rationale had been propagated into a file
-  written the same day.
-- **Round 4** (both 0 P1 / 0 P2): the round-3 arming pin was **presence-only**, so dual-arming would
-  reinstate the round-2 P1 with every guard green. Plus "lost frames" wrongly listed as a null-id
-  source, four places still teaching a refuted causal story, and a kdoc orphaned by the extraction
-  onto `BASE_BACKOFF_MS`.
+**Method.** Per maintainer instruction, three lenses produced blind DESIGNS first (Codex, Grok, Kimi
+K3), a five-agent panel judged them, and the winner was a GRAFT: Kimi's base, Codex's monotone
+handoff bit, Grok's fail-closed claim discipline. **Grok's design was disqualified outright** — its
+`claim → await abandon → markFailed` ordering parks on a half-open circuit, so `markFailed` never
+runs, the bubble stays SENDING, and `retryable()`'s CAS then refuses the retry. A design that
+silently disables retry for the messages it exists to protect.
 
-**THE HARNESS SPLIT — three rounds, then RESOLVED at round 4 to "debt to schedule, not a merge gate".**
-One lens had ruled it a merge blocker on the grounds that the absent coordinator harness let round 2's
-P1 escape. **That premise was refuted and the refutation verified against our own record:** round 2's
-mutation was caught by a `MessageRepository` test with no coordinator harness involved, and the
-`ServerErrorRouter` extraction would not have caught it either. Both lenses then converged, and both
-named the same remaining seam without wanting Robolectric.
+**All five judging lenses independently named an omission none of the three designs contained:**
+`abandonBlob` had no call timeout, and both shared clients set `readTimeout(0)`.
 
-**What landed:** relay attribution carried and normalised at the wire boundary; `routeServerError`
-extracted as a pure function with behavioural tests (yield on the CODE, failure on the ID, neither
-nested); `markFailedByRelay` narrow so a receipt outranks a contradicting error; receipts heal FAILED;
-a 90 s timeout armed at the handoff, exclusivity-pinned; comment corrections throughout.
+### The result that matters: three lenses agreed the design is sound, and falsified six things I said about it
 
-**Declared residuals, classing confirmed by both lenses:** no constructible `MessagingCoordinator`
-(wiring asserted, not tested — **the harness is now scheduled debt**); two guards protecting races a
-single-threaded virtual clock cannot express, kept as reachable under real threading (contrast round
-0's `isMine`, deleted as unreachable by construction); no end-to-end attachment-upload/timer test.
+Codex, Gemini and Kimi K3 each reviewed the implementation. **None could construct an
+attachment-destruction interleaving** — the question that killed five prior designs. But between them
+they falsified six factual claims in my own kdocs and two properties of my own tests:
 
-**No version bump, nothing deployed.** 0.10.1 is client-only, so no relay redeploy is implied by this
-merge — the CX23 trip owed for 0.10.2 items 1–4 is unaffected and still outstanding.
->>>>>>> main
+- **`handedOff -> SKIP` SURVIVED the whole suite.** My three mutations all attacked the ABANDON
+  branch, so I proved the safety property and left the liveness property — that the memo is actually
+  released — unpinned. My cross-product assertion was tautological (both sides from the same enum)
+  and its companion assertions passed VACUOUSLY with the feature entirely dead.
+- **I documented the wrong load-bearing invariant.** Codex concluded safety rests on the line
+  ordering inside `releaseDeposit` and called it fragile. **Kimi found the real one and it is
+  robust:** `AttachmentCrypto.encrypt` draws a fresh random token when no memo is supplied, so a memo
+  re-created after any clearing names a DIFFERENT blob. Hence "memo present + handoff bit absent"
+  implies no envelope naming the current blob was ever enqueued. **That, not the call site and not
+  the line ordering, is the line to defend.**
+- **My monotonicity kdoc was falsified by my own leak fix in the same commit that wrote it** — I made
+  `releaseDeposit` clear the bit, then left the comment saying only `settleAttachment` does.
+- **My call-site comment was false across retries**; all three lenses produced the same trace.
+- **My `abandonBlob` kdoc claimed the blob "dies in the same breath."** Verified false at source: the
+  relay rate-limits BEFORE parsing the body, so a 429 receives the token and deletes nothing.
+- **A source-pinning tripwire stayed green while its meaning changed.** `AttachmentDepositWiringTest`
+  asserts exactly 3 `releaseDeposit(messageId)` calls; 0.10.3 moved one and added another, so the
+  count held while the stated invariant ("relay took it / recipient got it / local copy discarded")
+  became false. **A bare count cannot distinguish "moved" from "lost."**
+
+### Two disputes, both resolved by experiment rather than adjudication
+
+**`NonCancellable`.** Codex said the detached abandon still runs after teardown; Gemini said the
+lambda never executes on a cancelled scope. Opposite failure modes from one line. **A ten-line probe
+settled it: the block runs, the job is not cancelled** — `NonCancellable` replaces the Job element,
+so the coroutine is never a child of the scope. Codex and Kimi right, **Gemini wrong**. Kept
+deliberately, because a plain `scope.launch` would silently leak exactly the blob the settle exists
+to reclaim; the accepted residual (a post-teardown 401 with the token already sent) is now recorded
+in the code as a decision rather than an accident.
+
+**Codex's P1 (disclosure on any non-204).** Kimi independently called the same state sound, and the
+mechanism gives the relay no capability it lacks — `AbandonBlob` is authenticated and `DepositBlob`
+already links the account to the blob id. **2–1 against; downgraded from P1 to a kdoc correction.**
+
+### Lessons recorded generally
+
+1. **Mutation-test the LIVENESS property, not only the safety property.** Every mutation I chose
+   attacked "can it destroy data?" and none asked "does it still do its job?" A mutant with the
+   feature entirely dead was green.
+2. **A count-based source pin must pin the SITES.** Otherwise a refactor that moves one and adds
+   another is invisible to it.
+3. **When two lenses contradict on language semantics, run the ten-line probe.** It cost minutes and
+   produced certainty where adjudication would have produced a coin flip.
+4. **`ci-gradle` from the wrong cwd is a false green** (recorded separately in `failures.md`) — it
+   produced a bogus "three mutations survived" verdict before being caught.
+
+**Also fixed here: an unresolved merge conflict had been committed into this ledger** (`<<<<<<< HEAD`
+… `>>>>>>> main`, ~180 lines) and was present on `main`. Both sides were distinct entries — the 0.10.1
+merge record and three 0.10.2 item-5 records — so both are kept, in chronological order. Nothing was
+discarded.
+
+**No version bump, nothing deployed, nothing merged.** The CX23 trip owed for 0.10.2 is unaffected
+and still outstanding.

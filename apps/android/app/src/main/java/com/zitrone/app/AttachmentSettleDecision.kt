@@ -48,8 +48,8 @@ import com.zitrone.app.data.MessageState
  * load-bearing invariant is the fresh-token draw in `AttachmentCrypto.encrypt`:**
  * `val token = reuseToken ?: ByteArray(BLOB_TOKEN_BYTES).also(random::nextBytes)`.
  *
- * A memo re-created after any clearing therefore carries a *fresh random* token, hence a different
- * `blobId`. So a memo that is present names a blob created **after** the last clearing, while any
+ * A memo re-created after any clearing therefore carries a *fresh random* token, hence — with
+ * cryptographically negligible collision probability, not literal certainty — a different `blobId`. So a memo that is present names a blob created **after** the last clearing, while any
  * envelope handed off **before** that clearing named the OLD blob id. Chaining that:
  *
  *     memo present AND handoff bit absent  ⇒  no envelope naming the CURRENT blob was ever enqueued
