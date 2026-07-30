@@ -129,6 +129,72 @@ carries the 0.9.4 PoW deploy commits and duplicates main's own onion flip.
       the element Caddy appended). Neither helps Tor/I2P, which collapse via the sidecars regardless —
       registration PoW is the per-client cost there.
 
+## 🔴 MULTI-HOP RELAY — MUST BE FINISHED BEFORE PRODUCTION RELEASE (maintainer, 2026-07-30)
+
+**Decision:** multi-hop is a shipping feature, not an experiment. It must be complete before the
+production release — it is one of the two anonymity claims the product is built on (with cover
+traffic), and it is currently the only headline feature that exists server-side but is unreachable
+from the shipped client.
+
+### What EXISTS (verified at source 2026-07-30, v0.10.3-beta)
+
+- **Relay side is built.** `server/internal/relay/onion.go` peels exactly one onion layer, learns
+  only the next hop, and never logs the previous one. `server/internal/api/relay.go` serves
+  `POST /relay/forward`, gated on `RELAY_PRIVATE_KEY`.
+- **Web carrier crypto is built.** `packages/crypto/src/onion.ts` — layered onion encryption.
+
+### What is MISSING
+
+1. **The Android client never calls `/relay/forward`.** Zero references. A user on 0.10.3 gets a
+   single relay hop no matter what they do. This is the whole gap.
+2. **No client-side onion encryption** — the Kotlin equivalent of `packages/crypto/src/onion.ts`
+   does not exist.
+3. **No hop directory / node selection.** Nothing tells a client what the available relay nodes are
+   or how a 3-hop path is chosen. `RELAY_PRIVATE_KEY` is blank in `.env.example`, so no deployed
+   node currently advertises itself as a hop.
+4. **No second/third node deployed.** CX23 is a single box. Multi-hop with one operator on one host
+   is theatre — **this needs at least one independently-hosted hop to mean anything**, and that is
+   an infrastructure decision, not a code one.
+5. **`data/ConnectionMode.kt` is UNREFERENCED DEAD CODE.** It describes STANDARD / STEALTH / GHOST
+   (STEALTH = "Tor routing + 3-hop onion relay + decoy traffic") with zero references outside its
+   own file. Either it becomes the real selector for this feature, or it is deleted — while it sits
+   there it reads as a shipped capability. **It also claims Sealed Sender, which is implemented
+   NOWHERE in the repo.** Decide: build, or delete the string.
+
+### Gate
+
+Do not describe multi-hop as available on any user-facing surface until 1–4 are done. See the
+website corrections below — it is already implied in places.
+
+---
+
+## 🟠 WEBSITE CLAIMS THAT OUTRUN THE CODE — correct before production release (found 2026-07-30)
+
+Two live claims are false as written. Both are in the same family as the tracked
+"website presents undeployed web client as available" item.
+
+1. **`website/src/components/Features.tsx`** — *"Android blocks them entirely. iOS and browser blur
+   your messages the instant a screenshot is attempted. We also watermark every conversation — if
+   something leaks, we know who did it."*
+   - **No iOS or browser client is shipped.**
+   - **"we know who did it" is false and is the serious one.** The watermark renders the VIEWER'S
+     OWN fingerprint, locally, with no telemetry of any kind. There is no "we", nothing is reported,
+     and the relay is zero-knowledge by design. The sentence claims a forensic capability the
+     product deliberately does not have, and implies the operator surveils leaks — which cuts
+     directly against the entire positioning.
+
+2. **`website/src/app/security/page.tsx`** — *"every conversation carries an invisible watermark
+   encoding the recipient and timestamp — if a screenshot leaks, it identifies who leaked it."*
+   - Describes the **Linux desktop app**, which is not shipped.
+   - The real watermark encodes the **viewer's own identity fingerprint**. Not the recipient. No
+     timestamp. And it is **visible by design** — see the rename below.
+
+**Also: "Invisible Watermarking" is renamed to "Identity Watermarking"** (maintainer, 2026-07-30).
+The feature is deliberately visible — a deterrent nobody can see deters nobody — and "invisible"
+additionally implies steganographic marking of message content, which Zitrone does not do.
+
+---
+
 ## 🗺️ RELEASE STRATEGY — recorded 2026-07-27 (maintainer). Read before planning any unit.
 
 **The "-beta" version labels are a deliberate hedge, not a maturity claim.** Everything shipped so

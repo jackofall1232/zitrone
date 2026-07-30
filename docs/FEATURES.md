@@ -182,7 +182,7 @@ tracked disclosure item for 0.11.0.
 | **Root warning** | Warns that root access can expose decrypted messages in memory. Dismissible; does **not** block use — blocking would punish power users. |
 | **Dark theme only** | There is no light mode. Settings states this explicitly rather than offering a dead toggle. |
 | **Cover traffic** | The client emits synthetic traffic so real sends are not distinguishable by timing. **Deliberately has no UI and no setting** — no toggle, no indicator, nothing in Settings. A real send is never delayed, reordered, blocked, or made less durable to produce cover. |
-| **Fingerprint watermark** | Renders an identity watermark in verification surfaces. |
+| **Identity Watermarking** | Paints a faint, tiled lattice of the VIEWER'S OWN 60-hex identity fingerprint behind the chat surfaces. A deterrent: anyone photographing the screen is reminded that what they capture is marked as theirs. Always on, no toggle — a toggle would turn a deterrent into a checkbox nobody finds. **Renders locally and reports nothing to anyone.** |
 | **Registration proof-of-work** | The client solves a PoW to register, throttling mass account creation. Surfaced as a progress screen during first setup. |
 
 ---
@@ -225,7 +225,7 @@ client.** Two do not, and both are the kind that read as available when they are
 | Plausible Deniability Vault | ✅ Shipped | §2, triple-entry ceremony |
 | Decoy / Cover Traffic | ✅ Shipped | §11, since 0.10.0 |
 | **Multi-Hop Relay** | ⚠️ **Server only — not in the shipped client** | see below |
-| **Invisible Watermarking** | ⚠️ **Shipped but misnamed** | see below |
+| ~~Invisible Watermarking~~ → **Identity Watermarking** | ✅ Shipped, **RENAMED** 2026-07-30 | see below |
 
 ### Multi-Hop Relay — real, but not reachable by a user today
 
@@ -239,13 +239,17 @@ gated server-side on `RELAY_PRIVATE_KEY`, which is blank in `.env.example`.
 UI, no settings, nothing in `MainActivity`. A user on 0.10.3 gets a single relay hop regardless of
 anything they can touch.
 
+**Tracked as a production-release blocker in `todos.md`** (maintainer decision, 2026-07-30): multi-hop
+must be finished before production. Beyond the client work, it needs **at least one independently
+hosted hop** — multi-hop across one operator's single box is theatre.
+
 Two follow-ups for the polish pass:
 - Decide whether `ConnectionMode` is scaffolding for 0.11.0 or abandoned. While it sits unreferenced
   it will keep generating claims like this one.
 - Its STANDARD description also claims **Sealed Sender**, which is **not implemented anywhere in the
   repo** — not client, not server. That string is the only place the feature "exists".
 
-### Invisible Watermarking — the name inverts the feature
+### Identity Watermarking — renamed 2026-07-30 (was "Invisible Watermarking")
 
 The watermark is **deliberately visible**. From `FingerprintWatermark.kt`: *"a faint,
 toroidally-tiled diagonal lattice of the VIEWER'S OWN 60-hex identity fingerprint… anyone
@@ -254,8 +258,12 @@ a deterrent, always on, with no toggle by design.
 
 A deterrent nobody can see deters nobody. Calling it "invisible" does not oversell it so much as
 describe a different feature — and invites the reading that Zitrone steganographically marks message
-*content*, which it does not do. Suggested rename: **Identity Watermarking**, or **Screen-Capture
-Watermark**.
+*content*, which it does not do. **Renamed to "Identity Watermarking" by maintainer decision.**
+
+**This name is load-bearing on two live website claims that are false** (tracked in `todos.md`):
+`Features.tsx` says *"if something leaks, we know who did it"* — the watermark renders locally with
+no telemetry, so there is no "we" and nothing is reported; and `security/page.tsx` says it encodes
+*"the recipient and timestamp"* — it encodes the **viewer's own fingerprint**, no timestamp.
 
 ---
 
