@@ -175,9 +175,17 @@ type PendingEnvelope struct {
 	Payload []byte
 }
 
-func (s *Store) PendingEnvelopes(ctx context.Context, recipientID uuid.UUID) ([]PendingEnvelope, error) {
+func (s *Store) PendingEnvelopes(ctx context.Context, recipientID uuid.UUID, cutoff time.Time) ([]PendingEnvelope, error) {
+	// TTL FILTER (0.10.2 item 3). Without it this delivered envelopes past their
+	// nominal expiry until the janitor's next pass — up to 10 minutes, longer
+	// after a relay restart — so a recipient could receive a message the sender
+	// already considers dead. RedeemBlob has always been strict (expires_at >
+	// now()), so the asymmetry also meant a delivered-but-expired envelope could
+	// carry an attachment that was already unfetchable.
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, payload FROM envelopes WHERE recipient_id = $1 ORDER BY created_at`, recipientID)
+		SELECT id, payload FROM envelopes
+		WHERE recipient_id = $1 AND created_at >= $2
+		ORDER BY created_at`, recipientID, cutoff)
 	if err != nil {
 		return nil, err
 	}
@@ -244,6 +252,22 @@ func (s *Store) RedeemDrop(ctx context.Context, dropID []byte) ([]byte, error) {
 	return ciphertext, err
 }
 
+// PurgeExpiredRefreshTokens deletes refresh tokens whose expiry has passed.
+//
+// NOTHING ELSE RECLAIMS THEM. A token is deleted on USE (rotation, gated
+// expires_at > now()) or at account teardown — so a token that simply expires
+// unused was never collected by anything. Measured on prod 2026-07-29: 118 of
+// 150 rows (79%) expired-and-stuck, oldest 2026-07-02. At ~239 B/row that is
+// trivial today, but it grows once per session, without bound, and eventually
+// overtakes the prekey batch as the dominant per-account storage term.
+func (s *Store) PurgeExpiredRefreshTokens(ctx context.Context, now time.Time) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM refresh_tokens WHERE expires_at <= $1`, now)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // PurgeExpiredDrops deletes drops past their TTL whether collected or not.
 func (s *Store) PurgeExpiredDrops(ctx context.Context, now time.Time) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM drops WHERE expires_at <= $1`, now)
@@ -278,6 +302,22 @@ func (s *Store) RedeemBlob(ctx context.Context, blobID []byte) ([]byte, error) {
 		DELETE FROM blobs WHERE blob_id = $1 AND expires_at > now()
 		RETURNING ciphertext`, blobID).Scan(&ciphertext)
 	return ciphertext, err
+}
+
+// AbandonBlob deletes a blob its DEPOSITOR is giving up on, keyed by the blob id
+// the caller proved it holds the token for (0.10.2 item 5b).
+//
+// WHY THIS EXISTS. A blob is uploaded BEFORE the envelope is published, so three
+// routes leave one with nothing that will ever fetch it: a non-durable ratchet
+// flush, a contact deleted mid-send, and any throw between. Before this only the
+// TTL reclaimed them — and one blob is up to 8,454,180 B, roughly 545 accounts'
+// worth of disk, with ~2,079 orphans enough to exhaust the box.
+//
+// Deliberately says nothing about whether a row existed, so it cannot be used to
+// probe which blob ids are live.
+func (s *Store) AbandonBlob(ctx context.Context, blobID []byte) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM blobs WHERE blob_id = $1`, blobID)
+	return err
 }
 
 // PurgeExpiredBlobs deletes blobs past their TTL whether collected or not.

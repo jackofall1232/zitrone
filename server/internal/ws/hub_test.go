@@ -31,7 +31,7 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{stored: make(map[uuid.UUID]uuid.UUID)}
 }
 
-func (f *fakeStore) PendingEnvelopes(ctx context.Context, recipientID uuid.UUID) ([]db.PendingEnvelope, error) {
+func (f *fakeStore) PendingEnvelopes(ctx context.Context, recipientID uuid.UUID, cutoff time.Time) ([]db.PendingEnvelope, error) {
 	return nil, nil
 }
 
@@ -60,7 +60,7 @@ func (f *fakeStore) RecordDeliveryReceipt(ctx context.Context, messageIDHash []b
 
 // newTestHub builds a hub over a fake store with rate limiting disabled.
 func newTestHub(store Store) *Hub {
-	return NewHub(store, ratelimit.New(1000, time.Minute, false))
+	return NewHub(store, ratelimit.New(1000, time.Minute, false), 72*time.Hour)
 }
 
 // newTestClient creates a client whose send() path only touches its outbox
@@ -238,7 +238,7 @@ func TestHandleReceived_OfflinePeer_NoOp(t *testing.T) {
 // newLimitedTestHub builds a hub whose send budget is real and exhausted after
 // max permits, so rejection paths can be exercised.
 func newLimitedTestHub(store Store, max int) *Hub {
-	return NewHub(store, ratelimit.New(max, time.Minute, true))
+	return NewHub(store, ratelimit.New(max, time.Minute, true), 72*time.Hour)
 }
 
 func TestHandleSend_RateLimited_CarriesMessageID(t *testing.T) {

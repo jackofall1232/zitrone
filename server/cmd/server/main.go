@@ -58,7 +58,7 @@ func main() {
 		log.Printf("rate limiting: TRUSTED_PROXY_IPS unset — keying on socket peer, so all clients behind a proxy SHARE ONE BUCKET")
 	}
 	sendLimit := ratelimit.New(cfg.SendRatePerMinute, time.Minute, cfg.RateLimitEnabled)
-	hub := ws.NewHub(store, sendLimit)
+	hub := ws.NewHub(store, sendLimit, time.Duration(cfg.MessageTTLUndeliveredHours)*time.Hour)
 
 	// No access logging, no body logging — application errors only.
 	app := fiber.New(fiber.Config{
@@ -115,6 +115,9 @@ func main() {
 	// capability, so the relay cannot link a fetch to an account (see blobs.go).
 	v1.Post("/blobs", handlers.RequireAuth, handlers.DepositBlob)
 	v1.Post("/blobs/redeem", handlers.RedeemBlob)
+	// Depositor-only cleanup of an orphan (0.10.2 item 5b) — token-keyed, so it
+	// grants no capability the blob id alone would.
+	v1.Post("/blobs/abandon", handlers.RequireAuth, handlers.AbandonBlob)
 
 	// QR dead drops (lemon drops) — anonymous, unauthenticated. Proof-of-work on
 	// deposit stands in for auth; fetch is blind and NON-destructive (a wrong scan

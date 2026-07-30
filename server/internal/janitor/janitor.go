@@ -3,7 +3,8 @@
 // See the LICENSE file in the repository root for full license text.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// Package janitor purges undelivered envelopes that outlived their TTL.
+// Package janitor purges envelopes, drops, blobs, QR drops and refresh tokens that
+// outlived their TTL.
 package janitor
 
 import (
@@ -29,6 +30,15 @@ func Run(ctx context.Context, store *db.Store, ttl time.Duration) {
 				log.Printf("janitor: purge failed: %v", err)
 			} else if purged > 0 {
 				log.Printf("janitor: purged %d undelivered envelopes past TTL", purged)
+			}
+			// Expired refresh tokens (0.10.2 item 1). Nothing else reclaims them: they
+			// are deleted on use or at account teardown, so one that expires unused
+			// used to sit forever. Unbounded growth, once per session.
+			tokens, err := store.PurgeExpiredRefreshTokens(ctx, time.Now())
+			if err != nil {
+				log.Printf("janitor: refresh-token purge failed: %v", err)
+			} else if tokens > 0 {
+				log.Printf("janitor: purged %d expired refresh tokens", tokens)
 			}
 			// Dead drops are destroyed at their TTL whether collected or not.
 			drops, err := store.PurgeExpiredDrops(ctx, time.Now())

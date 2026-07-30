@@ -70,11 +70,46 @@ object AttachmentCrypto {
         val size: Int,
     )
 
-    /** Encrypts attachment bytes for blind relay storage. */
-    fun encrypt(plain: ByteArray): EncryptedBlob {
+    /**
+     * Encrypts attachment bytes for blind relay storage.
+     *
+     * [reuseToken] / [reuseKey] are supplied ONLY when re-encrypting a message that has already had
+     * a deposit attempt — a 0.10.1 retry (0.10.2 item 5a). Passing them keeps `blobId` stable across
+     * attempts, so a retry deposits to the same row instead of orphaning the previous blob (up to
+     * 8 MiB held for the full TTL, once per retry).
+     *
+     * **Why reusing the KEY is what makes this safe, and reusing the box is not needed.**
+     * `DepositBlob` is `ON CONFLICT (blob_id) DO NOTHING`, so whichever attempt's bytes land first is
+     * what the relay keeps. Those bytes carry their OWN nonce inside [EncryptedBlob.box] — the
+     * layout is `nonce(12) || ciphertext+tag` — so the recipient can open whichever version was
+     * stored, provided the key matches. Holding the key stable is therefore sufficient, and holding
+     * the 8 MiB box in memory to guarantee byte-identity is not.
+     *
+     * **The nonce is still freshly drawn on every call, deliberately.** Deriving it to force
+     * byte-identical output would mean a repeated (key, nonce) pair over plaintext that differs —
+     * `MessagePadding.pad` fills with random bytes — and that is the one GCM failure mode that is
+     * catastrophic rather than merely wasteful. A fresh nonce under a reused key is the ordinary,
+     * safe construction.
+     *
+     * **The token must never be derived from anything the relay sees.** `blobId` is `sha256(token)`
+     * and the token IS the redemption capability, while the message id is cleartext to the relay for
+     * routing — so a relay-computable token would let the relay redeem the attachment outright.
+     * Callers memoize the randomly drawn token; they do not derive it.
+     */
+    fun encrypt(
+        plain: ByteArray,
+        reuseToken: ByteArray? = null,
+        reuseKey: ByteArray? = null,
+    ): EncryptedBlob {
         if (plain.isEmpty()) throw IllegalArgumentException("empty attachment")
-        val token = ByteArray(BLOB_TOKEN_BYTES).also(random::nextBytes)
-        val key = ByteArray(32).also(random::nextBytes)
+        require((reuseToken == null) == (reuseKey == null)) {
+            // Half-reuse would pair a stable blobId with a new key (the relay keeps the first bytes,
+            // the envelope carries the second key → an undecryptable attachment, surfaced as
+            // corruption) or a new blobId with an old key (a fresh orphan, defeating the point).
+            "reuseToken and reuseKey must be supplied together or not at all"
+        }
+        val token = reuseToken ?: ByteArray(BLOB_TOKEN_BYTES).also(random::nextBytes)
+        val key = reuseKey ?: ByteArray(32).also(random::nextBytes)
         val blobId = sha256(token)
         val digest = sha256(plain)
         val padded = MessagePadding.pad(plain, BLOB_BUCKET_BYTES)

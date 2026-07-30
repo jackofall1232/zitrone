@@ -174,8 +174,16 @@ class MessagingCoordinator(
      *
      * Teardown runs through [CoverTraffic.stop], which is handed `ws.disconnect` — see
      * [coverTeardown] — and a live transport SWAP runs through [CoverTraffic.quiesce], see
-     * [reconnectTransport]. Both run on the [confined] worker, through [CoverTrafficWorker], so they
-     * cannot interleave with a send's publish-then-pair slice. **They reach it by different routes,
+     * [reconnectTransport]. Both are dispatched through [CoverTrafficWorker].
+     *
+     * **CORRECTED (0.10.2 design review): this used to claim they "cannot interleave with a send's
+     * publish-then-pair slice" because both run on [confined]. That is FALSE whenever
+     * [CoverTrafficWorker]'s caller-thread fallback fires after its terminal wait — which
+     * CoverTrafficWorker's own kdoc already records as structurally defeating the confinement
+     * argument, precisely when it fires.** What actually holds the property is that the
+     * publish-then-pair sequence is a SUSPENSION-FREE slice, compiler-enforced by
+     * [publishOutgoing]/[publishReceipt] being non-suspending; `limitedParallelism(1)` serialises
+     * slices, not coroutines, so confinement alone would guarantee nothing across a suspension. **They reach it by different routes,
      * and that difference is a fix (round 5):** terminal teardown may fall back to the caller after a
      * bound, because a vault lock that hangs without wiping keys is worse; a transport swap may
      * NEVER, because `quiesce` leaves the register open and a swap off the worker splits pairs.
@@ -379,6 +387,44 @@ class MessagingCoordinator(
     private val confined = Dispatchers.IO.limitedParallelism(1)
 
     /**
+     * Per-message attachment deposit secrets, so a RETRY reuses one blob instead of orphaning the
+     * previous one (0.10.2 item 5a).
+     *
+     * `AttachmentCrypto.encrypt` drew a fresh token per call and `blobId = sha256(token)`, so every
+     * 0.10.1 retry uploaded a NEW blob and left the old one to its full TTL — N retries = N × up to
+     * 8 MiB, and blobs are the dimension that actually threatens the box (~2,079 orphans exhaust
+     * CX23's free space, one blob ≈ 545 accounts' worth of disk).
+     *
+     * **Only the 96-byte secrets are held, never the box.** Holding the 8 MiB ciphertext to force
+     * byte-identical re-uploads would trade a disk orphan for a heap leak, on bytes the message
+     * ALREADY retains in memory for retry. It is unnecessary anyway: whichever attempt's bytes the
+     * relay keeps carry their own nonce, so a stable key opens either.
+     *
+     * **Per-process is sufficient, and is the smaller surface.** `MessageRepository` is RAM-only, so
+     * a retry only ever happens inside one process lifetime — a crash takes the bubble and leaves
+     * nothing to retry. So this needs no vault scoping, no durable state, and adds no deniability
+     * surface. Entries are released the moment the send stops being retryable; see [releaseDeposit].
+     */
+    private class AttachmentDeposit(val token: ByteArray, val key: ByteArray)
+
+    private val attachmentDeposits = ConcurrentHashMap<String, AttachmentDeposit>()
+
+    /**
+     * Drop a message's memoized deposit secrets. Called on every terminal outcome — the relay took it
+     * (SENT), the recipient got it, the local copy was discarded, or it burned. **Without this the
+     * map grows for the process's lifetime**, which is the heap-leak side of the trade this fix
+     * exists to avoid. Idempotent.
+     */
+    private fun releaseDeposit(messageId: String) {
+        attachmentDeposits.remove(messageId)
+    }
+
+    // NOTE: `abandonBlobQuietly` was removed with its two call sites above. `ApiClient.abandonBlob`
+    // and the relay's `AbandonBlob` endpoint remain as DORMANT infrastructure — unreachable from the
+    // client, so they cannot trigger the P1, and ready for v6 to wire correctly.
+
+
+    /**
      * Whether [contactId] is still a live roster entry. Used by the send/deliver
      * publish tails: a send is always to an existing conversation, so a `false`
      * here means the contact was torn down mid-send and nothing may be deposited
@@ -423,6 +469,8 @@ class MessagingCoordinator(
         if (!contactExists(contactId)) {
             diag("send: contact deleted mid-send — dropping local copy")
             messages.discard(messageId)
+            // Contact deleted mid-send: the local copy is gone, so nothing will retry this id.
+            releaseDeposit(messageId)
             return false
         }
         if (ws.sendMessage(envelope)) {
@@ -1287,7 +1335,16 @@ class MessagingCoordinator(
         val accountId = api.accountId ?: return
         var stage = "encrypt-blob"
         runCatching {
-            val blob = AttachmentCrypto.encrypt(bytes)
+            // ONE BLOB PER MESSAGE (0.10.2 item 5a). A retry reuses the first attempt's token and
+            // key, so `blobId` is stable and the deposit lands on the same row
+            // (`ON CONFLICT (blob_id) DO NOTHING`) instead of orphaning the previous blob. The nonce
+            // is still fresh per call — see AttachmentCrypto.encrypt for why forcing byte-identity
+            // would be the dangerous option.
+            val memo = attachmentDeposits[messageId]
+            val blob = AttachmentCrypto.encrypt(bytes, memo?.token, memo?.key)
+            if (memo == null) {
+                attachmentDeposits[messageId] = AttachmentDeposit(blob.token, blob.key)
+            }
             // filename is forced null for images inside serialize(); mirror
             // that here so the local copy's metadata matches the wire.
             val controlFilename = if (kind == AttachmentControlPayload.KIND_IMAGE) null else filename
@@ -1368,7 +1425,32 @@ class MessagingCoordinator(
             // redeem it the moment the envelope arrives.
             stage = "upload-blob"
             diag("send: uploading attachment blob")
-            api.uploadBlob(b64(blob.blobId), b64(blob.box))
+            // A 409 ON OUR OWN MEMOIZED TOKEN IS SUCCESS, NOT FAILURE (0.10.2 item 5, v6).
+            //
+            // THIS FIXES A LIVE DEFECT IN SHIPPED CODE, not a hypothetical: `blobId` is
+            // `sha256(token)` and the token is MEMOIZED per message, so the FIRST RETRY TAP OF ANY
+            // ATTACHMENT re-deposits the same id, the relay answers 409 `blob_exists`
+            // (`StoreBlob`'s `ON CONFLICT (blob_id) DO NOTHING` → `ErrBlobExists`), and the throw
+            // fails the retry. Every attachment retry is guaranteed to fail today.
+            //
+            // Treating it as success is safe end to end, and each clause was checked rather than
+            // assumed: the token carries 256 bits of OUR OWN entropy, so a 409 means OUR row is the
+            // one already stored — not a collision; `digest` and `size` in the control payload are
+            // derived from the PLAINTEXT and are therefore attempt-independent; the AES key is
+            // memoized with the token, so it opens whichever attempt's bytes the relay kept; and the
+            // nonce travels inside the box, so the stored ciphertext is self-describing.
+            //
+            // This is also why the reversal was abandoned: the memoized token plus `ON CONFLICT` is a
+            // DB-ENFORCED one-row-per-message cap that needs no network call, no bearer, no limiter
+            // budget and no surviving session. Five design plans proposed replacing it with
+            // best-effort client cleanup; all five were rejected, and this is the mechanism they
+            // would have given up.
+            runCatching { api.uploadBlob(b64(blob.blobId), b64(blob.box)) }
+                .onFailure { e ->
+                    val alreadyOurs = e is ApiClient.ApiException && e.code == HTTP_CONFLICT
+                    if (!alreadyOurs) throw e
+                    diag("send: blob already deposited under our token — reusing it")
+                }
 
             val envelope = MessageEnvelope(
                 id = messageId,
@@ -1402,6 +1484,17 @@ class MessagingCoordinator(
             ) {
                 diag("send: not handed to relay — marked failed for retry (${ws.connectionState.value})")
                 messages.markFailed(messageId)
+                // ROUTE (a) — item 5b. The blob is already deposited by this point and this send is
+                // over, so nothing will ever fetch it: reclaim it rather than leave up to 8 MiB to
+                // wait out the full TTL. Abandoning cannot strand a later attempt, because item 5a
+                // memoises the token — a retry re-deposits under the SAME blob id.
+                // ABANDON DISABLED HERE — the confirmed P1, unfixed (0.10.2 item 5, all review
+                // rounds). Attempt 1's abandon is fire-and-forget; a retry then re-deposits under
+                // the SAME memoized id, publishes its envelope, and the stale abandon deletes the
+                // blob underneath it — the recipient gets a permanent UNAVAILABLE for a message
+                // that arrived. The 409-as-success fix makes this MORE reachable, not less: the
+                // retry now succeeds where it used to fail, so it reaches publish. Re-enable only
+                // with v6's `published` bit, which is what makes an abandon attempt-aware.
                 return@runCatching
             }
             // The NON-SUSPENDING publish tail (see [publishOutgoing]), called directly and FIRST. If
@@ -1415,6 +1508,12 @@ class MessagingCoordinator(
             if (e is CancellationException) throw e
             // Upload throw or transport error — the attachment never made it out.
             messages.markFailed(messageId)
+            // ROUTE (c) — item 5b, best effort. If the throw came AFTER a successful deposit the blob
+            // is an orphan; if before, there is nothing to delete and the relay's 204 says so without
+            // revealing which. The memo is the only place the token survives this far.
+            // ABANDON DISABLED HERE for the same reason as the route above, and additionally
+            // because this reads the SHARED memo after arbitrary suspension, so it can name a
+            // later attempt's token rather than its own.
             val bodySuffix = (e as? ApiClient.ApiException)?.responseBody
                 ?.let { " server_error=$it" }
                 .orEmpty()
@@ -2222,6 +2321,9 @@ class MessagingCoordinator(
     /** Relay stored our envelope → SENT tick (one tick, "the relay has it"). */
     override fun onMessageStored(messageId: String) {
         messages.markSent(messageId)
+        // The relay has it: no further attempt will re-deposit under this id, so the memoized blob
+        // secrets are dead weight (0.10.2 item 5a — release, or the map grows for the process's life).
+        releaseDeposit(messageId)
     }
 
     /**
@@ -2232,6 +2334,8 @@ class MessagingCoordinator(
      */
     override fun onMessageDelivered(messageId: String) {
         messages.markDelivered(messageId)
+        // Belt and braces: a delivery receipt can arrive without a preceding `message.stored`.
+        releaseDeposit(messageId)
     }
 
     override fun onTyping(senderId: String, started: Boolean) {
@@ -2372,6 +2476,9 @@ class MessagingCoordinator(
     }
 
     private companion object {
+        /** The relay's "this blob id is already stored" status — see the deposit call site. */
+        const val HTTP_CONFLICT = 409
+
         /** Logcat tag for boot-stage transport diagnostics — see class kdoc. */
         const val TAG = "ZitroneBoot"
 

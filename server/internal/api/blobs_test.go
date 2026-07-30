@@ -91,6 +91,7 @@ func blobTestApp(t *testing.T, h *Handlers) *fiber.App {
 	v1 := app.Group("/api/v1")
 	v1.Post("/blobs", h.RequireAuth, h.DepositBlob)
 	v1.Post("/blobs/redeem", h.RedeemBlob)
+	v1.Post("/blobs/abandon", h.RequireAuth, h.AbandonBlob)
 	return app
 }
 
@@ -185,6 +186,45 @@ func TestBlobRedeem_NoAuthRequired(t *testing.T) {
 	}
 	if status != fiber.StatusBadRequest {
 		t.Fatalf("wrong-length token: got %d, want 400", status)
+	}
+}
+
+// ── abandon (0.10.2 item 5b) ─────────────────────────────────────────────────
+
+// Abandon is DEPOSITOR-ONLY: unlike redemption it requires auth, because only a
+// party that deposited a blob has a reason to destroy one.
+func TestBlobAbandon_RequiresAuth(t *testing.T) {
+	h := newBlobHandlers(t, nil)
+	app := blobTestApp(t, h)
+	status, _ := postJSON(t, app, "/api/v1/blobs/abandon", fiber.Map{
+		"token": b64(bytes.Repeat([]byte("t"), blobTokenBytes)),
+	}, "")
+	if status != fiber.StatusUnauthorized {
+		t.Fatalf("abandon without auth: got %d, want 401", status)
+	}
+}
+
+// KEYED ON THE TOKEN, NOT THE BLOB ID — the invariant that keeps this from being
+// a destruction capability handed to a public value. The blob id is public (see
+// RedeemBlob), so an id-keyed delete would let anyone who saw an id destroy
+// someone's attachment. A wrong-length token is refused before any store access,
+// which is what proves the token is what this endpoint consumes.
+func TestBlobAbandon_RejectsMalformedToken(t *testing.T) {
+	h := newBlobHandlers(t, nil)
+	app := blobTestApp(t, h)
+	for name, token := range map[string]string{
+		"too short":   b64([]byte("short")),
+		"not base64":  "!!!not-base64!!!",
+		"empty":       "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, _ := postJSON(t, app, "/api/v1/blobs/abandon", fiber.Map{
+				"token": token,
+			}, bearer(t, h.issuer))
+			if status != fiber.StatusBadRequest {
+				t.Fatalf("%s: got %d, want 400", name, status)
+			}
+		})
 	}
 }
 

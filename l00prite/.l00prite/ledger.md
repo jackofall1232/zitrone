@@ -3549,6 +3549,146 @@ synthetic peer — a linkage the relay must not hold).
 
 Verified after merge: `go build` / `go vet` / `go test ./...` all pass, six packages ok.
 
+<<<<<<< HEAD
+## 2026-07-30 — 0.10.2 item 5: TWO design passes, TWO rejections, ZERO code written. Stopped by the maintainer.
+
+**The method is the result here.** Ten agents across two five-agent passes reviewed a *plan* rather
+than an implementation, and each pass rejected one. No code was written, so nothing had to be unwound.
+
+**v1 → DO NOT SHIP.** Its reversal would have **regressed the exact disk metric item 5 exists to
+bound**: `publishOutgoing`'s socket-down exit returns `false` **without throwing**, so `runCatching`
+completes normally and the abandon route never fires — a route the plan never enumerated. With
+fresh-per-attempt secrets and a single-slot memo, attempts 1…N−1 became unreclaimable by anything;
+~35 min to exhaust CX23 inside the *legitimate* 60/min deposit ceiling. **Four of five lenses,
+independently, same lines.** Its "fix first, blocks everything" step was also a **no-op** — 409
+handling was already correct and tested, and an implementer hunting the phantom would have converted a
+working 409 contract into a 500.
+
+**v2 → DO NOT SHIP.** Steps 4 and 5 **mutually unimplementable**, found by **all five lenses
+independently**: `published` as a coroutine-local cannot be read by any terminal-cleanup trigger,
+because every trigger runs on a foreign stack (UI thread, OkHttp reader thread, repository scope).
+Dropping the flag abandons a blob the relay already accepted; sharing it reinstates the lifetime bug it
+existed to kill.
+
+**Four of five lenses converged on the replacement neither the maintainer nor I proposed:** a
+**per-token registry** (`RESERVED/DEPOSITED → HANDED_OFF`), transitioned by the sending coroutine
+itself after `ws.sendMessage` returns, every abandon the return value of an atomic map operation.
+**v3 gets written around that mechanism, not as more patches.**
+
+**THE FINDING WORTH THE WHOLE EXERCISE — a tidiness note that was a deanonymisation defect.** v2's
+"use a non-shared OkHttp client for the abandon call" would have egressed over the **default network**:
+the device's real IP reaching a **conceded** relay seconds after an attachment send, time-correlated —
+or on I2P, unable to resolve `.b32.i2p`, so cleanup silently never works. Nothing about that step
+*looks* like it touches the threat model. **That is the strongest argument this project has produced
+for reviewing designs, not just diffs.**
+
+**Two more that relocate what we thought we knew.** There is **no `callTimeout` anywhere in the app**,
+and with `readTimeout(0)` a half-open circuit after the 8 MiB body is written never resumes and never
+throws — so the bubble sticks at SENDING **forever** and `retryable`'s CAS then refuses a retry. That,
+not the frozen-process story we had both been repeating, is the live unbounded case, and it is a worse
+user-facing bug than the orphan it causes. And **coroutine cancellation is an unenumerated route**
+whose highest-frequency trigger is **idle auto-lock** — adversary-free, orphaning 8 MiB on every
+in-flight photo send.
+
+**CONFINEMENT SWEEP — asked because `limitedParallelism(1)` serialises execution SLICES, not
+coroutines. It paid off in both directions.** **U3's cover-traffic reasoning is CLEAN**: claims scoped
+to suspension-free slices, **compiler-enforced** by non-suspending `private fun` publish tails, real
+Mutexes wherever cross-suspension exclusion is genuinely needed. A positive result on the foundation we
+were most worried about. Two *other* comments carry the misunderstanding and are latent traps:
+`VaultSession.kt` ~`:463` (code correct — guarded by `stateLock` + version check — but the sentence
+invites deleting that check) and `MessagingCoordinator.kt:177-178` (false whenever
+`CoverTrafficWorker`'s caller-thread fallback fires, which that worker's own kdoc already admits).
+
+**Process notes that generalise, all three confirmed twice over:** demanding **arithmetic
+falsification** rather than reading a claim is what killed v1's TTL invariant and produced the 35-minute
+figure; **naming the least-confident sequence** got it broken deliberately both times instead of
+missed; and **design-time review catches composition defects that per-fix review structurally cannot
+see** — including a composition defect *inside the remediation for a composition defect*.
+
+## 2026-07-30 — 0.10.2 item 5: FIVE plans, FOUR rejections, ZERO code. Session closed with the fifth pass in flight.
+
+**Twenty-four review agents across four completed design passes. Every plan was rejected before a line
+of item-5 code was written, so nothing was ever unwound.** The fifth pass (`wa22i00rm`) was launched at
+session close; its verdict is unread and **must be read before implementing**.
+
+**The v4 pass named what all four failures shared, and it is the reusable finding:**
+
+> **The client tried to DECIDE, at teardown, using state it CANNOT OBSERVE, with a call it CANNOT
+> COMPLETE, after DESTROYING the record that would let it try again.** Patch any one and the other three
+> kill the plan.
+
+**Why each died, in one line each:** v1 would have *regressed* the disk metric item 5 exists to bound,
+via a non-throwing exit nobody enumerated. v2's coroutine-local flag was unreadable by cleanup running
+on a foreign stack — **and it contained a deanonymisation defect in a step added for tidiness.** v3
+mistook an OkHttp enqueue receipt for relay ownership and lost a reclaim the tree already performs. v4
+retired the token *before* the abandon was confirmed, turning a self-healing residual into k permanent
+8 MiB rows.
+
+**The sharpest single ruling:** `ENQUEUED` must **never** be abandoned — not a tunable default, an
+invariant. `WsClient.disconnect()` closes **gracefully** (queued frames are written) *and* nulls the
+socket, after which the identity guard rejects `message.stored`. **The teardown makes delivery more
+likely and acknowledgement impossible**, so excluding `CONFIRMED` excludes nothing: the ambiguity is
+manufactured by the teardown itself. One branch is an orphan; the other is silent, permanent destruction
+of delivered content. The "symmetric tradeoff" framing both the maintainer and the agent had accepted
+was simply wrong.
+
+**Three item-5-INDEPENDENT fixes landed this session**, all found by the design passes: the blob deposit
+now has a per-call `callTimeout` (there was none anywhere; a half-open circuit left a bubble at SENDING
+**forever** with retry refused by the CAS — worse than the orphan it caused); two stale confinement
+comments were deleted (code correct in both, the sentences were traps); and the standalone-client
+deanonymisation risk **needed no code** because it only ever existed in a rejected plan.
+
+**Method note worth keeping:** four passes, four rejections, zero rework. Design-time review caught a
+composition defect *inside the remediation for a composition defect*, twice, and a privacy defect in a
+step written as hygiene. **Reviewing plans is cheaper than reviewing code and catches a class code review
+structurally cannot.**
+
+## 2026-07-30 — 0.10.2 item 5: v5 REJECTED, and the pass invalidated the PREMISE all five plans shared.
+
+**Five plans, five rejections, zero code.** The v5 pass did something the previous four could not: it
+rejected not the plan but **the decision underneath every plan.**
+
+**B1, ALL FIVE LENSES INDEPENDENTLY, SAME MECHANISM: the reversal trades a DB-ENFORCED cap for a
+BEST-EFFORT NETWORK one.** On the current tree, `blobId = sha256(token)` plus the memoized token plus
+`INSERT … ON CONFLICT (blob_id) DO NOTHING` means **k retries of one message can only ever occupy ONE
+row — with no network call, no bearer, no limiter budget, and no surviving session required.** Every
+plan v1–v5 deleted that and replaced it with one row per *attempt*, reclaimed only if k authenticated
+POSTs each return 204 before the session ends. On the metric item 5 exists for, that **lowers the
+exhaustion bar by a factor of k, in exactly the correlated-outage regime that produces retries across
+the user base at once.**
+
+**"Reverse 5a" was the error.** It was decided at the top of this arc, built on five times, and never
+challenged — including by me, across five designs. 5a's memoization was not the problem; it was the
+mechanism providing the guarantee.
+
+**v6 is small, and it is the reframing: STOP REPLACING WHAT THE TREE ALREADY OWNS CORRECTLY.**
+`attachmentDeposits` is *already* a per-message registry with three retirement points, released on every
+terminal outcome, pinned by a test. v1–v5 each proposed to replace it with a state machine, a flush, a
+queue or a registry, and each died on a route the replacement could not see. **v6 adds two bits to the
+existing memo and changes one branch. No registry, no queue, no state machine, no teardown, no storm.**
+
+- **M1 — IDEMPOTENT REDEPOSIT: treat a 409 on a memoized-token deposit as SUCCESS.** One branch. Safety
+  verified end to end: our own 256-bit token ⇒ our own row; `digest`/`size` are **plaintext**-derived and
+  attempt-independent; the nonce travels inside the box; the key is memoized. **It also fixes a live UX
+  defect nobody in five rounds had named — today the FIRST RETRY TAP OF EVERY ATTACHMENT is guaranteed
+  to fail on a 409.** It keeps the server-enforced cap and deletes the motivation for the entire arc.
+- **M2 — a `published` bit**, set non-suspending inside `publishOutgoing` at `ws.sendMessage == true`,
+  read at every abandon site. M3 made structural instead of documentary.
+
+**Two more findings worth keeping.** M1×M3 as written never retired `ENQUEUED`/`CONFIRMED` — the two
+states covering *every successful send* — and each retained entry is the blob **redemption token** for a
+deliberately unauthenticated `RedeemBlob`, so v5 would have held, for a whole session, proof an
+attachment was sent **plus the live capability to fetch-and-burn it**, after the tree would have dropped
+both. And the shared 60/min bucket is **accidentally self-limiting** today: an abandon storm 429s the
+deposit too, so no extra row is minted. Splitting the buckets *creates* the "deposits land while abandons
+429" state that manufactures k rows — so item 2 is a prerequisite that also makes B1 easier to reach, and
+must be **deployed**, not merely merged.
+
+**Method result for the whole arc: 30 review agents, 5 design passes, 5 rejected plans, ZERO code written
+and nothing unwound.** The last pass overturned a premise the maintainer and the agent had both held
+since the beginning — which no amount of implementation review would ever have surfaced, because the
+code would have been correct against a wrong design.
+=======
 ## 2026-07-30 — 0.10.1 MERGED to `main` (`a7d66e87`, PR #64) on maintainer instruction
 
 **A rejected send no longer shows `SENDING` forever.** Four paired-blind rounds, every finding upheld
@@ -3592,3 +3732,4 @@ single-threaded virtual clock cannot express, kept as reachable under real threa
 
 **No version bump, nothing deployed.** 0.10.1 is client-only, so no relay redeploy is implied by this
 merge — the CX23 trip owed for 0.10.2 items 1–4 is unaffected and still outstanding.
+>>>>>>> main

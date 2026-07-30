@@ -1200,3 +1200,90 @@ of THIS FEATURE do here?" before "what does the rest of this file do here?"
 **Also:** the requirement did not catch it either. R-U4-3 said "adds no durable-state writer",
 meaning vault sections; a diagnostics log is durable state by any honest reading. A requirement
 scoped to the mechanism you were thinking about will not cover the one you were not.
+
+## 2026-07-30 — I used `kimi -p` for a review after it is documented TWICE as not finishing
+
+**What happened.** Asked to bring Kimi K3 in as a third lens on 0.10.2 item 5, I dispatched
+`KIMI_MODEL_THINKING_EFFORT=high kimi -p "$(cat …)"`. That is the one shell-drivable Kimi mode, and it
+is **the mode recorded as not completing** — in `/root/.claude/CLAUDE.md` under a heading that says so
+in capitals ("⚠️ THE INVOCATION THAT ACTUALLY WORKS"), and again in this repo's own ledger reviewer
+roster: *"Kimi completes only in the interactive CLI (plan mode + `/yolo`); `kimi -p` does not
+finish."* Two prior whole-unit attempts had died mid-work with no verdict (~10 KB at `max`, ~87 KB at
+`high`). Mine reached 16.7 KB with no verdict before I killed it.
+
+**Knowledge did not prevent it — I quoted the risk while doing it anyway.** I told the maintainer in
+the same message that "`kimi -p` has died mid-work twice on this box without producing a verdict" and
+dispatched it regardless, because the maintainer's phrasing ("Kimi k3 is an agent on this box") pointed
+at the agent and I resolved the conflict toward the instruction in front of me rather than the
+instruction on file. **The recorded procedure is not advice to weigh against a fresh instruction; it
+is the thing to raise the conflict about.** The correct move was to say "the record says `-p` will not
+finish, so this needs you at a terminal or the `moon` path" BEFORE spending the run.
+
+**What went right, and is worth keeping as procedure.** Because an agentic CLI in a shared tree has
+already cost real work on this box, I committed everything first so the tree was clean at dispatch,
+and put an explicit read-only instruction at the top of the prompt. Verified afterwards:
+`git status` shows **only the two files I created myself** — Kimi wrote nothing. The precaution cost
+one commit and made the "did it mutate the tree?" question answerable in one command instead of
+arguable.
+
+**Also learned:** `l00prite/.l00prite/reviews/KIMI-PROMPTING.md` exists and I had not read it. It
+answers the `ask` vs `--diff` question for Moonshot directly — **`ask` with explicit full files, "and
+it isn't close"**, because adversarial unit review needs the unchanged 90% (the caller that was
+correct before, the invariant established 200 lines above the hunk) while `--diff` answers "did this
+change regress?". **Read the roster AND the prompting guide before choosing a lens invocation.**
+
+**Rule:** for Kimi, an agent from a shell uses `moon`. `kimi` interactive + plan mode + `/yolo` is a
+human-driven invocation and cannot be delegated. Partial `-p` output is notes, never a review.
+
+## 2026-07-30 — TWO FAILURE CLASSES, TWO REMEDIES. The second is the one review has to be built for.
+
+From the 0.10.2 item-5 design passes. Both plans I wrote were rejected, but **the two failures were not
+the same kind of failure**, and conflating them would produce the wrong countermeasure.
+
+**Class 1 — errors of REASONING.** v1's composition defect (fresh-per-attempt secrets plus a
+single-slot memo making attempts 1…N−1 unreclaimable on an unenumerated route) and v2's
+mutually-unimplementable steps 4 and 5. Both were mistakes I could **in principle** have caught by
+thinking harder: the facts were in front of me and the inference was wrong. **These respond to more
+careful reasoning** — to enumerating routes exhaustively, to tracing each step against the next, to
+demanding arithmetic instead of reading a claim.
+
+**Class 2 — things I WAS NOT THINKING ABOUT AT ALL.** v2's "use a non-shared OkHttp client for the
+abandon call." I wrote it as **hygiene**. There was **no moment where the threat model came up**,
+because nothing about "use a separate client for cleanup" *looks* like it touches the threat model. It
+would have egressed the request over the **default network** — the device's real IP reaching a
+**conceded** relay seconds after an attachment send, time-correlated — or on I2P failed to resolve
+`.b32.i2p` at all. **Thinking harder about my justification would not have found it, because my
+justification never went near the transport.**
+
+**The remedies are different, and only one of them is "be more careful":**
+
+| | Class 1 (bad inference) | Class 2 (blind spot) |
+|---|---|---|
+| Found by | rigour, adversarial self-review, arithmetic falsification | **a reader looking at SOURCE, not at my reasoning** |
+| Caught here by | lenses tracing my steps pairwise | a lens that had opened `CertificatePinning.kt` |
+| Prevented by | better process on my side | **cannot be prevented on my side** |
+
+**This is the argument for review by someone reading the source rather than reading the plan's own
+logic.** A reviewer who evaluates my justification can only ever find class 1. Class 2 requires
+somebody with the actual file open, and no amount of care in the plan substitutes for it.
+
+**The rule that came out of it is written generally, not as the instance:** per-call HTTP options come
+from `transport.client.newBuilder()`, re-derived on every transport swap — **never an independently
+built client** — because the transport client is what carries Tor SOCKS or the I2P socket factory and
+the pinner. That survives past this fix and past this feature.
+
+## …and I raised an alarm about U3 and was WRONG. Stated plainly, because the result is stronger than a null.
+
+Having discovered that `limitedParallelism(1)` serialises execution **slices**, not coroutines, I
+warned that U3's cover-traffic confinement reasoning might be built on the same misunderstanding —
+"if that's in U3's foundations, it's bigger than item 5." **It is not. I was wrong.**
+
+U3's argument does not merely happen to hold: its claims are scoped to a **suspension-free slice**, and
+that scoping is **compiler-enforced** by `publishOutgoing`/`publishReceipt` being non-suspending
+`private fun`s, with **real Mutexes** (`withSessionLock`, `DecoySendPairing`'s teardown Mutex) wherever
+cross-suspension exclusion is genuinely required. Seven rounds of adversarial review built something
+that **survived a correction to the reasoning underneath it**.
+
+**That is a stronger result than "no findings," and it only appears if you go looking to falsify your
+own foundation.** Recorded so the next person to find a shaky premise checks the foundation rather than
+assuming it, and so this particular alarm is not re-raised.
