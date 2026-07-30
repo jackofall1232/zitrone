@@ -1425,7 +1425,32 @@ class MessagingCoordinator(
             // redeem it the moment the envelope arrives.
             stage = "upload-blob"
             diag("send: uploading attachment blob")
-            api.uploadBlob(b64(blob.blobId), b64(blob.box))
+            // A 409 ON OUR OWN MEMOIZED TOKEN IS SUCCESS, NOT FAILURE (0.10.2 item 5, v6).
+            //
+            // THIS FIXES A LIVE DEFECT IN SHIPPED CODE, not a hypothetical: `blobId` is
+            // `sha256(token)` and the token is MEMOIZED per message, so the FIRST RETRY TAP OF ANY
+            // ATTACHMENT re-deposits the same id, the relay answers 409 `blob_exists`
+            // (`StoreBlob`'s `ON CONFLICT (blob_id) DO NOTHING` → `ErrBlobExists`), and the throw
+            // fails the retry. Every attachment retry is guaranteed to fail today.
+            //
+            // Treating it as success is safe end to end, and each clause was checked rather than
+            // assumed: the token carries 256 bits of OUR OWN entropy, so a 409 means OUR row is the
+            // one already stored — not a collision; `digest` and `size` in the control payload are
+            // derived from the PLAINTEXT and are therefore attempt-independent; the AES key is
+            // memoized with the token, so it opens whichever attempt's bytes the relay kept; and the
+            // nonce travels inside the box, so the stored ciphertext is self-describing.
+            //
+            // This is also why the reversal was abandoned: the memoized token plus `ON CONFLICT` is a
+            // DB-ENFORCED one-row-per-message cap that needs no network call, no bearer, no limiter
+            // budget and no surviving session. Five design plans proposed replacing it with
+            // best-effort client cleanup; all five were rejected, and this is the mechanism they
+            // would have given up.
+            runCatching { api.uploadBlob(b64(blob.blobId), b64(blob.box)) }
+                .onFailure { e ->
+                    val alreadyOurs = e is ApiClient.ApiException && e.code == HTTP_CONFLICT
+                    if (!alreadyOurs) throw e
+                    diag("send: blob already deposited under our token — reusing it")
+                }
 
             val envelope = MessageEnvelope(
                 id = messageId,
@@ -2429,6 +2454,9 @@ class MessagingCoordinator(
     }
 
     private companion object {
+        /** The relay's "this blob id is already stored" status — see the deposit call site. */
+        const val HTTP_CONFLICT = 409
+
         /** Logcat tag for boot-stage transport diagnostics — see class kdoc. */
         const val TAG = "ZitroneBoot"
 
