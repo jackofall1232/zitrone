@@ -1,0 +1,154 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Zitrone — settings network</title>
+<style>
+@font-face{font-family:'Space Grotesk';src:url('../../../../apps/android/app/src/main/res/font/space_grotesk_medium.ttf');font-weight:500}
+@font-face{font-family:'Space Grotesk';src:url('../../../../apps/android/app/src/main/res/font/space_grotesk_semibold.ttf');font-weight:600}
+@font-face{font-family:'Space Grotesk';src:url('../../../../apps/android/app/src/main/res/font/space_grotesk_bold.ttf');font-weight:700}
+@font-face{font-family:'Inter';src:url('../../../../apps/android/app/src/main/res/font/inter_regular.ttf');font-weight:400}
+@font-face{font-family:'Inter';src:url('../../../../apps/android/app/src/main/res/font/inter_medium.ttf');font-weight:500}
+@font-face{font-family:'JetBrains Mono';src:url('../../../../apps/android/app/src/main/res/font/jetbrains_mono_regular.ttf');font-weight:400}
+@font-face{font-family:'Noto Color Emoji';src:url('../assets/NotoColorEmoji.ttf')}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+html,body{width:432px;height:768px;overflow:hidden}
+body{background:#0D0C00;font-family:Inter,'Noto Color Emoji',sans-serif;color:#FAFAF2;position:relative}
+.screen{position:relative;width:432px;height:768px;overflow:hidden;background:#0D0C00}
+.wm{position:absolute;inset:0;pointer-events:none}
+.row{display:flex;flex-direction:row}
+.col{display:flex;flex-direction:column}
+.center{align-items:center;justify-content:center}
+.icon-btn{width:48px;height:48px;display:flex;align-items:center;justify-content:center;flex:none}
+.display{font-family:'Space Grotesk',Inter,sans-serif;letter-spacing:-0.03em}
+.mono{font-family:'JetBrains Mono',monospace}
+</style></head>
+<body><div class="screen">
+  <div id="scroller" class="col" style="height:100%;overflow:hidden">
+   <div id="scrollcol" class="col">
+    <div class="row" style="padding:6px 4px;align-items:center">
+      <div class="icon-btn"><svg style="width:24px;height:24px;display:block" fill="#F5E642" xmlns="http://www.w3.org/2000/svg"  viewBox="0 0 24 24" ><path d="M0 0h24v24H0z" fill="none"/><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg></div>
+      <span class="display" style="font-size:20px;font-weight:600;color:#FAFAF2">Settings</span>
+    </div>
+    <div id="sec-security" class="mono" style="font-size:12px;color:#5A5630;padding:24px 16px 8px 16px;text-transform:uppercase;background:#0D0C00">Security</div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#FAFAF2">Biometric unlock</span>
+        <span style="font-size:14px;color:#5A5630;line-height:1.35">Unlock with a fingerprint or face instead of your passphrase</span>
+      </div><div style="width:52px;height:32px;flex:none;border-radius:16px;background:#F5E642;position:relative"><div style="position:absolute;top:4px;left:24px;width:24px;height:24px;border-radius:50%;background:#0D0C00"></div></div></div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#FAFAF2">Auto-lock when backgrounded</span>
+        <span class="" style="font-size:14px;color:#5A5630;line-height:1.35">Locks the vault after 5 minutes in the background. Zitrone has no push notifications; messages only arrive while the app is open and unlocked. A shorter auto-lock is more private but means messages may not arrive until you next open the app.</span>
+      </div><span class="mono" style="font-size:14px;color:#F5E642;flex:none">5 minutes</span></div>
+    
+    <div class="col" style="padding:8px 16px">
+      <span style="font-size:14px;font-weight:500;color:#FAFAF2">Your identity key fingerprint</span>
+      <span style="font-size:14px;color:#5A5630;margin-bottom:8px">Contacts can compare this against what their device shows for you.</span>
+      <div class="col" style="background:#242100;border:1px solid #2E2B00;border-radius:12px;padding:16px;align-items:center;gap:4px"><div class="row" style="gap:12px"><span class="mono" style="font-size:16px;letter-spacing:.05em;color:#A8A070">3F7A</span><span class="mono" style="font-size:16px;letter-spacing:.05em;color:#A8A070">91C4</span><span class="mono" style="font-size:16px;letter-spacing:.05em;color:#A8A070">0B6E</span><span class="mono" style="font-size:16px;letter-spacing:.05em;color:#A8A070">82D5</span></div><div class="row" style="gap:12px"><span class="mono" style="font-size:16px;letter-spacing:.05em;color:#A8A070">F1A9</span><span class="mono" style="font-size:16px;letter-spacing:.05em;color:#A8A070">4C07</span><span class="mono" style="font-size:16px;letter-spacing:.05em;color:#A8A070">D3E8</span><span class="mono" style="font-size:16px;letter-spacing:.05em;color:#A8A070">5B26</span></div><div class="row" style="gap:12px"><span class="mono" style="font-size:16px;letter-spacing:.05em;color:#A8A070">A470</span><span class="mono" style="font-size:16px;letter-spacing:.05em;color:#A8A070">9E1D</span><span class="mono" style="font-size:16px;letter-spacing:.05em;color:#A8A070">C58B</span><span class="mono" style="font-size:16px;letter-spacing:.05em;color:#A8A070">306F</span></div><div class="row" style="gap:12px"><span class="mono" style="font-size:16px;letter-spacing:.05em;color:#A8A070">E2D4</span><span class="mono" style="font-size:16px;letter-spacing:.05em;color:#A8A070">7A19</span><span class="mono" style="font-size:16px;letter-spacing:.05em;color:#A8A070">B8C3</span></div></div>
+    </div>
+    <div id="sec-privacy" class="mono" style="font-size:12px;color:#5A5630;padding:24px 16px 8px 16px;text-transform:uppercase;background:#0D0C00">Privacy</div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#FAFAF2">Default disappearing timer</span>
+        <span class="" style="font-size:14px;color:#5A5630;line-height:1.35">Applied to new messages: Off</span>
+      </div><span class="mono" style="font-size:14px;color:#F5E642;flex:none">Off</span></div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#FAFAF2">Burn on read by default</span>
+        <span style="font-size:14px;color:#5A5630;line-height:1.35">New messages destroy themselves after the first open</span>
+      </div><div style="width:52px;height:32px;flex:none;border-radius:16px;background:#2A2500;border:2px solid #2E2B00;position:relative"><div style="position:absolute;top:6px;left:6px;width:16px;height:16px;border-radius:50%;background:#A8A070"></div></div></div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#FAFAF2">Send read receipts</span>
+        <span style="font-size:14px;color:#5A5630;line-height:1.35">Encrypted signal — the server never knows read status</span>
+      </div><div style="width:52px;height:32px;flex:none;border-radius:16px;background:#F5E642;position:relative"><div style="position:absolute;top:4px;left:24px;width:24px;height:24px;border-radius:50%;background:#0D0C00"></div></div></div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#FAFAF2">Lemon-drop compose button</span>
+        <span style="font-size:14px;color:#5A5630;line-height:1.35">Show the droplet in chat so you can seal a QR drop. Off by default — rare action.</span>
+      </div><div style="width:52px;height:32px;flex:none;border-radius:16px;background:#F5E642;position:relative"><div style="position:absolute;top:4px;left:24px;width:24px;height:24px;border-radius:50%;background:#0D0C00"></div></div></div>
+    <div id="sec-notifications" class="mono" style="font-size:12px;color:#5A5630;padding:24px 16px 8px 16px;text-transform:uppercase;background:#0D0C00">Notifications</div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#FAFAF2">Repeat unread reminders</span>
+        <span style="font-size:14px;color:#5A5630;line-height:1.35">While new messages keep arriving in an unread chat, re-alert roughly every 2 minutes until you open it. Off: new messages still alert (at most one per chat every 2 minutes), but never repeat for the same unread pile.</span>
+      </div><div style="width:52px;height:32px;flex:none;border-radius:16px;background:#F5E642;position:relative"><div style="position:absolute;top:4px;left:24px;width:24px;height:24px;border-radius:50%;background:#0D0C00"></div></div></div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#FAFAF2">Notification sound</span>
+        <span class="" style="font-size:14px;color:#5A5630;line-height:1.35">Plays the Zitrone tone by default. Tap to pick your own sound or silence it.</span>
+      </div><span class="mono" style="font-size:14px;color:#F5E642;flex:none">Change</span></div>
+    <div id="sec-account" class="mono" style="font-size:12px;color:#5A5630;padding:24px 16px 8px 16px;text-transform:uppercase;background:#0D0C00">Account</div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#FAFAF2">Account ID</span>
+        <span class="mono" style="font-size:12px;color:#5A5630;line-height:1.35">a3f1c2e4-7b96-4d28-9c05-e1b8a4d7f632</span>
+      </div></div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#FF4444">Pucker Burn password</span>
+        <span class="" style="font-size:14px;color:#5A5630;line-height:1.35">A separate password that erases everything Zitrone holds on this device when entered at the lock screen.</span>
+      </div></div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#FF4444">Delete account</span>
+        <span class="" style="font-size:14px;color:#5A5630;line-height:1.35">Purges every key, prekey and pending envelope. Irreversible.</span>
+      </div></div>
+    <div id="sec-network" class="mono" style="font-size:12px;color:#5A5630;padding:24px 16px 8px 16px;text-transform:uppercase;background:#0D0C00">Network</div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#FAFAF2">Use I2P when available</span>
+        <span style="font-size:14px;color:#5A5630;line-height:1.35">On, but no I2P app found — Zitrone will use your normal connection. Install the official I2P app to upgrade automatically.</span>
+      </div><div style="width:52px;height:32px;flex:none;border-radius:16px;background:#F5E642;position:relative"><div style="position:absolute;top:4px;left:24px;width:24px;height:24px;border-radius:50%;background:#0D0C00"></div></div></div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#F5E642">Get the I2P app</span>
+        <span class="" style="font-size:14px;color:#5A5630;line-height:1.35">Install the official I2P app, then come back — routing turns on automatically.</span>
+      </div></div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#FAFAF2">…or get the I2P app on F-Droid</span>
+        <span class="mono" style="font-size:12px;color:#5A5630;line-height:1.35">https://f-droid.org/packages/net.i2p.android.router/</span>
+      </div></div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#FAFAF2">Route through Tor</span>
+        <span style="font-size:14px;color:#5A5630;line-height:1.35">Requires Orbot — install it first, then enable this.</span>
+      </div><div style="opacity:.38;width:52px;height:32px;flex:none;border-radius:16px;background:#2A2500;border:2px solid #2E2B00;position:relative"><div style="position:absolute;top:6px;left:6px;width:16px;height:16px;border-radius:50%;background:#A8A070"></div></div></div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#F5E642">Get Orbot</span>
+        <span class="" style="font-size:14px;color:#5A5630;line-height:1.35">Install the Tor proxy app, then come back and enable Tor.</span>
+      </div></div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#FAFAF2">…or get Orbot on F-Droid</span>
+        <span class="mono" style="font-size:12px;color:#5A5630;line-height:1.35">https://f-droid.org/packages/org.torproject.android/</span>
+      </div></div>
+    
+    <div class="row" style="padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#FAFAF2">Connection</span>
+        <span style="font-size:14px;color:#FF8C00">Connected over clearnet</span>
+        <span style="font-size:14px;color:#5A5630;line-height:1.35">Still end-to-end encrypted, but your IP may be visible. Enable Tor above for full anonymity.</span>
+      </div>
+      <svg width="24" height="24" viewBox="0 0 24 24" style="display:block">
+<circle cx="12" cy="12" r="11.40" fill="none" stroke="rgba(245,230,66,.6)" stroke-width="1.20"/>
+<path d="M12.59 2.30 A9.72 9.72 0 0 1 18.44 4.72 L13.43 10.38 A2.16 2.16 0 0 0 12.13 9.84 Z" fill="#F5E642"/><path d="M19.28 5.56 A9.72 9.72 0 0 1 21.70 11.41 L14.16 11.87 A2.16 2.16 0 0 0 13.62 10.57 Z" fill="#F5E642"/><path d="M21.70 12.59 A9.72 9.72 0 0 1 19.28 18.44 L13.62 13.43 A2.16 2.16 0 0 0 14.16 12.13 Z" fill="#F5E642"/><path d="M18.44 19.28 A9.72 9.72 0 0 1 12.59 21.70 L12.13 14.16 A2.16 2.16 0 0 0 13.43 13.62 Z" fill="#F5E642"/><path d="M11.41 21.70 A9.72 9.72 0 0 1 5.56 19.28 L10.57 13.62 A2.16 2.16 0 0 0 11.87 14.16 Z" fill="#F5E642"/><path d="M4.72 18.44 A9.72 9.72 0 0 1 2.30 12.59 L9.84 12.13 A2.16 2.16 0 0 0 10.38 13.43 Z" fill="#F5E642"/><path d="M2.30 11.41 A9.72 9.72 0 0 1 4.72 5.56 L10.38 10.57 A2.16 2.16 0 0 0 9.84 11.87 Z" fill="#2E2B00"/><path d="M5.56 4.72 A9.72 9.72 0 0 1 11.41 2.30 L11.87 9.84 A2.16 2.16 0 0 0 10.57 10.38 Z" fill="#2E2B00"/><circle cx="12" cy="12" r="0.97" fill="#F5E642"/></svg>
+    </div>
+    <div id="sec-diagnostics" class="mono" style="font-size:12px;color:#5A5630;padding:24px 16px 8px 16px;text-transform:uppercase;background:#0D0C00">Diagnostics</div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#FAFAF2">Connection diagnostics</span>
+        <span class="" style="font-size:14px;color:#5A5630;line-height:1.35">On-device log of registration &amp; connection attempts. Open it if you’re stuck on “Connecting…”, and share it in a bug report.</span>
+      </div></div>
+    <div id="sec-appearance" class="mono" style="font-size:12px;color:#5A5630;padding:24px 16px 8px 16px;text-transform:uppercase;background:#0D0C00">Appearance</div>
+    <div class="row" style="background:#242100;padding:12px 16px;align-items:center;gap:12px">
+      <div class="col" style="flex:1">
+        <span style="font-size:14px;font-weight:500;color:#FAFAF2">Theme</span>
+        <span class="" style="font-size:14px;color:#5A5630;line-height:1.35">Dark. There is no light mode — lemons grow in the dark here.</span>
+      </div><span class="mono" style="font-size:14px;color:#A8A070;flex:none">Dark</span></div>
+    <div style="height:24px"></div>
+   </div>
+  </div>
+</div>
+<script>window.__wmDone=true;</script>
+</body></html>

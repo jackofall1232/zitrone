@@ -1,0 +1,129 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Zitrone — chat list</title>
+<style>
+@font-face{font-family:'Space Grotesk';src:url('../../../../apps/android/app/src/main/res/font/space_grotesk_medium.ttf');font-weight:500}
+@font-face{font-family:'Space Grotesk';src:url('../../../../apps/android/app/src/main/res/font/space_grotesk_semibold.ttf');font-weight:600}
+@font-face{font-family:'Space Grotesk';src:url('../../../../apps/android/app/src/main/res/font/space_grotesk_bold.ttf');font-weight:700}
+@font-face{font-family:'Inter';src:url('../../../../apps/android/app/src/main/res/font/inter_regular.ttf');font-weight:400}
+@font-face{font-family:'Inter';src:url('../../../../apps/android/app/src/main/res/font/inter_medium.ttf');font-weight:500}
+@font-face{font-family:'JetBrains Mono';src:url('../../../../apps/android/app/src/main/res/font/jetbrains_mono_regular.ttf');font-weight:400}
+@font-face{font-family:'Noto Color Emoji';src:url('../assets/NotoColorEmoji.ttf')}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+html,body{width:432px;height:768px;overflow:hidden}
+body{background:#0D0C00;font-family:Inter,'Noto Color Emoji',sans-serif;color:#FAFAF2;position:relative}
+.screen{position:relative;width:432px;height:768px;overflow:hidden;background:#0D0C00}
+.wm{position:absolute;inset:0;pointer-events:none}
+.row{display:flex;flex-direction:row}
+.col{display:flex;flex-direction:column}
+.center{align-items:center;justify-content:center}
+.icon-btn{width:48px;height:48px;display:flex;align-items:center;justify-content:center;flex:none}
+.display{font-family:'Space Grotesk',Inter,sans-serif;letter-spacing:-0.03em}
+.mono{font-family:'JetBrains Mono',monospace}
+</style></head>
+<body><div class="screen">
+  <div id="wm" class="wm"></div>
+  <div class="col" style="position:relative;height:100%">
+    <div class="row" style="padding:12px 16px;align-items:center">
+      <span class="display" style="flex:1;font-size:20px;font-weight:600;letter-spacing:0.18em;color:#F5E642">ZITRONE</span>
+      <div class="icon-btn"><svg style="width:24px;height:24px;display:block" fill="#F5E642" xmlns="http://www.w3.org/2000/svg" enable-background="new 0 0 24 24"  viewBox="0 0 24 24" ><rect fill="none" height="24" width="24"/><path d="M9.5,6.5v3h-3v-3H9.5 M11,5H5v6h6V5L11,5z M9.5,14.5v3h-3v-3H9.5 M11,13H5v6h6V13L11,13z M17.5,6.5v3h-3v-3H17.5 M19,5h-6v6 h6V5L19,5z M13,13h1.5v1.5H13V13z M14.5,14.5H16V16h-1.5V14.5z M16,13h1.5v1.5H16V13z M13,16h1.5v1.5H13V16z M14.5,17.5H16V19h-1.5 V17.5z M16,16h1.5v1.5H16V16z M17.5,14.5H19V16h-1.5V14.5z M17.5,17.5H19V19h-1.5V17.5z M22,7h-2V4h-3V2h5V7z M22,22v-5h-2v3h-3v2 H22z M2,22h5v-2H4v-3H2V22z M2,2v5h2V4h3V2H2z"/></svg></div>
+      <div class="icon-btn"><svg style="width:24px;height:24px;display:block" fill="#F5E642" xmlns="http://www.w3.org/2000/svg"  viewBox="0 0 24 24" ><path d="M0 0h24v24H0V0z" fill="none"/><path d="M19.43 12.98c.04-.32.07-.64.07-.98 0-.34-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.09-.16-.26-.25-.44-.25-.06 0-.12.01-.17.03l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.46 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1c-.06-.02-.12-.03-.18-.03-.17 0-.34.09-.43.25l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98 0 .33.03.66.07.98l-2.11 1.65c-.19.15-.24.42-.12.64l2 3.46c.09.16.26.25.44.25.06 0 .12-.01.17-.03l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.06.02.12.03.18.03.17 0 .34-.09.43-.25l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zm-1.98-1.71c.04.31.05.52.05.73 0 .21-.02.43-.05.73l-.14 1.13.89.7 1.08.84-.7 1.21-1.27-.51-1.04-.42-.9.68c-.43.32-.84.56-1.25.73l-1.06.43-.16 1.13-.2 1.35h-1.4l-.19-1.35-.16-1.13-1.06-.43c-.43-.18-.83-.41-1.23-.71l-.91-.7-1.06.43-1.27.51-.7-1.21 1.08-.84.89-.7-.14-1.13c-.03-.31-.05-.54-.05-.74s.02-.43.05-.73l.14-1.13-.89-.7-1.08-.84.7-1.21 1.27.51 1.04.42.9-.68c.43-.32.84-.56 1.25-.73l1.06-.43.16-1.13.2-1.35h1.39l.19 1.35.16 1.13 1.06.43c.43.18.83.41 1.23.71l.91.7 1.06-.43 1.27-.51.7 1.21-1.07.85-.89.7.14 1.13zM12 8c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4-1.79-4-4-4zm0 6c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg></div>
+    </div>
+    <div class="row" style="margin:0 16px;min-height:40px;background:#242100;border:1px solid #2E2B00;border-radius:999px;padding:8px 14px;align-items:center">
+      <svg style="width:18px;height:18px;display:block" fill="#A8A070" xmlns="http://www.w3.org/2000/svg"  viewBox="0 0 24 24" ><path d="M0 0h24v24H0z" fill="none"/><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+      <span style="font-size:15px;color:#5A5630;padding-left:8px">Search</span>
+    </div>
+    <div class="col" style="flex:1;padding-top:8px"><div class="row" style="padding:10px 16px;align-items:center;gap:12px">
+      <div style="width:44px;height:44px;flex:none;border:2px solid #4ADE80;border-radius:50%;padding:3px"><div style="width:100%;height:100%;border-radius:50%;background:linear-gradient(135deg,#F5E642,#E8B800);display:flex;align-items:center;justify-content:center"><span style="font-size:16px;font-weight:500;color:#0D0C00">M</span></div></div>
+      <div class="col" style="flex:1;min-width:0">
+        <span style="font-size:16px;font-weight:500;color:#FAFAF2;white-space:nowrap">Mika</span>
+        <span style="font-size:14px;color:#5A5630;white-space:nowrap">Encrypted message</span>
+      </div>
+      <div class="col" style="align-items:flex-end;gap:4px"><span class="mono" style="font-size:12px;color:#5A5630">14:32</span><div style="background:#F5E642;border-radius:999px;padding:2px 8px"><span style="font-size:12px;font-weight:500;color:#0D0C00">2</span></div></div>
+    </div>
+<div class="row" style="padding:10px 16px;align-items:center;gap:12px">
+      <div style="width:44px;height:44px;flex:none;border-radius:50%"><div style="width:100%;height:100%;border-radius:50%;background:linear-gradient(135deg,#F5E642,#E8B800);display:flex;align-items:center;justify-content:center"><span style="font-size:16px;font-weight:500;color:#0D0C00">A</span></div></div>
+      <div class="col" style="flex:1;min-width:0">
+        <span style="font-size:16px;font-weight:500;color:#FAFAF2;white-space:nowrap">Ari S.</span>
+        <span style="font-size:14px;color:#5A5630;white-space:nowrap">Encrypted message</span>
+      </div>
+      <div class="col" style="align-items:flex-end;gap:4px"><span class="mono" style="font-size:12px;color:#5A5630">12:07</span></div>
+    </div>
+<div class="row" style="padding:10px 16px;align-items:center;gap:12px">
+      <div style="width:44px;height:44px;flex:none;border:2px solid #4ADE80;border-radius:50%;padding:3px"><div style="width:100%;height:100%;border-radius:50%;background:linear-gradient(135deg,#F5E642,#E8B800);display:flex;align-items:center;justify-content:center"><span style="font-size:16px;font-weight:500;color:#0D0C00">J</span></div></div>
+      <div class="col" style="flex:1;min-width:0">
+        <span style="font-size:16px;font-weight:500;color:#FAFAF2;white-space:nowrap">Jonas</span>
+        <span style="font-size:14px;color:#5A5630;white-space:nowrap">Encrypted message</span>
+      </div>
+      <div class="col" style="align-items:flex-end;gap:4px"><span class="mono" style="font-size:12px;color:#5A5630">09:41</span></div>
+    </div>
+<div class="row" style="padding:10px 16px;align-items:center;gap:12px">
+      <div style="width:44px;height:44px;flex:none;border-radius:50%"><div style="width:100%;height:100%;border-radius:50%;background:linear-gradient(135deg,#F5E642,#E8B800);display:flex;align-items:center;justify-content:center"><span style="font-size:16px;font-weight:500;color:#0D0C00">P</span></div></div>
+      <div class="col" style="flex:1;min-width:0">
+        <span style="font-size:16px;font-weight:500;color:#FAFAF2;white-space:nowrap">Priya</span>
+        <span style="font-size:14px;color:#5A5630;white-space:nowrap">Encrypted message</span>
+      </div>
+      <div class="col" style="align-items:flex-end;gap:4px"><span class="mono" style="font-size:12px;color:#5A5630">08:15</span><div style="background:#F5E642;border-radius:999px;padding:2px 8px"><span style="font-size:12px;font-weight:500;color:#0D0C00">1</span></div></div>
+    </div>
+<div class="row" style="padding:10px 16px;align-items:center;gap:12px">
+      <div style="width:44px;height:44px;flex:none;border-radius:50%"><div style="width:100%;height:100%;border-radius:50%;background:linear-gradient(135deg,#F5E642,#E8B800);display:flex;align-items:center;justify-content:center"><span style="font-size:16px;font-weight:500;color:#0D0C00">T</span></div></div>
+      <div class="col" style="flex:1;min-width:0">
+        <span style="font-size:16px;font-weight:500;color:#FAFAF2;white-space:nowrap">Theo</span>
+        <span style="font-size:14px;color:#5A5630;white-space:nowrap">Encrypted message</span>
+      </div>
+      <div class="col" style="align-items:flex-end;gap:4px"><span class="mono" style="font-size:12px;color:#5A5630">07:58</span></div>
+    </div>
+<div class="row" style="padding:10px 16px;align-items:center;gap:12px">
+      <div style="width:44px;height:44px;flex:none;border-radius:50%"><div style="width:100%;height:100%;border-radius:50%;background:linear-gradient(135deg,#F5E642,#E8B800);display:flex;align-items:center;justify-content:center"><span style="font-size:16px;font-weight:500;color:#0D0C00">L</span></div></div>
+      <div class="col" style="flex:1;min-width:0">
+        <span style="font-size:16px;font-weight:500;color:#FAFAF2;white-space:nowrap">Lena</span>
+        <span style="font-size:14px;color:#5A5630;white-space:nowrap">Encrypted message</span>
+      </div>
+      <div class="col" style="align-items:flex-end;gap:4px"><span class="mono" style="font-size:12px;color:#5A5630">07:12</span></div>
+    </div></div>
+  </div>
+  <div style="position:absolute;right:24px;bottom:24px;width:56px;height:56px;border-radius:50%;background:#F5E642;display:flex;align-items:center;justify-content:center;box-shadow:0 0 16px rgba(245,230,66,.35),0 6px 14px rgba(245,230,66,.28)">
+    <svg style="width:24px;height:24px;display:block" fill="#0D0C00" xmlns="http://www.w3.org/2000/svg"  viewBox="0 0 24 24" ><path d="M0 0h24v24H0z" fill="none"/><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+  </div>
+</div>
+<script>
+async function paintWatermark(fp){
+  const el=document.getElementById('wm'); if(!el){window.__wmDone=true;return;}
+  await document.fonts.ready;
+  const d=2;                       // density, coerceAtMost(2f)
+  const s=Math.round(512*d);       // tile edge, physical px
+  const c=document.createElement('canvas'); c.width=s; c.height=s;
+  const ctx=c.getContext('2d');
+  ctx.font=(12.5*d)+'px "JetBrains Mono", monospace';
+  ctx.fillStyle='#F5E642';
+  ctx.globalAlpha=0.07;
+  ctx.textAlign='left'; ctx.textBaseline='middle';
+  const runWidth=ctx.measureText(fp).width;
+  const pitch=runWidth+12.5*d*4;
+  const rowGap=28*d;
+  const theta=-24*Math.PI/180, cos=Math.cos(theta), sin=Math.sin(theta);
+  const span=s*1.6, half=s/2;
+  const anchors=[];
+  let eta=-span,row=0;
+  while(eta<span){
+    const off=(row%2===1)?pitch*0.5:0;
+    let xi=-span+off;
+    while(xi<span){
+      const ax=half+xi*cos-eta*sin, ay=half+xi*sin+eta*cos;
+      if(ax>=0&&ax<s&&ay>=0&&ay<s) anchors.push([ax,ay]);
+      xi+=pitch;
+    }
+    eta+=rowGap; row++;
+  }
+  for(const [ax,ay] of anchors){
+    for(let dx=-1;dx<=1;dx++)for(let dy=-1;dy<=1;dy++){
+      ctx.save(); ctx.translate(ax+dx*s,ay+dy*s); ctx.rotate(theta);
+      ctx.fillText(fp,0,0); ctx.restore();
+    }
+  }
+  el.style.backgroundImage='url('+c.toDataURL()+')';
+  const cssTile=(512*d)/2.5;       // physical px -> CSS px at dsf 2.5
+  el.style.backgroundSize=cssTile+'px '+cssTile+'px';
+  window.__wmDone=true;
+}
+paintWatermark("3F7A 91C4 0B6E 82D5 F1A9 4C07 D3E8 5B26 A470 9E1D C58B 306F E2D4 7A19 B8C3");</script>
+</body></html>

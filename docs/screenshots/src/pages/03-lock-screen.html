@@ -1,0 +1,43 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Zitrone — lock screen</title>
+<style>
+@font-face{font-family:'Space Grotesk';src:url('../../../../apps/android/app/src/main/res/font/space_grotesk_medium.ttf');font-weight:500}
+@font-face{font-family:'Space Grotesk';src:url('../../../../apps/android/app/src/main/res/font/space_grotesk_semibold.ttf');font-weight:600}
+@font-face{font-family:'Space Grotesk';src:url('../../../../apps/android/app/src/main/res/font/space_grotesk_bold.ttf');font-weight:700}
+@font-face{font-family:'Inter';src:url('../../../../apps/android/app/src/main/res/font/inter_regular.ttf');font-weight:400}
+@font-face{font-family:'Inter';src:url('../../../../apps/android/app/src/main/res/font/inter_medium.ttf');font-weight:500}
+@font-face{font-family:'JetBrains Mono';src:url('../../../../apps/android/app/src/main/res/font/jetbrains_mono_regular.ttf');font-weight:400}
+@font-face{font-family:'Noto Color Emoji';src:url('../assets/NotoColorEmoji.ttf')}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+html,body{width:432px;height:768px;overflow:hidden}
+body{background:#0D0C00;font-family:Inter,'Noto Color Emoji',sans-serif;color:#FAFAF2;position:relative}
+.screen{position:relative;width:432px;height:768px;overflow:hidden;background:#0D0C00}
+.wm{position:absolute;inset:0;pointer-events:none}
+.row{display:flex;flex-direction:row}
+.col{display:flex;flex-direction:column}
+.center{align-items:center;justify-content:center}
+.icon-btn{width:48px;height:48px;display:flex;align-items:center;justify-content:center;flex:none}
+.display{font-family:'Space Grotesk',Inter,sans-serif;letter-spacing:-0.03em}
+.mono{font-family:'JetBrains Mono',monospace}
+</style></head>
+<body><div class="screen">
+  <div class="col" style="height:100%;padding:0 32px;align-items:center;justify-content:center">
+    <svg width="96" height="96" viewBox="0 0 96 96" style="display:block">
+<circle cx="48" cy="48" r="45.60" fill="none" stroke="#D4C200" stroke-width="4.80"/>
+<path d="M50.37 9.19 A38.88 38.88 0 0 1 73.76 18.88 L53.73 41.53 A8.64 8.64 0 0 0 48.53 39.38 Z" fill="#F5E642"/><path d="M77.12 22.24 A38.88 38.88 0 0 1 86.81 45.63 L56.62 47.47 A8.64 8.64 0 0 0 54.47 42.27 Z" fill="#F5E642"/><path d="M86.81 50.37 A38.88 38.88 0 0 1 77.12 73.76 L54.47 53.73 A8.64 8.64 0 0 0 56.62 48.53 Z" fill="#F5E642"/><path d="M73.76 77.12 A38.88 38.88 0 0 1 50.37 86.81 L48.53 56.62 A8.64 8.64 0 0 0 53.73 54.47 Z" fill="#F5E642"/><path d="M45.63 86.81 A38.88 38.88 0 0 1 22.24 77.12 L42.27 54.47 A8.64 8.64 0 0 0 47.47 56.62 Z" fill="#F5E642"/><path d="M18.88 73.76 A38.88 38.88 0 0 1 9.19 50.37 L39.38 48.53 A8.64 8.64 0 0 0 41.53 53.73 Z" fill="#F5E642"/><path d="M9.19 45.63 A38.88 38.88 0 0 1 18.88 22.24 L41.53 42.27 A8.64 8.64 0 0 0 39.38 47.47 Z" fill="#F5E642"/><path d="M22.24 18.88 A38.88 38.88 0 0 1 45.63 9.19 L47.47 39.38 A8.64 8.64 0 0 0 42.27 41.53 Z" fill="#F5E642"/><circle cx="48" cy="48" r="3.89" fill="#F5E642"/></svg>
+    <span class="display" style="font-size:24px;font-weight:600;color:#F5E642;margin-top:24px">Locked</span>
+    <span style="font-size:15px;color:#A8A070;text-align:center;margin-top:8px;margin-bottom:24px">Your keys stay sealed until you unlock.</span>
+    <div style="position:relative;width:100%;height:56px;border:2px solid #F5E642;border-radius:6px;display:flex;align-items:center;padding:0 16px">
+      <span style="position:absolute;top:-8px;left:12px;background:#0D0C00;padding:0 4px;font-size:12px;color:#F5E642">Passphrase</span>
+      <span style="font-size:16px;letter-spacing:3px;color:#FAFAF2">••••••••••••</span><span style="display:inline-block;width:1.5px;height:18px;background:#F5E642;margin-left:2px"></span>
+    </div>
+    <div style="margin-top:16px;height:40px;border-radius:20px;background:#F5E642;display:flex;align-items:center;padding:0 24px">
+      <span style="font-size:14px;font-weight:500;color:#0D0C00">Unlock</span>
+    </div>
+    <div style="margin-top:12px;height:40px;border-radius:20px;border:1px solid #2E2B00;display:flex;align-items:center;padding:0 24px">
+      <span style="font-size:14px;font-weight:500;color:#F5E642">Use biometrics</span>
+    </div>
+  </div>
+</div>
+<script>window.__wmDone=true;</script>
+</body></html>

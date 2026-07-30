@@ -1,0 +1,145 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Zitrone — chat</title>
+<style>
+@font-face{font-family:'Space Grotesk';src:url('../../../../apps/android/app/src/main/res/font/space_grotesk_medium.ttf');font-weight:500}
+@font-face{font-family:'Space Grotesk';src:url('../../../../apps/android/app/src/main/res/font/space_grotesk_semibold.ttf');font-weight:600}
+@font-face{font-family:'Space Grotesk';src:url('../../../../apps/android/app/src/main/res/font/space_grotesk_bold.ttf');font-weight:700}
+@font-face{font-family:'Inter';src:url('../../../../apps/android/app/src/main/res/font/inter_regular.ttf');font-weight:400}
+@font-face{font-family:'Inter';src:url('../../../../apps/android/app/src/main/res/font/inter_medium.ttf');font-weight:500}
+@font-face{font-family:'JetBrains Mono';src:url('../../../../apps/android/app/src/main/res/font/jetbrains_mono_regular.ttf');font-weight:400}
+@font-face{font-family:'Noto Color Emoji';src:url('../assets/NotoColorEmoji.ttf')}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+html,body{width:432px;height:768px;overflow:hidden}
+body{background:#0D0C00;font-family:Inter,'Noto Color Emoji',sans-serif;color:#FAFAF2;position:relative}
+.screen{position:relative;width:432px;height:768px;overflow:hidden;background:#0D0C00}
+.wm{position:absolute;inset:0;pointer-events:none}
+.row{display:flex;flex-direction:row}
+.col{display:flex;flex-direction:column}
+.center{align-items:center;justify-content:center}
+.icon-btn{width:48px;height:48px;display:flex;align-items:center;justify-content:center;flex:none}
+.display{font-family:'Space Grotesk',Inter,sans-serif;letter-spacing:-0.03em}
+.mono{font-family:'JetBrains Mono',monospace}
+</style></head>
+<body><div class="screen">
+  <div id="wm" class="wm"></div>
+  <div class="col" style="position:relative;height:100%">
+    <div class="row" style="background:#1A1800;padding:6px 4px;align-items:center">
+      <div class="icon-btn"><svg style="width:24px;height:24px;display:block" fill="#F5E642" xmlns="http://www.w3.org/2000/svg"  viewBox="0 0 24 24" ><path d="M0 0h24v24H0z" fill="none"/><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg></div>
+      <div style="width:44px;height:44px;flex:none;border:2px solid #4ADE80;border-radius:50%;padding:3px"><div style="width:100%;height:100%;border-radius:50%;background:linear-gradient(135deg,#F5E642,#E8B800);display:flex;align-items:center;justify-content:center"><span style="font-size:16px;font-weight:500;color:#0D0C00">M</span></div></div>
+      <div class="col" style="flex:1;padding:0 10px;min-width:0">
+        <span style="font-size:16px;font-weight:500;color:#FAFAF2">Mika</span>
+        <span class="mono" style="font-size:12px;color:#5A5630">Encrypted · tap name to edit</span>
+      </div>
+      <div class="row" style="background:#242100;border-radius:999px;padding:5px 10px;align-items:center;gap:6px;flex:none">
+        <svg width="14" height="14" viewBox="0 0 14 14" style="display:block">
+<circle cx="7" cy="7" r="6.50" fill="none" stroke="rgba(74,222,128,.6)" stroke-width="1.00"/>
+<path d="M7.31 1.91 A5.10 5.10 0 0 1 10.38 3.18 L7.83 6.06 A1.26 1.26 0 0 0 7.08 5.74 Z" fill="#4ADE80"/><path d="M10.82 3.62 A5.10 5.10 0 0 1 12.09 6.69 L8.26 6.92 A1.26 1.26 0 0 0 7.94 6.17 Z" fill="#4ADE80"/><path d="M12.09 7.31 A5.10 5.10 0 0 1 10.82 10.38 L7.94 7.83 A1.26 1.26 0 0 0 8.26 7.08 Z" fill="#4ADE80"/><path d="M10.38 10.82 A5.10 5.10 0 0 1 7.31 12.09 L7.08 8.26 A1.26 1.26 0 0 0 7.83 7.94 Z" fill="#4ADE80"/><path d="M6.69 12.09 A5.10 5.10 0 0 1 3.62 10.82 L6.17 7.94 A1.26 1.26 0 0 0 6.92 8.26 Z" fill="#4ADE80"/><path d="M3.18 10.38 A5.10 5.10 0 0 1 1.91 7.31 L5.74 7.08 A1.26 1.26 0 0 0 6.06 7.83 Z" fill="#4ADE80"/><path d="M1.91 6.69 A5.10 5.10 0 0 1 3.18 3.62 L6.06 6.17 A1.26 1.26 0 0 0 5.74 6.92 Z" fill="#4ADE80"/><path d="M3.62 3.18 A5.10 5.10 0 0 1 6.69 1.91 L6.92 5.74 A1.26 1.26 0 0 0 6.17 6.06 Z" fill="#4ADE80"/><circle cx="7" cy="7" r="0.57" fill="#4ADE80"/></svg>
+        <span style="font-size:12px;font-weight:500;color:#4ADE80;white-space:nowrap">Keys verified</span>
+      </div>
+      <div class="icon-btn"><svg style="width:24px;height:24px;display:block" fill="#FF8C00" xmlns="http://www.w3.org/2000/svg" enable-background="new 0 0 24 24"  viewBox="0 0 24 24" ><g><rect fill="none" height="24" width="24"/></g><g><g><g><path d="M12,12.9l-2.13,2.09C9.31,15.55,9,16.28,9,17.06C9,18.68,10.35,20,12,20s3-1.32,3-2.94c0-0.78-0.31-1.52-0.87-2.07 L12,12.9z"/></g><g><path d="M16,6l-0.44,0.55C14.38,8.02,12,7.19,12,5.3V2c0,0-8,4-8,11c0,2.92,1.56,5.47,3.89,6.86C7.33,19.07,7,18.1,7,17.06 c0-1.32,0.52-2.56,1.47-3.5L12,10.1l3.53,3.47c0.95,0.93,1.47,2.17,1.47,3.5c0,1.02-0.31,1.96-0.85,2.75 c1.89-1.15,3.29-3.06,3.71-5.3C20.52,10.97,18.79,7.62,16,6z"/></g></g></g></svg></div>
+    </div>
+    <div style="padding:6px 0;text-align:center">
+      <span style="font-size:12px;font-weight:500;color:rgba(245,230,66,.55)">🔒 End-to-end encrypted</span>
+    </div>
+    <div class="col" style="flex:1;padding:8px 12px;gap:6px;justify-content:flex-end;overflow:hidden">
+      <div style="padding:8px 0;text-align:center"><span class="mono" style="font-size:12px;color:#5A5630">30 Jul 2026</span></div>
+<div class="row" style="justify-content:flex-start">
+    <div style="max-width:72%;padding:10px 14px;background:rgba(36,33,0,0.851);border:1px solid #2E2B00;border-radius:18px 18px 18px 4px">
+      <div style="font-size:15px;line-height:1.35;color:#FAFAF2">Did the shipment clear?</div>
+      <div class="row" style="justify-content:flex-end;align-items:center;gap:4px;padding-top:4px"><span class="mono" style="font-size:12px;color:#5A5630">16:58</span></div>
+    </div>
+  </div>
+<div class="row" style="justify-content:flex-end">
+    <div style="max-width:72%;padding:10px 14px;background:rgba(245,230,66,0.922);border-radius:18px 18px 4px 18px">
+      <div style="font-size:15px;line-height:1.35;color:#0D0C00">Cleared this morning. Paperwork's in the vault.</div>
+      <div class="row" style="justify-content:flex-end;align-items:center;gap:4px;padding-top:4px"><span class="mono" style="font-size:12px;color:rgba(13,12,0,.6)">17:00</span><span class="mono" style="font-size:12px;color:#0D0C00">✓✓</span></div>
+    </div>
+  </div>
+<div class="row" style="justify-content:flex-start">
+    <div style="max-width:72%;padding:10px 14px;background:rgba(36,33,0,0.851);border:1px solid #2E2B00;border-radius:18px 18px 18px 4px">
+      <div style="font-size:15px;line-height:1.35;color:#FAFAF2">Perfect. Market at six?</div>
+      <div class="row" style="justify-content:flex-end;align-items:center;gap:4px;padding-top:4px"><span class="mono" style="font-size:12px;color:#5A5630">17:01</span></div>
+    </div>
+  </div>
+<div class="row" style="justify-content:flex-end">
+    <div style="max-width:72%;padding:10px 14px;background:rgba(245,230,66,0.922);border-radius:18px 18px 4px 18px">
+      <div style="font-size:15px;line-height:1.35;color:#0D0C00">Works — I'll bring the crates.</div>
+      <div class="row" style="justify-content:flex-end;align-items:center;gap:4px;padding-top:4px"><span class="mono" style="font-size:12px;color:rgba(13,12,0,.6)">17:02</span><svg width="14" height="14" viewBox="0 0 14 14" style="display:block">
+<circle cx="7" cy="7" r="6.50" fill="none" stroke="rgba(245,230,66,.5)" stroke-width="1.00"/>
+<path d="M7.31 1.91 A5.10 5.10 0 0 1 10.38 3.18 L7.83 6.06 A1.26 1.26 0 0 0 7.08 5.74 Z" fill="#F5E642"/><path d="M10.82 3.62 A5.10 5.10 0 0 1 12.09 6.69 L8.26 6.92 A1.26 1.26 0 0 0 7.94 6.17 Z" fill="#F5E642"/><path d="M12.09 7.31 A5.10 5.10 0 0 1 10.82 10.38 L7.94 7.83 A1.26 1.26 0 0 0 8.26 7.08 Z" fill="#F5E642"/><path d="M10.38 10.82 A5.10 5.10 0 0 1 7.31 12.09 L7.08 8.26 A1.26 1.26 0 0 0 7.83 7.94 Z" fill="#F5E642"/><path d="M6.69 12.09 A5.10 5.10 0 0 1 3.62 10.82 L6.17 7.94 A1.26 1.26 0 0 0 6.92 8.26 Z" fill="#F5E642"/><path d="M3.18 10.38 A5.10 5.10 0 0 1 1.91 7.31 L5.74 7.08 A1.26 1.26 0 0 0 6.06 7.83 Z" fill="#F5E642"/><path d="M1.91 6.69 A5.10 5.10 0 0 1 3.18 3.62 L6.06 6.17 A1.26 1.26 0 0 0 5.74 6.92 Z" fill="#F5E642"/><path d="M3.62 3.18 A5.10 5.10 0 0 1 6.69 1.91 L6.92 5.74 A1.26 1.26 0 0 0 6.17 6.06 Z" fill="#F5E642"/><circle cx="7" cy="7" r="0.57" fill="#F5E642"/></svg><span class="mono" style="font-size:12px;color:rgba(13,12,0,.45)">✓✓</span></div>
+    </div>
+  </div>
+<div class="row" style="justify-content:flex-end">
+    <div style="max-width:72%;padding:10px 14px;background:rgba(245,230,66,0.922);border-radius:18px 18px 4px 18px">
+      <div style="font-size:15px;line-height:1.35;color:#0D0C00">Gate code is 4471.</div>
+      <div class="row" style="justify-content:flex-end;align-items:center;gap:4px;padding-top:4px"><span class="mono" style="font-size:12px;color:rgba(13,12,0,.6)">17:03</span><span style="display:flex"><svg style="width:13px;height:13px;display:block" fill="#FF8C00" xmlns="http://www.w3.org/2000/svg" enable-background="new 0 0 24 24"  viewBox="0 0 24 24" ><g><rect fill="none" height="24" width="24"/></g><g><g><g><path d="M12,12.9l-2.13,2.09C9.31,15.55,9,16.28,9,17.06C9,18.68,10.35,20,12,20s3-1.32,3-2.94c0-0.78-0.31-1.52-0.87-2.07 L12,12.9z"/></g><g><path d="M16,6l-0.44,0.55C14.38,8.02,12,7.19,12,5.3V2c0,0-8,4-8,11c0,2.92,1.56,5.47,3.89,6.86C7.33,19.07,7,18.1,7,17.06 c0-1.32,0.52-2.56,1.47-3.5L12,10.1l3.53,3.47c0.95,0.93,1.47,2.17,1.47,3.5c0,1.02-0.31,1.96-0.85,2.75 c1.89-1.15,3.29-3.06,3.71-5.3C20.52,10.97,18.79,7.62,16,6z"/></g></g></g></svg></span><span class="mono" style="font-size:12px;color:rgba(13,12,0,.45)">✓</span></div>
+    </div>
+  </div>
+<div class="row" style="justify-content:flex-end">
+    <div style="max-width:72%;padding:10px 14px;background:rgba(245,230,66,0.922);border-radius:18px 18px 4px 18px">
+      <div style="font-size:15px;line-height:1.35;color:#0D0C00">Heading out now.</div>
+      <div class="row" style="justify-content:flex-end;align-items:center;gap:4px;padding-top:4px"><span class="mono" style="font-size:12px;color:rgba(13,12,0,.6)">17:05</span><span class="mono" style="font-size:12px;color:rgba(13,12,0,.45)">…</span></div>
+    </div>
+  </div>
+    </div>
+    
+  <div style="border-top:1px solid #2E2B00"></div>
+  <div class="row" style="background:#1A1800;padding:8px;gap:4px;align-items:flex-end">
+    <div class="icon-btn"><svg style="width:24px;height:24px;display:block" fill="#A8A070" xmlns="http://www.w3.org/2000/svg" enable-background="new 0 0 24 24"  viewBox="0 0 24 24" ><g><rect fill="none" height="24" width="24"/></g><g><g><g><path d="M12,12.9l-2.13,2.09C9.31,15.55,9,16.28,9,17.06C9,18.68,10.35,20,12,20s3-1.32,3-2.94c0-0.78-0.31-1.52-0.87-2.07 L12,12.9z"/></g><g><path d="M16,6l-0.44,0.55C14.38,8.02,12,7.19,12,5.3V2c0,0-8,4-8,11c0,2.92,1.56,5.47,3.89,6.86C7.33,19.07,7,18.1,7,17.06 c0-1.32,0.52-2.56,1.47-3.5L12,10.1l3.53,3.47c0.95,0.93,1.47,2.17,1.47,3.5c0,1.02-0.31,1.96-0.85,2.75 c1.89-1.15,3.29-3.06,3.71-5.3C20.52,10.97,18.79,7.62,16,6z"/></g></g></g></svg></div>
+    <div class="icon-btn"><div class="col" style="align-items:center"><svg style="width:24px;height:24px;display:block" fill="#F5E642" xmlns="http://www.w3.org/2000/svg" enable-background="new 0 0 24 24"  viewBox="0 0 24 24" ><g><rect fill="none" height="24" width="24"/></g><g><g><g><path d="M15,1H9v2h6V1z M11,14h2V8h-2V14z M19.03,7.39l1.42-1.42c-0.43-0.51-0.9-0.99-1.41-1.41l-1.42,1.42 C16.07,4.74,14.12,4,12,4c-4.97,0-9,4.03-9,9s4.02,9,9,9s9-4.03,9-9C21,10.88,20.26,8.93,19.03,7.39z M12,20c-3.87,0-7-3.13-7-7 s3.13-7,7-7s7,3.13,7,7S15.87,20,12,20z"/></g></g></g></svg><span class="mono" style="font-size:12px;color:#F5E642">1h</span></div></div>
+    <div class="row" style="flex:1;min-height:48px;background:#242100;border:1px solid #F5E642;border-radius:24px;padding:2px 12px 2px 2px;align-items:center">
+      <div class="icon-btn"><svg style="width:24px;height:24px;display:block" fill="#A8A070" xmlns="http://www.w3.org/2000/svg"  viewBox="0 0 24 24" ><path d="M0 0h24v24H0V0z" fill="none"/><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg></div>
+      <div style="flex:1;padding:10px 0"><span style="font-size:15px;color:#FAFAF2">See you at the stand</span><span style="display:inline-block;width:1.5px;height:17px;background:#F5E642;vertical-align:-3px;margin-left:1px"></span></div>
+    </div>
+    <div class="icon-btn"><svg width="20" height="20" viewBox="0 0 24 24" style="display:block"><path d="M12 3C8.2 8 5.8 11.4 5.8 14.6a6.2 6.2 0 0 0 12.4 0C18.2 11.4 15.8 8 12 3z" fill="none" stroke="#F5E642" stroke-width="1.8" stroke-linejoin="round"/></svg></div>
+    <div style="width:40px;height:40px;flex:none;margin:4px 0;border-radius:50%;background:#F5E642;display:flex;align-items:center;justify-content:center;box-shadow:0 0 10px rgba(245,230,66,.30)">
+      <svg width="22" height="22" viewBox="0 0 22 22" style="display:block">
+<circle cx="11" cy="11" r="10.45" fill="none" stroke="#0D0C00" stroke-width="1.10"/>
+<path d="M11.54 2.11 A8.91 8.91 0 0 1 16.90 4.33 L12.31 9.52 A1.98 1.98 0 0 0 11.12 9.02 Z" fill="#0D0C00"/><path d="M17.67 5.10 A8.91 8.91 0 0 1 19.89 10.46 L12.98 10.88 A1.98 1.98 0 0 0 12.48 9.69 Z" fill="#0D0C00"/><path d="M19.89 11.54 A8.91 8.91 0 0 1 17.67 16.90 L12.48 12.31 A1.98 1.98 0 0 0 12.98 11.12 Z" fill="#0D0C00"/><path d="M16.90 17.67 A8.91 8.91 0 0 1 11.54 19.89 L11.12 12.98 A1.98 1.98 0 0 0 12.31 12.48 Z" fill="#0D0C00"/><path d="M10.46 19.89 A8.91 8.91 0 0 1 5.10 17.67 L9.69 12.48 A1.98 1.98 0 0 0 10.88 12.98 Z" fill="#0D0C00"/><path d="M4.33 16.90 A8.91 8.91 0 0 1 2.11 11.54 L9.02 11.12 A1.98 1.98 0 0 0 9.52 12.31 Z" fill="#0D0C00"/><path d="M2.11 10.46 A8.91 8.91 0 0 1 4.33 5.10 L9.52 9.69 A1.98 1.98 0 0 0 9.02 10.88 Z" fill="#0D0C00"/><path d="M5.10 4.33 A8.91 8.91 0 0 1 10.46 2.11 L10.88 9.02 A1.98 1.98 0 0 0 9.69 9.52 Z" fill="#0D0C00"/><circle cx="11" cy="11" r="0.89" fill="#0D0C00"/></svg>
+    </div>
+  </div>
+  </div>
+  
+</div>
+<script>
+async function paintWatermark(fp){
+  const el=document.getElementById('wm'); if(!el){window.__wmDone=true;return;}
+  await document.fonts.ready;
+  const d=2;                       // density, coerceAtMost(2f)
+  const s=Math.round(512*d);       // tile edge, physical px
+  const c=document.createElement('canvas'); c.width=s; c.height=s;
+  const ctx=c.getContext('2d');
+  ctx.font=(12.5*d)+'px "JetBrains Mono", monospace';
+  ctx.fillStyle='#F5E642';
+  ctx.globalAlpha=0.07;
+  ctx.textAlign='left'; ctx.textBaseline='middle';
+  const runWidth=ctx.measureText(fp).width;
+  const pitch=runWidth+12.5*d*4;
+  const rowGap=28*d;
+  const theta=-24*Math.PI/180, cos=Math.cos(theta), sin=Math.sin(theta);
+  const span=s*1.6, half=s/2;
+  const anchors=[];
+  let eta=-span,row=0;
+  while(eta<span){
+    const off=(row%2===1)?pitch*0.5:0;
+    let xi=-span+off;
+    while(xi<span){
+      const ax=half+xi*cos-eta*sin, ay=half+xi*sin+eta*cos;
+      if(ax>=0&&ax<s&&ay>=0&&ay<s) anchors.push([ax,ay]);
+      xi+=pitch;
+    }
+    eta+=rowGap; row++;
+  }
+  for(const [ax,ay] of anchors){
+    for(let dx=-1;dx<=1;dx++)for(let dy=-1;dy<=1;dy++){
+      ctx.save(); ctx.translate(ax+dx*s,ay+dy*s); ctx.rotate(theta);
+      ctx.fillText(fp,0,0); ctx.restore();
+    }
+  }
+  el.style.backgroundImage='url('+c.toDataURL()+')';
+  const cssTile=(512*d)/2.5;       // physical px -> CSS px at dsf 2.5
+  el.style.backgroundSize=cssTile+'px '+cssTile+'px';
+  window.__wmDone=true;
+}
+paintWatermark("3F7A 91C4 0B6E 82D5 F1A9 4C07 D3E8 5B26 A470 9E1D C58B 306F E2D4 7A19 B8C3");</script>
+</body></html>
