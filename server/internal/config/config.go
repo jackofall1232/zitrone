@@ -91,6 +91,11 @@ type Config struct {
 	RelayPeers      []string // allowlist of next-hop forward URLs; forwarding fails closed otherwise
 }
 
+// blobTTLMarginHours is how far a blob's TTL must exceed the undelivered-envelope
+// TTL: enough for the janitor's 10-minute period plus slack for the upload→send
+// gap. See the enforcement in [Load].
+const blobTTLMarginHours = 24
+
 func Load() (*Config, error) {
 	cfg := &Config{
 		DatabaseURL:                os.Getenv("DATABASE_URL"),
@@ -139,6 +144,33 @@ func Load() (*Config, error) {
 	// trust-breaking attachment failure. Clamp to the secure default (1 week).
 	if cfg.BlobTTLHours <= 0 {
 		cfg.BlobTTLHours = 96
+	}
+	// A <=0 MESSAGE_TTL_UNDELIVERED_HOURS SILENTLY DROPS EVERY OFFLINE MESSAGE
+	// (0.10.2 review round 1, P1 — a defect introduced by item 3's own delivery
+	// cutoff). PendingEnvelopes selects `created_at >= now() - ttl`, so at 0 a
+	// recipient reconnecting the instant after an envelope was stored matches
+	// nothing and the next janitor pass deletes it; a negative value excludes even
+	// future-skewed rows. Nothing surfaces — the sender saw a successful send.
+	if cfg.MessageTTLUndeliveredHours <= 0 {
+		cfg.MessageTTLUndeliveredHours = 72
+	}
+	// ⚠️ THE BLOB/ENVELOPE TTL RELATIONSHIP IS NOW ENFORCED, NOT ASSERTED
+	// (0.10.2 review round 1, found by BOTH lenses). It previously lived only in
+	// the comment on BlobTTLHours, so a deployment could set
+	// MESSAGE_TTL_UNDELIVERED_HOURS=120 against the 96 h blob default — or set
+	// BLOB_TTL_HOURS=24, which `TestLoadKeepsPositiveBlobValues` explicitly
+	// blessed — and the relay would then deliver an envelope whose attachment had
+	// already been reclaimed: a live message with a permanently dead attachment,
+	// 404 on redeem, surfaced to the user as "unavailable".
+	//
+	// The margin covers the janitor's 10-minute sweep period plus slack for the
+	// upload→send gap (upload is anchored at deposit, the envelope's TTL at send).
+	// **It does NOT make that gap bounded** — a frozen Android process can resume a
+	// send continuation much later, which is a declared residual and needs a
+	// client-side fix, not a bigger number here. What this closes is the
+	// cross-setting hole, which is reachable by configuration alone.
+	if minBlob := cfg.MessageTTLUndeliveredHours + blobTTLMarginHours; cfg.BlobTTLHours < minBlob {
+		cfg.BlobTTLHours = minBlob
 	}
 	// A <=0 BLOB_MAX_BYTES would cap every attachment at zero bytes (or worse,
 	// underflow downstream size math) — never trust it; fall back to the default.
