@@ -1663,3 +1663,81 @@ change to the send-path ordering 0.10.1 just hardened.**
 
 **Still unconfirmed:** the "0 blobs on prod" baseline. Checked on CX33 (0), which is NOT prod; CX23
 has no SSH from here. Fold into the same trip as the deploy.
+
+## 🛑 0.10.2 item 5 — STOPPED at maintainer instruction 2026-07-30. v3 needed, written AROUND a new mechanism.
+
+**Two five-agent DESIGN passes each rejected a plan (v1 and v2, both DO NOT SHIP), before any code was
+written.** Full records: `reviews/capacity-0.10.2/PLAN-5agent-review-VERDICT-DO-NOT-SHIP.md` (v1) and
+`PLAN-v2-5agent-review.md` (v2). **Do not write v3 as another round of patches on the same shape** —
+both failures were plan-level, and the lenses converged on a mechanism neither the maintainer nor the
+agent proposed:
+
+> **A per-TOKEN registry entry carrying `RESERVED/DEPOSITED → HANDED_OFF`**, transitioned by the
+> sending coroutine **itself** immediately after `ws.sendMessage` returns true (R-U3-1 forbids work
+> *between* the barrier and `ws.sendMessage`, not after it), with **every abandon being the return
+> value of an atomic `ConcurrentHashMap.remove`/`compute`**. Cleanup abandons only `DEPOSITED`.
+> Four of five lenses arrived at this independently. **Write v3 around it.**
+
+**Why v2 failed (B1, all five lenses independently):** `published` as a coroutine-local `var` cannot be
+read by any terminal-cleanup trigger, because every trigger runs on a foreign stack — `burnAll` on the
+UI thread (`MainActivity.kt:1677`), remote burn on the OkHttp reader thread
+(`WsClient.kt:258→302`), TTL/reveal burns on the repository scope. Dropping the flag abandons a blob
+whose envelope the relay already accepted; restoring it to shared state reinstates the lifetime bug it
+existed to kill.
+
+## 🔴 THREE FINDINGS INDEPENDENT OF ITEM 5 — fix these regardless of what v3 becomes
+
+- [ ] **DEANONYMISATION RISK in a step added for tidiness (v2 B3).** A "non-shared OkHttp client" for
+      the abandon call would egress over the **default network**: the device's real IP reaching a
+      **conceded** relay seconds after an attachment send, time-correlated — or on I2P, unable to
+      resolve `.b32.i2p` at all, so cleanup silently never works. `ApiClient` tags every request with
+      the live `@Volatile Transport` (`ApiClient.kt:52-64,435`), and that client is what carries Tor
+      SOCKS (`CertificatePinning.kt:79`) or the I2P socket factory + loopback DNS override
+      (`:121-128`) plus the pinner. **Rule: per-call options come from
+      `transport.client.newBuilder()`, re-derived on every swap — NEVER an independently built
+      client.** Recorded because nothing about "use a separate client for cleanup" looks like it
+      touches the threat model, which is the sharpest argument for design-time review this project has
+      produced.
+- [ ] **NO `callTimeout` ANYWHERE, and `readTimeout(0)` on both clients (v2 B5) — this is the LIVE
+      unbounded case, and the frozen-process story was wrong.** A half-open circuit after the 8 MiB
+      body is written means `suspendCancellableCoroutine` **never resumes**: no throw ⇒ no
+      `markFailed` ⇒ no abandon ⇒ no memo release. **The bubble sticks at SENDING forever and
+      `retryable`'s CAS then refuses a retry, so the user cannot even try again** — a worse
+      user-facing bug than the orphan it causes. Fix: a per-call `callTimeout` on the deposit (via
+      `newBuilder()` on the transport client, same mechanism as above). `readTimeout(0)` is correct
+      for the WebSocket and must not be changed.
+- [ ] **CANCELLATION IS AN UNENUMERATED ROUTE, and it is the highest-frequency one in the product
+      (v2 B6).** Route (c) rethrows `CancellationException` at `MessagingCoordinator.kt:1469`
+      **before** `markFailed` and the abandon. `abandonBlobQuietly` runs on the per-unlock session
+      scope, which `UnlockController.lockCurrent()` cancels (`UnlockController.kt:134-135`), so any
+      queued cleanup is silently discarded at the next lock. **Idle auto-lock**
+      (`ZitroneApp.kt:983-996`) is adversary-free and orphans a full 8 MiB on every in-flight photo
+      send. Cleanup needs a process-scope `NonCancellable` issuer, gated off for duress. And the
+      teardown exclusion must be restated **path by path**: the deniability argument is sound for
+      duress / revoke / account-delete, **not** for lock / logout.
+
+## ✅ CONFINEMENT SWEEP — U3 is CLEAN; two comments are latent traps
+
+Prompted by discovering that `limitedParallelism(1)` serialises execution **slices**, not coroutines,
+so anything that suspends frees the worker. Two lenses swept independently.
+
+**U3's cover-traffic reasoning is CLEAN, and this is a positive result on the foundation we were most
+worried about.** Its load-bearing claims are scoped to a suspension-free *slice*
+(`MessagingCoordinator.kt:362-366`, `CoverTrafficWorker.kt:26-30`) and **compiler-enforced** by
+`publishOutgoing`/`publishReceipt` being non-suspending `private fun`s (`:456-462`); cross-suspension
+exclusion elsewhere uses **real Mutexes** (`withSessionLock` `:349-352`; `DecoySendPairing`'s teardown
+Mutex `:310,443-447`). `attachmentDeposits`'s kdoc makes no confinement claim.
+
+- [ ] **Two comments carry the misunderstanding — delete/correct them (cheap, independent of item 5).**
+      **(1)** `crypto/vault/VaultSession.kt` ~`:463` — *"Cannot occur under single-worker confinement
+      anyway."* Wrong twice: `flush` is reachable from at least three threads (the coordinator's
+      `confined` worker via `flushBeforeAck`, the background coalescing timer, and `UnlockController`'s
+      lock thread via `runtime.close()`), and `persist(...)` sits between two separate
+      `synchronized(stateLock)` blocks. **The code is CORRECT** — the real guard is `stateLock` plus
+      the `version`/`sealedVersion` check at `:452-463`. **Delete the sentence**; a future simplifier
+      could delete the version check on its strength.
+      **(2)** `MessagingCoordinator.kt:177-178` — *"Both run on the `confined` worker … so they cannot
+      interleave with a send's publish-then-pair slice."* **False whenever
+      `CoverTrafficWorker.runTerminalConfined`'s caller-thread fallback fires** after
+      `TERMINAL_TEARDOWN_WAIT_MS` — and that worker's **own kdoc already admits** the fallback
+      "structurally defeated the confinement argument, precisely when it fired."

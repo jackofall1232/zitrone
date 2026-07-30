@@ -3548,3 +3548,58 @@ a sound reason anyway (exempting means trusting a client flag, or storing which 
 synthetic peer — a linkage the relay must not hold).
 
 Verified after merge: `go build` / `go vet` / `go test ./...` all pass, six packages ok.
+
+## 2026-07-30 — 0.10.2 item 5: TWO design passes, TWO rejections, ZERO code written. Stopped by the maintainer.
+
+**The method is the result here.** Ten agents across two five-agent passes reviewed a *plan* rather
+than an implementation, and each pass rejected one. No code was written, so nothing had to be unwound.
+
+**v1 → DO NOT SHIP.** Its reversal would have **regressed the exact disk metric item 5 exists to
+bound**: `publishOutgoing`'s socket-down exit returns `false` **without throwing**, so `runCatching`
+completes normally and the abandon route never fires — a route the plan never enumerated. With
+fresh-per-attempt secrets and a single-slot memo, attempts 1…N−1 became unreclaimable by anything;
+~35 min to exhaust CX23 inside the *legitimate* 60/min deposit ceiling. **Four of five lenses,
+independently, same lines.** Its "fix first, blocks everything" step was also a **no-op** — 409
+handling was already correct and tested, and an implementer hunting the phantom would have converted a
+working 409 contract into a 500.
+
+**v2 → DO NOT SHIP.** Steps 4 and 5 **mutually unimplementable**, found by **all five lenses
+independently**: `published` as a coroutine-local cannot be read by any terminal-cleanup trigger,
+because every trigger runs on a foreign stack (UI thread, OkHttp reader thread, repository scope).
+Dropping the flag abandons a blob the relay already accepted; sharing it reinstates the lifetime bug it
+existed to kill.
+
+**Four of five lenses converged on the replacement neither the maintainer nor I proposed:** a
+**per-token registry** (`RESERVED/DEPOSITED → HANDED_OFF`), transitioned by the sending coroutine
+itself after `ws.sendMessage` returns, every abandon the return value of an atomic map operation.
+**v3 gets written around that mechanism, not as more patches.**
+
+**THE FINDING WORTH THE WHOLE EXERCISE — a tidiness note that was a deanonymisation defect.** v2's
+"use a non-shared OkHttp client for the abandon call" would have egressed over the **default network**:
+the device's real IP reaching a **conceded** relay seconds after an attachment send, time-correlated —
+or on I2P, unable to resolve `.b32.i2p`, so cleanup silently never works. Nothing about that step
+*looks* like it touches the threat model. **That is the strongest argument this project has produced
+for reviewing designs, not just diffs.**
+
+**Two more that relocate what we thought we knew.** There is **no `callTimeout` anywhere in the app**,
+and with `readTimeout(0)` a half-open circuit after the 8 MiB body is written never resumes and never
+throws — so the bubble sticks at SENDING **forever** and `retryable`'s CAS then refuses a retry. That,
+not the frozen-process story we had both been repeating, is the live unbounded case, and it is a worse
+user-facing bug than the orphan it causes. And **coroutine cancellation is an unenumerated route**
+whose highest-frequency trigger is **idle auto-lock** — adversary-free, orphaning 8 MiB on every
+in-flight photo send.
+
+**CONFINEMENT SWEEP — asked because `limitedParallelism(1)` serialises execution SLICES, not
+coroutines. It paid off in both directions.** **U3's cover-traffic reasoning is CLEAN**: claims scoped
+to suspension-free slices, **compiler-enforced** by non-suspending `private fun` publish tails, real
+Mutexes wherever cross-suspension exclusion is genuinely needed. A positive result on the foundation we
+were most worried about. Two *other* comments carry the misunderstanding and are latent traps:
+`VaultSession.kt` ~`:463` (code correct — guarded by `stateLock` + version check — but the sentence
+invites deleting that check) and `MessagingCoordinator.kt:177-178` (false whenever
+`CoverTrafficWorker`'s caller-thread fallback fires, which that worker's own kdoc already admits).
+
+**Process notes that generalise, all three confirmed twice over:** demanding **arithmetic
+falsification** rather than reading a claim is what killed v1's TTL invariant and produced the 35-minute
+figure; **naming the least-confident sequence** got it broken deliberately both times instead of
+missed; and **design-time review catches composition defects that per-fix review structurally cannot
+see** — including a composition defect *inside the remediation for a composition defect*.

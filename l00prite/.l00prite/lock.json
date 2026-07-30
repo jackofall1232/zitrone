@@ -1,12 +1,12 @@
 {
  "schema_version": 1,
- "lock_id": "lock-20260730T-kimi-p",
+ "lock_id": "lock-20260730T-0102-stop",
  "owner_agent": null,
  "owner_session": null,
- "acquired_at": "2026-07-30T04:00:00Z",
- "expires_at": "2026-07-30T05:00:00Z",
+ "acquired_at": "2026-07-30T04:30:00Z",
+ "expires_at": "2026-07-30T05:30:00Z",
  "ttl_seconds": 3600,
- "purpose": "Record the kimi -p misuse; released",
+ "purpose": "Record the three item-5-independent findings + confinement sweep; released",
  "protected_paths": [
   "ledger.md",
   "memory.md",

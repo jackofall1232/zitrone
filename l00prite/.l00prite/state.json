@@ -2,13 +2,13 @@
   "schema_version": 2,
   "project_name": "Zitrone",
   "current_goal": "0.10.0-beta SHIPPED 2026-07-29 (vc21, a0d7598b): cover traffic is live on Android. U1-U4 merged; U6 disclosure delivered BEFORE the cut (SECURITY_MODEL §storage-format + shipped decoy-traffic section + CHANGELOG). GH prerelease v0.10.0-beta targets d955391b, APK sha256 fa183f30…c877db, signer cert 6c7f92a7…892753 verified both sides, served asset byte-identical, onion mirror staged, website /download/beta live on the new version + checksum.",
-  "current_phase": "0.10.0-beta shipped and live. CX23 relay stack MERGED to main (8ba25e98): error attribution, per-client rate-limit keying, send budget 100->200 for cover traffic. 0.10.1 client half on feat/0.10.1-send-failure-surfacing (4882afd8), round 1 fixed + send timeout built, ROUND 2 OWED, not merged.",
+  "current_phase": "0.10.0-beta live. 0.10.1 MERGED (a7d66e87). 0.10.2 on feat/0.10.2-capacity-fixes (LOCAL, unpushed): items 1-4 done incl. two P1 config fixes; item 5 STOPPED at maintainer instruction after TWO five-agent design passes each rejected a plan (v1, v2 both DO NOT SHIP) before any code was written. v3 must be written AROUND the per-token registry the lenses converged on, not as more patches.",
   "active_agent": null,
   "last_agent": "claude",
-  "last_updated": "2026-07-29",
+  "last_updated": "2026-07-30",
   "status": "in_progress",
-  "blocked": false,
-  "blocker_reason": null,
+  "blocked": true,
+  "blocker_reason": "0.10.2 item 5 needs a v3 DESIGN written around a per-token RESERVED/DEPOSITED->HANDED_OFF registry (four of five lenses converged on it independently). Two plans of ours were rejected at design time; a third round of patches on the same shape is the wrong move. Fresh session with room to design it.",
   "active_event_id": null,
   "last_event_processed": null,
   "pending_event_count": 0,
@@ -16,5 +16,5 @@
   "ci_status": "local only — release verification: keystore cert continuity checked BEFORE build; :app:assembleRelease BUILD SUCCESSFUL exit 0 in 3m36s; apksigner cert digest matches anchor; aapt2 badging vc21/0.10.0-beta; GitHub-served APK downloaded and byte-identical (fa183f30…c877db); website build exit 0 with new version+checksum baked and zero 0.9.4 refs; live site confirmed serving v0.10.0-beta. | FIELD 2026-07-29 (maintainer): relay deployed from main and healthy, messages sending with no perceptible delay, onion mirror serving the current build (confirms ad80919b landed). NOT yet an R-U3-1 confirmation — depends on whether cover traffic was enabled on the sending vault; question owed at next session start.",
   "execution_active": false,
   "execution_stop_reason": null,
-  "next_recommended_action": "1) CX23 REDEPLOY still owed (send budget 100->200 and per-client keying only take effect on redeploy from main; 0.10.0 is live with a halved effective budget). 2) 0.10.1 REVIEW ROUND 2 — paired-blind, whole unit incl. the send timeout and the now-merged relay contract; the round-1 split on whether the missing MessagingCoordinator harness blocks merge is unadjudicated. 3) 0.11.0 polish round. NOTE: registration PoW is REVERSED (d83b9b3a) — clientKeyer is the answer; server/internal/pow/ stays for dead-drop PoW."
+  "next_recommended_action": "THREE ITEM-5-INDEPENDENT FIXES FIRST (all recorded in todos.md, all cheap, none needing the v3 design): (1) never build a standalone OkHttp client for any call — per-call options must come from transport.client.newBuilder(), or the request egresses over the default network and leaks the device IP to a conceded relay (v2 B3, a deanonymisation defect introduced by a tidiness step); (2) add a per-call callTimeout to the blob deposit — there is none anywhere in the app and readTimeout(0) on both clients means a half-open circuit leaves the bubble stuck SENDING forever with retryable's CAS refusing a retry (v2 B5, the live unbounded case; readTimeout(0) is CORRECT for the WebSocket, do not change it); (3) delete the two stale confinement comments (VaultSession.kt ~:463 and MessagingCoordinator.kt:177-178) — code is correct in both, the sentences are latent traps. THEN v3 for item 5. THEN 0.10.2's re-review, the CX23 trip (server rebuild for items 1-3, docker compose up -d --force-recreate postgres for item 4, prod blob-count check), the 0.10.1 harness debt, and 0.11.0."
 }
