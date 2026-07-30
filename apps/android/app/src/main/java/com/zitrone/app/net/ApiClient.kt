@@ -284,6 +284,20 @@ class ApiClient(
      * **Keyed on the TOKEN, not the blob id.** The blob id is public; the token is the capability.
      * Sending it is acceptable here only because the blob is being destroyed in the same request.
      *
+     * **⚠️ THE DISCLOSURE INVARIANT — the rule the next contributor will otherwise break.**
+     * **A token may be transmitted only when the row it names is provably unreferenced and
+     * unrecreatable.** In this design the relay never learns a blob token: `RedeemBlob` is
+     * unauthenticated *because the token IS the capability*, and sending one here is conceded only
+     * because the blob dies in the same breath. **Every non-deleting outcome breaks that trade** —
+     * a 429 (rate-limited *before* the body is parsed), a 401 after the bearer dies, or a dropped
+     * response all leave a conceded relay holding a live, unauthenticated redemption capability for
+     * a blob that still exists. So never call this speculatively, and never for a blob an envelope
+     * may still name.
+     *
+     * **Bounded (0.10.3 C1).** Without a deadline this shares the deposit's failure mode: both
+     * shared clients set `readTimeout(0)`, so a half-open circuit parks the continuation forever and
+     * nothing upstream runs. All five judging lenses named the omission independently.
+     *
      * **Best-effort by design — see the call sites: failures are swallowed.** This runs on paths that
      * are ALREADY failing, and letting cleanup turn a failed send into a crash, or delay the user's
      * feedback, would be a worse defect than the orphan it reclaims. The TTL still collects anything
@@ -291,7 +305,7 @@ class ApiClient(
      */
     suspend fun abandonBlob(blobTokenBase64: String) {
         val body = JSONObject().apply { put("token", blobTokenBase64) }
-        execute(post("/api/v1/blobs/abandon", body))
+        execute(post("/api/v1/blobs/abandon", body), callTimeoutMs = BLOB_ABANDON_TIMEOUT_MS)
     }
 
     /**
@@ -535,6 +549,14 @@ class ApiClient(
          * the continuation, nothing throws, and the bubble stays SENDING forever with retry refused.
          */
         const val BLOB_UPLOAD_TIMEOUT_MS = 10 * 60 * 1000L
+
+        /**
+         * Whole-call deadline for an abandon (0.10.3 C1). Far shorter than the deposit's: the body is
+         * a single token, so there is no large upload to clear — only a round trip. Erring short is
+         * safe here in a way it is not for the deposit, because a timed-out abandon leaves an orphan
+         * the janitor collects, whereas a timed-out deposit strands a message.
+         */
+        const val BLOB_ABANDON_TIMEOUT_MS = 30 * 1000L
 
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 

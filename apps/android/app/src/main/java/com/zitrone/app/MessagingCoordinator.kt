@@ -417,11 +417,71 @@ class MessagingCoordinator(
      */
     private fun releaseDeposit(messageId: String) {
         attachmentDeposits.remove(messageId)
+        // Clear the handoff record too, or it grows for the process's lifetime — the heap-leak side
+        // of the very trade this memo exists to avoid. Safe to clear here and ONLY here alongside the
+        // memo: with no memo, settleDecision returns SKIP whatever the handoff bit said, so dropping
+        // the two together can never turn a RELEASE_ONLY into an ABANDON.
+        handedOffMessages.remove(messageId)
     }
 
-    // NOTE: `abandonBlobQuietly` was removed with its two call sites above. `ApiClient.abandonBlob`
-    // and the relay's `AbandonBlob` endpoint remain as DORMANT infrastructure — unreachable from the
-    // client, so they cannot trigger the P1, and ready for v6 to wire correctly.
+    /**
+     * Message ids whose envelope has been handed to a socket at least once — **the authoritative,
+     * monotone record that forbids abandoning their blob** (0.10.3 C3).
+     *
+     * Monotone within a message's life: set in [publishOutgoing]'s success branch, cleared only by
+     * [settleAttachment] once the message is provably finished. A retry re-enters `publishOutgoing`
+     * and re-sets it, so no later incarnation can "un-hand-off" an earlier one. Five design passes
+     * failed by trying to *arbitrate* the race between a retry and a cleanup; this deletes the race
+     * instead, by making "was it ever enqueued?" a question with a durable answer.
+     *
+     * Why a set and not a flag on [AttachmentDeposit]: the deposit is claimed and removed by whoever
+     * settles first, and the handoff fact must outlive that removal to stay monotone.
+     */
+    private val handedOffMessages = ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * Terminal cleanup for a message that had an attachment: reclaim the blob **only when it is
+     * provably unreferenced and unrecreatable**, per [settleDecision].
+     *
+     * Structure (the shape the 0.10.3 judging panel converged on, grafting Grok's claim discipline
+     * onto Kimi's base):
+     *
+     * 1. Read the decision inputs.
+     * 2. `SKIP` / `RELEASE_ONLY` return without transmitting anything.
+     * 3. **The atomic `remove` is the LAST gate and the exclusive claim.** Only one caller can get a
+     *    non-null memo, so only one abandon can ever be issued per deposit. Losing the claim means
+     *    someone else already settled it — do nothing.
+     * 4. **No restore-on-failure.** A failed abandon leaves an orphan the relay's janitor collects at
+     *    the blob TTL. Putting the memo back would re-open the claim and reintroduce exactly the
+     *    double-settle the claim exists to prevent — trading a self-healing orphan for a live P1.
+     *
+     * Must run on [confined].
+     */
+    private fun settleAttachment(messageId: String) {
+        val action = settleDecision(
+            hasMemo = attachmentDeposits.containsKey(messageId),
+            state = messages.stateOf(messageId),
+            handedOff = messageId in handedOffMessages,
+        )
+        if (action == SettleAction.SKIP) return
+        handedOffMessages.remove(messageId)
+        if (action == SettleAction.RELEASE_ONLY) {
+            releaseDeposit(messageId)
+            return
+        }
+        // ABANDON. The claim is the last gate: lose it and another settle already owns this blob.
+        val memo = attachmentDeposits.remove(messageId) ?: return
+        scope.launch(confined + NonCancellable) {
+            // NonCancellable: teardown is the commonest reason we are here, and a cancelled abandon
+            // would leak the blob it was launched to reclaim. Bounded by BLOB_ABANDON_TIMEOUT_MS, so
+            // this cannot park forever on a half-open circuit.
+            runCatching { api.abandonBlob(b64(memo.token)) }
+                .onSuccess { diag("attachment: reclaimed unsent blob") }
+                // Swallowed by design: the janitor collects the orphan at the blob TTL, and there is
+                // no user-visible consequence to report.
+                .onFailure { diag("attachment: blob reclaim failed — left for the relay janitor") }
+        }
+    }
 
 
     /**
@@ -469,8 +529,11 @@ class MessagingCoordinator(
         if (!contactExists(contactId)) {
             diag("send: contact deleted mid-send — dropping local copy")
             messages.discard(messageId)
-            // Contact deleted mid-send: the local copy is gone, so nothing will retry this id.
-            releaseDeposit(messageId)
+            // Contact deleted mid-send: the local copy is gone, so nothing will retry this id — and
+            // we are BEFORE the ws.sendMessage below, so no envelope naming this blob ever reached a
+            // socket. That is the one condition under which the deposit may be reclaimed rather than
+            // merely forgotten; settleAttachment re-proves it rather than trusting this comment.
+            settleAttachment(messageId)
             return false
         }
         if (ws.sendMessage(envelope)) {
@@ -493,6 +556,10 @@ class MessagingCoordinator(
             // and forgotten. Retries re-enter here and get their own window; nothing arms on
             // `addOutgoing` or `retryable` any more.
             messages.armSendTimeout(messageId)
+            // The blob (if any) may now be at the relay and redeemable by the recipient, so it must
+            // never be abandoned. Recorded AFTER the enqueue succeeds and never cleared here — see
+            // [handedOffMessages].
+            handedOffMessages.add(messageId)
             return true
         }
         // The socket was down: the send did not reach the relay. The ratchet advance is already
