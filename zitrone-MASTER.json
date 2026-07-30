@@ -1117,12 +1117,22 @@
               {
                 "visual": "Pixelated/blurred screenshot mockup",
                 "headline": "Screenshots? Blocked.",
-                "body": "On Android, screenshots are impossible. On iOS and browser, we blur instantly."
+                "body": "Screenshots and screen recording are blocked. Always. And every chat carries a faint watermark of your own fingerprint — drawn on your device, reported to no one."
               },
               {
                 "visual": "QR code with lemon-slice overlay",
                 "headline": "No phone number needed",
                 "body": "Add contacts by QR code or link. We don't need your number, your email, or your name."
+              },
+              {
+                "visual": "QR code collapsing into a burn-particle loop",
+                "headline": "Lemon drops",
+                "body": "Seal a message into a one-time QR code — open it once and it's gone, miss the deadline and it burns. Ready in Settings when you need it."
+              },
+              {
+                "visual": "Lemon slice, fully lit, in a slow continuous rotation",
+                "headline": "Choose your route",
+                "body": "Zitrone rides I2P automatically when the app is installed. Prefer Tor? Orbot works too. And when you're on plain internet, we say so — no pretending."
               }
             ]
           },
@@ -1220,8 +1230,8 @@
                     "visual": "Message bubble burn animation loop"
                   },
                   {
-                    "headline": "Screenshots? We blur those.",
-                    "body": "Android blocks them entirely. iOS and browser blur your messages the instant a screenshot is attempted. We also watermark every conversation — if something leaks, we know who did it.",
+                    "headline": "Screenshots? Android blocks them cold.",
+                    "body": "FLAG_SECURE on every screen with message content — screenshots and screen recordings come out black, at the OS level, always on. Every chat also carries your own identity fingerprint as a faint watermark, so anything photographed off the screen is visibly marked as yours. That watermark is painted on your device and never leaves it — we can't see it, because we can't see anything.",
                     "visual": "Split mockup: left phone blurred, right shows 'Screenshot blocked'"
                   },
                   {
@@ -1256,6 +1266,36 @@
                     "description": "Set to burn, or burn on read. Nothing stays."
                   }
                 ]
+              },
+              {
+                "id": "deeper_cuts",
+                "type": "card_grid",
+                "label": "Deeper cuts",
+                "headline": "Built for the day it matters",
+                "intro": "Shipped, on Android, today. Some of it deliberately has no UI at all — the full walkthrough is in the how-to guide.",
+                "cards": [
+                  {
+                    "title": "Second vault",
+                    "body": "A second passphrase can open a second, fully independent Zitrone — no button, no wizard, no cryptographic evidence it exists. The instructions live on this site, not in the app: the app showing nothing is the point.",
+                    "link": "/how-to#second-vault"
+                  },
+                  {
+                    "title": "Pucker Burn",
+                    "body": "A duress password. Typed at the lock screen, it erases everything Zitrone holds on the device. The app can't even tell you one is set — a readback would itself prove it exists.",
+                    "link": "/how-to#pucker-burn"
+                  },
+                  {
+                    "title": "Lemon drops",
+                    "body": "Seal a message into a one-time QR dead drop. The QR image is the entire capability, opening it consumes it, and a drop unclaimed by its deadline burns on the relay.",
+                    "link": "/how-to#lemon-drops"
+                  },
+                  {
+                    "title": "Cover traffic",
+                    "body": "Every real send travels with a same-size cover frame at a randomized offset, so a network observer can't pick out the real one. No toggle, no indicator — and a real send is never delayed to make cover.",
+                    "link": "/how-to#network"
+                  }
+                ],
+                "note": "Added 2026-07-30 website refresh; renders between audiences and platform badges. Copy source of truth: website/src/components/DeeperCuts.tsx"
               },
               {
                 "id": "platform_badges",

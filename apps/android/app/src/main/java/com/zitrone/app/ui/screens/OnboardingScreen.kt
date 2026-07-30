@@ -75,6 +75,9 @@ private data class OnboardingSlide(
 )
 
 // design_system.screens.onboarding.slides — copy verbatim.
+// Slide set extended 2026-07-30 (slide 3 rewritten for the Android-only reality + identity
+// watermark; lemon-drop and network-privacy slides added). MASTER.json sync pending — the
+// orchestrator reconciles zitrone-MASTER.json; do not hand-edit it.
 private val Slides = listOf(
     OnboardingSlide(
         headline = "End-to-end encrypted",
@@ -86,17 +89,28 @@ private val Slides = listOf(
     ),
     OnboardingSlide(
         headline = "Screenshots? Blocked.",
-        body = "On Android, screenshots are impossible. On iOS and browser, we blur instantly.",
+        body = "Screenshots and screen recording are blocked. Always. And every chat carries a " +
+            "faint watermark of your own fingerprint — drawn on your device, reported to no one.",
     ),
     OnboardingSlide(
         headline = "No phone number needed",
         body = "Add contacts by QR code or link. We don't need your number, your email, or your name.",
     ),
+    OnboardingSlide(
+        headline = "Lemon drops",
+        body = "Seal a message into a one-time QR code — open it once and it's gone, miss the " +
+            "deadline and it burns. Ready in Settings when you need it.",
+    ),
+    OnboardingSlide(
+        headline = "Choose your route",
+        body = "Zitrone rides I2P automatically when the app is installed. Prefer Tor? Orbot " +
+            "works too. And when you're on plain internet, we say so — no pretending.",
+    ),
 )
 
 /**
  * Full-screen card stack, then the vault passphrase-creation step
- * (design_system.screens.onboarding). The 4-slide pager is unchanged; "Get started"
+ * (design_system.screens.onboarding). [Slides] drives the pager and dots; "Get started"
  * / "Skip" advance to passphrase creation rather than completing — a vault-only
  * install has no app without a created vault.
  *
@@ -150,7 +164,9 @@ fun OnboardingScreen(
                         0 -> EncryptionLayersVisual()
                         1 -> BurningBubbleVisual()
                         2 -> BlockedScreenshotVisual()
-                        else -> QrCode(content = "zitrone://contact", size = 180.dp)
+                        3 -> QrCode(content = "zitrone://contact", size = 180.dp)
+                        4 -> LemonDropVisual()
+                        else -> NetworkRouteVisual()
                     }
                 }
                 Text(
@@ -413,5 +429,56 @@ private fun BlockedScreenshotVisual() {
                 color = Lemon,
             )
         }
+    }
+}
+
+/** Slide 5 — a sealed QR drop looping the unclaimed burn: deadline passes, drop is gone. */
+@Composable
+private fun LemonDropVisual() {
+    val transition = rememberInfiniteTransition(label = "dropBurnLoop")
+    val raw by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1.5f, // pause at the end of each loop
+        animationSpec = infiniteRepeatable(
+            animation = tween(2200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "dropBurnProgress",
+    )
+    val progress = raw.coerceAtMost(1f)
+    Box(contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier.graphicsLayer {
+                val collapse = 1f - progress
+                scaleX = collapse
+                scaleY = collapse
+                alpha = 1f - progress * 0.85f
+            },
+        ) {
+            QrCode(content = "zitrone://drop", size = 150.dp)
+        }
+        BurnParticles(
+            progress = progress,
+            seed = 11,
+            modifier = Modifier.size(180.dp, 180.dp),
+        )
+    }
+}
+
+/** Slide 6 — lemon slice slowly wheeling: traffic routed on, hop after hop. */
+@Composable
+private fun NetworkRouteVisual() {
+    val transition = rememberInfiniteTransition(label = "routeSpin")
+    val angle by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(2400, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "routeAngle",
+    )
+    Box(modifier = Modifier.graphicsLayer { rotationZ = angle }) {
+        LemonSlice(size = 160.dp, filledSegments = 8)
     }
 }
