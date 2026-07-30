@@ -1,0 +1,1 @@
+I'll do a read-only adversarial review of the round-3 delta and the full send-failure unit, verifying claims against source rather than prior rounds.Next I'll read the full unit against hub.go and the Android paths, then re-attack each load-bearing claim.
