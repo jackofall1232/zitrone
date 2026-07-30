@@ -60,7 +60,10 @@ export async function POST(request: Request) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      from: process.env.BETA_SIGNUP_FROM ?? "Zitrone Beta <onboarding@resend.dev>",
+      // Default sender is on the Resend-verified zitrone.app domain (verified
+      // 2026-07-30); Resend's onboarding sender can only deliver to the account
+      // owner and is no longer a useful fallback.
+      from: process.env.BETA_SIGNUP_FROM ?? "Zitrone Beta <beta@zitrone.app>",
       // BETA_SIGNUP_TO exists because Resend's unverified-domain test sender can
       // only deliver to the Resend account owner's address — set it to that
       // address until the zitrone.app domain is verified, then remove it.
