@@ -62,3 +62,16 @@ Without the key the route answers 503 and the form falls back to a prefilled
 `mailto:admin@zitrone.app` link — signups still arrive, just typed by the tester's own mail app.
 If storage is ever added here, `/privacy` and the form's "no database" copy MUST change in the
 same commit.
+
+### Resend delivery gotcha (seen live 2026-07-30)
+
+With no verified domain, Resend's `onboarding@resend.dev` sender can only deliver to the Resend
+account owner's own address — a send to `admin@zitrone.app` returns 403 and the form 502s.
+Two ways out:
+
+- **Permanent (do this):** resend.com/domains → add `zitrone.app` → create the DNS records it
+  shows at Porkbun → once verified, set `BETA_SIGNUP_FROM="Zitrone Beta <beta@zitrone.app>"` on
+  Vercel and redeploy. Signups then reach `admin@zitrone.app`.
+- **Instant workaround:** set `BETA_SIGNUP_TO=<the Resend account's own email>` on Vercel and
+  redeploy; remove it after domain verification. Note the beta page copy names admin@zitrone.app,
+  so this is a stopgap, not the end state.

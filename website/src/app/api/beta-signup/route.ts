@@ -61,7 +61,10 @@ export async function POST(request: Request) {
     },
     body: JSON.stringify({
       from: process.env.BETA_SIGNUP_FROM ?? "Zitrone Beta <onboarding@resend.dev>",
-      to: [BETA_CONTACT_EMAIL],
+      // BETA_SIGNUP_TO exists because Resend's unverified-domain test sender can
+      // only deliver to the Resend account owner's address — set it to that
+      // address until the zitrone.app domain is verified, then remove it.
+      to: [process.env.BETA_SIGNUP_TO ?? BETA_CONTACT_EMAIL],
       reply_to: email,
       subject: `Play beta signup: ${email}`,
       text:
