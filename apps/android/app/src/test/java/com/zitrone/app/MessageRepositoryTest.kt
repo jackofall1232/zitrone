@@ -216,6 +216,292 @@ class MessageRepositoryTest {
         assertEquals(MessageState.READ, repo.conversationMessages("c1").single().state)
     }
 
+    // ── 0.10.1: what a RELAY-SUPPLIED message id can and cannot touch ──────────────────────────
+    //
+    // `onServerError` now attributes a rejection to a message using an id the RELAY sent, and the
+    // relay is conceded in the threat model — it can echo any well-formed UUID it likes. These pin
+    // the structural bounds that make acting on that id safe, because they are properties of the
+    // CAS rather than of the relay behaving.
+
+    @Test
+    fun `markFailed on an id the repository does not hold changes nothing`() = runTest {
+        // This is what makes a rejected COVER frame unable to surface to the user: a cover envelope
+        // never creates a Message row, so its id is simply not here. Same protection against a
+        // hostile relay echoing an id from thin air. Not a lucky accident of lookup order — the CAS
+        // finds no conversation holding the id and returns the map untouched.
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+
+        repo.markFailed("a-cover-envelope-id")
+        repo.markFailed("00000000-0000-0000-0000-000000000000")
+
+        assertEquals(MessageState.SENDING, repo.conversationMessages("c1").single().state)
+    }
+
+    @Test
+    fun `markFailed cannot touch a delivered message, which is what protects incoming mail`() =
+        runTest {
+            // A relay echoing the id of an INCOMING message must not be able to mark it failed —
+            // that would corrupt the display state of mail it merely delivered.
+            //
+            // WHAT ACTUALLY PROTECTS THIS IS THE STATE CAS, not an ownership check. `addIncoming`
+            // forces DELIVERED, and `markFailed` only accepts SENDING/SENT. An earlier version of
+            // this test asserted an `isMine` clause instead — and passed identically after that
+            // clause was deleted, because the state check was doing the work all along. So this
+            // now names the mechanism it actually exercises, and mutating the state precondition
+            // is what makes it fail.
+            val repo = repository()
+            repo.addIncoming(message("theirs"))
+            repo.addOutgoing(message("mine", isMine = true))
+            repo.markDelivered("mine")
+
+            repo.markFailed("theirs")
+            repo.markFailed("mine") // ours, but already DELIVERED — equally out of reach
+
+            val byId = repo.conversationMessages("c1").associateBy { it.id }
+            assertEquals(MessageState.DELIVERED, byId.getValue("theirs").state)
+            assertEquals(
+                "a late rejection must never overwrite a message that actually got delivered",
+                MessageState.DELIVERED,
+                byId.getValue("mine").state,
+            )
+        }
+
+    @Test
+    fun `markFailed fails only the named message and leaves the rest of the conversation alone`() =
+        runTest {
+            val repo = repository()
+            repo.addOutgoing(message("m1", isMine = true))
+            repo.addOutgoing(message("m2", isMine = true))
+            repo.addOutgoing(message("m3", isMine = true))
+
+            repo.markFailed("m2")
+
+            val byId = repo.conversationMessages("c1").associateBy { it.id }
+            assertEquals(MessageState.FAILED, byId.getValue("m2").state)
+            assertEquals(MessageState.SENDING, byId.getValue("m1").state)
+            assertEquals(MessageState.SENDING, byId.getValue("m3").state)
+        }
+
+    @Test
+    fun `a relay-attributed failure cannot touch a message the relay said it stored`() = runTest {
+        // Round 1, BOTH lenses. `markFailed` accepted SENT, so a hostile lie, a duplicated frame,
+        // or a relay/client version mismatch could mark a message FAILED that the relay had already
+        // told us it STORED. The user's only recovery is retry-under-the-same-id, so that produced
+        // a real double delivery of a message that was never lost — strictly worse than the relay
+        // simply dropping it, which at least leaves an honest SENT.
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+        repo.markSent("m1") // the relay said: stored
+
+        repo.markFailedByRelay("m1")
+
+        assertEquals(
+            "a receipt outranks an error that contradicts it",
+            MessageState.SENT,
+            repo.conversationMessages("c1").single().state,
+        )
+    }
+
+    @Test
+    fun `a real receipt heals a message a spurious error failed`() = runTest {
+        // The other half of the same defect: FAILED used to be terminal against receipts, so one
+        // spurious error latched a delivered message as failed forever. A receipt is ground truth.
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+        repo.markFailedByRelay("m1")
+        assertEquals(MessageState.FAILED, repo.conversationMessages("c1").single().state)
+
+        repo.markSent("m1")
+        assertEquals(MessageState.SENT, repo.conversationMessages("c1").single().state)
+
+        repo.addOutgoing(message("m2", isMine = true))
+        repo.markFailedByRelay("m2")
+        repo.markDelivered("m2")
+        val byId = repo.conversationMessages("c1").associateBy { it.id }
+        assertEquals(MessageState.DELIVERED, byId.getValue("m2").state)
+    }
+
+    @Test
+    fun `a send with no receipt fails on the timeout instead of hanging forever`() = runTest {
+        // Round 1 item 2, maintainer's chosen fix. An unattributable rejection used to leave the
+        // bubble SENDING with no escape: only FAILED is clickable and the store is RAM-only. This
+        // bounds it WITHOUT the relay's cooperation, which is what makes it survive a relay
+        // rollback — and that, not the frequency of unattributable rejections, is the justification.
+        // (The merged relay parses the header before rate-limiting, so an ordinary rate_limited DOES
+        // carry its id; what remains unattributable is parse failures, lost frames, older relays.)
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+        repo.armSendTimeout("m1") // what publishOutgoing does at the socket handoff
+
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS - 1)
+        assertEquals(
+            "failing early would turn a merely-slow Tor circuit into a duplicate send",
+            MessageState.SENDING,
+            repo.conversationMessages("c1").single().state,
+        )
+
+        advanceTimeBy(2)
+        assertEquals(MessageState.FAILED, repo.conversationMessages("c1").single().state)
+    }
+
+    @Test
+    fun `the relay taking a message disarms the timeout, and delivery may then take as long as it likes`() =
+        runTest {
+            // The timer is on the RELAY'S RECEIPT, never on delivery. A stored message waiting for
+            // an offline peer is normal and must never be failed — that would be a lie about a
+            // message the relay is holding.
+            val repo = repository()
+            repo.addOutgoing(message("m1", isMine = true))
+            repo.armSendTimeout("m1")
+            repo.markSent("m1")
+
+            advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS * 10)
+
+            assertEquals(MessageState.SENT, repo.conversationMessages("c1").single().state)
+        }
+
+    @Test
+    fun `a retry gets a fresh timeout rather than inheriting the first attempt's`() = runTest {
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+        repo.armSendTimeout("m1")
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS + 1)
+        assertEquals(MessageState.FAILED, repo.conversationMessages("c1").single().state)
+
+        repo.retryable("m1")
+        assertEquals(MessageState.SENDING, repo.conversationMessages("c1").single().state)
+        repo.armSendTimeout("m1") // the retry's own handoff
+
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS - 1)
+        assertEquals(
+            "the retry must get its own full window, not a stale or already-elapsed one",
+            MessageState.SENDING,
+            repo.conversationMessages("c1").single().state,
+        )
+        advanceTimeBy(2)
+        assertEquals(MessageState.FAILED, repo.conversationMessages("c1").single().state)
+    }
+
+    @Test
+    fun `a late relay receipt heals a message the timeout already failed`() = runTest {
+        // Why the window can afford to be tight: firing early is self-correcting.
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+        repo.armSendTimeout("m1")
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS + 1)
+        assertEquals(MessageState.FAILED, repo.conversationMessages("c1").single().state)
+
+        repo.markSent("m1")
+
+        assertEquals(MessageState.SENT, repo.conversationMessages("c1").single().state)
+    }
+
+    @Test
+    fun `no timeout is armed before the send is handed off, so local work is never timed`() =
+        runTest {
+            // Round 2, BOTH lenses, the P1. Arming used to happen in `addOutgoing` — i.e. when the
+            // bubble appeared, which for an attachment is BEFORE an unbounded blob upload. The timer
+            // then failed a send that was still uploading, showed a retry affordance on a live send,
+            // and a user who took it double-delivered under one id. The window must contain no local
+            // work at all: creating a bubble arms nothing.
+            val repo = repository()
+            repo.addOutgoing(message("m1", isMine = true))
+
+            advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS * 3)
+
+            assertEquals(
+                "a bubble with no handoff yet must not be failed by the send timeout",
+                MessageState.SENDING,
+                repo.conversationMessages("c1").single().state,
+            )
+        }
+
+    @Test
+    fun `clearAll disarms send timeouts, so none outlives the session`() = runTest {
+        // Round 2, P3. clearAll cancelled the TTL, read-burn and reveal timers but not this one, so a
+        // send timeout outlived vault lock / logout / revocation / confirmed deletion by up to 90s.
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+        repo.armSendTimeout("m1")
+
+        repo.clearAll()
+        repo.addOutgoing(message("m1", isMine = true)) // a fresh session re-adds the same id
+
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS * 2)
+
+        assertEquals(
+            "a timer from the cleared session fired into the new one",
+            MessageState.SENDING,
+            repo.conversationMessages("c1").single().state,
+        )
+    }
+
+    @Test
+    fun `re-arming replaces the timer and restarts the window`() = runTest {
+        // Round 2, P3 (second half) — but read what this does and does NOT cover.
+        //
+        // COVERED: re-arming replaces the deadline, so the message fails on the SECOND window rather
+        // than the first, and the surviving timer is still tracked well enough for a receipt to
+        // disarm it.
+        //
+        // NOT COVERED, and the mutation sweep proved it: the DISOWN RACE that motivated the
+        // conditional `remove(messageId, job)`. Making that removal unconditional again broke no
+        // test, because re-arming cancels the old job and a single-threaded virtual clock therefore
+        // never runs the old job's tail concurrently with the new one. The guard is kept as a
+        // declared residual — see the comment at the removal site — not because this test verifies
+        // it.
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+        repo.armSendTimeout("m1")
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS / 2)
+        repo.armSendTimeout("m1") // re-armed mid-window: the old handle must not outlive this
+
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS / 2 + 1)
+        assertEquals(
+            "the replaced timer fired on the ORIGINAL deadline",
+            MessageState.SENDING,
+            repo.conversationMessages("c1").single().state,
+        )
+
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS / 2 + 1)
+        assertEquals(MessageState.FAILED, repo.conversationMessages("c1").single().state)
+
+        // …and the surviving timer is still tracked, so a receipt can still disarm it.
+        repo.retryable("m1")
+        repo.armSendTimeout("m1")
+        repo.markSent("m1")
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS * 2)
+        assertEquals(MessageState.SENT, repo.conversationMessages("c1").single().state)
+    }
+
+    @Test
+    fun `an incoming message is never given a send timeout`() = runTest {
+        val repo = repository()
+        repo.addIncoming(message("theirs"))
+
+        advanceTimeBy(MessageRepository.SEND_TIMEOUT_MS * 3)
+
+        assertEquals(MessageState.DELIVERED, repo.conversationMessages("c1").single().state)
+    }
+
+    @Test
+    fun `a failed message is retryable and a retry re-enters as a normal send`() = runTest {
+        // The rejection path has to end somewhere the user can act: FAILED is the state the bubble
+        // renders with "!" + retry, and `retryable` is what arms it. Pinning the round trip here
+        // means a change that marks a message FAILED without leaving it retryable — a dead end the
+        // user cannot escape — fails a test rather than shipping.
+        val repo = repository()
+        repo.addOutgoing(message("m1", isMine = true))
+
+        repo.markFailed("m1")
+        assertEquals(MessageState.FAILED, repo.conversationMessages("c1").single().state)
+
+        val armed = repo.retryable("m1")
+        assertEquals("m1", armed?.id)
+        assertEquals(MessageState.SENDING, repo.conversationMessages("c1").single().state)
+    }
+
     @Test
     fun `own messages are never marked read locally`() = runTest {
         val repo = repository()

@@ -69,7 +69,14 @@ class WsSyntheticSocket(
             onDeliver?.invoke(envelope)
         }
 
-        override fun onServerError(code: String, message: String) {
+        // `messageId` is accepted and DELIBERATELY IGNORED (0.10.1). The synthetic account's
+        // rejections are cover-traffic events, never user-facing ones: attributing one would mean
+        // surfacing a decoy's failure to a user who is not supposed to know decoys exist. The id
+        // could only ever name a cover envelope, which owns no Message row, so there is nothing
+        // here to attribute even if we wanted to. The rate_limited routing is unchanged and stays
+        // the meter's SYNTHETIC channel — see the class kdoc for why that separation is
+        // load-bearing.
+        override fun onServerError(code: String, message: String, messageId: String?) {
             if (code == RATE_LIMITED) onRateLimited()
         }
 

@@ -113,6 +113,7 @@ class WsClientFrameTest {
         var preKeyRemaining: Int? = null
         var revoked = false
         var errorCode: String? = null
+        var errorMessageId: String? = null
 
         override fun onMessageDeliver(envelope: MessageEnvelope) { delivered = envelope }
         override fun onMessageBurned(messageId: String) { burnedId = messageId }
@@ -122,7 +123,10 @@ class WsClientFrameTest {
         override fun onPreKeyLow(remaining: Int) { preKeyRemaining = remaining }
         override fun onSessionRevoked() { revoked = true }
         override fun onAuthExpired() {}
-        override fun onServerError(code: String, message: String) { errorCode = code }
+        override fun onServerError(code: String, message: String, messageId: String?) {
+            errorCode = code
+            errorMessageId = messageId
+        }
     }
 
     private fun clientWith(listener: WsClient.Listener): WsClient =
@@ -155,7 +159,28 @@ class WsClientFrameTest {
         assertEquals("p1" to true, listener.typing)
         assertEquals(7, listener.preKeyRemaining)
         assertEquals("bad_envelope", listener.errorCode)
+        assertNull("an error frame with no message_id must attribute to nothing", listener.errorMessageId)
         assertTrue(listener.revoked)
+    }
+
+    @Test
+    fun `an error frame carries message_id through, and absent or empty means unattributable`() {
+        // 0.10.1. The relay echoes `message_id` on rate_limited / store_failed / bad_envelope so a
+        // rejected send can be marked FAILED instead of showing SENDING forever. The field is
+        // `omitempty` server-side (server/internal/ws/hub.go), so ABSENT and EMPTY are the same
+        // statement — "not attributable" — and both must reach the listener as null. A listener
+        // that saw "" could match it against a message whose id is "", which is why the
+        // normalisation lives here at the wire boundary rather than in each implementor.
+        val listener = RecordingListener()
+        val ws = clientWith(listener)
+
+        ws.dispatchFrame("""{"type":"error","code":"rate_limited","message_id":"m-42"}""")
+        assertEquals("rate_limited", listener.errorCode)
+        assertEquals("m-42", listener.errorMessageId)
+
+        ws.dispatchFrame("""{"type":"error","code":"store_failed","message_id":""}""")
+        assertEquals("store_failed", listener.errorCode)
+        assertNull("an empty message_id means unattributable, never a message whose id is \"\"", listener.errorMessageId)
     }
 
     @Test
