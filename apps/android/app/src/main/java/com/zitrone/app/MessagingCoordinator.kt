@@ -174,8 +174,16 @@ class MessagingCoordinator(
      *
      * Teardown runs through [CoverTraffic.stop], which is handed `ws.disconnect` — see
      * [coverTeardown] — and a live transport SWAP runs through [CoverTraffic.quiesce], see
-     * [reconnectTransport]. Both run on the [confined] worker, through [CoverTrafficWorker], so they
-     * cannot interleave with a send's publish-then-pair slice. **They reach it by different routes,
+     * [reconnectTransport]. Both are dispatched through [CoverTrafficWorker].
+     *
+     * **CORRECTED (0.10.2 design review): this used to claim they "cannot interleave with a send's
+     * publish-then-pair slice" because both run on [confined]. That is FALSE whenever
+     * [CoverTrafficWorker]'s caller-thread fallback fires after its terminal wait — which
+     * CoverTrafficWorker's own kdoc already records as structurally defeating the confinement
+     * argument, precisely when it fires.** What actually holds the property is that the
+     * publish-then-pair sequence is a SUSPENSION-FREE slice, compiler-enforced by
+     * [publishOutgoing]/[publishReceipt] being non-suspending; `limitedParallelism(1)` serialises
+     * slices, not coroutines, so confinement alone would guarantee nothing across a suspension. **They reach it by different routes,
      * and that difference is a fix (round 5):** terminal teardown may fall back to the caller after a
      * bound, because a vault lock that hangs without wiping keys is worse; a transport swap may
      * NEVER, because `quiesce` leaves the register open and a swap off the worker splits pairs.

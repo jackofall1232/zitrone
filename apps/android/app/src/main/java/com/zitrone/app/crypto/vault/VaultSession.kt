@@ -460,7 +460,19 @@ class VaultSession(
                     // sink). It re-anchored firstDirtyAt to its own timestamp (the snapshot
                     // reset it to null), so the caller (flushNow / the timer body) re-arms
                     // a full cooldown from the real mutation time — no lost update, no
-                    // hot-loop. Cannot occur under single-worker confinement anyway.
+                    // hot-loop.
+                    //
+                    // The sentence that used to end this comment — "cannot occur under
+                    // single-worker confinement anyway" — was DELETED (0.10.2 design review).
+                    // It was wrong twice and it was a trap. `limitedParallelism(1)` serialises
+                    // execution SLICES, not coroutines, so anything that suspends frees the
+                    // worker; and `flush` is reachable from at least three threads anyway (the
+                    // coordinator's confined worker via flushBeforeAck, the background
+                    // coalescing timer, and UnlockController's lock thread via runtime.close()),
+                    // with `persist(...)` sitting between two separate synchronized(stateLock)
+                    // blocks. THE CODE IS CORRECT — the real guard is stateLock plus the
+                    // version/sealedVersion check above — but a reader who believed the
+                    // confinement claim could delete that version check on its strength.
                 }
             } catch (t: Throwable) {
                 synchronized(stateLock) {
