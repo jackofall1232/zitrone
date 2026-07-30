@@ -76,6 +76,12 @@ export async function POST(request: Request) {
   }).catch(() => null);
 
   if (!sent || !sent.ok) {
+    // Server-side only: Resend's status/body never reaches the client, and the
+    // tester's address is deliberately not logged.
+    console.error(
+      "beta-signup delivery failed:",
+      sent ? `${sent.status} ${await sent.text().catch(() => "")}` : "fetch error",
+    );
     return NextResponse.json({ error: "delivery_failed" }, { status: 502 });
   }
   return NextResponse.json({ ok: true });
