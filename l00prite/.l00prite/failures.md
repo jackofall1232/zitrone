@@ -1307,3 +1307,29 @@ same script, and grep for `no ./gradlew` alongside the result patterns.
 
 The Bash tool's working directory persists between calls, so a `cd` in an earlier command silently
 changes where a later one runs — which is exactly how this happened both times.
+
+## 2026-08-11 — a memoized VERIFICATION cost three review rounds, one frozen input at a time
+
+`RegistryResolver.verifiedBootstrap` was `by lazy`. Three consecutive external-review rounds each
+found one hole in it: the memo froze the persisted high-water mark (round 1 — an in-process burn
+wipe left a null cached past the reset), then the device clock (round 2 — a wrong boot clock left
+a null cached past the NTP correction). Each round removed ONE impurity from a construct that
+should never have been memoized: the final fix deleted the memo, at a cost of one asset read and
+one Ed25519 verify on two rare readers. Memoizing was premature optimization; it nearly shipped a
+rollback hole that collapses the floor on exactly fresh and post-burn installs — the population
+most in need of the bootstrap floor is the population that would have lost it.
+
+**The pattern, stated generally (maintainer, 2026-08-11):** a memo is only sound if it is a pure
+function of inputs that cannot change within the process lifetime. This one captured two that can
+— the persisted mark (mutable via burn) and the clock (mutable via NTP) — and both were invisible
+at the call site because the impurity lived in the PREDICATE, not the arguments. **Caching a
+security decision is caching the state the decision was made against; enumerate that state before
+the cache is justified.** Corollary for review: when a fix removes one impurity from a cache, ask
+what ELSE the cached predicate reads — the next round's finding is usually already in the closure.
+
+**Sweep on the way out (same shape, whole app module):** every other `by lazy` is a handle or
+compute-object construction (Keystore handles, Argon2 derivers, the burn-step list), not a cached
+decision — not the pattern. ONE instance of the pattern remains and is tracked deliberately:
+`AppContainer.registryRelay` caches a manifest-validity-dependent resolution for the process
+lifetime (documented resolve-once design; its staleness is the deferred "resolved relay outlives
+validUntil" finding in todos.md). Its enumeration now includes everything this entry names.

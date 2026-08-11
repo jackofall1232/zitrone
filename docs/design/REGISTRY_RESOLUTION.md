@@ -262,6 +262,19 @@ distinction — that is why there isn't one.
 `zitrone-MASTER.json`'s `tor.enabled_by_default` / `opt_in` are synced to match (the
 master spec is a claims document; it must not claim the old default).
 
+## 6.5 Known property — manifest validity trusts the device clock
+
+Every temporal check in [ManifestVerifier] — the ±24h `validFrom` skew and the as-written
+`validUntil` — evaluates against device time. An adversary who can set the device clock (local
+access, or control of the device's NTP source) can therefore stretch a manifest's life: skewing
+the clock BACK keeps an expired manifest inside its window, which combined with a replayed signed
+envelope holds a client on a retired relay set for as long as the skew holds. The epoch floor is
+unaffected (it is ordinal, not temporal) — a clock-skewed client still refuses any manifest below
+`max(persisted mark, bootstrap epoch)`, so the exposure is bounded to KEEPING an old-but-
+floor-valid manifest alive, never rolling back past the floor. Recorded as a known property of
+v1 (device time is the only clock a disconnected client has); revisit only if a trusted time
+source ever exists in the threat model.
+
 ## 7. Activation checklist (human, in order — nothing activates by default)
 
 1. **Key ceremony** (maintainer, offline): `registry-sign.mjs keygen` → custody per §2.
