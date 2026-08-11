@@ -345,7 +345,8 @@ only where the OS provides it (Android).
 
 ## Tor routing
 
-In v1.0, Tor is opt-in, not default. Mobile clients integrate with Orbot; browser users can reach
+Tor defaults ON for users who never touched the toggle (opt-out; an explicit off is honored —
+the default was opt-in until the 0.11.0 registry unit). Mobile clients integrate with Orbot; browser users can reach
 the deployment's `.onion` address via Tor Browser. The server ships an optional nginx + tor hidden
 service configuration (`docker-compose.tor.yml`). **As of v1.5 this is inverted — an anonymous
 transport is the default and clearnet is a flagged fallback, along a fixed hierarchy: I2P is the
@@ -800,7 +801,7 @@ indicator (a yellow dot on the connection-mode badge — informative, not alarmi
 transport hierarchy is **fixed, not user-selectable**: I2P is the primary relay transport, Tor is
 the fallback when I2P is unavailable, and clearnet is the last resort. This replaced the earlier
 v1.5 `tor_first`/`i2p_first` user-choice model. Mobile clients integrate **external router
-apps** rather than embedding routers: Orbot for Tor (opt-in), and on Android the i2pd router app
+apps** rather than embedding routers: Orbot for Tor (default ON, opt-out), and on Android the i2pd router app
 for I2P (auto-detected; primary transport when present, 0.7.0-beta). In-process embedding was
 considered and rejected — no maintained embeddable I2P artifact exists, and bundling routers cuts
 against the project's dependency philosophy. Browser clients auto-detect an `.onion`

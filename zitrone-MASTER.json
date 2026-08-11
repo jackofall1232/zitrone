@@ -83,8 +83,9 @@
             "web": "TLS 1.3 + HSTS (max-age=63072000; preload). True certificate pinning is not available in browser environments — HPKP was removed from all major browsers and Service Workers cannot access the TLS certificate chain. Web transport relies on CA chain validation + HSTS preload. Users requiring hard pinning should use the native iOS or Android clients."
           },
           "tor": {
-            "enabled_by_default": false,
-            "opt_in": true,
+            "enabled_by_default": true,
+            "opt_in": false,
+            "default_applies_to_unset_preferences_only": "an explicit user off is honored; key-absence is the never-set signal (0.11.0 registry unit)",
             "method": "Orbot integration on mobile, .onion address for browser via Tor Browser",
             "onion_address": "configurable at deployment"
           },

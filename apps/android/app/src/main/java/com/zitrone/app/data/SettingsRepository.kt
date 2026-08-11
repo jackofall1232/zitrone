@@ -12,8 +12,8 @@ import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * User preferences, persisted via EncryptedSharedPreferences only.
- * All defaults follow the master spec: Tor OFF (opt-in), biometric gate ON,
- * burn-on-read OFF, no default TTL.
+ * All defaults follow the master spec: Tor ON (opt-out, since the registry unit),
+ * biometric gate ON, burn-on-read OFF, no default TTL.
  */
 class SettingsRepository(private val prefs: android.content.SharedPreferences) {
 
@@ -34,14 +34,27 @@ class SettingsRepository(private val prefs: android.content.SharedPreferences) {
         val burnOnReadDefault: Boolean = false,
         /** Read receipts are user-controlled (features.messaging.read_receipts). */
         val readReceipts: Boolean = true,
-        /** Tor via Orbot — strictly opt-in (security.transport.tor). */
-        val torEnabled: Boolean = false,
         /**
-         * I2P via a local router (the official I2P app). Opt-OUT (default ON) — the ASYMMETRY
-         * with Tor is deliberate: I2P is the fixed-primary relay transport, and
-         * auto-detecting a running router is cheap and has no downside, so it's
-         * on by default and simply falls through the chain when no router is
-         * present. Tor stays opt-in because it's a user-chosen fallback.
+         * Tor via Orbot (security.transport.tor). Opt-OUT (default ON) as of the
+         * registry unit — matching I2P below, so both anonymity transports engage by
+         * themselves when their router app is present and the transport chain
+         * (I2P → Tor → clearnet, unchanged) only lands on clearnet when neither is.
+         *
+         * THE DEFAULT APPLIES TO UNSET PREFERENCES ONLY, and that needs no migration
+         * code: `tor_enabled` is written exclusively by the user's own toggle
+         * ([setTorEnabled] — the only writer), so key-absence IS the "never
+         * expressed a preference" signal, and [load]'s `getBoolean` default reaches
+         * exactly that population. A user who explicitly disabled Tor has
+         * `tor_enabled=false` ON DISK and keeps it. Do NOT "migrate" by stamping the
+         * default into the store — that would destroy the never-set/explicit
+         * distinction for every future default change (WRITER/READER table row 3,
+         * docs/design/REGISTRY_RESOLUTION.md §6).
+         */
+        val torEnabled: Boolean = true,
+        /**
+         * I2P via a local router (the official I2P app). Opt-OUT (default ON):
+         * auto-detecting a running router is cheap and has no downside — the chain
+         * simply falls through when no router is present.
          */
         val i2pEnabled: Boolean = true,
         /**
@@ -134,7 +147,7 @@ class SettingsRepository(private val prefs: android.content.SharedPreferences) {
         defaultTtlSeconds = prefs.getInt(KEY_TTL, TTL_OFF).takeIf { it != TTL_OFF },
         burnOnReadDefault = prefs.getBoolean(KEY_BURN_ON_READ, false),
         readReceipts = prefs.getBoolean(KEY_READ_RECEIPTS, true),
-        torEnabled = prefs.getBoolean(KEY_TOR, false),
+        torEnabled = prefs.getBoolean(KEY_TOR, true),
         i2pEnabled = prefs.getBoolean(KEY_I2P, true),
         lemonDropComposeEnabled = prefs.getBoolean(KEY_LEMON_DROP_COMPOSE, false),
         unreadReminderEnabled = prefs.getBoolean(KEY_UNREAD_REMINDER, true),
