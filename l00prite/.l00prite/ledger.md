@@ -4238,3 +4238,12 @@ real, dormant while the registry is disabled, degradation-shaped when active (on
 a cache refresh — next start still resolves bootstrap/legacy). Same design gap as the deferred
 Orbot-cold-start finding, third trigger now enumerated; the todos item is generalized to "refresh
 retry policy" so the review round designs ONE bounded retry rather than three ad-hoc nudges.
+
+### Burn-gate flake hypothesis: CONFIRMED (2026-08-11 13:13Z)
+
+The gate PASSED on `94cb25e0` — which carries b9d2e32's app code byte-identical (that push touched
+only docs and l00prite files). Same code, one failure with "Failed to start Emulator console" in
+the log, one clean pass: the b9d2e32 failure was the emulator, not the delta. The canary's
+precondition ("auth store must exist post-provision") is therefore flake-CAPABLE on an unhealthy
+emulator — worth remembering the next time it fires alone, and worth the review round asking
+whether provisioning should await the auth store's materialization explicitly.

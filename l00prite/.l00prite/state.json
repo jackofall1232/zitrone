@@ -13,7 +13,7 @@
  "last_event_processed": null,
  "pending_event_count": 0,
  "review_response_required": false,
- "ci_status": "PR #65 merged. Post-merge main CI state not yet observed from this session.",
+ "ci_status": "PR #66: burn gate GREEN on 94cb25e0 (flake hypothesis for b9d2e32's single canary failure CONFIRMED — same app code, clean pass). Remaining CI cycling on doc/memory pushes.",
  "execution_active": false,
  "execution_stop_reason": null,
  "next_recommended_action": "1) Confirm the burn gate on the next push (single failure on b9d2e32's canary precondition — flake hypothesis: unhealthy emulator, no causal path from the diff; if it repeats, it is real and gets a unit). 2) Human merge decision on PR #66. 3) Dispatch the owed paired-blind whole-unit review; todos.md's deferred registry items are its agenda. 4) Then 0.10.1 coordinator-harness debt, remainder of 0.11.0 polish."
