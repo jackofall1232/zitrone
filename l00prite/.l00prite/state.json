@@ -1,11 +1,11 @@
 {
   "schema_version": 2,
   "project_name": "Zitrone",
-  "current_goal": "v0.10.3-beta SHIPPED 2026-07-30 (vc23): attachment blob reclaim. GH prerelease live at tag v0.10.3-beta, APK sha256 9c1ce6e9...b9c5c3, signer cert 6c7f92a7...892753 (unchanged since 0.10.0), GitHub-served asset verified BYTE-IDENTICAL to the locally built and onion-staged binary. Website /download/beta flipped. CI green (CI + burn byte-for-byte gate).",
-  "current_phase": "v0.10.3-beta live. CX23 DEPLOY of the 0.10.2 relay work DONE 2026-07-30 (deployed 755e558b, verified: per-client keying active, refresh_tokens 150->32, effective_cache_size 4GB->2560MB, 8443 not publicly reachable, 0 log errors, blobs 0 rows). \u26a0\ufe0f ONION MIRROR STILL NOT SERVING AN APK: deployed code names the 0.10.2 APK which is not staged, so the index renders 'not staged on this mirror' (graceful, no broken link). Forward fix = redeploy at main >= aa8876c7 AND stage zitrone-v0.10.3-beta.apk (9c1ce6e9...b9c5c3).",
+  "current_goal": "0.11.0 polish round (FINAL ALPHA) — STARTED, docs/website/honesty track only. 14 commits landed 2026-07-30 on main (71553992..74157301): docs/FEATURES.md added and audited twice against shipped v0.10.3 (12 of 14 mockup claims verified; registration PoW row removed as reversed), 'Invisible Watermarking' renamed to 'Identity Watermarking' (visible by design — maintainer decision), website/README honesty fixes (two false watermark claims removed, Android-only reality stated, lemon-drop QR corrected to 'pointer not key', new /how-to walkthrough), Play-beta tester signup form live on the website, honest onboarding slides synced to MASTER.json, code-reconstructed screenshots + regeneration pipeline. NO Android code polish yet. NO version bump: app is still vc23 / 0.10.3-beta and CHANGELOG [Unreleased] is empty.",
+  "current_phase": "0.11.0 in progress (docs/website/honesty track landed; Android/code polish scope not started). main = 74157301. v0.10.3-beta remains the shipped release (vc23, APK sha256 9c1ce6e9...b9c5c3, signer cert 6c7f92a7...892753). research/plan.md (74157301) holds a Linux desktop ↔ Android/iOS libsignal interop plan — RESEARCH ONLY, no code; Linux and iOS stay back-burner until after V1 Android testing. ⚠️ ONION MIRROR REDEPLOY STILL OWED: deployed relay is 755e558b whose currentAPK names the unstaged 0.10.2 APK, so the mirror serves no current APK (graceful 'not staged' message). PR #60 (0.9.2 Unit W-A residue sweep) still open, untouched since 2026-07-25.",
   "active_agent": null,
   "last_agent": "claude",
-  "last_updated": "2026-07-30",
+  "last_updated": "2026-08-11",
   "status": "in_progress",
   "blocked": false,
   "blocker_reason": null,
@@ -13,8 +13,8 @@
   "last_event_processed": null,
   "pending_event_count": 0,
   "review_response_required": false,
-  "ci_status": "GREEN on the release commit aa8876c7: CI success, Android burn byte-for-byte gate success. link-check initially failed on a 404 for the not-yet-published release asset (sequencing: bump and website flip were combined into ONE commit; prior releases split them), re-run after publishing. Release verification: cert continuity checked BEFORE build; stale 0.10.2 APK found in outputs and deleted first; badging vc23/0.10.3-beta; GitHub-served asset byte-identical (cmp) to onion-staged.",
+  "ci_status": "GREEN on main as of the 0.10.3 release arc (CI + Android burn byte-for-byte gate on aa8876c7; gofmt redness fixed at 755e558b). The 14 polish commits of 2026-07-30 are docs/website/onboarding-copy changes; no CI regression recorded.",
   "execution_active": false,
   "execution_stop_reason": null,
-  "next_recommended_action": "ONION MIRROR REDEPLOY \u2014 the only CX23 item still open: redeploy the relay at main (>= aa8876c7, which changes onion.go's currentAPK to 0.10.3) and stage zitrone-v0.10.3-beta.apk server-side; sha must be 9c1ce6e9e0bc64582e02faf10202198c837882a7ede55a83b2c25ace78b9c5c3. NOTE: /api/v1/blobs/abandon is now live AND called by shipped v0.10.3-beta clients (contact-deleted-mid-send route only); it shares blobLimit (60/min) with deposit and redeem. Then: 0.10.1 coordinator-harness debt, 0.11.0 polish round (FINAL ALPHA)."
+  "next_recommended_action": "1) ONION MIRROR REDEPLOY (CX23, human): redeploy relay at main >= aa8876c7 and stage zitrone-v0.10.3-beta.apk (sha256 9c1ce6e9e0bc64582e02faf10202198c837882a7ede55a83b2c25ace78b9c5c3). 2) Scope the remaining 0.11.0 polish round work (Android/code track) — see zitrone-0110-planning-inputs in Claude auto-memory for queue + which todos.md entries are stale. 3) Standing pre-tester hygiene: CI SAST silently broken + release-apk.yml shell-injection, storage-format stability decision, contact-deletion permanence disclosure. 4) PR #60 (0.9.2 Unit W-A) needs a decision: finish review or close. 5) 0.10.1 coordinator-harness scheduled debt. No version bump without an explicit flip decision from the maintainer."
 }

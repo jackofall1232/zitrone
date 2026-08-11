@@ -3899,3 +3899,57 @@ allowlist, so staging it too would also resolve.
 still correct; only the account of the old value's origin was wrong. Also noted: oldest expired token
 was 2026-07-09 (not 07-02), and the blobs size query needs `ciphertext` — there is no `payload`
 column.
+
+## 2026-07-30 — 0.11.0 polish round STARTED: docs/website/honesty track, 14 commits (`71553992`..`74157301`) — recorded 2026-08-11 (memory sync)
+
+*This entry was written 2026-08-11 during a memory sync: the 14 commits below landed 2026-07-30
+with no ledger entry, leaving memory claiming the 0.11.0 polish round was future work while it had
+in fact started. Recorded retroactively from `git log` + working-tree verification, not from
+session recollection.*
+
+**Scope reality check first:** 0.11.0 has started **only** on the docs/website/honesty track.
+There is **no Android code polish yet** — the sole app-code commit in the run (`500a6093`) changes
+onboarding slide *copy* (honest slide 3, new lemon-drop and network slides, MASTER.json sync), not
+behavior. There has been **no version bump**: the app is still **vc23 / 0.10.3-beta**
+(`build.gradle.kts` verified) and CHANGELOG `[Unreleased]` is **empty** (verified). No flip
+decision exists.
+
+### What landed, by theme
+
+**Feature truth (`71553992`, `b21242b1`, `0cf9ae0b`, `0eb313a5`):** `docs/FEATURES.md` added as
+the verified feature reference for the 0.11.0 polish pass, then **audited twice against source** —
+first against the feature mockup (**12 of 14 claims verified**), then against shipped v0.10.3
+(missing rows added, and the **registration PoW row removed** because that design was reversed —
+see the PoW-reversal record). "Invisible Watermarking" was **renamed to Identity Watermarking**:
+the watermark is *visible by design* — a maintainer decision, and the docs now say so instead of
+implying covert embedding. Multi-hop is recorded as a pre-production blocker, not a shipped
+feature.
+
+**Website/README honesty (`859b65f8`, `5840ba5a`, `218268a5`, `ce3a8827`):** two false watermark
+claims removed from the website; README honesty pass states the **Android-only reality** and the
+screenshots section; new **/how-to walkthrough** on the website (includes second-vault
+instructions, per the ruling that second-vault docs live on the WEBSITE, not in the wizard);
+**lemon-drop QR corrected everywhere to "pointer, not key"** — docs and website stop implying a QR
+holder can read anything.
+
+**Play-beta tester signup (`593eaa86`, `5b692d21`, `cd529f60`, `aa144851`):** signup form +
+forwarding API route + privacy disclosure on the website; Resend failure status/body now logged
+server-side; recipient made env-overridable (Resend unverified-domain limit); sender defaulted to
+`beta@zitrone.app` once the domain verified. E2e-verified per the docs-refresh record.
+
+**Screenshots (`dffec1af`):** code-reconstructed app screenshots (6 PNGs) plus the
+regeneration pipeline committed under `docs/screenshots/`.
+
+**Research (`74157301`, = current main):** `research/plan.md` adds a Linux desktop ↔ Android/iOS
+libsignal interop plan. **RESEARCH ONLY — no code.** Linux and iOS remain back-burner until after
+V1 Android testing; the plan exists so that decision is made with a map, not so work starts.
+
+### Still true / still owed after this run
+
+- **Onion mirror redeploy still owed** (unchanged from the 0.10.3 entry): deployed relay is
+  `755e558b`, whose `currentAPK` names the unstaged 0.10.2 APK. Forward fix: redeploy at
+  `main` ≥ `aa8876c7` + stage `zitrone-v0.10.3-beta.apk`
+  (`9c1ce6e9e0bc64582e02faf10202198c837882a7ede55a83b2c25ace78b9c5c3`).
+- **PR #60** (0.9.2 Unit W-A residue sweep) still OPEN, untouched since 2026-07-25.
+- Standing pre-tester hygiene: CI SAST silently broken, `release-apk.yml` shell-injection,
+  storage-format-stability decision, contact-deletion permanence disclosure.
