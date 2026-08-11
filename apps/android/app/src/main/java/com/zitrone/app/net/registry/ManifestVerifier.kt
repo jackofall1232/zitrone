@@ -47,13 +47,30 @@ class ManifestVerifier(
     fun verify(envelopeBytes: ByteArray, trustRootB64Url: String, minEpoch: Int): VerifiedManifest? {
         if (trustRootB64Url.isEmpty()) return null // registry resolution disabled at build time
         if (envelopeBytes.isEmpty() || envelopeBytes.size > MAX_ENVELOPE_BYTES) return null
-        return runCatching { verifyOrThrow(envelopeBytes, trustRootB64Url, minEpoch) }.getOrNull()
+        return runCatching { verifyOrThrow(envelopeBytes, trustRootB64Url, minEpoch, enforceWindow = true) }.getOrNull()
+    }
+
+    /**
+     * The SIGNED epoch of [envelopeBytes], or null when the signature, schema, or
+     * relay shape fail — the validity WINDOW is deliberately not checked, and no
+     * epoch floor is applied. FLOOR DERIVATION ONLY (design doc §6.5): the rollback
+     * floor is ordinal, never temporal — an out-of-window but validly signed
+     * manifest is still proof its epoch existed, and a floor that dies with the
+     * window dies exactly when the device clock is wrong. Never use this to SERVE
+     * a manifest; serving goes through [verify], window and all.
+     */
+    fun signedEpoch(envelopeBytes: ByteArray, trustRootB64Url: String): Int? {
+        if (trustRootB64Url.isEmpty()) return null
+        if (envelopeBytes.isEmpty() || envelopeBytes.size > MAX_ENVELOPE_BYTES) return null
+        return runCatching { verifyOrThrow(envelopeBytes, trustRootB64Url, minEpoch = 0, enforceWindow = false) }
+            .getOrNull()?.epoch
     }
 
     private fun verifyOrThrow(
         envelopeBytes: ByteArray,
         trustRootB64Url: String,
         minEpoch: Int,
+        enforceWindow: Boolean,
     ): VerifiedManifest? {
         val trustRoot = Base64.getUrlDecoder().decode(trustRootB64Url)
         if (trustRoot.size != 32) return null
@@ -91,10 +108,12 @@ class ManifestVerifier(
         // ±24h skew tolerance on validFrom ONLY: a slightly-slow device clock must not
         // reject a just-published manifest, but validUntil is enforced as written —
         // skew tolerance on expiry would extend every manifest's life by a day (§1.2).
+        // The fields must PARSE regardless of [enforceWindow] (a malformed instant is
+        // a malformed manifest); only the temporal comparison is floor-exempt.
         val now = nowMs()
         val validFrom = Instant.parse(manifest.getString("validFrom")).toEpochMilli()
         val validUntil = Instant.parse(manifest.getString("validUntil")).toEpochMilli()
-        if (now < validFrom - VALID_FROM_SKEW_MS || now > validUntil) return null
+        if (enforceWindow && (now < validFrom - VALID_FROM_SKEW_MS || now > validUntil)) return null
 
         if (epoch == 1) {
             if (!manifest.isNull("previousManifestHash")) return null

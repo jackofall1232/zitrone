@@ -4101,3 +4101,193 @@ our own memory files).
 unit kdoc, slot with multi-relay bootstrap).
 
 **Standing note:** Android-side changes ride PR CI for evidence; this container cannot resolve AGP.
+
+## 2026-08-11 — PR #65 MERGED (`b92db02`, maintainer) — Codex round 5 arrived at merge time, recorded UNADDRESSED
+
+The maintainer merged the registry unit while round 5's five findings were being adjudicated.
+Nothing from round 5 is in the merged code. They are recorded in todos.md next to the earlier
+deferred items — four fix-shaped (transport-binding race on the registry fetch is the sharpest:
+leak-shaped, P1), one a UX design call on the Tor default. All dormant until registry activation.
+
+Final PR #65 review-round tally: 29 bot findings across 5 rounds (Gemini 5, Copilot 3, Codex 21).
+13 fixed and merged, 3 declined with recorded reasons, 11 deferred/outstanding in todos.md, 1
+already satisfied, 1 was the state.json drift (fixed). The paired-blind whole-unit review the
+standing rule requires was NEVER dispatched — the merge happened on bot passes plus fix rounds
+alone. That gap is now the top of the unit's debt, ahead of every deferred finding.
+
+This branch (claude/0-11-x-status-bgrxfo) restarts from the merged main per protocol; the merged
+history is behind it, and this entry is the first commit of the follow-up line.
+
+## 2026-08-11 — PR #66 bot round 1: Gemini CONFIRMED CRITICAL on the P1 #1 fix itself; fixed + pinned
+
+**Gemini found a real hole in the fix under review.** `verifiedBootstrap` was memoized with
+`minEpoch = snapshots.highWaterEpoch()` read at FIRST ACCESS — a state-dependent memo. Initialized
+under a mark above the bootstrap's epoch, it caches null for the process lifetime; an in-process
+store wipe (the burn survives the process — P1 #2's own premise) then drops `epochFloor()` to
+`max(0, null→0) = 0`, reopening exactly the stale-replay window P1 #1 exists to close.
+**Adjudicated CONFIRMED against source; the reviewer's fix shape was correct and taken:** verify
+the bootstrap at floor ZERO (the memo becomes a pure function of asset + key + clock), and let the
+READERS apply the persisted mark — `localManifest`'s `takeIf` and `epochFloor`'s `maxOf` already
+did. New regression test pins the full scenario (memoize under mark 10 → in-process wipe → epoch-3
+replay refused, floor rides the bootstrap; the poisoned memo would wave it through).
+
+**Copilot round 1:** the mode-b burn-gate test could pass vacuously if the writer thread was never
+scheduled inside the 300 ms window — added a started-latch so the blocked assertion means BLOCKED.
+Also removed a duplicated kdoc paragraph in `RegistrySnapshotStore` (Copilot's suppressed comment;
+merge artifact).
+
+**Lesson, same as 0.9.x:** the fix for a P1 was itself carrying a P1-shaped defect, found by an
+outside reader on the first pass. Fix deltas are not lower-risk than original code.
+
+Android evidence rides PR CI (this container cannot resolve AGP); both changes traced by hand
+against source in both directions (fails unfixed / passes fixed).
+
+## 2026-08-11 — PR #66 Codex round 1: suppression must survive overlapping wipe brackets
+
+Codex confirmed a real hole in the NEW suppression flag: burns can overlap (single-flight releases
+on `attemptPassphrase` RETURN, `unlocking` guard dies with recreation), and a Boolean let a failed
+burn A's finally lift suppression while burn B still owned the store — post-burn registry residue,
+or a write between B's clear and its emptiness proof. **Fix: depth counter** (`AtomicInteger`),
+raise before the first destructive step, release in the same finally; suppression lifts only when
+the LAST holder exits. The store's `writesSuppressed: () -> Boolean` seam is unchanged, so the
+burn-gate tests hold as written. The wider question — burn single-flight itself, which touches
+WB-1 uniformity and the 0.9.2 terminal-exclusion boolean — is recorded in todos.md as a
+maintainer decision; the counter makes the registry gate correct under either answer.
+
+## 2026-08-11 — PR #66 Codex round 2: the memo purity lesson, THIRD time — stop memoizing
+
+Round 1 proved the bootstrap verification memo must not capture the STORE's state; Codex round 2
+proved it must not capture the CLOCK either: first access under a wrong boot clock (dead RTC,
+NTP corrects later — routine on Android) cached null for the process lifetime, collapsing
+`epochFloor` to the persisted mark on exactly the fresh/burned installs the floor protects.
+**Fix: `verifiedBootstrap` is now a FUNCTION, not a lazy** — one asset read + one Ed25519 verify
+per read on a rare path, pure in asset + key + CURRENT clock. Regression test pins the recovery
+(wrong clock at boot → nothing resolves → NTP correction, same process → epoch-3 replay refused,
+bootstrap serves again).
+
+Maintainer ruling received mid-round: the burn single-flight question STAYS DEFERRED, with the
+three constraints (WB-1 uniformity, hung-burn recovery, the 0.9.2 non-nesting boolean) recorded
+in todos.md as the bar any future attempt must clear.
+
+Generalized lesson for the review round: memoizing a VERIFICATION result froze every one of its
+inputs; two of those inputs (store, clock) change under a live process, and each frozen input was
+a P1. Verify at read time unless a measurement says otherwise.
+
+## 2026-08-11 — PR #66 Codex round 3: the floor was temporal after all, and the boot fold raced its own gate
+
+Two P1s on the previous round's own output, both CONFIRMED and fixed:
+
+**1. The epoch floor died with the bootstrap's validity window.** De-memoizing fixed staleness but
+not the dependence itself: while the device clock sat >24h before `validFrom`, the full verify
+returned null, the floor collapsed to the persisted mark (0 on fresh/burned installs), and an old
+signed manifest whose window COVERED the skewed time was accepted — directly contradicting the
+§6.5 "the floor is ordinal" claim written one commit earlier. **Fix:** `ManifestVerifier.signedEpoch`
+— signature/schema/shape enforced, window deliberately not — and `epochFloor` rides it. Flooring
+on an out-of-window bootstrap can never refuse a legitimate current manifest (epochs only
+increase); the window still gates SERVING. §6.5 now states the property as by-construction. Tests:
+the clock-skew test refuses an epoch-3 manifest valid AT the skewed time while the clock is wrong;
+verifier test pins signedEpoch ignoring exactly the window and nothing else.
+
+**2. The boot fold's pre-verify raced an admitted writer.** `completeInterruptedCleanup` skips any
+step whose verify() already holds, and that verify reads prefs WITHOUT the gate lock — so a
+refresh store() admitted before the suppression increment could commit AFTER the fold observed
+emptiness: post-burn registry residue under a lowered hold, boot reporting clean. The LIVE burn
+was already sound (runBurnPlan always runs the action, whose synchronized block is the barrier);
+only the skip-if-verified path lacked one. **Fix:** one `synchronized(registryWriteGateLock) {}`
+drain after the increment — happens-after every admitted commit, everything later refused by
+suppression.
+
+**Pattern note for the review round:** rounds 1–3 all found defects in the PREVIOUS round's fix.
+The unit's fix-loop is converging (each finding is narrower), but nothing here discharges the
+paired-blind whole-unit review.
+
+## 2026-08-11 — PR #66 round 4 (Codex) + a burn-gate failure under investigation
+
+**Codex round 4, both taken:** the WRITER/READER table row 4 still said an expired bootstrap
+contributes no floor — false since the ordinal-floor fix and exactly the kind of stale claim that
+misleads a cutover; corrected to "unusable for serving, authoritative for flooring". And
+heartbeat.json still described 0.10.0 U3 as the active unit — synced (with state.json) to the
+live PR #66 unit. Second state-drift finding in two days; the protocol's own reviewers keep
+catching our memory lagging our pushes.
+
+**Burn gate failed ONCE on b9d2e32** — the canary's PRECONDITION ("store must exist") found
+`zitrone_auth.xml` absent after provisioning. Adjudication so far: the gate was GREEN on 683be23
+(which already carried every prior code change) and on main; b9d2e32's app delta is a no-op
+synchronized block on the boot path, a verifier method unreachable while the registry is
+disabled, and an epochFloor change behind the same disabled gate — no causal path to auth prefs.
+The job log also shows "Failed to start Emulator console". FLAKE HYPOTHESIS, under test: this
+push re-runs the gate on an equivalent tree. If it fails again the hypothesis is DEAD and the
+failure is real on this branch — it gets a unit, not a shrug.
+
+### Correction to the round-4 entry above (maintainer, 2026-08-11)
+
+The heartbeat half of Codex's "state drift" finding was a FALSE POSITIVE: the repo's
+`heartbeat.json` is a periodic snapshot that trails the live server-side heartbeat BY DESIGN —
+lagging is the file doing its job, not drift. The reviewer read it cold and flagged correctly
+only because nothing in the file said which copy is authoritative; that is now fixed at the
+source — `heartbeat.json` carries a `_provenance` field stating the snapshot relationship, and
+the protocol README's file table says the same — so the finding cannot recur against a reviewer
+acting in good faith. (The state.json half of the earlier PR #65 finding WAS real drift — an
+"unpushed, awaiting authorization" claim after the push — and stays adjudicated as fixed.)
+
+## 2026-08-11 — PR #66 round 5 (Codex): third trigger for the deferred retry-policy gap; folded, not fixed
+
+A refresh refused during the boot fold's suppression bracket is discarded for the process (the
+collector only retries on transport emissions; StateFlow dedups an unchanged state). CONFIRMED
+real, dormant while the registry is disabled, degradation-shaped when active (one process without
+a cache refresh — next start still resolves bootstrap/legacy). Same design gap as the deferred
+Orbot-cold-start finding, third trigger now enumerated; the todos item is generalized to "refresh
+retry policy" so the review round designs ONE bounded retry rather than three ad-hoc nudges.
+
+### Burn-gate flake hypothesis: CONFIRMED (2026-08-11 13:13Z)
+
+The gate PASSED on `94cb25e0` — which carries b9d2e32's app code byte-identical (that push touched
+only docs and l00prite files). Same code, one failure with "Failed to start Emulator console" in
+the log, one clean pass: the b9d2e32 failure was the emulator, not the delta. The canary's
+precondition ("auth store must exist post-provision") is therefore flake-CAPABLE on an unhealthy
+emulator — worth remembering the next time it fires alone, and worth the review round asking
+whether provisioning should await the auth store's materialization explicitly.
+
+## 2026-08-11 — PR #66 round 6 (Codex): fourth retry-gap trigger, and it inverts the round-3 fix's cost
+
+CONFIRMED: on a vault-less cold start, a refresh committing BEFORE suppression rises is exactly
+what the round-3 drain barrier waits for — after which the boot fold reads the just-committed
+registry keys as interrupted-burn residue and erases them, while the collector has latched
+`refreshed = true` on a durable-then-invalidated commit. No retry, and a FRESH INSTALL's boot
+pass reports residue it created itself. Folded into the generalized retry/sequencing item as
+trigger (d); Codex's start-refresh-after-bootReconciled shape is recorded as the strongest
+candidate (it removes (b) and (d) structurally). Dormant while the registry ships disabled.
+The interplay lesson: the drain barrier fixed mid-wipe correctness and CREATED a new way for a
+correct commit to be authored-then-erased — sequencing beats draining when both are available.
+
+### Burn-gate flake: REVISED — not a one-off, a racy precondition, now fixed at the source
+
+The canary failed AGAIN on `8fe2ae6` (memory-only commit; app code identical to the passing
+94cb25e run): fail/pass/fail on the same code, always the same precondition. The earlier
+"emulator flake, confirmed" entry was HALF right — nondeterministic and not the delta — but wrong
+to leave it at that: a 2-in-3 flake randomly blocks every merge. Root cause: the canary sampled
+`target.exists()` at one instant while EncryptedSharedPreferences lands the store via the async
+apply() queue; today's slower runners widened the race. Fix (test-only): the precondition AWAITS
+materialization with a 10s deadline — a provisioning path that truly stops creating the store
+still fails, with the deadline as evidence instead of a coin-flip. Also fixed the state.json
+internal contradiction Codex round 7 caught (ci_status said hypothesis confirmed while
+next_recommended_action still ordered its confirmation).
+
+Lesson: "flake, confirmed" is a diagnosis, not a resolution — a confirmed flake at meaningful
+rate is a defect in the TEST and gets fixed like one.
+
+### And the await fix itself failed to compile — recorded against me
+
+`3328784`'s gate run failed at `compileDebugAndroidTestKotlin`: my await introduced a second
+`val deadline` in a function that already had one (the post-burn 2s loop). This box cannot
+compile Android, and I shipped a name collision the first `grep` of the function would have
+caught. Renamed to `materializeDeadline`. The canary-race fix itself is still UNTESTED until
+this head's gate runs — the fail/pass/fail flake evidence stands, but the fix has produced one
+compile failure and zero passing runs so far. Claim nothing until the gate is green.
+
+### Gate GREEN on `83c8594` (maintainer-confirmed) — the canary await fix is proven
+
+All checks green on the head carrying the materialization-await. Final accounting of the gate
+arc: fail (b9d2e32, race) → pass (94cb25e, race won) → fail (8fe2ae6, race lost) → fail
+(3328784, MY compile error) → green (83c8594, fix proven). The canary now awaits the auth
+store's materialization instead of sampling one instant; discriminating power unchanged.

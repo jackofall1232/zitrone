@@ -2,7 +2,7 @@
  "schema_version": 2,
  "project_name": "Zitrone",
  "current_goal": "0.11.0 polish round (FINAL ALPHA) — STARTED, docs/website/honesty track only. 14 commits landed 2026-07-30 on main (71553992..74157301): docs/FEATURES.md added and audited twice against shipped v0.10.3 (12 of 14 mockup claims verified; registration PoW row removed as reversed), 'Invisible Watermarking' renamed to 'Identity Watermarking' (visible by design — maintainer decision), website/README honesty fixes (two false watermark claims removed, Android-only reality stated, lemon-drop QR corrected to 'pointer not key', new /how-to walkthrough), Play-beta tester signup form live on the website, honest onboarding slides synced to MASTER.json, code-reconstructed screenshots + regeneration pipeline. NO Android code polish yet. NO version bump: app is still vc23 / 0.10.3-beta and CHANGELOG [Unreleased] is empty.",
- "current_phase": "0.11.0 registry unit: PR #65 OPEN on claude/0-11-x-status-bgrxfo (push authorization arrived after the unit was recorded as local-only). Four bot review rounds (Gemini/Copilot/Codex) processed 2026-08-11: fixes pushed through dca15e1+ (asset stream, signer/client shape+grammar/chain/window/size alignment, sig-entry isolation, bounded registry fetch, onion-mirror cleartext, nanoid CVE). Five design-level findings DEFERRED to the blind review round by maintainer ruling — see todos.md 'PR #65 REVIEW DISAGREEMENTS'. Paired-blind whole-unit review still OWED; merge/version human-gated as always.",
+ "current_phase": "PR #66 OPEN (registry P1 fixes on claude/0-11-x-status-bgrxfo): blind-review P1 pair fixed, then four bot rounds fixed on top (memo purity x2, suppression depth counter, ordinal floor, boot-fold drain). PR #65 (the registry unit itself) merged earlier today at b92db02. Registry DISABLED until the §7 activation checklist.",
  "active_agent": null,
  "last_agent": "claude",
  "last_updated": "2026-08-11",
@@ -13,8 +13,8 @@
  "last_event_processed": null,
  "pending_event_count": 0,
  "review_response_required": false,
- "ci_status": "PR #65 CI cycling on review-fix pushes; Security scanning was red on a pre-existing nanoid CVE (fixed 1b2693c). Android suite evidence rides PR CI — the review container cannot resolve AGP.",
+ "ci_status": "ALL GREEN on 83c8594 (maintainer-confirmed 2026-08-11): burn gate passes with the canary materialization-await; the fail/pass/fail flake arc is closed.",
  "execution_active": false,
  "execution_stop_reason": null,
- "next_recommended_action": "Dispatch the paired-blind whole-unit review of PR #65 (attack list in the 2026-08-11 ledger entries + the five deferred items in todos.md). Bot passes do NOT discharge it. After clean convergence: human merge decision. Registry stays DISABLED (empty trust root) until the §7 activation checklist. Then: 0.10.1 coordinator-harness debt, remainder of the 0.11.0 polish round."
+ "next_recommended_action": "1) Human merge decision on PR #66 — CI green, seven bot rounds adjudicated, nothing outstanding on the branch. 2) Dispatch the owed paired-blind whole-unit review; todos.md's deferred registry items (4-trigger retry/sequencing design, I2P fallback ruling, relay rotation, validUntil expiry, Tor-toggle UX, burn single-flight bar) are its agenda. 3) Then 0.10.1 coordinator-harness debt, remainder of 0.11.0 polish."
 }

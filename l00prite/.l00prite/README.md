@@ -18,7 +18,7 @@ plus which prompt to use for which job.
 | `blueprint.md` | Mission, architecture, requirements, and definition of done for the project. |
 | `ledger.md` | Rich, human-readable run history, including evidence-backed verification. |
 | `memory.md` | Durable decisions and facts only. |
-| `heartbeat.json` | Machine-readable loop control, including the Execution Mode block. |
+| `heartbeat.json` | Machine-readable loop control, including the Execution Mode block. **The repo copy is a periodic snapshot that trails the live server-side heartbeat by design** — see its `_provenance` field; staleness relative to the branch is expected, not drift. |
 | `constraints.md` | Hard rules, user preferences, security boundaries. |
 | `failures.md` | Approaches that already failed. |
 | `todos.md` | Prioritized next actions. |

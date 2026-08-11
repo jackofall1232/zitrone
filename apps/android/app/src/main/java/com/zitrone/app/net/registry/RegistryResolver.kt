@@ -18,9 +18,17 @@ import java.net.URI
  *  5. last-known-good cached snapshot on device             — [resolveLocalRelay]
  *
  * "Success" is DEFINED (§3.1): a source succeeds only when [ManifestVerifier.verify]
- * accepts its bytes at the device's current epoch high-water mark. That definition is
- * what makes bootstrap-first ordering rollback-safe: once a refresh has cached epoch
- * N, a stale bootstrap (epoch < N) fails the epoch check and the cache wins instead.
+ * accepts its bytes at the device's current rollback floor — [epochFloor], the MAX of
+ * the persisted epoch high-water mark and the verified bootstrap's epoch. The persisted
+ * mark covers manifests this device refreshed to; the bootstrap half covers the window
+ * BEFORE the first refresh lands, so a network-position attacker replaying a stale but
+ * validly signed manifest cannot pull the device below the relay set its build shipped
+ * (blind-review P1: the floor used to read 0 until the first [store][RegistrySnapshotStore.store]).
+ * The bootstrap half needs no write: it rides the APK, so it survives the burn exactly
+ * as a fresh install's copy does, and no startup write ever dirties the settings store
+ * (a pre-vault app key there reads as burn residue to the boot reconciler). That floor
+ * is also what makes bootstrap-first ordering rollback-safe: once a refresh has cached
+ * epoch N, a stale bootstrap (epoch < N) fails the epoch check and the cache wins instead.
  *
  * Two-phase by design (§3.2): [resolveLocalRelay] is synchronous and touches ONLY
  * local sources (1 and 5) — no network on the construction path. [refresh] is the
@@ -55,11 +63,52 @@ class RegistryResolver(
      */
     fun resolveLocalRelay(): RegistryRelay? = localManifest()?.let(::selectRelay)
 
+    /**
+     * The verified embedded bootstrap, or null when resolution is disabled, the asset
+     * is absent, or it fails [ManifestVerifier]. Deliberately NOT memoized — this has
+     * now bitten twice. The result depends on inputs that CHANGE under a running
+     * process: a memo initialized under a high persisted mark cached null past an
+     * in-process store wipe (round 1), and a memo initialized under a wrong boot
+     * clock would cache null past the NTP correction (round 2) — either way
+     * [epochFloor] collapses to the persisted mark for the process lifetime, on
+     * exactly the fresh/burned installs the floor exists to protect. Re-verifying
+     * per read is one asset read and one Ed25519 verify on a rare path, and every
+     * reader gets the CURRENT clock's answer. Verified at floor ZERO — a pure
+     * function of asset, key, and clock; rollback protection against the persisted
+     * mark is applied by the READERS: [localManifest]'s `takeIf` and [epochFloor]'s
+     * `maxOf`.
+     */
+    private fun verifiedBootstrap(): VerifiedManifest? =
+        if (trustRootB64Url.isEmpty()) {
+            null
+        } else {
+            bootstrap()?.let { verifier.verify(it, trustRootB64Url, 0) }
+        }
+
+    /**
+     * The rollback floor applied to every NETWORK acceptance: max of the persisted
+     * high-water mark and the bootstrap's SIGNED epoch. The floor is ORDINAL, never
+     * temporal (design doc §6.5): a validly signed bootstrap outside its usage
+     * window — an APK shelved past expiry, or a device clock skewed years off —
+     * is still proof "epoch N existed", so it still floors this device; a floor
+     * that died with the window died exactly while the clock was wrong, on exactly
+     * the fresh/burned installs with no persisted mark to fall back on. Only a
+     * tampered or absent bootstrap contributes nothing. Flooring on an old epoch
+     * can never refuse a LEGITIMATE current manifest — epochs only increase — and
+     * the window still gates USAGE: [localManifest] serves the bootstrap through
+     * the full [ManifestVerifier.verify], window included.
+     */
+    private fun epochFloor(): Int =
+        maxOf(
+            snapshots.highWaterEpoch(),
+            bootstrap()?.let { verifier.signedEpoch(it, trustRootB64Url) } ?: 0,
+        )
+
     private fun localManifest(): VerifiedManifest? {
         if (trustRootB64Url.isEmpty()) return null
         val minEpoch = snapshots.highWaterEpoch()
-        bootstrap()?.let { verifier.verify(it, trustRootB64Url, minEpoch)?.let { v -> return v } }
-        snapshots.snapshotBytes()?.let { return verifier.verify(it, trustRootB64Url, minEpoch) }
+        verifiedBootstrap()?.takeIf { it.epoch >= minEpoch }?.let { return it }
+        snapshots.snapshotBytes()?.let { return verifier.verify(it, trustRootB64Url, epochFloor()) }
         return null
     }
 
@@ -101,7 +150,7 @@ class RegistryResolver(
         if (trustRootB64Url.isEmpty()) return false
         for (url in urls) {
             val bytes = fetchBytes(url) ?: continue
-            val verified = verifier.verify(bytes, trustRootB64Url, snapshots.highWaterEpoch()) ?: continue
+            val verified = verifier.verify(bytes, trustRootB64Url, epochFloor()) ?: continue
             if (snapshots.store(verified.envelopeBytes, verified.epoch)) return true
         }
         return false
