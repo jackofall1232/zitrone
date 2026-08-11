@@ -4275,3 +4275,12 @@ next_recommended_action still ordered its confirmation).
 
 Lesson: "flake, confirmed" is a diagnosis, not a resolution — a confirmed flake at meaningful
 rate is a defect in the TEST and gets fixed like one.
+
+### And the await fix itself failed to compile — recorded against me
+
+`3328784`'s gate run failed at `compileDebugAndroidTestKotlin`: my await introduced a second
+`val deadline` in a function that already had one (the post-burn 2s loop). This box cannot
+compile Android, and I shipped a name collision the first `grep` of the function would have
+caught. Renamed to `materializeDeadline`. The canary-race fix itself is still UNTESTED until
+this head's gate runs — the fail/pass/fail flake evidence stands, but the fix has produced one
+compile failure and zero passing runs so far. Claim nothing until the gate is green.

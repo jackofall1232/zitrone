@@ -727,8 +727,8 @@ class BurnByteForByteGateTest {
         // precondition discriminating: a provisioning path that truly stops creating
         // the store still fails, with the full deadline as evidence instead of a
         // scheduler coin-flip.
-        val deadline = System.nanoTime() + 10_000_000_000L
-        while (!target.exists() && System.nanoTime() < deadline) Thread.sleep(25)
+        val materializeDeadline = System.nanoTime() + 10_000_000_000L
+        while (!target.exists() && System.nanoTime() < materializeDeadline) Thread.sleep(25)
         assertTrue("precondition: the store must exist, or there is nothing to resurrect", target.exists())
 
         // Left deliberately in flight — the same shape as wipeLegacyPrefs()'s own writes.
