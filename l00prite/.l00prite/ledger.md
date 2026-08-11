@@ -4229,3 +4229,12 @@ source — `heartbeat.json` carries a `_provenance` field stating the snapshot r
 the protocol README's file table says the same — so the finding cannot recur against a reviewer
 acting in good faith. (The state.json half of the earlier PR #65 finding WAS real drift — an
 "unpushed, awaiting authorization" claim after the push — and stays adjudicated as fixed.)
+
+## 2026-08-11 — PR #66 round 5 (Codex): third trigger for the deferred retry-policy gap; folded, not fixed
+
+A refresh refused during the boot fold's suppression bracket is discarded for the process (the
+collector only retries on transport emissions; StateFlow dedups an unchanged state). CONFIRMED
+real, dormant while the registry is disabled, degradation-shaped when active (one process without
+a cache refresh — next start still resolves bootstrap/legacy). Same design gap as the deferred
+Orbot-cold-start finding, third trigger now enumerated; the todos item is generalized to "refresh
+retry policy" so the review round designs ONE bounded retry rather than three ad-hoc nudges.

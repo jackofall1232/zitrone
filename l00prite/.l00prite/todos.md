@@ -150,10 +150,15 @@ DORMANT until registry activation (the feature ships with an empty trust root).
       to the bootstrap). Fix implies a prefs write on the construction path ("no network, no
       write" today) and touches the fresh-install baseline the burn byte-for-byte gate compares —
       decide the write's placement deliberately, WRITER/READER table first.
-- [ ] **Tor cold-start refresh never retries (P2).** The refresh collector retries only on
-      `TransportState` EMISSIONS; Orbot becoming ready emits nothing, so a user who starts both
-      apps together may never populate the registry cache that process. Wants a bounded
-      retry/backoff policy — decide budget and backoff shape at the round.
+- [ ] **Refresh retry policy — now THREE triggers, one design gap (P2, generalized 2026-08-11).**
+      The refresh collector retries only on `TransportState` EMISSIONS, and StateFlow dedups an
+      unchanged state, so a refresh lost to any transient condition is lost for the process:
+      (a) Orbot not yet ready on a Tor cold start — starting both apps together may never
+      populate the cache that process; (b) a `store()` refused while the BOOT fold's suppression
+      bracket holds the gate (PR #66 round 5) — the already-verified manifest is discarded and
+      the next start rides bootstrap/legacy; (c) any fetch that simply failed on a stable
+      transport. ONE bounded retry/backoff design covers all three — decide budget and backoff
+      shape at the round; do not add per-trigger nudges piecemeal.
 - [ ] **Per-endpoint I2P fallback re-dials a removed destination (P1) — NEEDS A MAINTAINER
       RULING, it is a design reversal, not a bug fix.** `transportEndpoints` falls back per FIELD
       (`relay?.i2pDest ?: BuildConfig.RELAY_I2P_DEST`), and the kdoc documents per-endpoint
