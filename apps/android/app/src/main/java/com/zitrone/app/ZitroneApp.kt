@@ -1585,8 +1585,22 @@ class AppContainer(private val app: Application) {
                 // (readTimeout 0): a mirror that answers and then stalls the body open
                 // must fail this ONE fetch, not pin the refresh loop for the process
                 // lifetime. newBuilder() shares the pool/dispatcher — no second client.
+                //
+                // The onion mirror is http:// BY ARCHITECTURE (the hidden-service
+                // protocol authenticates and encrypts end to end; the project's onion
+                // services carry no TLS — docs/TOR_ARCHITECTURE.md), and the manifest
+                // signature, not the transport, is this fetch's trust anchor. The base
+                // client's RESTRICTED_TLS-only connection spec would refuse that
+                // cleartext dial outright, so an .onion URL — reached only via the
+                // Tor-proxied client — gets CLEARTEXT allowed for THIS call alone;
+                // every clearnet registry URL keeps the TLS-only spec untouched.
+                val onionCleartext = url.startsWith("http://") &&
+                    runCatching { java.net.URI(url).host?.endsWith(".onion") }.getOrNull() == true
                 httpClient.newBuilder()
                     .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                    .apply {
+                        if (onionCleartext) connectionSpecs(listOf(okhttp3.ConnectionSpec.CLEARTEXT))
+                    }
                     .build()
                     .newCall(okhttp3.Request.Builder().url(url).build()).execute().use { resp ->
                     val body = resp.body

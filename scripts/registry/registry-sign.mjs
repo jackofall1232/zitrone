@@ -35,6 +35,10 @@ import { join } from "node:path";
 const b64url = (buf) => Buffer.from(buf).toString("base64url");
 const fromB64url = (s) => Buffer.from(s, "base64url");
 
+// Mirror of ManifestVerifier.MAX_ENVELOPE_BYTES — the client refuses larger envelopes
+// before parsing, so blessing one here would be a lie.
+const MAX_ENVELOPE_BYTES = 262_144;
+
 // Raw 32-byte Ed25519 public key from a node KeyObject (last 32 bytes of SPKI DER).
 const rawPub = (keyObj) => keyObj.export({ type: "spki", format: "der" }).subarray(-32);
 
@@ -67,6 +71,8 @@ function signManifest(manifestPath, secretPemPath, keyId, outPath) {
     signatures: [{ keyId, algorithm: "ed25519", signature: b64url(signature) }],
   };
   const out = JSON.stringify(envelope, null, 1) + "\n";
+  if (Buffer.byteLength(out) > MAX_ENVELOPE_BYTES)
+    throw new Error(`envelope is ${Buffer.byteLength(out)} bytes — the client rejects anything over ${MAX_ENVELOPE_BYTES} before parsing (ManifestVerifier.MAX_ENVELOPE_BYTES)`);
   if (outPath) writeFileSync(outPath, out);
   else process.stdout.write(out);
   console.error(`signed ${manifestPath} (${payloadBytes.length} payload bytes) with ${keyId}`);
@@ -79,16 +85,24 @@ function validatePayload(m) {
   if (m.schemaVersion !== 1) fail(`schemaVersion must be 1, got ${m.schemaVersion}`);
   if (!Number.isInteger(m.epoch) || m.epoch < 1) fail("epoch must be a positive integer");
   // Strict ISO-8601 instant grammar, NOT Date.parse laxity: the client parses these
-  // with java.time.Instant.parse, which rejects "2026-08-11", named months, and
-  // non-Z offsets — a manifest blessed here must parse THERE.
-  const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
-  if (!INSTANT.test(m.validFrom) || !INSTANT.test(m.validUntil))
-    fail("validFrom/validUntil must be full ISO-8601 UTC instants (e.g. 2026-08-11T00:00:00Z) — the client's Instant.parse accepts nothing looser");
+  // with java.time.Instant.parse, which rejects "2026-08-11", named months, non-Z
+  // offsets, AND impossible dates Date.parse silently normalizes (Feb 30 → Mar 2).
+  // The field-by-field round-trip is what catches the normalized ones.
+  const validInstant = (s) => {
+    const g = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?Z$/.exec(s);
+    if (!g) return false;
+    const d = new Date(s);
+    return !Number.isNaN(d.getTime()) &&
+      d.getUTCFullYear() === +g[1] && d.getUTCMonth() + 1 === +g[2] && d.getUTCDate() === +g[3] &&
+      d.getUTCHours() === +g[4] && d.getUTCMinutes() === +g[5] && d.getUTCSeconds() === +g[6];
+  };
+  if (!validInstant(m.validFrom) || !validInstant(m.validUntil))
+    fail("validFrom/validUntil must be real ISO-8601 UTC instants (e.g. 2026-08-11T00:00:00Z) — the client's Instant.parse accepts nothing looser, including normalized dates like Feb 30");
   const from = Date.parse(m.validFrom); const until = Date.parse(m.validUntil);
   if (Number.isNaN(from) || Number.isNaN(until)) fail("validFrom/validUntil must be ISO 8601");
   if (until <= from) fail("validUntil must be after validFrom");
-  if (m.epoch === 1 ? m.previousManifestHash !== null : typeof m.previousManifestHash !== "string")
-    fail("previousManifestHash: null only at epoch 1, required string after");
+  if (m.epoch === 1 ? m.previousManifestHash !== null : typeof m.previousManifestHash !== "string" || !m.previousManifestHash)
+    fail("previousManifestHash: null only at epoch 1, required NON-EMPTY string after (the client rejects an empty one)");
   if (!Array.isArray(m.relays) || m.relays.length === 0) fail("relays must be non-empty");
   for (const r of m.relays) {
     if (typeof r.id !== "string" || !r.id) fail("every relay needs an id");
@@ -106,6 +120,8 @@ function validatePayload(m) {
 
 function verifyEnvelope(envelopePath, pubkeyB64url, prevEnvelopePath) {
   const envBytes = readFileSync(envelopePath);
+  if (envBytes.length > MAX_ENVELOPE_BYTES)
+    throw new Error(`envelope is ${envBytes.length} bytes — the client rejects anything over ${MAX_ENVELOPE_BYTES} before parsing`);
   const env = JSON.parse(envBytes.toString("utf8"));
   if (env.envelopeVersion !== 1) throw new Error(`unknown envelopeVersion ${env.envelopeVersion}`);
   const payloadBytes = fromB64url(env.payload);

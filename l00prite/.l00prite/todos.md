@@ -171,6 +171,13 @@ DORMANT until registry activation (the feature ships with an empty trust root).
       at the round: re-run the local-only resolution per session build, or expire the cached relay
       at `validUntil` (the `VerifiedManifest` already carries it). No-hot-swap policy stays.
 
+- [ ] **Relay selection collapses to first-eligible; no rotation on failure (P1, Codex round 4).**
+      True, and ALREADY SCOPED OUT by the unit's own kdoc ("the abstraction, not the selection
+      policy, is this unit's deliverable; smarter selection is a registry-side ordering change
+      later" — authority doc §3). Becomes real work the moment a multi-relay manifest exists
+      (the three-equal-peers V1.0.0 target): preserve the eligible set, rotate on connection
+      failure. Slot it with the multi-relay bootstrap, not before.
+
 ### Adjudicated DECLINED — do not revisit without NEW information (full reasoning on the PR threads)
 
 - **Base64 in `RegistrySnapshotStore` is load-bearing, not redundant** (Gemini). Readers re-verify

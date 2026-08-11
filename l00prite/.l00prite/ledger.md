@@ -4077,3 +4077,27 @@ or the hardened burn surface; none fixable here with evidence):**
 
 Registry resolution still ships DISABLED (empty trust root), which bounds every deferred item's
 live exposure to zero until the activation checklist runs.
+
+## 2026-08-11 — PR #65 review rounds 3–4 (Codex): 8 more findings; the signer keeps failing the same class
+
+Codex re-reviewed each push and kept finding real gaps — notably, FOUR of them are the same defect
+class recurring: **"the offline tool blesses what the client rejects"** (lax timestamp grammar,
+normalized impossible dates, empty previousManifestHash, oversize envelope). Each was fixed AND
+locally verified, but the pattern is the lesson: the tool's "re-run exactly the client's checks"
+claim needs a REAL conformance harness — same fixtures run through both the Node tool and the
+Android verifier — or the claim will keep drifting. Flagged for the blind review round.
+
+**Fixed rounds 3–4:** strict ISO-instant grammar then field-round-trip date validation (Feb 30
+refused); non-empty previousManifestHash for epoch > 1; MAX_ENVELOPE_BYTES enforced in sign and
+verify; onion-mirror registry fetch gets CLEARTEXT connection spec for .onion URLs only (the base
+client's RESTRICTED_TLS-only spec made resolution source 3 structurally unreachable — the onion
+mirror is http:// by architecture, and the manifest signature is the trust anchor); state.json
+current_phase/next action synced to PR-open reality (it still described the unit as four local
+unpushed commits — the exact drift the protocol exists to prevent, caught by a reviewer reading
+our own memory files).
+
+**Deferred (recorded in todos.md):** resolved relay outlives validUntil in a long-lived process
+(round 3); first-eligible relay selection with no rotation (round 4 — already scoped out by the
+unit kdoc, slot with multi-relay bootstrap).
+
+**Standing note:** Android-side changes ride PR CI for evidence; this container cannot resolve AGP.
