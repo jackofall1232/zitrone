@@ -249,6 +249,24 @@ class AppContainer(private val app: Application) {
     /** Device-scoped, pre-unlock settings view over the SAME legacy store. */
     val deviceSettings = DeviceSettings(settingsRepository)
 
+    // ── Registry burn gate (blind-review P1) ─────────────────────────────────
+    // The registry snapshot cache lives in the SAME zitrone_settings store the burn
+    // wipes, but its only writer (a background refresh on the app-lifetime [scope])
+    // is NOT quiesced by the burn's session lock — so an in-flight fetch could commit
+    // registry keys into the store during or after the wipe: post-burn residue, or a
+    // write between the wipe's clear and its emptiness proof that aborts the burn
+    // AFTER the vault image is already gone. The gate is the protocol
+    // [RegistrySnapshotStore] documents: [registryWritesSuppressed] is set BEFORE the
+    // first destructive burn step (and around the boot completion pass, which re-runs
+    // the same wipe), and the wipe's action holds [registryWriteGateLock] — the same
+    // monitor every snapshot commit runs under — so an admitted commit always
+    // completes before the clear begins, and no commit is admitted after.
+    private val registryWriteGateLock = Any()
+
+    /** See [registryWriteGateLock]. Volatile: written by the burn thread, read under the lock. */
+    @Volatile
+    private var registryWritesSuppressed = false
+
     // ── Registry resolution (docs/design/REGISTRY_RESOLUTION.md) ───────────────
     // Relay endpoints resolve through a signed registry manifest instead of the
     // hardcoded constants — the V1.0.0 client contract (docs/MULTI_RELAY_ARCHITECTURE.md
@@ -256,14 +274,18 @@ class AppContainer(private val app: Application) {
     // REGISTRY_PUBKEY_ED25519 the resolver yields null everywhere and every endpoint
     // below falls back to the cutover-protected constants — today's behavior,
     // bit for bit. The snapshot cache shares the settings prefs file ON PURPOSE:
-    // the burn's in-place reset of that store wipes it with zero change to the
-    // hardened wipe surface (see the WRITER/READER table, rows 1–2).
+    // the burn's in-place reset of that store wipes it, with the burn gate above
+    // closing the in-flight-refresh race (see the WRITER/READER table, rows 1–2).
     val registryResolver = RegistryResolver(
         trustRootB64Url = BuildConfig.REGISTRY_PUBKEY_ED25519,
         // Same-libsodium-function seam as LemonDropSodiumOps: production verifies with
         // lazysodium-android; JVM tests hand the verifier lazysodium-java's identical C call.
         verifier = ManifestVerifier(LemonDropSodiumOps(SodiumAndroid())::ed25519Verify),
-        snapshots = RegistrySnapshotStore(keyStoreManager.prefs(KeyStoreManager.PREFS_SETTINGS)),
+        snapshots = RegistrySnapshotStore(
+            keyStoreManager.prefs(KeyStoreManager.PREFS_SETTINGS),
+            writeGateLock = registryWriteGateLock,
+            writesSuppressed = { registryWritesSuppressed },
+        ),
         bootstrap = {
             runCatching { app.assets.open(REGISTRY_BOOTSTRAP_ASSET).use { it.readBytes() } }.getOrNull()
         },
@@ -619,6 +641,12 @@ class AppContainer(private val app: Application) {
      *   the gate. See [burnVault].
      */
     internal fun runTerminalBurn(terminate: () -> Unit) {
+        // Suppress registry snapshot writes FIRST, before anything destructive can
+        // run: the refresh collector is app-scope and survives the session quiesce
+        // below, and this flag is what keeps its store() out of the wiped store
+        // (see registryWriteGateLock). Lifted in the finally — on a failed burn the
+        // session may still be intact, so refresh caching must resume.
+        registryWritesSuppressed = true
         unlockController.beginTerminalWipe()
         try {
             runTerminalBurnLocked(terminate)
@@ -636,6 +664,11 @@ class AppContainer(private val app: Application) {
             // with "the production create/publish path must succeed". Three tests failed on that
             // precondition — the gate discriminating a change to the terminal sequence, which is the
             // property this refactor existed to establish.
+            //
+            // The registry write suppression lifts with the gate it accompanies: on
+            // the success path the process is already dead; on the failure path a
+            // possibly-intact install must be allowed to cache manifests again.
+            registryWritesSuppressed = false
             unlockController.endTerminalWipe()
         }
     }
@@ -764,7 +797,14 @@ class AppContainer(private val app: Application) {
                 // biometric step.
                 verify = { vaultUsePreferencesAreFresh() },
                 action = {
-                    if (!wipeVaultUsePreferences()) throw VaultImageException.DestroyFailed()
+                    // Under registryWriteGateLock: a registry refresh commit admitted
+                    // before suppression began finishes BEFORE this clear can start,
+                    // and suppression (set in runTerminalBurn before the plan runs)
+                    // refuses every later one — so no registry write can land between
+                    // this action and its verify, or after it. See registryWriteGateLock.
+                    synchronized(registryWriteGateLock) {
+                        if (!wipeVaultUsePreferences()) throw VaultImageException.DestroyFailed()
+                    }
                 },
             ),
             BurnStep(
@@ -847,12 +887,26 @@ class AppContainer(private val app: Application) {
                 // references to it, so the claim failed its own grep check twice).
                 // The ORDER now lives inside `foldBootMutators`, which invokes the sweep itself, so
                 // hoisting cleanup above it is no longer expressible at this call site.
-                foldBootMutators(
-                    reconcileUnproven = reconcileUnproven,
-                    sweep = { imageStore.sweepOrphanedResidue() },
-                    imageProvenAbsent = { imageStore.imageBearingProvenAbsent() },
-                    completeCleanup = { absent -> completeInterruptedCleanup(burnPlan, absent) },
-                )
+                //
+                // Suppress registry snapshot writes across the fold (blind-review P1,
+                // boot half): `completeCleanup` re-runs the burn plan's prefs step —
+                // the same wipe the burn gates — but on THIS path runTerminalBurn never
+                // ran, so without this bracket an in-flight refresh's store() could land
+                // between the step's clear and its re-verify and flip a clean boot to
+                // INCOMPLETE (a spurious durability hold), or rewrite keys the pass just
+                // erased. The flag lifts in the finally; a refresh refused here simply
+                // caches nothing this process and retries on the next transport change.
+                registryWritesSuppressed = true
+                try {
+                    foldBootMutators(
+                        reconcileUnproven = reconcileUnproven,
+                        sweep = { imageStore.sweepOrphanedResidue() },
+                        imageProvenAbsent = { imageStore.imageBearingProvenAbsent() },
+                        completeCleanup = { absent -> completeInterruptedCleanup(burnPlan, absent) },
+                    )
+                } finally {
+                    registryWritesSuppressed = false
+                }
             },
             publish = { hold ->
                 durabilityHold.value = hold

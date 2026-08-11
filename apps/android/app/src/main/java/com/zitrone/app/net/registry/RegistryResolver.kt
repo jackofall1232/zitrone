@@ -18,9 +18,17 @@ import java.net.URI
  *  5. last-known-good cached snapshot on device             — [resolveLocalRelay]
  *
  * "Success" is DEFINED (§3.1): a source succeeds only when [ManifestVerifier.verify]
- * accepts its bytes at the device's current epoch high-water mark. That definition is
- * what makes bootstrap-first ordering rollback-safe: once a refresh has cached epoch
- * N, a stale bootstrap (epoch < N) fails the epoch check and the cache wins instead.
+ * accepts its bytes at the device's current rollback floor — [epochFloor], the MAX of
+ * the persisted epoch high-water mark and the verified bootstrap's epoch. The persisted
+ * mark covers manifests this device refreshed to; the bootstrap half covers the window
+ * BEFORE the first refresh lands, so a network-position attacker replaying a stale but
+ * validly signed manifest cannot pull the device below the relay set its build shipped
+ * (blind-review P1: the floor used to read 0 until the first [store][RegistrySnapshotStore.store]).
+ * The bootstrap half needs no write: it rides the APK, so it survives the burn exactly
+ * as a fresh install's copy does, and no startup write ever dirties the settings store
+ * (a pre-vault app key there reads as burn residue to the boot reconciler). That floor
+ * is also what makes bootstrap-first ordering rollback-safe: once a refresh has cached
+ * epoch N, a stale bootstrap (epoch < N) fails the epoch check and the cache wins instead.
  *
  * Two-phase by design (§3.2): [resolveLocalRelay] is synchronous and touches ONLY
  * local sources (1 and 5) — no network on the construction path. [refresh] is the
@@ -55,11 +63,36 @@ class RegistryResolver(
      */
     fun resolveLocalRelay(): RegistryRelay? = localManifest()?.let(::selectRelay)
 
+    /**
+     * The verified embedded bootstrap for this process, or null when resolution is
+     * disabled, the asset is absent, or it fails [ManifestVerifier]. Memoized:
+     * [resolveLocalRelay] runs once per process and [epochFloor] reads it on every
+     * refresh attempt. Verified against the PERSISTED mark only — the bootstrap is a
+     * SOURCE of the floor, so it cannot be checked against a floor that includes
+     * itself; the [localManifest] caller re-applies the current mark before use.
+     */
+    private val verifiedBootstrap: VerifiedManifest? by lazy {
+        if (trustRootB64Url.isEmpty()) {
+            null
+        } else {
+            bootstrap()?.let { verifier.verify(it, trustRootB64Url, snapshots.highWaterEpoch()) }
+        }
+    }
+
+    /**
+     * The rollback floor applied to every NETWORK acceptance: max of the persisted
+     * high-water mark and the verified bootstrap's epoch. An expired or tampered
+     * bootstrap contributes nothing (verifiedBootstrap is null) — the persisted mark
+     * still floors that device, matching the doc's "APK shelved for a year" case.
+     */
+    private fun epochFloor(): Int =
+        maxOf(snapshots.highWaterEpoch(), verifiedBootstrap?.epoch ?: 0)
+
     private fun localManifest(): VerifiedManifest? {
         if (trustRootB64Url.isEmpty()) return null
         val minEpoch = snapshots.highWaterEpoch()
-        bootstrap()?.let { verifier.verify(it, trustRootB64Url, minEpoch)?.let { v -> return v } }
-        snapshots.snapshotBytes()?.let { return verifier.verify(it, trustRootB64Url, minEpoch) }
+        verifiedBootstrap?.takeIf { it.epoch >= minEpoch }?.let { return it }
+        snapshots.snapshotBytes()?.let { return verifier.verify(it, trustRootB64Url, epochFloor()) }
         return null
     }
 
@@ -101,7 +134,7 @@ class RegistryResolver(
         if (trustRootB64Url.isEmpty()) return false
         for (url in urls) {
             val bytes = fetchBytes(url) ?: continue
-            val verified = verifier.verify(bytes, trustRootB64Url, snapshots.highWaterEpoch()) ?: continue
+            val verified = verifier.verify(bytes, trustRootB64Url, epochFloor()) ?: continue
             if (snapshots.store(verified.envelopeBytes, verified.epoch)) return true
         }
         return false

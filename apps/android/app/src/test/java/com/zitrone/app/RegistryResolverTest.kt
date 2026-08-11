@@ -163,4 +163,57 @@ class RegistryResolverTest {
         assertFalse(resolver(trustRoot = "").refresh(listOf("a")) { RegistryTestSigner.envelope() })
         assertFalse(resolver().refresh(emptyList()) { RegistryTestSigner.envelope() })
     }
+
+    // ── Rollback floor before the first refresh (blind-review P1) ────────────
+    // Every pre-existing rollback test seeded the persisted mark via store()
+    // first, so none of them could see the floor sitting at 0 between bootstrap
+    // acceptance and the first network refresh. These two do not store() first.
+
+    @Test
+    fun `an accepted bootstrap floors the epoch - a stale signed replay is refused`() = runBlocking {
+        // Fresh install: the build embeds epoch 5, and NO store() has ever run,
+        // so the persisted mark is 0. The bootstrap resolves locally.
+        val bootstrap = RegistryTestSigner.envelope(
+            epoch = 5,
+            previousManifestHash = "prev",
+            relaysJson = relaysJson("relay-epoch5"),
+        )
+        val r = resolver(bootstrap = bootstrap)
+        assertEquals("relay-epoch5", r.resolveLocalRelay()?.id)
+        // A network-position attacker replays a previously published, validly
+        // signed epoch-3 manifest whose window still covers now. It must be
+        // refused as a rollback against the BOOTSTRAP's epoch, even though the
+        // persisted high-water mark has never been written.
+        val stale = RegistryTestSigner.envelope(
+            epoch = 3,
+            previousManifestHash = "p",
+            relaysJson = relaysJson("relay-stale"),
+        )
+        assertFalse(r.refresh(listOf("https://reg.example/m.json")) { stale })
+        // Nothing was persisted: the floor rides the APK, so a fresh install's
+        // settings store stays empty (the boot reconciler's fresh-install
+        // postcondition) and post-burn stays byte-identical to fresh.
+        assertNull(snapshots.snapshotBytes())
+        assertEquals(0, snapshots.highWaterEpoch())
+        assertEquals("relay-epoch5", r.resolveLocalRelay()?.id)
+    }
+
+    @Test
+    fun `a manifest newer than the bootstrap epoch refreshes and raises the mark`() = runBlocking {
+        val bootstrap = RegistryTestSigner.envelope(
+            epoch = 5,
+            previousManifestHash = "prev",
+            relaysJson = relaysJson("relay-epoch5"),
+        )
+        val fresh = RegistryTestSigner.envelope(
+            epoch = 6,
+            previousManifestHash = "prev5",
+            relaysJson = relaysJson("relay-epoch6"),
+        )
+        val r = resolver(bootstrap = bootstrap)
+        assertEquals("relay-epoch5", r.resolveLocalRelay()?.id)
+        assertTrue(r.refresh(listOf("u")) { fresh })
+        assertEquals(6, snapshots.highWaterEpoch())
+        assertEquals("relay-epoch6", r.resolveLocalRelay()?.id)
+    }
 }

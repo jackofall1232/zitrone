@@ -68,7 +68,7 @@ Field rules (client-enforced, all fail closed):
 | `schemaVersion` | must equal 1; unknown → reject |
 | `epoch` | positive integer, strictly increasing across published manifests; the client refuses any manifest with `epoch` **lower than** the highest epoch it has ever accepted (rollback detection at the client, complementing `previousManifestHash`) |
 | `validFrom` / `validUntil` | ISO 8601 UTC; the manifest is usable only inside the window. Clock skew tolerance: ±24 h on `validFrom` only (a device with a slightly slow clock must not reject a just-published manifest); `validUntil` is enforced without tolerance |
-| `previousManifestHash` | SHA-256 (base64url) of the previous **envelope** file bytes; `null` only for epoch 1. Recorded for auditability and mirror cross-checking; the client's own rollback guard is the epoch high-water mark, which survives even when a client never saw the intermediate manifest |
+| `previousManifestHash` | SHA-256 (base64url) of the previous **envelope** file bytes; `null` only for epoch 1. Recorded for auditability and mirror cross-checking; the client checks only its shape (null at epoch 1, present after) — the client's own rollback guard is the epoch floor of §3.1 (persisted high-water mark + bootstrap epoch), which survives even when a client never saw the intermediate manifest |
 | `relays[]` | non-empty; all relays are equal peers — order carries no primary/failover meaning. Each relay needs at least one of `clearnet` / `onion` / `i2p` |
 
 **Validity window policy** (registry-side): 90-day windows, re-signed and re-published
@@ -138,14 +138,29 @@ recorded here and must be mirrored into wherever the operational inventory lives
 
 **"Success" is defined**, not assumed: a source succeeds only if its envelope parses,
 carries a valid signature from the build's trust root, is inside its validity window,
-and has `epoch >=` the device's high-water epoch. Everything else is a miss and the
-resolver moves on. This definition is what makes the ordering correct:
+and has `epoch >=` the device's rollback floor. **The floor is the MAX of two
+signals**: the persisted epoch high-water mark (table row 2) AND the verified
+bootstrap's epoch. The bootstrap half closes the window the blind review found:
+between bootstrap acceptance and the first successful refresh the persisted mark is
+still 0, so without it a network-position attacker could replay a previously
+published, validly signed manifest — older than the relay set the build shipped,
+window still current — and the client would accept, cache, and ratify the downgrade.
+The bootstrap half needs no write to work: the bootstrap rides the APK, so it
+survives the burn exactly as a fresh install's copy does, and no startup write ever
+dirties the settings store (a pre-vault app key in `zitrone_settings` reads as burn
+residue to the boot reconciler's fresh-install postcondition — persisting the
+bootstrap at startup, the naive form of this fix, would trip that wipe on every
+pre-vault boot). Everything else is a miss and the resolver moves on. This definition
+is what makes the ordering correct:
 
 - Fresh install: the bootstrap snapshot is valid → wins immediately, no network needed.
 - After a background refresh has cached epoch N > bootstrap's epoch: the bootstrap
   fails the epoch check → network sources are consulted → if all unreachable, the
   cached snapshot (epoch N) wins. A stale-but-validly-signed bootstrap can never roll
   a client back.
+- Before the first refresh: a stale-but-validly-signed NETWORK manifest (epoch below
+  the bootstrap's) fails the floor → refused, and nothing is cached. Rollback
+  protection does not depend on a refresh having landed first.
 
 ### 3.2 Two-phase operation — what happens when
 
@@ -194,16 +209,19 @@ what the reader assumes the signal MEANS.
 
 | # | Signal | Store | Writers | Readers | What the reader assumes it means | Burn/wipe behavior |
 |---|---|---|---|---|---|---|
-| 1 | `registry_snapshot` (envelope bytes, base64) | `zitrone_settings` EncryptedSharedPreferences (the SAME file `SettingsRepository` + `BiometricUnlockStore` share — deliberately NOT a new store) | `RegistrySnapshotStore.store()`, called only by the background refresh, only AFTER full verification (signature + window + epoch) | Startup resolver (source 5) | "A manifest that verified against this build's trust root at store time." The reader RE-VERIFIES on every read — the cache is treated as untrusted bytes, so a corrupted/tampered prefs value degrades to a miss, never to acceptance | Cleared by `resetToFreshInstallDefaults()`'s in-place key clear — the existing burn row for `zitrone_settings` covers it with ZERO change to the hardened burn surface. Fresh-install baseline (key absent) is honest: a fresh install has no cache |
-| 2 | `registry_epoch_high_water` (int) | same store | `RegistrySnapshotStore.store()` (monotonic: only raised, never lowered) | Every source evaluation (the epoch check in §3.1) | "The highest epoch this device has ever accepted; anything lower is a rollback attempt or stale data." Absent key = 0 = accept any valid epoch — correct for fresh installs and for post-burn, where the cache is gone too (rows 1+2 are written atomically in one editor commit, so they cannot diverge) | Same as row 1. NOTE: post-burn rollback protection is deliberately reset — a burned device is byte-identical to a fresh install BY DESIGN; keeping the high-water mark would be a burn distinguisher. Availability of rollback protection is subordinate to the burn invariant, decided here, on purpose |
+| 1 | `registry_snapshot` (envelope bytes, base64) | `zitrone_settings` EncryptedSharedPreferences (the SAME file `SettingsRepository` + `BiometricUnlockStore` share — deliberately NOT a new store) | `RegistrySnapshotStore.store()`, called only by the background refresh, only AFTER full verification (signature + window + epoch floor) | Startup resolver (source 5) | "A manifest that verified against this build's trust root at store time." The reader RE-VERIFIES on every read — the cache is treated as untrusted bytes, so a corrupted/tampered prefs value degrades to a miss, never to acceptance | Cleared by `resetToFreshInstallDefaults()`'s in-place key clear — the existing burn row for `zitrone_settings` covers it. Fresh-install baseline (key absent) is honest: a fresh install has no cache. CONCURRENCY (corrected after blind review — the earlier "zero change to the hardened wipe surface" claim was false under it): the writer is an app-scope coroutine the burn's session quiesce does NOT stop, and its fetch has no read timeout, so an un-gated `store()` could commit during or after the wipe — residue, or a write between the wipe's clear and its emptiness proof aborting the burn post-image. The gate: the burn (and the boot completion pass, which re-runs this step) sets a suppression flag BEFORE the wipe and holds a shared monitor (`registryWriteGateLock`) across it; `store()` checks the flag under that same monitor, so an admitted commit always finishes before the clear begins and no commit is admitted after. The wipe SEQUENCE — phases, steps, postconditions — is unchanged |
+| 2 | `registry_epoch_high_water` (int) | same store | `RegistrySnapshotStore.store()` (monotonic: only raised, never lowered; suppressed during a wipe — row 1) | Every source evaluation (one half of the epoch floor in §3.1) | "The highest epoch this device has ever accepted over the network; anything lower is a rollback attempt or stale data." Absent key = 0 — but 0 is NOT the effective floor: the floor also includes the verified bootstrap's epoch (row 4), so a fresh install refuses anything older than its build's bootstrap, and a post-burn device does the same (rows 1+2 are written atomically in one editor commit, so they cannot diverge) | Same as row 1. NOTE: post-burn the PERSISTED mark is gone BY DESIGN — a burned device must be byte-indistinguishable from a fresh install, and a surviving mark would be a burn distinguisher. Rollback protection does not drop to zero, though: the bootstrap floor rides the APK, identical on burned and fresh devices, so post-burn ≡ fresh install holds AND nothing older than the build's bootstrap is ever accepted |
 | 3 | `tor_enabled` (existing key — default flip only) | same store | `SettingsRepository.setTorEnabled()` (user toggle — the ONLY writer; nothing else writes this key, verified by grep) | `SettingsRepository.load()` → `DeviceSettings.torEnabled` → `TransportResolver` fallback + OkHttp client construction | "The user's Tor preference." KEY ABSENT = never expressed a preference = new default ON. KEY PRESENT = an explicit user choice = honored verbatim, including `false`. `SharedPreferences` gives this distinction for free: `getBoolean`'s default applies only when the key is absent, and the key is only ever written by the user's own toggle. NO migration write is performed — writing the new default would DESTROY the never-set/explicit distinction for every future default change | Burn clears the key → post-burn = fresh install = default ON. Correct: a burned device must not carry the pre-burn user's preference as a distinguisher |
-| 4 | Bootstrap snapshot (`assets/registry/bootstrap.json`) | APK asset (read-only, not device state) | The release build process (copies the signed file in; absent in dev builds unless provided) | Startup resolver (source 1) | "The relay set current when this APK was built, signed by the registry key." Read-only by construction; no wipe interaction | none (in-APK) |
+| 4 | Bootstrap snapshot (`assets/registry/bootstrap.json`) | APK asset (read-only, not device state) | The release build process (copies the signed file in; absent in dev builds unless provided) | Startup resolver (source 1) — AND its verified epoch is the second half of the rollback floor (§3.1), read on every network acceptance | "The relay set current when this APK was built, signed by the registry key." Read-only by construction; no wipe interaction. An expired/tampered bootstrap contributes no floor — the persisted mark still applies | none (in-APK — which is exactly why its epoch can floor post-burn devices without becoming a burn distinguisher) |
 | 5 | Legacy endpoint constants (`API_BASE_URL`, `WS_URL`, `RELAY_I2P_DEST`, pins) | source code / BuildConfig | — (cutover-protected, unchanged by this unit) | The legacy fallback path (§3.3) and the pin gate (§3.4) | "The known-good relay of record until cutover" | none |
 
 **Invariant the table protects:** no reader of `zitrone_settings` gains a new meaning
 for an existing key, and the two new keys are written atomically by exactly one writer
-after verification. The burn surface (`wipeVaultUsePreferences`) is untouched: its
-four-store enumeration and the "no other prefs factory exists" claim both remain true.
+after verification. `wipeVaultUsePreferences` itself is untouched: its four-store
+enumeration and the "no other prefs factory exists" claim both remain true — what the
+blind review added is the write GATE around it (row 1), because sharing the wipe
+target with an app-scope writer is only sound under mutual exclusion, not merely by
+sharing the file.
 
 ## 5. Hardcoded relay addresses — sweep results (authority doc 2c)
 
@@ -255,5 +273,17 @@ master spec is a claims document; it must not claim the old default).
    redeploy (can ride the already-owed onion-mirror redeploy trip), and the I2P mirror.
 5. Set `REGISTRY_PUBKEY_ED25519` (and mirror URL env vars) in the release build
    environment, drop the signed bootstrap at `assets/registry/bootstrap.json`.
+   The bootstrap's epoch becomes the rollback floor for every device on that build
+   (§3.1), so the embedded snapshot must be the CURRENT manifest, not a stale copy.
 6. First release built with those set = registry resolution live. Until then the
    shipped behavior is bit-for-bit today's.
+
+**Known residual, tracked as an activation blocker (blind review, P2 — accepted for
+v1, must be resolved at cutover):** when every registry source misses, the client
+falls back to the hardcoded `API_BASE_URL`/`WS_URL` (§3.3). While those constants
+name the pinned live relay that is availability-preserving; but an attacker who can
+merely DoS all registry sources holds the fleet on the legacy endpoint indefinitely,
+and the fallback means the hardcoded address never actually becomes unreachable.
+Step 6 of this checklist therefore carries a standing obligation: the constants'
+removal (or a fail-closed degradation mode) is a cutover BLOCKER, not a footnote.
+Tracked with the `TODO(zitrone-cutover)` markers in `ZitroneApp.kt`.
