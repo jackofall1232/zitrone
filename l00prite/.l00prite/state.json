@@ -13,8 +13,8 @@
  "last_event_processed": null,
  "pending_event_count": 0,
  "review_response_required": false,
- "ci_status": "PR #66: burn gate GREEN on 94cb25e0 (flake hypothesis for b9d2e32's single canary failure CONFIRMED — same app code, clean pass). Remaining CI cycling on doc/memory pushes.",
+ "ci_status": "PR #66 burn gate: canary precondition is a REAL flake — fail/pass/fail on identical app code (b9d2e32 fail, 94cb25e pass, 8fe2ae6 fail), always 'auth store absent post-provision'. Root cause: the canary sampled one instant while the prefs apply() queue materializes the file asynchronously. Fixed on this branch: the precondition now AWAITS materialization with a 10s deadline (test-only change, discriminating power preserved). Verify the gate goes green on this head.",
  "execution_active": false,
  "execution_stop_reason": null,
- "next_recommended_action": "1) Confirm the burn gate on the next push (single failure on b9d2e32's canary precondition — flake hypothesis: unhealthy emulator, no causal path from the diff; if it repeats, it is real and gets a unit). 2) Human merge decision on PR #66. 3) Dispatch the owed paired-blind whole-unit review; todos.md's deferred registry items are its agenda. 4) Then 0.10.1 coordinator-harness debt, remainder of 0.11.0 polish."
+ "next_recommended_action": "1) Confirm the burn gate is green on the canary-await fix. 2) Human merge decision on PR #66. 3) Dispatch the owed paired-blind whole-unit review — todos.md's deferred registry items (incl. the 4-trigger retry/sequencing design) are its agenda. 4) Then 0.10.1 coordinator-harness debt, remainder of 0.11.0 polish."
 }

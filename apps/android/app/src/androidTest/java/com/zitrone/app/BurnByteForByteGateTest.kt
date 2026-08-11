@@ -720,6 +720,15 @@ class BurnByteForByteGateTest {
     fun canary_a_queued_preference_write_does_not_resurrect_a_proven_absent_store() {
         val target = File(ctx.filesDir.parentFile!!, "shared_prefs/zitrone_auth.xml")
         provisionThroughProduction()
+        // AWAIT materialization, don't sample one instant: the store's writes land via
+        // the prefs apply() queue, so on a loaded emulator the FILE can lag
+        // provisioning — two CI runs on identical code failed exactly here with the
+        // file merely late, while a third passed (2026-08-11). The deadline keeps the
+        // precondition discriminating: a provisioning path that truly stops creating
+        // the store still fails, with the full deadline as evidence instead of a
+        // scheduler coin-flip.
+        val deadline = System.nanoTime() + 10_000_000_000L
+        while (!target.exists() && System.nanoTime() < deadline) Thread.sleep(25)
         assertTrue("precondition: the store must exist, or there is nothing to resurrect", target.exists())
 
         // Left deliberately in flight — the same shape as wipeLegacyPrefs()'s own writes.

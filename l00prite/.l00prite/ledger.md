@@ -4259,3 +4259,19 @@ trigger (d); Codex's start-refresh-after-bootReconciled shape is recorded as the
 candidate (it removes (b) and (d) structurally). Dormant while the registry ships disabled.
 The interplay lesson: the drain barrier fixed mid-wipe correctness and CREATED a new way for a
 correct commit to be authored-then-erased — sequencing beats draining when both are available.
+
+### Burn-gate flake: REVISED — not a one-off, a racy precondition, now fixed at the source
+
+The canary failed AGAIN on `8fe2ae6` (memory-only commit; app code identical to the passing
+94cb25e run): fail/pass/fail on the same code, always the same precondition. The earlier
+"emulator flake, confirmed" entry was HALF right — nondeterministic and not the delta — but wrong
+to leave it at that: a 2-in-3 flake randomly blocks every merge. Root cause: the canary sampled
+`target.exists()` at one instant while EncryptedSharedPreferences lands the store via the async
+apply() queue; today's slower runners widened the race. Fix (test-only): the precondition AWAITS
+materialization with a 10s deadline — a provisioning path that truly stops creating the store
+still fails, with the deadline as evidence instead of a coin-flip. Also fixed the state.json
+internal contradiction Codex round 7 caught (ci_status said hypothesis confirmed while
+next_recommended_action still ordered its confirmation).
+
+Lesson: "flake, confirmed" is a diagnosis, not a resolution — a confirmed flake at meaningful
+rate is a defect in the TEST and gets fixed like one.
