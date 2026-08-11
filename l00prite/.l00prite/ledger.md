@@ -3993,3 +3993,39 @@ tests across verifier/resolver/endpoints/Tor-default.
 **Deferred per the authority doc:** OPK-claim quorum, Algorand, PoW admission, multi-hop wiring,
 additional relays. **NOT done:** version bump (still vc23), CHANGELOG entry (rides the flip
 decision), any push/merge, the registry key ceremony (credential creation — human-gated).
+
+## 2026-08-11 — PR #65 first external review round (Gemini + Copilot bots): 8 findings, 3 real, all adjudicated against source
+
+PR #65 opened on `claude/0-11-x-status-bgrxfo` (so push authorization arrived after the entry
+above). Two bot reviewers commented; every finding was verified against source before acting,
+none accepted on the reviewer's say-so. **This does NOT discharge the owed blind adversarial
+review** — bots skimming the diff are not the paired-blind whole-unit review the standing rule
+requires.
+
+**Fixed (3):**
+- **Gemini P-leak:** `assets.open(REGISTRY_BOOTSTRAP_ASSET).readBytes()` never closed the
+  stream → `.use { it.readBytes() }`. Once-per-process, so no practical exhaustion, but real.
+- **Copilot signer/client shape drift (the good catch):** `registry-sign.mjs validatePayload`
+  accepted any truthy `onion`/`i2p` while the client reads only `onion.address` / `i2p.dest`
+  object shapes — a `"onion": "<addr>"` STRING signed fine and was silently endpoint-absent
+  client-side. Copilot suggested loosening the CLIENT to accept both shapes; done the other way
+  round: the SIGNER now enforces exactly the shape the client reads (design doc §2 shows the
+  object shape as canonical). One parser shape on the security surface, fail-closed; the fix is
+  script-only. Verified: good-shape keygen→sign→verify roundtrip OK; string `onion` and empty
+  `i2p.dest` both refused; `null` still accepted.
+- **Copilot doc duplication:** MULTI_RELAY_ARCHITECTURE.md §8 carried two back-to-back drafts of
+  the AWS sizing note; consolidated into one, every unique clause kept (incl. the I2P
+  no-co-location warning).
+
+**Declined with replies (3):** Gemini's Base64-is-redundant (×2 — the Base64 is load-bearing:
+readers re-verify Ed25519 over EXACT bytes, and a String/prefs-XML round-trip is not byte-exact
+for arbitrary bytes; U+FFFD replacement = silent permanent cache loss) and Gemini's
+make-`refresh`-main-safe (no main-thread path exists: sole caller is on `Dispatchers.Default`,
+fetch already hops to IO, `commit()`-on-background is a recorded decision).
+
+**No action (2):** Gemini's `@Volatile httpClient` (already annotated at the declaration, with a
+comment saying why) and Copilot's overview comment.
+
+**Not verifiable here:** this box cannot resolve the Android Gradle Plugin (proxy blocks
+Google's maven repo), so the `.use` one-liner rides on PR CI's Android job for compile/test
+evidence rather than a local run. The signer change WAS verified locally (node, above).

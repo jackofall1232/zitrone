@@ -83,6 +83,12 @@ function validatePayload(m) {
     if (!r.clearnet && !r.onion && !r.i2p) fail(`relay ${r.id} has no endpoint at all`);
     if (r.clearnet && !(r.clearnet.apiBaseUrl?.startsWith("https://") && r.clearnet.wsUrl?.startsWith("wss://")))
       fail(`relay ${r.id} clearnet endpoints must be https/wss`);
+    // The client reads EXACTLY these shapes (ManifestVerifier: onion.address / i2p.dest) and
+    // silently treats anything else as endpoint-absent — refuse to sign what it cannot read.
+    if (r.onion != null && !(typeof r.onion === "object" && typeof r.onion.address === "string" && r.onion.address))
+      fail(`relay ${r.id} onion must be null or {"address": "<non-empty>"}`);
+    if (r.i2p != null && !(typeof r.i2p === "object" && typeof r.i2p.dest === "string" && r.i2p.dest))
+      fail(`relay ${r.id} i2p must be null or {"dest": "<non-empty>"}`);
   }
 }
 

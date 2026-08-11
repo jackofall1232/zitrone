@@ -265,7 +265,7 @@ class AppContainer(private val app: Application) {
         verifier = ManifestVerifier(LemonDropSodiumOps(SodiumAndroid())::ed25519Verify),
         snapshots = RegistrySnapshotStore(keyStoreManager.prefs(KeyStoreManager.PREFS_SETTINGS)),
         bootstrap = {
-            runCatching { app.assets.open(REGISTRY_BOOTSTRAP_ASSET).readBytes() }.getOrNull()
+            runCatching { app.assets.open(REGISTRY_BOOTSTRAP_ASSET).use { it.readBytes() } }.getOrNull()
         },
         pinnedClearnetHost = CertificatePinning.API_HOST,
     )
