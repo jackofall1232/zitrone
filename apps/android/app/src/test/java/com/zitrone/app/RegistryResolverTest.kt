@@ -218,6 +218,19 @@ class RegistryResolverTest {
             pinnedClearnetHost = "relay.sublemonable.com",
         )
         assertNull(r.resolveLocalRelay())
+        // WHILE the clock is still wrong: an epoch-3 manifest whose window COVERS the
+        // skewed time verifies temporally — the floor must refuse it anyway, because
+        // the floor rides the bootstrap's SIGNED epoch, not its window (§6.5). A
+        // window-dependent floor collapses to the persisted mark (0 here) exactly now.
+        val staleValidAtSkewedTime = RegistryTestSigner.envelope(
+            epoch = 3,
+            validFrom = "2019-01-01T00:00:00Z",
+            validUntil = "2021-01-01T00:00:00Z",
+            previousManifestHash = "p3",
+            relaysJson = relaysJson("relay-stale"),
+        )
+        assertFalse(r.refresh(listOf("https://reg.example/m.json")) { staleValidAtSkewedTime })
+        assertNull(snapshots.snapshotBytes())
         clock = now // NTP correction, same process
         // A memoized first verification would hold the floor at the persisted mark
         // (0 here) and wave this stale-but-signed epoch-3 replay through.

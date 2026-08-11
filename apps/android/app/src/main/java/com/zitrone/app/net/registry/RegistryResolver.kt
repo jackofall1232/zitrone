@@ -87,12 +87,22 @@ class RegistryResolver(
 
     /**
      * The rollback floor applied to every NETWORK acceptance: max of the persisted
-     * high-water mark and the verified bootstrap's epoch. An expired or tampered
-     * bootstrap contributes nothing (verifiedBootstrap is null) — the persisted mark
-     * still floors that device, matching the doc's "APK shelved for a year" case.
+     * high-water mark and the bootstrap's SIGNED epoch. The floor is ORDINAL, never
+     * temporal (design doc §6.5): a validly signed bootstrap outside its usage
+     * window — an APK shelved past expiry, or a device clock skewed years off —
+     * is still proof "epoch N existed", so it still floors this device; a floor
+     * that died with the window died exactly while the clock was wrong, on exactly
+     * the fresh/burned installs with no persisted mark to fall back on. Only a
+     * tampered or absent bootstrap contributes nothing. Flooring on an old epoch
+     * can never refuse a LEGITIMATE current manifest — epochs only increase — and
+     * the window still gates USAGE: [localManifest] serves the bootstrap through
+     * the full [ManifestVerifier.verify], window included.
      */
     private fun epochFloor(): Int =
-        maxOf(snapshots.highWaterEpoch(), verifiedBootstrap()?.epoch ?: 0)
+        maxOf(
+            snapshots.highWaterEpoch(),
+            bootstrap()?.let { verifier.signedEpoch(it, trustRootB64Url) } ?: 0,
+        )
 
     private fun localManifest(): VerifiedManifest? {
         if (trustRootB64Url.isEmpty()) return null

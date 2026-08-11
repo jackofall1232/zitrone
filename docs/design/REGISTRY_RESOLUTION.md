@@ -268,12 +268,18 @@ Every temporal check in [ManifestVerifier] — the ±24h `validFrom` skew and th
 `validUntil` — evaluates against device time. An adversary who can set the device clock (local
 access, or control of the device's NTP source) can therefore stretch a manifest's life: skewing
 the clock BACK keeps an expired manifest inside its window, which combined with a replayed signed
-envelope holds a client on a retired relay set for as long as the skew holds. The epoch floor is
-unaffected (it is ordinal, not temporal) — a clock-skewed client still refuses any manifest below
-`max(persisted mark, bootstrap epoch)`, so the exposure is bounded to KEEPING an old-but-
-floor-valid manifest alive, never rolling back past the floor. Recorded as a known property of
-v1 (device time is the only clock a disconnected client has); revisit only if a trusted time
-source ever exists in the threat model.
+envelope holds a client on a retired relay set for as long as the skew holds.
+
+The epoch floor is unaffected **by construction, not by accident**: the floor uses the
+bootstrap's SIGNED epoch via `ManifestVerifier.signedEpoch`, which checks the signature, schema,
+and shape but deliberately not the window — the floor is ordinal, and a floor that died with the
+window died exactly while the clock was wrong, on exactly the fresh/burned installs with no
+persisted mark to fall back on. A clock-skewed client therefore still refuses any manifest below
+`max(persisted mark, signed bootstrap epoch)` at every clock setting; the window gates SERVING
+the bootstrap, never flooring on it. The exposure is bounded to KEEPING an old-but-floor-valid
+manifest alive, never rolling back past the floor. Recorded as a known property of v1 (device
+time is the only clock a disconnected client has); revisit only if a trusted time source ever
+exists in the threat model.
 
 ## 7. Activation checklist (human, in order — nothing activates by default)
 

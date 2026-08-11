@@ -110,6 +110,24 @@ class RegistryManifestVerifierTest {
     }
 
     @Test
+    fun `signedEpoch ignores the window but nothing else`() {
+        // Out-of-window (expired long before the fixed now) — verify refuses it,
+        // but the SIGNED epoch still floors (§6.5: the floor is ordinal).
+        val expired = RegistryTestSigner.envelope(
+            epoch = 7,
+            validFrom = "2020-01-01T00:00:00Z",
+            validUntil = "2020-06-01T00:00:00Z",
+            previousManifestHash = "p7",
+        )
+        assertNull(verifier.verify(expired, RegistryTestSigner.trustRoot, 0))
+        assertEquals(7, verifier.signedEpoch(expired, RegistryTestSigner.trustRoot))
+        // Tampering still voids it — the window is the ONLY check signedEpoch skips.
+        val tampered = expired.copyOf().also { it[it.size / 2] = 'X'.code.toByte() }
+        assertNull(verifier.signedEpoch(tampered, RegistryTestSigner.trustRoot))
+        assertNull(verifier.signedEpoch(expired, ""))
+    }
+
+    @Test
     fun `not-yet-valid inside 24h skew is accepted, beyond it rejected`() {
         val justAhead = RegistryTestSigner.envelope(validFrom = "2026-08-15T12:00:00Z")
         assertNotNull(verifier.verify(justAhead, RegistryTestSigner.trustRoot, 0))

@@ -908,6 +908,17 @@ class AppContainer(private val app: Application) {
                 // erased. The flag lifts in the finally; a refresh refused here simply
                 // caches nothing this process and retries on the next transport change.
                 registryWriteSuppressions.incrementAndGet()
+                // DRAIN admitted writers before the fold's PRE-verification (this pass
+                // skips any step whose verify() already holds — unlike the live burn,
+                // where runBurnPlan always runs the action and the action's own
+                // synchronized block is the barrier). A refresh store() that observed
+                // the counter at zero may be committing under registryWriteGateLock
+                // RIGHT NOW; the fold's verify reads prefs without that lock, so it
+                // could see emptiness, skip the wipe step, and report a clean
+                // completion before that commit lands — post-burn residue under a
+                // lowered hold. Taking the lock once happens-after every admitted
+                // commit; every later writer is refused by the suppression above.
+                synchronized(registryWriteGateLock) {}
                 try {
                     foldBootMutators(
                         reconcileUnproven = reconcileUnproven,

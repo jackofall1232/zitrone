@@ -1,12 +1,12 @@
 {
  "schema_version": 1,
- "lock_id": "lock-20260811T-pr66-memo-pattern",
+ "lock_id": "lock-20260811T-pr66-codex-round-3",
  "owner_agent": null,
  "owner_session": null,
- "acquired_at": "2026-08-11T12:55:00Z",
- "expires_at": "2026-08-11T13:55:00Z",
+ "acquired_at": "2026-08-11T13:05:00Z",
+ "expires_at": "2026-08-11T14:05:00Z",
  "ttl_seconds": 3600,
- "purpose": "failures.md memo-purity pattern + sweep result + clock-trust property; released",
+ "purpose": "PR #66 Codex round 3: ordinal floor (signedEpoch) + boot-fold drain barrier; released",
  "protected_paths": [
   "ledger.md",
   "memory.md",

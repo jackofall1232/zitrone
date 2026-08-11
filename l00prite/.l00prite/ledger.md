@@ -4172,3 +4172,31 @@ in todos.md as the bar any future attempt must clear.
 Generalized lesson for the review round: memoizing a VERIFICATION result froze every one of its
 inputs; two of those inputs (store, clock) change under a live process, and each frozen input was
 a P1. Verify at read time unless a measurement says otherwise.
+
+## 2026-08-11 — PR #66 Codex round 3: the floor was temporal after all, and the boot fold raced its own gate
+
+Two P1s on the previous round's own output, both CONFIRMED and fixed:
+
+**1. The epoch floor died with the bootstrap's validity window.** De-memoizing fixed staleness but
+not the dependence itself: while the device clock sat >24h before `validFrom`, the full verify
+returned null, the floor collapsed to the persisted mark (0 on fresh/burned installs), and an old
+signed manifest whose window COVERED the skewed time was accepted — directly contradicting the
+§6.5 "the floor is ordinal" claim written one commit earlier. **Fix:** `ManifestVerifier.signedEpoch`
+— signature/schema/shape enforced, window deliberately not — and `epochFloor` rides it. Flooring
+on an out-of-window bootstrap can never refuse a legitimate current manifest (epochs only
+increase); the window still gates SERVING. §6.5 now states the property as by-construction. Tests:
+the clock-skew test refuses an epoch-3 manifest valid AT the skewed time while the clock is wrong;
+verifier test pins signedEpoch ignoring exactly the window and nothing else.
+
+**2. The boot fold's pre-verify raced an admitted writer.** `completeInterruptedCleanup` skips any
+step whose verify() already holds, and that verify reads prefs WITHOUT the gate lock — so a
+refresh store() admitted before the suppression increment could commit AFTER the fold observed
+emptiness: post-burn registry residue under a lowered hold, boot reporting clean. The LIVE burn
+was already sound (runBurnPlan always runs the action, whose synchronized block is the barrier);
+only the skip-if-verified path lacked one. **Fix:** one `synchronized(registryWriteGateLock) {}`
+drain after the increment — happens-after every admitted commit, everything later refused by
+suppression.
+
+**Pattern note for the review round:** rounds 1–3 all found defects in the PREVIOUS round's fix.
+The unit's fix-loop is converging (each finding is narrower), but nothing here discharges the
+paired-blind whole-unit review.
