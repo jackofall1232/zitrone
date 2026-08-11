@@ -3953,3 +3953,43 @@ V1 Android testing; the plan exists so that decision is made with a map, not so 
 - **PR #60** (0.9.2 Unit W-A residue sweep) still OPEN, untouched since 2026-07-25.
 - Standing pre-tester hygiene: CI SAST silently broken, `release-apk.yml` shell-injection,
   storage-format-stability decision, contact-deletion permanence disclosure.
+
+## 2026-08-11 — 0.11.0 registry-resolution unit BUILT on `claude/0-11-x-status-bgrxfo` — AWAITING BLIND ADVERSARIAL REVIEW, then merge decision
+
+Authority: `docs/MULTI_RELAY_ARCHITECTURE.md` (maintainer's consolidated rev 3, placed verbatim
+at `6673046c`), scope = its §3 + §11 client side. Design first, code second:
+`docs/design/REGISTRY_RESOLUTION.md` carries the manifest format, signing-key handling (with a
+credentials-inventory entry — NO in-repo inventory file exists, flagged), the WRITER/READER
+invariant table (written BEFORE code, per the standing rule), the full hardcoded-address sweep,
+and the cutover-collision flags.
+
+**Commits (local only, NOT pushed — awaiting authorization):**
+- `5fe39c06` memory sync (separate task, same branch)
+- `6673046c` authority doc + design doc
+- `01b28cfd` registry resolution: `net/registry/` (ManifestVerifier / RegistrySnapshotStore /
+  RegistryResolver), ZitroneApp wiring, `scripts/registry/registry-sign.mjs`
+- `5dce1428` Tor default ON for never-set preferences only + claims sync
+
+**Key decisions a reviewer should attack:**
+- Signature over EXACT payload bytes (base64url envelope) — canonicalization is impossible by
+  construction, not merely avoided.
+- "Success" for a resolution source is DEFINED: verify + validity window + epoch >= device
+  high-water. That definition is what makes bootstrap-first ordering rollback-safe.
+- The snapshot cache + epoch mark live in the EXISTING `zitrone_settings` store, so the burn's
+  in-place reset wipes them with ZERO change to the hardened wipe surface; post-burn rollback
+  protection resets BY DESIGN (burn indistinguishability outranks it — table row 2).
+- Pin fail-closed gate: until pins travel in the manifest (cutover decision), relays on any
+  clearnet host other than the pinned one contribute NOTHING.
+- Registry resolution ships DISABLED: empty `REGISTRY_PUBKEY_ED25519` = legacy constants,
+  bit-for-bit. Activation = key ceremony + bootstrap embed + env vars (design doc §7, human).
+- `TODO(zitrone-cutover)` items UNTOUCHED; collisions flagged in design doc §5, not resolved.
+- Tor default flip applies to UNSET preferences only via key-absence — deliberately NO migration
+  write, and a test pins that `load()` never stamps the key.
+
+**Evidence:** full Android unit suite **871 tests / 0 failures / 3 skipped**; `assembleDebug`
+exit 0; signing-tool keygen→sign→verify roundtrip OK and a tampered envelope rejected. ~30 new
+tests across verifier/resolver/endpoints/Tor-default.
+
+**Deferred per the authority doc:** OPK-claim quorum, Algorand, PoW admission, multi-hop wiring,
+additional relays. **NOT done:** version bump (still vc23), CHANGELOG entry (rides the flip
+decision), any push/merge, the registry key ceremony (credential creation — human-gated).
