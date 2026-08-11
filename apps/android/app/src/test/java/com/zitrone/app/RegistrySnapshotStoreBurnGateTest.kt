@@ -76,16 +76,24 @@ class RegistrySnapshotStoreBurnGateTest {
     fun `a writer arriving mid-wipe blocks on the gate lock, then is refused - mode b`() {
         val h = Harness()
         h.suppressed.set(true)
+        val writerStarted = CountDownLatch(1)
         val writerFinished = CountDownLatch(1)
         val storeResult = AtomicBoolean(true) // fails safe if the writer never runs
 
         synchronized(h.gateLock) {
             // The wipe holds the gate lock; the refresh thread's store() must block on it.
             val writer = thread(start = false) {
+                writerStarted.countDown()
                 storeResult.set(h.store.store("racing".toByteArray(), 7))
                 writerFinished.countDown()
             }
             writer.start()
+            // Prove the thread is RUNNING before reading anything into its silence —
+            // without this, a scheduler stall passes the next assertion vacuously.
+            assertTrue(
+                "writer thread never started — the blocking assertion below would be vacuous",
+                writerStarted.await(5, TimeUnit.SECONDS),
+            )
             assertFalse(
                 "store() must block behind the wipe's gate lock, not interleave with it",
                 writerFinished.await(300, TimeUnit.MILLISECONDS),

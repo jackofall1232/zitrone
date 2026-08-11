@@ -4117,3 +4117,27 @@ alone. That gap is now the top of the unit's debt, ahead of every deferred findi
 
 This branch (claude/0-11-x-status-bgrxfo) restarts from the merged main per protocol; the merged
 history is behind it, and this entry is the first commit of the follow-up line.
+
+## 2026-08-11 — PR #66 bot round 1: Gemini CONFIRMED CRITICAL on the P1 #1 fix itself; fixed + pinned
+
+**Gemini found a real hole in the fix under review.** `verifiedBootstrap` was memoized with
+`minEpoch = snapshots.highWaterEpoch()` read at FIRST ACCESS — a state-dependent memo. Initialized
+under a mark above the bootstrap's epoch, it caches null for the process lifetime; an in-process
+store wipe (the burn survives the process — P1 #2's own premise) then drops `epochFloor()` to
+`max(0, null→0) = 0`, reopening exactly the stale-replay window P1 #1 exists to close.
+**Adjudicated CONFIRMED against source; the reviewer's fix shape was correct and taken:** verify
+the bootstrap at floor ZERO (the memo becomes a pure function of asset + key + clock), and let the
+READERS apply the persisted mark — `localManifest`'s `takeIf` and `epochFloor`'s `maxOf` already
+did. New regression test pins the full scenario (memoize under mark 10 → in-process wipe → epoch-3
+replay refused, floor rides the bootstrap; the poisoned memo would wave it through).
+
+**Copilot round 1:** the mode-b burn-gate test could pass vacuously if the writer thread was never
+scheduled inside the 300 ms window — added a started-latch so the blocked assertion means BLOCKED.
+Also removed a duplicated kdoc paragraph in `RegistrySnapshotStore` (Copilot's suppressed comment;
+merge artifact).
+
+**Lesson, same as 0.9.x:** the fix for a P1 was itself carrying a P1-shaped defect, found by an
+outside reader on the first pass. Fix deltas are not lower-risk than original code.
+
+Android evidence rides PR CI (this container cannot resolve AGP); both changes traced by hand
+against source in both directions (fails unfixed / passes fixed).

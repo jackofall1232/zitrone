@@ -39,11 +39,6 @@ import java.util.Base64
  * anyway, so a corrupted or tampered value degrades to a cache miss, never to
  * acceptance.
  *
- * The cached bytes are UNTRUSTED on read: the sole writer ([store]) only ever
- * persists an envelope that passed [ManifestVerifier], but every reader re-verifies
- * anyway, so a corrupted or tampered value degrades to a cache miss, never to
- * acceptance.
- *
  * Post-burn the high-water mark is gone BY DESIGN: a burned device must be
  * byte-indistinguishable from a fresh install, and a surviving epoch mark would be a
  * burn distinguisher. Rollback protection is subordinate to the burn invariant

@@ -1,12 +1,12 @@
 {
  "schema_version": 1,
- "lock_id": "lock-20260811T-pr65-merge-record",
+ "lock_id": "lock-20260811T-pr66-round-1",
  "owner_agent": null,
  "owner_session": null,
- "acquired_at": "2026-08-11T03:10:00Z",
- "expires_at": "2026-08-11T04:10:00Z",
+ "acquired_at": "2026-08-11T12:20:00Z",
+ "expires_at": "2026-08-11T13:20:00Z",
  "ttl_seconds": 3600,
- "purpose": "record PR #65 merge + unaddressed round-5 findings; branch restarted from main; released",
+ "purpose": "PR #66 round 1: Gemini critical on verifiedBootstrap memo fixed + pinned; released",
  "protected_paths": [
   "ledger.md",
   "memory.md",

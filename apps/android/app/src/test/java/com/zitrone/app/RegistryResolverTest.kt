@@ -199,6 +199,42 @@ class RegistryResolverTest {
     }
 
     @Test
+    fun `bootstrap floor survives an in-process store wipe even when first read under a higher mark`() = runBlocking {
+        // Device previously accepted epoch 10; this APK embeds a bootstrap at epoch 5.
+        val bootstrap = RegistryTestSigner.envelope(
+            epoch = 5,
+            previousManifestHash = "prev",
+            relaysJson = relaysJson("relay-epoch5"),
+        )
+        assertTrue(
+            snapshots.store(
+                RegistryTestSigner.envelope(epoch = 10, previousManifestHash = "p10", relaysJson = relaysJson("relay-epoch10")),
+                10,
+            ),
+        )
+        val r = resolver(bootstrap = bootstrap)
+        // First resolution memoizes the bootstrap while the mark (10) is ABOVE its
+        // epoch (5). The cached snapshot serves; the bootstrap must not.
+        assertEquals("relay-epoch10", r.resolveLocalRelay()?.id)
+        // The burn's in-place wipe clears the settings store WITHOUT a process
+        // restart — the refresh collector survives the burn (P1 #2's premise).
+        prefs.edit().clear().commit()
+        assertEquals(0, snapshots.highWaterEpoch())
+        // The floor must still be the bootstrap's epoch, NOT 0: a stale-but-signed
+        // epoch-3 replay is refused. A memo poisoned by the pre-wipe mark would
+        // cache null here and wave the replay through.
+        val stale = RegistryTestSigner.envelope(
+            epoch = 3,
+            previousManifestHash = "p3",
+            relaysJson = relaysJson("relay-stale"),
+        )
+        assertFalse(r.refresh(listOf("https://reg.example/m.json")) { stale })
+        assertNull(snapshots.snapshotBytes())
+        // And local resolution now serves the bootstrap, exactly like a fresh install.
+        assertEquals("relay-epoch5", r.resolveLocalRelay()?.id)
+    }
+
+    @Test
     fun `a manifest newer than the bootstrap epoch refreshes and raises the mark`() = runBlocking {
         val bootstrap = RegistryTestSigner.envelope(
             epoch = 5,

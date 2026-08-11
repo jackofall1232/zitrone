@@ -67,15 +67,21 @@ class RegistryResolver(
      * The verified embedded bootstrap for this process, or null when resolution is
      * disabled, the asset is absent, or it fails [ManifestVerifier]. Memoized:
      * [resolveLocalRelay] runs once per process and [epochFloor] reads it on every
-     * refresh attempt. Verified against the PERSISTED mark only — the bootstrap is a
-     * SOURCE of the floor, so it cannot be checked against a floor that includes
-     * itself; the [localManifest] caller re-applies the current mark before use.
+     * refresh attempt. Verified at floor ZERO deliberately — the bootstrap is a
+     * SOURCE of the floor, and this memo must be a pure function of the asset, key,
+     * and clock, never of the store's state at first access: initializing it under a
+     * mark ABOVE the bootstrap's epoch would cache null for the process lifetime, and
+     * an in-process store wipe (the burn survives this process — that is P1 #2's
+     * whole premise) would then drop [epochFloor] to 0, reopening the exact replay
+     * this floor exists to refuse. Rollback protection against the persisted mark is
+     * applied by the READERS instead: [localManifest]'s `takeIf` and [epochFloor]'s
+     * `maxOf`.
      */
     private val verifiedBootstrap: VerifiedManifest? by lazy {
         if (trustRootB64Url.isEmpty()) {
             null
         } else {
-            bootstrap()?.let { verifier.verify(it, trustRootB64Url, snapshots.highWaterEpoch()) }
+            bootstrap()?.let { verifier.verify(it, trustRootB64Url, 0) }
         }
     }
 
