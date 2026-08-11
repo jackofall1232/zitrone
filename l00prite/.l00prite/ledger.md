@@ -4291,3 +4291,16 @@ All checks green on the head carrying the materialization-await. Final accountin
 arc: fail (b9d2e32, race) → pass (94cb25e, race won) → fail (8fe2ae6, race lost) → fail
 (3328784, MY compile error) → green (83c8594, fix proven). The canary now awaits the auth
 store's materialization instead of sampling one instant; discriminating power unchanged.
+
+## 2026-08-11 — PR #66 MERGED (maintainer) — the registry P1-fix unit is on main
+
+Merged with all CI green and seven bot rounds adjudicated to quiet. On main now: the blind-review
+P1 pair (computed ordinal floor, burn write gate) plus the round fixes (verifiedBootstrap as a
+pure per-read function, suppression depth counter, signedEpoch ordinal floor, boot-fold drain
+barrier, canary materialization-await) and the memory/doc records. Registry still ships DISABLED.
+
+REMAINING DEBT, in order: (1) the paired-blind whole-unit review of the registry surface —
+todos.md's deferred items are its agenda; (2) the retry/sequencing design (4 triggers,
+start-after-bootReconciled is the lead shape); (3) the maintainer rulings queued in todos.md
+(I2P fallback, Tor-toggle UX, burn single-flight bar). Then back to the 0.11.0 polish round
+proper — FEATURES.md is its reference, multi-hop is the production blocker.
