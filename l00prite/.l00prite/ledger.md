@@ -4218,3 +4218,14 @@ disabled, and an epochFloor change behind the same disabled gate — no causal p
 The job log also shows "Failed to start Emulator console". FLAKE HYPOTHESIS, under test: this
 push re-runs the gate on an equivalent tree. If it fails again the hypothesis is DEAD and the
 failure is real on this branch — it gets a unit, not a shrug.
+
+### Correction to the round-4 entry above (maintainer, 2026-08-11)
+
+The heartbeat half of Codex's "state drift" finding was a FALSE POSITIVE: the repo's
+`heartbeat.json` is a periodic snapshot that trails the live server-side heartbeat BY DESIGN —
+lagging is the file doing its job, not drift. The reviewer read it cold and flagged correctly
+only because nothing in the file said which copy is authoritative; that is now fixed at the
+source — `heartbeat.json` carries a `_provenance` field stating the snapshot relationship, and
+the protocol README's file table says the same — so the finding cannot recur against a reviewer
+acting in good faith. (The state.json half of the earlier PR #65 finding WAS real drift — an
+"unpushed, awaiting authorization" claim after the push — and stays adjudicated as fixed.)
