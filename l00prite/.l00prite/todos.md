@@ -213,8 +213,13 @@ above — none were reviewed or fixed pre-merge.
       when Orbot is absent, indicate separately that routing needs the install. Decide alongside
       the Tor-default unit's never-set semantics (no migration write — key absence is the signal).
 
-- [ ] **Should the burn itself be single-flight? (Codex on PR #66 — MAINTAINER CALL, hardened
-      surface.)** Overlapping burns are reachable: `attemptPassphrase` releases its process
+- [ ] **Should the burn itself be single-flight? (Codex on PR #66 — MAINTAINER RULED 2026-08-11:
+      STAYS DEFERRED.)** The maintainer's reasoning, kept verbatim as the bar any future attempt
+      must clear: a refused second burn has to render WB-1's uniform failure indistinguishable
+      from a wrong passphrase; a hung first burn cannot permanently block the duress path; and
+      0.9.2's terminal-exclusion boolean has the same non-nesting shape — any of the three could
+      turn a "simple" single-flight into a duress-path regression. The suppression depth counter
+      being correct under either answer is what makes deferring safe.** Overlapping burns are reachable: `attemptPassphrase` releases its process
       single-flight when it RETURNS Burn (before `onBurn` runs), and the composition-local
       `unlocking` guard dies with an Activity recreation, so a second duress entry can start burn B
       while burn A is mid-wipe. The registry suppression is now a depth counter (PR #66), so the

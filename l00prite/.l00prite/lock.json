@@ -1,12 +1,12 @@
 {
  "schema_version": 1,
- "lock_id": "lock-20260811T-pr66-codex-round-1",
+ "lock_id": "lock-20260811T-pr66-codex-round-2",
  "owner_agent": null,
  "owner_session": null,
- "acquired_at": "2026-08-11T12:35:00Z",
- "expires_at": "2026-08-11T13:35:00Z",
+ "acquired_at": "2026-08-11T12:45:00Z",
+ "expires_at": "2026-08-11T13:45:00Z",
  "ttl_seconds": 3600,
- "purpose": "PR #66 Codex round: suppression depth counter + burn single-flight question recorded; released",
+ "purpose": "PR #66 Codex round 2: verifiedBootstrap de-memoized (clock purity); maintainer ruling on single-flight recorded; released",
  "protected_paths": [
   "ledger.md",
   "memory.md",

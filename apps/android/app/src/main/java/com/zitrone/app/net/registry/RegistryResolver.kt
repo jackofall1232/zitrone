@@ -64,26 +64,26 @@ class RegistryResolver(
     fun resolveLocalRelay(): RegistryRelay? = localManifest()?.let(::selectRelay)
 
     /**
-     * The verified embedded bootstrap for this process, or null when resolution is
-     * disabled, the asset is absent, or it fails [ManifestVerifier]. Memoized:
-     * [resolveLocalRelay] runs once per process and [epochFloor] reads it on every
-     * refresh attempt. Verified at floor ZERO deliberately — the bootstrap is a
-     * SOURCE of the floor, and this memo must be a pure function of the asset, key,
-     * and clock, never of the store's state at first access: initializing it under a
-     * mark ABOVE the bootstrap's epoch would cache null for the process lifetime, and
-     * an in-process store wipe (the burn survives this process — that is P1 #2's
-     * whole premise) would then drop [epochFloor] to 0, reopening the exact replay
-     * this floor exists to refuse. Rollback protection against the persisted mark is
-     * applied by the READERS instead: [localManifest]'s `takeIf` and [epochFloor]'s
+     * The verified embedded bootstrap, or null when resolution is disabled, the asset
+     * is absent, or it fails [ManifestVerifier]. Deliberately NOT memoized — this has
+     * now bitten twice. The result depends on inputs that CHANGE under a running
+     * process: a memo initialized under a high persisted mark cached null past an
+     * in-process store wipe (round 1), and a memo initialized under a wrong boot
+     * clock would cache null past the NTP correction (round 2) — either way
+     * [epochFloor] collapses to the persisted mark for the process lifetime, on
+     * exactly the fresh/burned installs the floor exists to protect. Re-verifying
+     * per read is one asset read and one Ed25519 verify on a rare path, and every
+     * reader gets the CURRENT clock's answer. Verified at floor ZERO — a pure
+     * function of asset, key, and clock; rollback protection against the persisted
+     * mark is applied by the READERS: [localManifest]'s `takeIf` and [epochFloor]'s
      * `maxOf`.
      */
-    private val verifiedBootstrap: VerifiedManifest? by lazy {
+    private fun verifiedBootstrap(): VerifiedManifest? =
         if (trustRootB64Url.isEmpty()) {
             null
         } else {
             bootstrap()?.let { verifier.verify(it, trustRootB64Url, 0) }
         }
-    }
 
     /**
      * The rollback floor applied to every NETWORK acceptance: max of the persisted
@@ -92,12 +92,12 @@ class RegistryResolver(
      * still floors that device, matching the doc's "APK shelved for a year" case.
      */
     private fun epochFloor(): Int =
-        maxOf(snapshots.highWaterEpoch(), verifiedBootstrap?.epoch ?: 0)
+        maxOf(snapshots.highWaterEpoch(), verifiedBootstrap()?.epoch ?: 0)
 
     private fun localManifest(): VerifiedManifest? {
         if (trustRootB64Url.isEmpty()) return null
         val minEpoch = snapshots.highWaterEpoch()
-        verifiedBootstrap?.takeIf { it.epoch >= minEpoch }?.let { return it }
+        verifiedBootstrap()?.takeIf { it.epoch >= minEpoch }?.let { return it }
         snapshots.snapshotBytes()?.let { return verifier.verify(it, trustRootB64Url, epochFloor()) }
         return null
     }

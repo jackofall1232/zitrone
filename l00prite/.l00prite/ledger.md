@@ -4153,3 +4153,22 @@ the LAST holder exits. The store's `writesSuppressed: () -> Boolean` seam is unc
 burn-gate tests hold as written. The wider question — burn single-flight itself, which touches
 WB-1 uniformity and the 0.9.2 terminal-exclusion boolean — is recorded in todos.md as a
 maintainer decision; the counter makes the registry gate correct under either answer.
+
+## 2026-08-11 — PR #66 Codex round 2: the memo purity lesson, THIRD time — stop memoizing
+
+Round 1 proved the bootstrap verification memo must not capture the STORE's state; Codex round 2
+proved it must not capture the CLOCK either: first access under a wrong boot clock (dead RTC,
+NTP corrects later — routine on Android) cached null for the process lifetime, collapsing
+`epochFloor` to the persisted mark on exactly the fresh/burned installs the floor protects.
+**Fix: `verifiedBootstrap` is now a FUNCTION, not a lazy** — one asset read + one Ed25519 verify
+per read on a rare path, pure in asset + key + CURRENT clock. Regression test pins the recovery
+(wrong clock at boot → nothing resolves → NTP correction, same process → epoch-3 replay refused,
+bootstrap serves again).
+
+Maintainer ruling received mid-round: the burn single-flight question STAYS DEFERRED, with the
+three constraints (WB-1 uniformity, hung-burn recovery, the 0.9.2 non-nesting boolean) recorded
+in todos.md as the bar any future attempt must clear.
+
+Generalized lesson for the review round: memoizing a VERIFICATION result froze every one of its
+inputs; two of those inputs (store, clock) change under a live process, and each frozen input was
+a P1. Verify at read time unless a measurement says otherwise.

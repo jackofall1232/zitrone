@@ -199,6 +199,39 @@ class RegistryResolverTest {
     }
 
     @Test
+    fun `bootstrap floor recovers after a clock correction without a process restart`() = runBlocking {
+        // Boot with a badly wrong device clock (dead RTC): the bootstrap is outside
+        // its validity window, so nothing resolves. NTP then corrects the clock with
+        // the process still alive — the floor must come back, not stay poisoned.
+        var clock = Instant.parse("2020-01-01T00:00:00Z").toEpochMilli()
+        val movableVerifier = ManifestVerifier(RegistryTestSigner.ed25519Verify, nowMs = { clock })
+        val bootstrap = RegistryTestSigner.envelope(
+            epoch = 5,
+            previousManifestHash = "prev",
+            relaysJson = relaysJson("relay-epoch5"),
+        )
+        val r = RegistryResolver(
+            trustRootB64Url = RegistryTestSigner.trustRoot,
+            verifier = movableVerifier,
+            snapshots = snapshots,
+            bootstrap = { bootstrap },
+            pinnedClearnetHost = "relay.sublemonable.com",
+        )
+        assertNull(r.resolveLocalRelay())
+        clock = now // NTP correction, same process
+        // A memoized first verification would hold the floor at the persisted mark
+        // (0 here) and wave this stale-but-signed epoch-3 replay through.
+        val stale = RegistryTestSigner.envelope(
+            epoch = 3,
+            previousManifestHash = "p3",
+            relaysJson = relaysJson("relay-stale"),
+        )
+        assertFalse(r.refresh(listOf("https://reg.example/m.json")) { stale })
+        assertNull(snapshots.snapshotBytes())
+        assertEquals("relay-epoch5", r.resolveLocalRelay()?.id)
+    }
+
+    @Test
     fun `bootstrap floor survives an in-process store wipe even when first read under a higher mark`() = runBlocking {
         // Device previously accepted epoch 10; this APK embeds a bootstrap at epoch 5.
         val bootstrap = RegistryTestSigner.envelope(
