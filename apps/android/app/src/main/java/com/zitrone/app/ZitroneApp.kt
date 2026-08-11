@@ -70,6 +70,10 @@ import com.zitrone.app.net.CertificatePinning
 import com.zitrone.app.net.HttpConnectI2pProber
 import com.zitrone.app.net.TransportResolver
 import com.zitrone.app.net.WsClient
+import com.zitrone.app.net.registry.ManifestVerifier
+import com.zitrone.app.net.registry.RegistryRelay
+import com.zitrone.app.net.registry.RegistryResolver
+import com.zitrone.app.net.registry.RegistrySnapshotStore
 import com.zitrone.app.notifications.MessagingNotifications
 import com.zitrone.app.notifications.NotificationScheduler
 import com.zitrone.app.tor.TorIntegration
@@ -244,6 +248,38 @@ class AppContainer(private val app: Application) {
 
     /** Device-scoped, pre-unlock settings view over the SAME legacy store. */
     val deviceSettings = DeviceSettings(settingsRepository)
+
+    // ── Registry resolution (docs/design/REGISTRY_RESOLUTION.md) ───────────────
+    // Relay endpoints resolve through a signed registry manifest instead of the
+    // hardcoded constants — the V1.0.0 client contract (docs/MULTI_RELAY_ARCHITECTURE.md
+    // §3). DISABLED until a trust root is baked in at build time: with no
+    // REGISTRY_PUBKEY_ED25519 the resolver yields null everywhere and every endpoint
+    // below falls back to the cutover-protected constants — today's behavior,
+    // bit for bit. The snapshot cache shares the settings prefs file ON PURPOSE:
+    // the burn's in-place reset of that store wipes it with zero change to the
+    // hardened wipe surface (see the WRITER/READER table, rows 1–2).
+    val registryResolver = RegistryResolver(
+        trustRootB64Url = BuildConfig.REGISTRY_PUBKEY_ED25519,
+        // Same-libsodium-function seam as LemonDropSodiumOps: production verifies with
+        // lazysodium-android; JVM tests hand the verifier lazysodium-java's identical C call.
+        verifier = ManifestVerifier(LemonDropSodiumOps(SodiumAndroid())::ed25519Verify),
+        snapshots = RegistrySnapshotStore(keyStoreManager.prefs(KeyStoreManager.PREFS_SETTINGS)),
+        bootstrap = {
+            runCatching { app.assets.open(REGISTRY_BOOTSTRAP_ASSET).use { it.readBytes() } }.getOrNull()
+        },
+        pinnedClearnetHost = CertificatePinning.API_HOST,
+    )
+
+    /**
+     * The relay this process resolved AT STARTUP, from local sources only (embedded
+     * bootstrap / cached snapshot) — null when registry resolution is disabled or gave
+     * nothing, in which case every consumer falls back to the legacy constants.
+     * Resolved ONCE per process on purpose: a background [RegistryResolver.refresh]
+     * feeds the cache for the NEXT start, and mid-session endpoint movement stays the
+     * exclusive business of the transport-swap machinery (which moves transports, not
+     * relays — see the resolver kdoc).
+     */
+    private val registryRelay: RegistryRelay? = registryResolver.resolveLocalRelay()
 
     // ── Vault device layer (process lifetime; survives lock/unlock) ────────────
 
@@ -902,7 +938,9 @@ class AppContainer(private val app: Application) {
             )
 
     val transportResolver = TransportResolver(
-        relayI2pDest = BuildConfig.RELAY_I2P_DEST,
+        // Registry-resolved I2P destination when one resolved; the build-time value
+        // otherwise. Same fallback rule as every endpoint (see registryRelay's kdoc).
+        relayI2pDest = registryRelay?.i2pDest ?: BuildConfig.RELAY_I2P_DEST,
         i2pProxyHost = BuildConfig.I2P_PROXY_HOST,
         inputs = transportInputs,
         isRouterInstalled = { I2pIntegration.isOfficialRouterInstalled(app) },
@@ -1452,7 +1490,7 @@ class AppContainer(private val app: Application) {
     }
 
     private fun buildVaultSession(sessionScope: CoroutineScope, vaultOpen: VaultOpen): SessionContainer {
-        val (client, apiBase, ws) = transportEndpoints(transportResolver.state.value)
+        val (client, apiBase, ws) = transportEndpoints(transportResolver.state.value, registryRelay)
         httpClient = client
         return SessionContainer(
             app = app,
@@ -1472,7 +1510,8 @@ class AppContainer(private val app: Application) {
             // that starts after a transport swap must register over the transport that is live
             // then — the same reason applyTransportLocked re-points the session's ApiClient/WsClient.
             decoyRelay = {
-                val (decoyClient, decoyApiBase, _) = transportEndpoints(transportResolver.state.value)
+                val (decoyClient, decoyApiBase, _) =
+                    transportEndpoints(transportResolver.state.value, registryRelay)
                 ApiClientDecoyRelay(decoyApiBase, decoyClient)
             },
         )
@@ -1497,11 +1536,82 @@ class AppContainer(private val app: Application) {
         scope.launch {
             transportResolver.state.collect(::applyTransport)
         }
+        // Background registry refresh (resolution sources 2–4): one durable success
+        // per process, retried across transport changes until it lands. Feeds the
+        // snapshot CACHE for the next start — never the live session (see
+        // registryRelay's kdoc for why endpoint hot-swap is deliberately absent).
+        scope.launch {
+            var refreshed = false
+            transportResolver.state.collect { state ->
+                if (refreshed) return@collect
+                val urls = registryUrlCandidates(state)
+                if (urls.isEmpty()) return@collect
+                refreshed = registryResolver.refresh(urls, ::fetchRegistryBytes)
+            }
+        }
         // Cold-start GC of superseded/abandoned per-enable biometric aliases (0.9.2 enable-atomicity),
         // off-main. Safe even if an enable races it: reapStaleBiometricAliases holds biometricWriteLock
         // and keeps the live wrap's alias, and the enable-commit re-checks keyExists under the same lock.
         scope.launch(Dispatchers.IO) { runCatching { reapStaleBiometricAliases() } }
     }
+
+    /**
+     * Which registry mirrors are reachable over [state] (design doc §3.2). The source
+     * ORDER (clearnet → onion → I2P) is the authority doc's; what a transport filters
+     * OUT is reachability fact, not preference: the I2P client tunnels every request
+     * to the relay destination, so only the I2P mirror URL means anything there, and
+     * the onion mirror needs Orbot's proxy, so it is only offered alongside Tor.
+     * Empty BuildConfig values mean "mirror not stood up yet" and drop out silently.
+     */
+    private fun registryUrlCandidates(state: TransportState): List<String> = when (state) {
+        TransportState.I2P -> listOf(BuildConfig.REGISTRY_URL_I2P)
+        TransportState.TOR -> listOf(BuildConfig.REGISTRY_URL, BuildConfig.REGISTRY_URL_ONION)
+        else -> listOf(BuildConfig.REGISTRY_URL)
+    }.filter { it.isNotEmpty() }
+
+    /**
+     * Fetch one registry URL through the CURRENT transport's client — a Tor/I2P
+     * user's registry fetch rides the same anonymity layer as everything else. The
+     * read is bounded BEFORE buffering ([ManifestVerifier.MAX_ENVELOPE_BYTES]): a
+     * hostile mirror must not be able to balloon the client's memory, and the TLS
+     * connection is deliberately NOT the trust anchor here — the manifest signature
+     * is, which is exactly why an unpinned fetch of signed bytes is sound
+     * (authority doc §3: verify the manifest, not merely the connection).
+     */
+    private suspend fun fetchRegistryBytes(url: String): ByteArray? =
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            runCatching {
+                // Hard per-call deadline the WebSocket-shaped client deliberately lacks
+                // (readTimeout 0): a mirror that answers and then stalls the body open
+                // must fail this ONE fetch, not pin the refresh loop for the process
+                // lifetime. newBuilder() shares the pool/dispatcher — no second client.
+                //
+                // The onion mirror is http:// BY ARCHITECTURE (the hidden-service
+                // protocol authenticates and encrypts end to end; the project's onion
+                // services carry no TLS — docs/TOR_ARCHITECTURE.md), and the manifest
+                // signature, not the transport, is this fetch's trust anchor. The base
+                // client's RESTRICTED_TLS-only connection spec would refuse that
+                // cleartext dial outright, so an .onion URL — reached only via the
+                // Tor-proxied client — gets CLEARTEXT allowed for THIS call alone;
+                // every clearnet registry URL keeps the TLS-only spec untouched.
+                val onionCleartext = url.startsWith("http://") &&
+                    runCatching { java.net.URI(url).host?.endsWith(".onion") }.getOrNull() == true
+                httpClient.newBuilder()
+                    .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                    .apply {
+                        if (onionCleartext) connectionSpecs(listOf(okhttp3.ConnectionSpec.CLEARTEXT))
+                    }
+                    .build()
+                    .newCall(okhttp3.Request.Builder().url(url).build()).execute().use { resp ->
+                    val body = resp.body
+                    if (!resp.isSuccessful || body == null) return@use null
+                    val source = body.source()
+                    // request() == true means MORE than the cap is available → oversize → reject.
+                    if (source.request(ManifestVerifier.MAX_ENVELOPE_BYTES + 1L)) null
+                    else source.readByteArray()
+                }
+            }.getOrNull()
+        }
 
     /**
      * Apply a transport state (Tor/I2P toggle, resolver change, session publish).
@@ -1571,7 +1681,7 @@ class AppContainer(private val app: Application) {
      */
     private fun applyTransportLocked(state: TransportState): SessionContainer? {
         if (state != transportResolver.state.value) return null
-        val (client, apiBase, ws) = transportEndpoints(state)
+        val (client, apiBase, ws) = transportEndpoints(state, registryRelay)
         httpClient = client
         val live = _session.value
         live?.apiClient?.updateTransport(httpClient, apiBase)
@@ -1603,23 +1713,45 @@ class AppContainer(private val app: Application) {
         const val API_BASE_URL = "https://relay.sublemonable.com"
         const val WS_URL = "wss://relay.sublemonable.com/ws"
 
-        private val i2pApiBaseUrl = "http://${BuildConfig.RELAY_I2P_DEST}"
-        private val i2pWsUrl = "ws://${BuildConfig.RELAY_I2P_DEST}/ws"
+        /** `assets/` path of the signed bootstrap manifest a release build embeds (may be absent). */
+        internal const val REGISTRY_BOOTSTRAP_ASSET = "registry/bootstrap.json"
 
-        internal fun transportEndpoints(state: TransportState): Triple<OkHttpClient, String, String> =
-            when (state) {
+        /**
+         * The ONE state → (client, apiBase, wsUrl) mapping. [relay] is the
+         * registry-resolved relay when one resolved (docs/design/REGISTRY_RESOLUTION.md);
+         * null — the default, and every pre-registry caller — keeps the legacy
+         * constants, so the two paths cannot diverge silently: there is exactly one
+         * fallback rule, applied per endpoint, in one place. A registry relay's
+         * clearnet endpoints are pin-gated before they ever reach here
+         * ([RegistryResolver.selectRelay]), so the TOR/clearnet branches never dial a
+         * host [CertificatePinning]'s pins don't cover.
+         */
+        internal fun transportEndpoints(
+            state: TransportState,
+            relay: RegistryRelay? = null,
+        ): Triple<OkHttpClient, String, String> {
+            val i2pDest = relay?.i2pDest ?: BuildConfig.RELAY_I2P_DEST
+            return when (state) {
                 TransportState.I2P -> Triple(
                     CertificatePinning.buildI2pClient(
                         BuildConfig.I2P_PROXY_HOST,
-                        BuildConfig.RELAY_I2P_DEST,
+                        i2pDest,
                     ),
-                    i2pApiBaseUrl,
-                    i2pWsUrl,
+                    "http://$i2pDest",
+                    "ws://$i2pDest/ws",
                 )
-                TransportState.TOR ->
-                    Triple(CertificatePinning.buildClient(torEnabled = true), API_BASE_URL, WS_URL)
-                else -> Triple(CertificatePinning.buildClient(torEnabled = false), API_BASE_URL, WS_URL)
+                TransportState.TOR -> Triple(
+                    CertificatePinning.buildClient(torEnabled = true),
+                    relay?.clearnetApiBaseUrl ?: API_BASE_URL,
+                    relay?.clearnetWsUrl ?: WS_URL,
+                )
+                else -> Triple(
+                    CertificatePinning.buildClient(torEnabled = false),
+                    relay?.clearnetApiBaseUrl ?: API_BASE_URL,
+                    relay?.clearnetWsUrl ?: WS_URL,
+                )
             }
+        }
     }
 }
 

@@ -3899,3 +3899,205 @@ allowlist, so staging it too would also resolve.
 still correct; only the account of the old value's origin was wrong. Also noted: oldest expired token
 was 2026-07-09 (not 07-02), and the blobs size query needs `ciphertext` — there is no `payload`
 column.
+
+## 2026-07-30 — 0.11.0 polish round STARTED: docs/website/honesty track, 14 commits (`71553992`..`74157301`) — recorded 2026-08-11 (memory sync)
+
+*This entry was written 2026-08-11 during a memory sync: the 14 commits below landed 2026-07-30
+with no ledger entry, leaving memory claiming the 0.11.0 polish round was future work while it had
+in fact started. Recorded retroactively from `git log` + working-tree verification, not from
+session recollection.*
+
+**Scope reality check first:** 0.11.0 has started **only** on the docs/website/honesty track.
+There is **no Android code polish yet** — the sole app-code commit in the run (`500a6093`) changes
+onboarding slide *copy* (honest slide 3, new lemon-drop and network slides, MASTER.json sync), not
+behavior. There has been **no version bump**: the app is still **vc23 / 0.10.3-beta**
+(`build.gradle.kts` verified) and CHANGELOG `[Unreleased]` is **empty** (verified). No flip
+decision exists.
+
+### What landed, by theme
+
+**Feature truth (`71553992`, `b21242b1`, `0cf9ae0b`, `0eb313a5`):** `docs/FEATURES.md` added as
+the verified feature reference for the 0.11.0 polish pass, then **audited twice against source** —
+first against the feature mockup (**12 of 14 claims verified**), then against shipped v0.10.3
+(missing rows added, and the **registration PoW row removed** because that design was reversed —
+see the PoW-reversal record). "Invisible Watermarking" was **renamed to Identity Watermarking**:
+the watermark is *visible by design* — a maintainer decision, and the docs now say so instead of
+implying covert embedding. Multi-hop is recorded as a pre-production blocker, not a shipped
+feature.
+
+**Website/README honesty (`859b65f8`, `5840ba5a`, `218268a5`, `ce3a8827`):** two false watermark
+claims removed from the website; README honesty pass states the **Android-only reality** and the
+screenshots section; new **/how-to walkthrough** on the website (includes second-vault
+instructions, per the ruling that second-vault docs live on the WEBSITE, not in the wizard);
+**lemon-drop QR corrected everywhere to "pointer, not key"** — docs and website stop implying a QR
+holder can read anything.
+
+**Play-beta tester signup (`593eaa86`, `5b692d21`, `cd529f60`, `aa144851`):** signup form +
+forwarding API route + privacy disclosure on the website; Resend failure status/body now logged
+server-side; recipient made env-overridable (Resend unverified-domain limit); sender defaulted to
+`beta@zitrone.app` once the domain verified. E2e-verified per the docs-refresh record.
+
+**Screenshots (`dffec1af`):** code-reconstructed app screenshots (6 PNGs) plus the
+regeneration pipeline committed under `docs/screenshots/`.
+
+**Research (`74157301`, = current main):** `research/plan.md` adds a Linux desktop ↔ Android/iOS
+libsignal interop plan. **RESEARCH ONLY — no code.** Linux and iOS remain back-burner until after
+V1 Android testing; the plan exists so that decision is made with a map, not so work starts.
+
+### Still true / still owed after this run
+
+- **Onion mirror redeploy still owed** (unchanged from the 0.10.3 entry): deployed relay is
+  `755e558b`, whose `currentAPK` names the unstaged 0.10.2 APK. Forward fix: redeploy at
+  `main` ≥ `aa8876c7` + stage `zitrone-v0.10.3-beta.apk`
+  (`9c1ce6e9e0bc64582e02faf10202198c837882a7ede55a83b2c25ace78b9c5c3`).
+- **PR #60** (0.9.2 Unit W-A residue sweep) still OPEN, untouched since 2026-07-25.
+- Standing pre-tester hygiene: CI SAST silently broken, `release-apk.yml` shell-injection,
+  storage-format-stability decision, contact-deletion permanence disclosure.
+
+## 2026-08-11 — 0.11.0 registry-resolution unit BUILT on `claude/0-11-x-status-bgrxfo` — AWAITING BLIND ADVERSARIAL REVIEW, then merge decision
+
+Authority: `docs/MULTI_RELAY_ARCHITECTURE.md` (maintainer's consolidated rev 3, placed verbatim
+at `6673046c`), scope = its §3 + §11 client side. Design first, code second:
+`docs/design/REGISTRY_RESOLUTION.md` carries the manifest format, signing-key handling (with a
+credentials-inventory entry — NO in-repo inventory file exists, flagged), the WRITER/READER
+invariant table (written BEFORE code, per the standing rule), the full hardcoded-address sweep,
+and the cutover-collision flags.
+
+**Commits (local only, NOT pushed — awaiting authorization):**
+- `5fe39c06` memory sync (separate task, same branch)
+- `6673046c` authority doc + design doc
+- `01b28cfd` registry resolution: `net/registry/` (ManifestVerifier / RegistrySnapshotStore /
+  RegistryResolver), ZitroneApp wiring, `scripts/registry/registry-sign.mjs`
+- `5dce1428` Tor default ON for never-set preferences only + claims sync
+
+**Key decisions a reviewer should attack:**
+- Signature over EXACT payload bytes (base64url envelope) — canonicalization is impossible by
+  construction, not merely avoided.
+- "Success" for a resolution source is DEFINED: verify + validity window + epoch >= device
+  high-water. That definition is what makes bootstrap-first ordering rollback-safe.
+- The snapshot cache + epoch mark live in the EXISTING `zitrone_settings` store, so the burn's
+  in-place reset wipes them with ZERO change to the hardened wipe surface; post-burn rollback
+  protection resets BY DESIGN (burn indistinguishability outranks it — table row 2).
+- Pin fail-closed gate: until pins travel in the manifest (cutover decision), relays on any
+  clearnet host other than the pinned one contribute NOTHING.
+- Registry resolution ships DISABLED: empty `REGISTRY_PUBKEY_ED25519` = legacy constants,
+  bit-for-bit. Activation = key ceremony + bootstrap embed + env vars (design doc §7, human).
+- `TODO(zitrone-cutover)` items UNTOUCHED; collisions flagged in design doc §5, not resolved.
+- Tor default flip applies to UNSET preferences only via key-absence — deliberately NO migration
+  write, and a test pins that `load()` never stamps the key.
+
+**Evidence:** full Android unit suite **871 tests / 0 failures / 3 skipped**; `assembleDebug`
+exit 0; signing-tool keygen→sign→verify roundtrip OK and a tampered envelope rejected. ~30 new
+tests across verifier/resolver/endpoints/Tor-default.
+
+**Deferred per the authority doc:** OPK-claim quorum, Algorand, PoW admission, multi-hop wiring,
+additional relays. **NOT done:** version bump (still vc23), CHANGELOG entry (rides the flip
+decision), any push/merge, the registry key ceremony (credential creation — human-gated).
+
+## 2026-08-11 — PR #65 first external review round (Gemini + Copilot bots): 8 findings, 3 real, all adjudicated against source
+
+PR #65 opened on `claude/0-11-x-status-bgrxfo` (so push authorization arrived after the entry
+above). Two bot reviewers commented; every finding was verified against source before acting,
+none accepted on the reviewer's say-so. **This does NOT discharge the owed blind adversarial
+review** — bots skimming the diff are not the paired-blind whole-unit review the standing rule
+requires.
+
+**Fixed (3):**
+- **Gemini P-leak:** `assets.open(REGISTRY_BOOTSTRAP_ASSET).readBytes()` never closed the
+  stream → `.use { it.readBytes() }`. Once-per-process, so no practical exhaustion, but real.
+- **Copilot signer/client shape drift (the good catch):** `registry-sign.mjs validatePayload`
+  accepted any truthy `onion`/`i2p` while the client reads only `onion.address` / `i2p.dest`
+  object shapes — a `"onion": "<addr>"` STRING signed fine and was silently endpoint-absent
+  client-side. Copilot suggested loosening the CLIENT to accept both shapes; done the other way
+  round: the SIGNER now enforces exactly the shape the client reads (design doc §2 shows the
+  object shape as canonical). One parser shape on the security surface, fail-closed; the fix is
+  script-only. Verified: good-shape keygen→sign→verify roundtrip OK; string `onion` and empty
+  `i2p.dest` both refused; `null` still accepted.
+- **Copilot doc duplication:** MULTI_RELAY_ARCHITECTURE.md §8 carried two back-to-back drafts of
+  the AWS sizing note; consolidated into one, every unique clause kept (incl. the I2P
+  no-co-location warning).
+
+**Declined with replies (3):** Gemini's Base64-is-redundant (×2 — the Base64 is load-bearing:
+readers re-verify Ed25519 over EXACT bytes, and a String/prefs-XML round-trip is not byte-exact
+for arbitrary bytes; U+FFFD replacement = silent permanent cache loss) and Gemini's
+make-`refresh`-main-safe (no main-thread path exists: sole caller is on `Dispatchers.Default`,
+fetch already hops to IO, `commit()`-on-background is a recorded decision).
+
+**No action (2):** Gemini's `@Volatile httpClient` (already annotated at the declaration, with a
+comment saying why) and Copilot's overview comment.
+
+**Not verifiable here:** this box cannot resolve the Android Gradle Plugin (proxy blocks
+Google's maven repo), so the `.use` one-liner rides on PR CI's Android job for compile/test
+evidence rather than a local run. The signer change WAS verified locally (node, above).
+
+## 2026-08-11 — PR #65 review round 2 (Codex bot): 9 findings, all real, 5 fixed / 4 deferred to the human gate
+
+Codex attacked exactly the ledger's own attack list (burn interaction, epoch semantics, bounded
+read) and scored. Adjudicated against source, every one.
+
+**Fixed this round (verifiable here or by PR CI):**
+- **Malformed signature entry vetoed valid siblings (P2 — REAL).** The signatures array is outside
+  the signed payload; `getJSONObject`/`getString`/`decode` throwing on one attacker-writable entry
+  rejected the WHOLE envelope before reaching a valid signature, contradicting "any one valid
+  signature suffices". Per-entry `runCatching` → non-match. Pinned by a new test (malformed
+  entries + valid sibling accepted; all-malformed still fail closed).
+- **Unbounded registry body read (P2 — REAL).** `buildClient` ships `readTimeout(0)` (WebSocket
+  shape); a mirror answering then stalling the body pinned the refresh collector forever, and one
+  stalled source defeated multi-source fallback. `fetchRegistryBytes` now derives a per-call
+  client with `callTimeout(30s)` — pool/dispatcher shared, WebSocket clients untouched.
+- **keygen silently overwrote a registry keypair (P1 — REAL).** Also: `mode: 0o600` applies only
+  at creation, so an overwrite kept the old file's permissions. Now refuses if either output
+  exists; writes are exclusive-create (`flag: "wx"`). Verified: re-keygen exit 1, originals
+  untouched.
+- **verify tool passed manifests every client rejects (P2 — REAL).** It warned-and-OK'd a
+  validFrom arbitrarily far ahead; ManifestVerifier tolerates 24h of skew and no more. The tool
+  now fails >24h-ahead, warns inside the window. Verified both directions.
+- **verify tool never enforced epoch increase along the chain (P2 — REAL).** With a previous
+  envelope supplied it checked only the byte hash. Now parses the previous payload and requires
+  strictly increasing epoch. Verified: 1→2 OK, 2→2 refused.
+
+**Deferred — REAL but architecturally significant, human-gated (all four touch design decisions
+or the hardened burn surface; none fixable here with evidence):**
+1. **Burn/refresh race (P1):** an in-flight `refresh` landing `snapshots.store` after
+   `wipeVaultUsePreferences()` recreates registry keys post-wipe → post-burn state ≠ fresh
+   install. Needs serialization or generation-check against the burn boundary — a change to the
+   hardened wipe surface's neighborhood, exactly what the human gate exists for.
+2. **Bootstrap-accepted epoch not persisted (P1):** `localManifest` accepts a bootstrap at epoch
+   N without raising the high-water mark, so `refresh` can still accept an older-but-valid
+   manifest. Fix implies a prefs write on the construction path and touches the fresh-install
+   baseline the burn gate compares against — design call.
+3. **Tor cold-start refresh never retries (P2):** refresh retries only on TransportState
+   emissions; Orbot becoming ready emits nothing. Wants a bounded retry/backoff policy — design.
+4. **Per-endpoint I2P fallback (P1):** `transportEndpoints` falls back per FIELD, so a resolved
+   relay that deliberately omits `i2p.dest` still sends I2P users to the build-time constant —
+   a retired/compromised destination stays dialable. BUT the per-endpoint rule is documented
+   deliberate design in the kdoc ("one fallback rule, applied per endpoint"); reversing it is a
+   design decision, not a bug fix, and interacts with the registry-disabled default. Maintainer
+   ruling requested.
+
+Registry resolution still ships DISABLED (empty trust root), which bounds every deferred item's
+live exposure to zero until the activation checklist runs.
+
+## 2026-08-11 — PR #65 review rounds 3–4 (Codex): 8 more findings; the signer keeps failing the same class
+
+Codex re-reviewed each push and kept finding real gaps — notably, FOUR of them are the same defect
+class recurring: **"the offline tool blesses what the client rejects"** (lax timestamp grammar,
+normalized impossible dates, empty previousManifestHash, oversize envelope). Each was fixed AND
+locally verified, but the pattern is the lesson: the tool's "re-run exactly the client's checks"
+claim needs a REAL conformance harness — same fixtures run through both the Node tool and the
+Android verifier — or the claim will keep drifting. Flagged for the blind review round.
+
+**Fixed rounds 3–4:** strict ISO-instant grammar then field-round-trip date validation (Feb 30
+refused); non-empty previousManifestHash for epoch > 1; MAX_ENVELOPE_BYTES enforced in sign and
+verify; onion-mirror registry fetch gets CLEARTEXT connection spec for .onion URLs only (the base
+client's RESTRICTED_TLS-only spec made resolution source 3 structurally unreachable — the onion
+mirror is http:// by architecture, and the manifest signature is the trust anchor); state.json
+current_phase/next action synced to PR-open reality (it still described the unit as four local
+unpushed commits — the exact drift the protocol exists to prevent, caught by a reviewer reading
+our own memory files).
+
+**Deferred (recorded in todos.md):** resolved relay outlives validUntil in a long-lived process
+(round 3); first-eligible relay selection with no rotation (round 4 — already scoped out by the
+unit kdoc, slot with multi-relay bootstrap).
+
+**Standing note:** Android-side changes ride PR CI for evidence; this container cannot resolve AGP.

@@ -93,6 +93,39 @@ android {
             "\"${providers.environmentVariable("I2P_PROXY_HOST").orNull ?: "127.0.0.1"}\""
         )
 
+        // Registry resolution trust root (docs/design/REGISTRY_RESOLUTION.md §2) —
+        // the raw 32-byte Ed25519 registry public key, base64url, from
+        // scripts/registry/registry-sign.mjs keygen. EMPTY = registry resolution
+        // disabled entirely and the app uses the legacy endpoint constants, so
+        // shipping this code activates nothing: activation is the release-time
+        // decision of setting this var (plus embedding the signed bootstrap at
+        // assets/registry/bootstrap.json).
+        buildConfigField(
+            "String",
+            "REGISTRY_PUBKEY_ED25519",
+            "\"${providers.environmentVariable("REGISTRY_PUBKEY_ED25519").orNull ?: ""}\""
+        )
+
+        // Registry manifest sources 2–4 (primary clearnet + Tor/I2P mirrors). The
+        // primary has a real default — a static file on the existing website; the
+        // mirrors default empty (= skipped) until they are stood up server-side.
+        buildConfigField(
+            "String",
+            "REGISTRY_URL",
+            "\"${providers.environmentVariable("REGISTRY_URL").orNull
+                ?: "https://www.zitrone.app/registry/v1/manifest.json"}\""
+        )
+        buildConfigField(
+            "String",
+            "REGISTRY_URL_ONION",
+            "\"${providers.environmentVariable("REGISTRY_URL_ONION").orNull ?: ""}\""
+        )
+        buildConfigField(
+            "String",
+            "REGISTRY_URL_I2P",
+            "\"${providers.environmentVariable("REGISTRY_URL_I2P").orNull ?: ""}\""
+        )
+
         // 0.9.4 registration proof-of-work — DEBUG-ONLY difficulty override.
         // Burn testing re-registers on every cycle, and paying a full PoW solve
         // each time makes the burn loop unusable; this lets a debug build ask for

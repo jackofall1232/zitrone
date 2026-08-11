@@ -282,7 +282,7 @@ fun SettingsScreen(
 
         // ----- Network -------------------------------------------------------
         SectionHeader("Network")
-        // I2P is opt-OUT auto-detect (unlike Tor's opt-in): the toggle only
+        // I2P is opt-OUT auto-detect (as is Tor, since the registry unit): the toggle only
         // permits Zitrone to USE the local I2P app's router if it's present and its
         // tunnels are ready. When it isn't, the chain falls through to
         // Tor/clearnet on its own — the toggle being on does NOT mean traffic is
