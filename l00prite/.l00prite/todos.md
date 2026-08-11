@@ -163,6 +163,14 @@ DORMANT until registry activation (the feature ships with an empty trust root).
       only when registry resolution produced NO relay. Note the asymmetry that makes this sharper
       than the clearnet case: clearnet fallback is pin-gated, I2P has no pin equivalent.
 
+- [ ] **Resolved relay outlives `validUntil` in a long-lived process (P2, Codex round 3).**
+      `registryRelay` is resolved once at construction; a process surviving past the manifest's
+      `validUntil` keeps handing the expired relay to every new session build and transport
+      reconnect until Android kills the process. Resolve-once-per-process is documented deliberate
+      design ("refresh feeds the cache for the NEXT start"), so the fix is a refinement to decide
+      at the round: re-run the local-only resolution per session build, or expire the cached relay
+      at `validUntil` (the `VerifiedManifest` already carries it). No-hot-swap policy stays.
+
 ### Adjudicated DECLINED — do not revisit without NEW information (full reasoning on the PR threads)
 
 - **Base64 in `RegistrySnapshotStore` is load-bearing, not redundant** (Gemini). Readers re-verify

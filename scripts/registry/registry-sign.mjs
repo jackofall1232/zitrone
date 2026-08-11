@@ -78,6 +78,12 @@ function validatePayload(m) {
   const fail = (msg) => { throw new Error(`manifest invalid: ${msg}`); };
   if (m.schemaVersion !== 1) fail(`schemaVersion must be 1, got ${m.schemaVersion}`);
   if (!Number.isInteger(m.epoch) || m.epoch < 1) fail("epoch must be a positive integer");
+  // Strict ISO-8601 instant grammar, NOT Date.parse laxity: the client parses these
+  // with java.time.Instant.parse, which rejects "2026-08-11", named months, and
+  // non-Z offsets — a manifest blessed here must parse THERE.
+  const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
+  if (!INSTANT.test(m.validFrom) || !INSTANT.test(m.validUntil))
+    fail("validFrom/validUntil must be full ISO-8601 UTC instants (e.g. 2026-08-11T00:00:00Z) — the client's Instant.parse accepts nothing looser");
   const from = Date.parse(m.validFrom); const until = Date.parse(m.validUntil);
   if (Number.isNaN(from) || Number.isNaN(until)) fail("validFrom/validUntil must be ISO 8601");
   if (until <= from) fail("validUntil must be after validFrom");
