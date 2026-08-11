@@ -4029,3 +4029,51 @@ comment saying why) and Copilot's overview comment.
 **Not verifiable here:** this box cannot resolve the Android Gradle Plugin (proxy blocks
 Google's maven repo), so the `.use` one-liner rides on PR CI's Android job for compile/test
 evidence rather than a local run. The signer change WAS verified locally (node, above).
+
+## 2026-08-11 — PR #65 review round 2 (Codex bot): 9 findings, all real, 5 fixed / 4 deferred to the human gate
+
+Codex attacked exactly the ledger's own attack list (burn interaction, epoch semantics, bounded
+read) and scored. Adjudicated against source, every one.
+
+**Fixed this round (verifiable here or by PR CI):**
+- **Malformed signature entry vetoed valid siblings (P2 — REAL).** The signatures array is outside
+  the signed payload; `getJSONObject`/`getString`/`decode` throwing on one attacker-writable entry
+  rejected the WHOLE envelope before reaching a valid signature, contradicting "any one valid
+  signature suffices". Per-entry `runCatching` → non-match. Pinned by a new test (malformed
+  entries + valid sibling accepted; all-malformed still fail closed).
+- **Unbounded registry body read (P2 — REAL).** `buildClient` ships `readTimeout(0)` (WebSocket
+  shape); a mirror answering then stalling the body pinned the refresh collector forever, and one
+  stalled source defeated multi-source fallback. `fetchRegistryBytes` now derives a per-call
+  client with `callTimeout(30s)` — pool/dispatcher shared, WebSocket clients untouched.
+- **keygen silently overwrote a registry keypair (P1 — REAL).** Also: `mode: 0o600` applies only
+  at creation, so an overwrite kept the old file's permissions. Now refuses if either output
+  exists; writes are exclusive-create (`flag: "wx"`). Verified: re-keygen exit 1, originals
+  untouched.
+- **verify tool passed manifests every client rejects (P2 — REAL).** It warned-and-OK'd a
+  validFrom arbitrarily far ahead; ManifestVerifier tolerates 24h of skew and no more. The tool
+  now fails >24h-ahead, warns inside the window. Verified both directions.
+- **verify tool never enforced epoch increase along the chain (P2 — REAL).** With a previous
+  envelope supplied it checked only the byte hash. Now parses the previous payload and requires
+  strictly increasing epoch. Verified: 1→2 OK, 2→2 refused.
+
+**Deferred — REAL but architecturally significant, human-gated (all four touch design decisions
+or the hardened burn surface; none fixable here with evidence):**
+1. **Burn/refresh race (P1):** an in-flight `refresh` landing `snapshots.store` after
+   `wipeVaultUsePreferences()` recreates registry keys post-wipe → post-burn state ≠ fresh
+   install. Needs serialization or generation-check against the burn boundary — a change to the
+   hardened wipe surface's neighborhood, exactly what the human gate exists for.
+2. **Bootstrap-accepted epoch not persisted (P1):** `localManifest` accepts a bootstrap at epoch
+   N without raising the high-water mark, so `refresh` can still accept an older-but-valid
+   manifest. Fix implies a prefs write on the construction path and touches the fresh-install
+   baseline the burn gate compares against — design call.
+3. **Tor cold-start refresh never retries (P2):** refresh retries only on TransportState
+   emissions; Orbot becoming ready emits nothing. Wants a bounded retry/backoff policy — design.
+4. **Per-endpoint I2P fallback (P1):** `transportEndpoints` falls back per FIELD, so a resolved
+   relay that deliberately omits `i2p.dest` still sends I2P users to the build-time constant —
+   a retired/compromised destination stays dialable. BUT the per-endpoint rule is documented
+   deliberate design in the kdoc ("one fallback rule, applied per endpoint"); reversing it is a
+   design decision, not a bug fix, and interacts with the registry-disabled default. Maintainer
+   ruling requested.
+
+Registry resolution still ships DISABLED (empty trust root), which bounds every deferred item's
+live exposure to zero until the activation checklist runs.

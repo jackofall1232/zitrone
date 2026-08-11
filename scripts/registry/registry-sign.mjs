@@ -29,7 +29,7 @@
 // chain — exit 0 only when a client built with this pubkey would accept it.
 
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify, createHash } from "node:crypto";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 const b64url = (buf) => Buffer.from(buf).toString("base64url");
@@ -40,11 +40,17 @@ const rawPub = (keyObj) => keyObj.export({ type: "spki", format: "der" }).subarr
 
 function keygen(keyId, outDir) {
   mkdirSync(outDir, { recursive: true });
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   const secretPath = join(outDir, `${keyId}.secret.pem`);
-  writeFileSync(secretPath, privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
+  const pubPath = join(outDir, `${keyId}.pub.txt`);
+  // NEVER overwrite: replacing a registry key strands every APK built with the old
+  // pubkey, and writeFileSync's mode applies only at creation — an overwrite would
+  // also keep whatever permissions the old file had. flag "wx" = exclusive create.
+  for (const p of [secretPath, pubPath])
+    if (existsSync(p)) throw new Error(`refusing to overwrite existing ${p} — pick a new keyId or move the old keypair first`);
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  writeFileSync(secretPath, privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600, flag: "wx" });
   const pubB64 = b64url(rawPub(publicKey));
-  writeFileSync(join(outDir, `${keyId}.pub.txt`), pubB64 + "\n");
+  writeFileSync(pubPath, pubB64 + "\n", { flag: "wx" });
   console.log(`secret : ${secretPath} (mode 600 — offline custody, never committed)`);
   console.log(`pubkey : ${pubB64}`);
   console.log(`         ^ this is the REGISTRY_PUBKEY_ED25519 build-time value`);
@@ -109,12 +115,24 @@ function verifyEnvelope(envelopePath, pubkeyB64url, prevEnvelopePath) {
   const m = JSON.parse(payloadBytes.toString("utf8"));
   validatePayload(m);
   const now = Date.now();
-  if (now < Date.parse(m.validFrom)) console.error(`WARN: not yet valid (validFrom ${m.validFrom})`);
+  // Mirror the client exactly: ManifestVerifier tolerates 24h of validFrom skew and
+  // no more — a manifest further ahead passes nothing, so "OK" here would be a lie.
+  const VALID_FROM_SKEW_MS = 24 * 60 * 60 * 1000;
+  if (now < Date.parse(m.validFrom) - VALID_FROM_SKEW_MS)
+    throw new Error(`NOT YET VALID: validFrom ${m.validFrom} is more than 24h ahead — every client rejects this today`);
+  if (now < Date.parse(m.validFrom)) console.error(`WARN: not yet valid (validFrom ${m.validFrom}) — inside the 24h client skew window`);
   if (now > Date.parse(m.validUntil)) throw new Error(`EXPIRED at ${m.validUntil}`);
   if (prevEnvelopePath) {
-    const prevHash = b64url(createHash("sha256").update(readFileSync(prevEnvelopePath)).digest());
+    const prevBytes = readFileSync(prevEnvelopePath);
+    const prevHash = b64url(createHash("sha256").update(prevBytes).digest());
     if (m.previousManifestHash !== prevHash)
       throw new Error(`previousManifestHash mismatch: manifest says ${m.previousManifestHash}, previous file hashes to ${prevHash}`);
+    // Epochs are strictly increasing along the chain. A reused or lower epoch either
+    // strands updated clients (their high-water floor refuses it) or leaves two
+    // different relay sets the floor cannot order — refuse to bless either.
+    const prevEpoch = JSON.parse(fromB64url(JSON.parse(prevBytes.toString("utf8")).payload).toString("utf8")).epoch;
+    if (!(m.epoch > prevEpoch))
+      throw new Error(`epoch must increase along the chain: previous envelope is epoch ${prevEpoch}, manifest says ${m.epoch}`);
   }
   console.log(`OK: epoch ${m.epoch}, ${m.relays.length} relay(s), valid until ${m.validUntil}`);
   console.log(`    signed by: ${env.signatures.map((s) => s.keyId).join(", ")}`);

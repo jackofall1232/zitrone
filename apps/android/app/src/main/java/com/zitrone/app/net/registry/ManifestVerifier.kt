@@ -63,16 +63,21 @@ class ManifestVerifier(
         val payloadBytes = Base64.getUrlDecoder().decode(envelope.getString("payload"))
 
         // Any one valid signature from the build's trust root suffices (1-of-1 today;
-        // the array shape is what makes m-of-n an additive change later, §1.1).
+        // the array shape is what makes m-of-n an additive change later, §1.1). Each
+        // entry is judged in isolation: the signatures array sits OUTSIDE the signed
+        // payload, so a malformed entry is attacker-writable without breaking the
+        // signature — it must count as a non-match, never veto a valid sibling.
         val signatures = envelope.getJSONArray("signatures")
         val signed = (0 until signatures.length()).any { i ->
-            val sig = signatures.getJSONObject(i)
-            sig.getString("algorithm") == "ed25519" &&
-                ed25519Verify(
-                    Base64.getUrlDecoder().decode(sig.getString("signature")),
-                    payloadBytes,
-                    trustRoot,
-                )
+            runCatching {
+                val sig = signatures.getJSONObject(i)
+                sig.getString("algorithm") == "ed25519" &&
+                    ed25519Verify(
+                        Base64.getUrlDecoder().decode(sig.getString("signature")),
+                        payloadBytes,
+                        trustRoot,
+                    )
+            }.getOrDefault(false)
         }
         if (!signed) return null
 

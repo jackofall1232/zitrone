@@ -1581,7 +1581,14 @@ class AppContainer(private val app: Application) {
     private suspend fun fetchRegistryBytes(url: String): ByteArray? =
         kotlinx.coroutines.withContext(Dispatchers.IO) {
             runCatching {
-                httpClient.newCall(okhttp3.Request.Builder().url(url).build()).execute().use { resp ->
+                // Hard per-call deadline the WebSocket-shaped client deliberately lacks
+                // (readTimeout 0): a mirror that answers and then stalls the body open
+                // must fail this ONE fetch, not pin the refresh loop for the process
+                // lifetime. newBuilder() shares the pool/dispatcher — no second client.
+                httpClient.newBuilder()
+                    .callTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                    .build()
+                    .newCall(okhttp3.Request.Builder().url(url).build()).execute().use { resp ->
                     val body = resp.body
                     if (!resp.isSuccessful || body == null) return@use null
                     val source = body.source()

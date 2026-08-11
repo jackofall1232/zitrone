@@ -71,6 +71,36 @@ class RegistryManifestVerifierTest {
     }
 
     @Test
+    fun `malformed signature entries are skipped, never veto a valid sibling`() {
+        // The signatures array is OUTSIDE the signed payload: an attacker relaying a
+        // legitimate envelope can prepend garbage entries without touching the
+        // signature. Each malformed shape must count as a non-match, not abort the
+        // scan before the valid entry (PR #65 Codex P2).
+        val payload = RegistryTestSigner.manifestJson().toByteArray(Charsets.UTF_8)
+        val b64 = { b: ByteArray ->
+            java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(b)
+        }
+        val envelope = """{
+            "envelopeVersion": 1,
+            "payload": "${b64(payload)}",
+            "signatures": [
+                {"keyId":"missing-everything"},
+                {"keyId":"bad-b64","algorithm":"ed25519","signature":"!!!not base64url!!!"},
+                "not-even-an-object",
+                {"keyId":"test-k1","algorithm":"ed25519","signature":"${b64(RegistryTestSigner.sign(payload))}"}
+            ]
+        }""".toByteArray(Charsets.UTF_8)
+        assertNotNull(verifier.verify(envelope, RegistryTestSigner.trustRoot, 0))
+        // And with NO valid entry among the malformed ones, still fail closed.
+        val allBad = """{
+            "envelopeVersion": 1,
+            "payload": "${b64(payload)}",
+            "signatures": [{"keyId":"missing-everything"}, "not-even-an-object"]
+        }""".toByteArray(Charsets.UTF_8)
+        assertNull(verifier.verify(allBad, RegistryTestSigner.trustRoot, 0))
+    }
+
+    @Test
     fun `expired manifest fails with no skew tolerance on validUntil`() {
         val envelope = RegistryTestSigner.envelope(
             validFrom = "2026-06-01T00:00:00Z",
