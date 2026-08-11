@@ -4284,3 +4284,10 @@ compile Android, and I shipped a name collision the first `grep` of the function
 caught. Renamed to `materializeDeadline`. The canary-race fix itself is still UNTESTED until
 this head's gate runs — the fail/pass/fail flake evidence stands, but the fix has produced one
 compile failure and zero passing runs so far. Claim nothing until the gate is green.
+
+### Gate GREEN on `83c8594` (maintainer-confirmed) — the canary await fix is proven
+
+All checks green on the head carrying the materialization-await. Final accounting of the gate
+arc: fail (b9d2e32, race) → pass (94cb25e, race won) → fail (8fe2ae6, race lost) → fail
+(3328784, MY compile error) → green (83c8594, fix proven). The canary now awaits the auth
+store's materialization instead of sampling one instant; discriminating power unchanged.
