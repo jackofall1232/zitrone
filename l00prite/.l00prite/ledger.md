@@ -4200,3 +4200,21 @@ suppression.
 **Pattern note for the review round:** rounds 1–3 all found defects in the PREVIOUS round's fix.
 The unit's fix-loop is converging (each finding is narrower), but nothing here discharges the
 paired-blind whole-unit review.
+
+## 2026-08-11 — PR #66 round 4 (Codex) + a burn-gate failure under investigation
+
+**Codex round 4, both taken:** the WRITER/READER table row 4 still said an expired bootstrap
+contributes no floor — false since the ordinal-floor fix and exactly the kind of stale claim that
+misleads a cutover; corrected to "unusable for serving, authoritative for flooring". And
+heartbeat.json still described 0.10.0 U3 as the active unit — synced (with state.json) to the
+live PR #66 unit. Second state-drift finding in two days; the protocol's own reviewers keep
+catching our memory lagging our pushes.
+
+**Burn gate failed ONCE on b9d2e32** — the canary's PRECONDITION ("store must exist") found
+`zitrone_auth.xml` absent after provisioning. Adjudication so far: the gate was GREEN on 683be23
+(which already carried every prior code change) and on main; b9d2e32's app delta is a no-op
+synchronized block on the boot path, a verifier method unreachable while the registry is
+disabled, and an epochFloor change behind the same disabled gate — no causal path to auth prefs.
+The job log also shows "Failed to start Emulator console". FLAKE HYPOTHESIS, under test: this
+push re-runs the gate on an equivalent tree. If it fails again the hypothesis is DEAD and the
+failure is real on this branch — it gets a unit, not a shrug.

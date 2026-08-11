@@ -1,12 +1,12 @@
 {
  "schema_version": 1,
- "lock_id": "lock-20260811T-pr66-codex-round-3",
+ "lock_id": "lock-20260811T-pr66-round-4",
  "owner_agent": null,
  "owner_session": null,
- "acquired_at": "2026-08-11T13:05:00Z",
- "expires_at": "2026-08-11T14:05:00Z",
+ "acquired_at": "2026-08-11T12:55:00Z",
+ "expires_at": "2026-08-11T13:55:00Z",
  "ttl_seconds": 3600,
- "purpose": "PR #66 Codex round 3: ordinal floor (signedEpoch) + boot-fold drain barrier; released",
+ "purpose": "PR #66 round 4: doc table row corrected, heartbeat+state synced to the live unit, gate-flake hypothesis recorded; released",
  "protected_paths": [
   "ledger.md",
   "memory.md",

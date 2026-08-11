@@ -2,7 +2,7 @@
  "schema_version": 2,
  "project_name": "Zitrone",
  "current_goal": "0.11.0 polish round (FINAL ALPHA) — STARTED, docs/website/honesty track only. 14 commits landed 2026-07-30 on main (71553992..74157301): docs/FEATURES.md added and audited twice against shipped v0.10.3 (12 of 14 mockup claims verified; registration PoW row removed as reversed), 'Invisible Watermarking' renamed to 'Identity Watermarking' (visible by design — maintainer decision), website/README honesty fixes (two false watermark claims removed, Android-only reality stated, lemon-drop QR corrected to 'pointer not key', new /how-to walkthrough), Play-beta tester signup form live on the website, honest onboarding slides synced to MASTER.json, code-reconstructed screenshots + regeneration pipeline. NO Android code polish yet. NO version bump: app is still vc23 / 0.10.3-beta and CHANGELOG [Unreleased] is empty.",
- "current_phase": "0.11.0 registry unit MERGED to main (b92db02) on maintainer action, 2026-08-11. Codex round 5 (5 findings, incl. a P1 leak-shaped transport race on the registry fetch) arrived at merge time and is UNADDRESSED — recorded in todos.md. The paired-blind whole-unit review was never dispatched; the merge rode bot passes + fix rounds only.",
+ "current_phase": "PR #66 OPEN (registry P1 fixes on claude/0-11-x-status-bgrxfo): blind-review P1 pair fixed, then four bot rounds fixed on top (memo purity x2, suppression depth counter, ordinal floor, boot-fold drain). PR #65 (the registry unit itself) merged earlier today at b92db02. Registry DISABLED until the §7 activation checklist.",
  "active_agent": null,
  "last_agent": "claude",
  "last_updated": "2026-08-11",
@@ -16,5 +16,5 @@
  "ci_status": "PR #65 merged. Post-merge main CI state not yet observed from this session.",
  "execution_active": false,
  "execution_stop_reason": null,
- "next_recommended_action": "1) Dispatch the paired-blind whole-unit review of the merged registry unit — it is OWED and outranks everything else on this unit. 2) Fix the Codex round-5 transport-binding race (P1) plus the three signer conformance gaps as a follow-up unit on this branch. 3) The 11 deferred/outstanding findings in todos.md ('PR #65 REVIEW DISAGREEMENTS' + 'ARRIVED AT MERGE TIME') are the round's agenda. Registry stays DISABLED until the §7 activation checklist. Then: 0.10.1 coordinator-harness debt, remainder of 0.11.0 polish."
+ "next_recommended_action": "1) Confirm the burn gate on the next push (single failure on b9d2e32's canary precondition — flake hypothesis: unhealthy emulator, no causal path from the diff; if it repeats, it is real and gets a unit). 2) Human merge decision on PR #66. 3) Dispatch the owed paired-blind whole-unit review; todos.md's deferred registry items are its agenda. 4) Then 0.10.1 coordinator-harness debt, remainder of 0.11.0 polish."
 }

@@ -21,7 +21,7 @@
  "last_run_time": "2026-08-11",
  "completion_status": "in_progress",
  "should_continue": false,
- "pause_reason": "Memory sync 2026-08-11: heartbeat had been stale since 2026-07-28 (still describing 0.10.0 U3 fix round 5 of 6 — that arc converged, merged, and 0.10.0/0.10.1/0.10.2/0.10.3 all shipped since; see ledger). Current reality: 0.11.0 polish round (FINAL ALPHA) started 2026-07-30 on the docs/website/honesty track only — 14 commits, no Android code polish, no version bump (still vc23 / 0.10.3-beta, CHANGELOG [Unreleased] empty). No unit is actively looping. Next unit needs scoping by the maintainer (0.11.0 Android/code track), and the onion mirror redeploy remains a human/CX23 item.",
+ "pause_reason": "PR #66 open, bot fix rounds in progress; merge human-gated. Superseded entry (0.10.0 U3) closed by that unit's merge long since.",
  "execution": {
   "enabled": false,
   "preflight_confirmed": false,
@@ -45,6 +45,6 @@
    "stop_signal"
   ]
  },
- "active_unit": "NONE actively looping. 0.11.0 polish round (FINAL ALPHA) is the current phase; its docs/website/honesty track landed on main 2026-07-30 (71553992..74157301) outside a review loop (docs/copy/website surface, not security-sensitive code). The 0.10.0 U3 unit this file previously described is long closed: converged at the 6-round cap and shipped in v0.10.0-beta (see ledger + zitrone-0100-release-status). No fix rounds are in use; the round counter is reset.",
- "loop": "Next loop starts when the 0.11.0 Android/code polish scope is decided (inputs: zitrone-0110-planning-inputs auto-memory, todos.md — noting some entries there are stale). Standard unit rules apply when it does: WRITER/READER table before durable-signal changes, paired-blind review of the WHOLE unit to clean convergence, 6-round hard cap, no merge/push/version bump without explicit human approval."
+ "active_unit": "PR #66 (registry P1 fixes, branch claude/0-11-x-status-bgrxfo): the two activation-blocking blind-review P1s plus four bot-review fix rounds (verifiedBootstrap purity x2, suppression depth counter, ordinal floor via signedEpoch, boot-fold drain barrier). Registry ships DISABLED. OPEN: burn byte-for-byte gate failed ONCE on b9d2e32's canary precondition (auth prefs absent post-provision) — no causal path from the diff, emulator looked unhealthy, flake hypothesis under test via re-run on the next push. The paired-blind whole-unit review of the ORIGINAL registry unit remains owed on top of these fixes.",
+ "loop": "Bot-review rounds on PR #66 until quiet -> gate green confirmed -> human merge decision. Then: dispatch the owed paired-blind whole-unit review; the deferred items in todos.md are its agenda. No merge, no push to main, no version bump without explicit approval."
 }
