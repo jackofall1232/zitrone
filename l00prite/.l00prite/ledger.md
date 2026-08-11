@@ -4247,3 +4247,15 @@ the log, one clean pass: the b9d2e32 failure was the emulator, not the delta. Th
 precondition ("auth store must exist post-provision") is therefore flake-CAPABLE on an unhealthy
 emulator — worth remembering the next time it fires alone, and worth the review round asking
 whether provisioning should await the auth store's materialization explicitly.
+
+## 2026-08-11 — PR #66 round 6 (Codex): fourth retry-gap trigger, and it inverts the round-3 fix's cost
+
+CONFIRMED: on a vault-less cold start, a refresh committing BEFORE suppression rises is exactly
+what the round-3 drain barrier waits for — after which the boot fold reads the just-committed
+registry keys as interrupted-burn residue and erases them, while the collector has latched
+`refreshed = true` on a durable-then-invalidated commit. No retry, and a FRESH INSTALL's boot
+pass reports residue it created itself. Folded into the generalized retry/sequencing item as
+trigger (d); Codex's start-refresh-after-bootReconciled shape is recorded as the strongest
+candidate (it removes (b) and (d) structurally). Dormant while the registry ships disabled.
+The interplay lesson: the drain barrier fixed mid-wipe correctness and CREATED a new way for a
+correct commit to be authored-then-erased — sequencing beats draining when both are available.

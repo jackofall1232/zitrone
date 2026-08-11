@@ -157,8 +157,15 @@ DORMANT until registry activation (the feature ships with an empty trust root).
       populate the cache that process; (b) a `store()` refused while the BOOT fold's suppression
       bracket holds the gate (PR #66 round 5) — the already-verified manifest is discarded and
       the next start rides bootstrap/legacy; (c) any fetch that simply failed on a stable
-      transport. ONE bounded retry/backoff design covers all three — decide budget and backoff
-      shape at the round; do not add per-trigger nudges piecemeal.
+      transport; (d) NEW (PR #66 round 6, the sharpest shape): on a vault-less cold start a
+      refresh that COMMITS before suppression rises is drained by the boot barrier, then the fold
+      reads the fresh registry keys as interrupted-burn residue and ERASES them — but the
+      collector already latched `refreshed = true` on that commit, a durable success the boot
+      immediately invalidated, so no retry ever runs AND a fresh install's boot pass reports
+      residue it created itself. ONE design covers all four — Codex's structural shape is the
+      strongest candidate: START the refresh collector only after `bootReconciled`, which removes
+      triggers (b) and (d) outright and leaves (a)/(c) to a bounded retry. Decide at the round;
+      do not add per-trigger nudges piecemeal.
 - [ ] **Per-endpoint I2P fallback re-dials a removed destination (P1) — NEEDS A MAINTAINER
       RULING, it is a design reversal, not a bug fix.** `transportEndpoints` falls back per FIELD
       (`relay?.i2pDest ?: BuildConfig.RELAY_I2P_DEST`), and the kdoc documents per-endpoint
