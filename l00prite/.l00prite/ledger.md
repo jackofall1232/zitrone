@@ -4101,3 +4101,19 @@ our own memory files).
 unit kdoc, slot with multi-relay bootstrap).
 
 **Standing note:** Android-side changes ride PR CI for evidence; this container cannot resolve AGP.
+
+## 2026-08-11 — PR #65 MERGED (`b92db02`, maintainer) — Codex round 5 arrived at merge time, recorded UNADDRESSED
+
+The maintainer merged the registry unit while round 5's five findings were being adjudicated.
+Nothing from round 5 is in the merged code. They are recorded in todos.md next to the earlier
+deferred items — four fix-shaped (transport-binding race on the registry fetch is the sharpest:
+leak-shaped, P1), one a UX design call on the Tor default. All dormant until registry activation.
+
+Final PR #65 review-round tally: 29 bot findings across 5 rounds (Gemini 5, Copilot 3, Codex 21).
+13 fixed and merged, 3 declined with recorded reasons, 11 deferred/outstanding in todos.md, 1
+already satisfied, 1 was the state.json drift (fixed). The paired-blind whole-unit review the
+standing rule requires was NEVER dispatched — the merge happened on bot passes plus fix rounds
+alone. That gap is now the top of the unit's debt, ahead of every deferred finding.
+
+This branch (claude/0-11-x-status-bgrxfo) restarts from the merged main per protocol; the merged
+history is behind it, and this entry is the first commit of the follow-up line.

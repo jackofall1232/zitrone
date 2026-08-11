@@ -178,6 +178,41 @@ DORMANT until registry activation (the feature ships with an empty trust root).
       (the three-equal-peers V1.0.0 target): preserve the eligible set, rotate on connection
       failure. Slot it with the multi-relay bootstrap, not before.
 
+### ⚠️ ARRIVED AT MERGE TIME, UNADDRESSED — Codex round 5 (PR #65 merged b92db02 while these were being adjudicated)
+
+Five findings landed minutes before the merge. Four are real and fix-shaped, one is UX design.
+All dormant until registry activation. They belong to the SAME blind-review round as the items
+above — none were reviewed or fixed pre-merge.
+
+- [ ] **Registry fetch transport race (P1 — leak-shaped, fix first).** The refresh collector can
+      observe a new `TransportState` before the sibling `applyTransport` collector swaps the shared
+      `httpClient`, so `registryUrlCandidates(state)` picks the NEW transport's URLs while
+      `fetchRegistryBytes` sends them over the OLD client — a Tor-selected fetch can leave directly
+      over clearnet; an I2P hostname can hit ordinary DNS. Fix shape: bind the fetch client to the
+      EMITTED state (derive via `transportEndpoints(state, registryRelay)` inside the collector and
+      pass it down) instead of reading the shared mutable client.
+- [ ] **`i2p.dest` accepted on nonempty alone (P2 — injection-shaped).** The dest is interpolated
+      verbatim into `HttpConnect.connectRequest`'s raw request line and Host header; a URL-typo or
+      CR/LF passes both signer and client verification but breaks I2P probing / the helper's
+      ASCII-only assumption. Enforce the b32 grammar (`[a-z2-7]{52}\.b32\.i2p`) in BOTH the signer
+      and `ManifestVerifier` (malformed relay = whole manifest rejected, per its stated policy).
+      NOTE: test fixtures use short fake dests ("testdest.b32.i2p" in RegistryTestSigner,
+      RegistryResolverTest, TransportEndpointsTest) — they must move to 52-char forms with the fix.
+- [ ] **Signer accepts epoch > Int.MAX_VALUE (P2).** Client reads epoch with `JSONObject.getInt`;
+      above 2147483647 it truncates/negates and the manifest is rejected — the tool must cap at the
+      client's signed-32-bit range. One line in `validatePayload`.
+- [ ] **Node's base64url decode is lax (P2).** `Buffer.from(s, "base64url")` silently drops
+      non-alphabet characters, so `verify` can OK corrupted publication bytes Android's
+      `Base64.getUrlDecoder` throws on. Validate the URL-safe alphabet + canonical round-trip in
+      `fromB64url` before decoding. Same blesses-what-the-client-rejects class as rounds 3–4 —
+      one more argument for the CONFORMANCE HARNESS flagged in the 2026-08-11 ledger entry.
+- [ ] **Tor default ON with no Orbot installed: user cannot record an opt-out (P2 — UX design,
+      MAINTAINER CALL).** `SettingsScreen` disables the Tor toggle when `torAvailable` is false;
+      with the flipped default, a never-set user without Orbot has Tor=ON they cannot turn off,
+      and Tor auto-activates the moment Orbot appears. Codex's shape: keep the toggle editable
+      when Orbot is absent, indicate separately that routing needs the install. Decide alongside
+      the Tor-default unit's never-set semantics (no migration write — key absence is the signal).
+
 ### Adjudicated DECLINED — do not revisit without NEW information (full reasoning on the PR threads)
 
 - **Base64 in `RegistrySnapshotStore` is load-bearing, not redundant** (Gemini). Readers re-verify
