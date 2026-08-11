@@ -129,6 +129,51 @@ carries the 0.9.4 PoW deploy commits and duplicates main's own onion flip.
       the element Caddy appended). Neither helps Tor/I2P, which collapse via the sidecars regardless —
       registration PoW is the per-client cost there.
 
+## 🟡 PR #65 (0.11.0 registry unit) — REVIEW DISAGREEMENTS TO ADDRESS AT THE BLIND REVIEW ROUND (recorded 2026-08-11)
+
+Bot reviewers (Gemini, Copilot, Codex) left 17 findings; adjudication detail is in the two
+2026-08-11 ledger entries. Maintainer ruling 2026-08-11: the four deferred items below wait for
+the paired-blind whole-unit review round — do NOT fix them autonomously before it. All four are
+DORMANT until registry activation (the feature ships with an empty trust root).
+
+### Deferred — real findings, design-level, owed at the review round (Codex)
+
+- [ ] **Burn ↔ in-flight refresh race (P1).** A `refresh` that reaches `snapshots.store` after
+      `wipeVaultUsePreferences()` completes recreates `registry_snapshot` +
+      `registry_epoch_high_water` post-wipe → post-burn state ≠ fresh install, defeating the burn
+      invariant the store's own kdoc calls load-bearing. Needs cancellation or serialization
+      against the burn boundary (a wipe-generation check is the obvious shape). Touches the
+      hardened wipe surface's neighborhood — human-gated by standing rule.
+- [ ] **Bootstrap-accepted epoch never raises the high-water mark (P1).** `localManifest()`
+      verifies the embedded bootstrap at the STORED floor and returns it without persisting its
+      epoch, so `refresh` can later accept an older-but-valid signed manifest (rollback relative
+      to the bootstrap). Fix implies a prefs write on the construction path ("no network, no
+      write" today) and touches the fresh-install baseline the burn byte-for-byte gate compares —
+      decide the write's placement deliberately, WRITER/READER table first.
+- [ ] **Tor cold-start refresh never retries (P2).** The refresh collector retries only on
+      `TransportState` EMISSIONS; Orbot becoming ready emits nothing, so a user who starts both
+      apps together may never populate the registry cache that process. Wants a bounded
+      retry/backoff policy — decide budget and backoff shape at the round.
+- [ ] **Per-endpoint I2P fallback re-dials a removed destination (P1) — NEEDS A MAINTAINER
+      RULING, it is a design reversal, not a bug fix.** `transportEndpoints` falls back per FIELD
+      (`relay?.i2pDest ?: BuildConfig.RELAY_I2P_DEST`), and the kdoc documents per-endpoint
+      fallback as the deliberate "one fallback rule". Codex's argument: a signed manifest that
+      deliberately OMITS `i2p.dest` (retired/compromised destination) should make I2P unavailable
+      for that relay, not silently restore the build-time constant — legacy fallback should apply
+      only when registry resolution produced NO relay. Note the asymmetry that makes this sharper
+      than the clearnet case: clearnet fallback is pin-gated, I2P has no pin equivalent.
+
+### Adjudicated DECLINED — do not revisit without NEW information (full reasoning on the PR threads)
+
+- **Base64 in `RegistrySnapshotStore` is load-bearing, not redundant** (Gemini). Readers re-verify
+  Ed25519 over EXACT envelope bytes; a String/prefs-XML round-trip is not byte-exact for arbitrary
+  bytes (invalid UTF-8 → U+FFFD), so the "optimization" converts a corrupted cache into a silent
+  permanent cache loss.
+- **`RegistryResolver.refresh` needs no internal `Dispatchers.IO`** (Gemini). Sole caller runs on
+  `Dispatchers.Default`; the fetch lambda hops to IO itself; `commit()`-on-background is a recorded
+  durability decision in `store`'s kdoc. Hardcoding a dispatcher would also take it away from tests.
+- **`@Volatile httpClient`** (Gemini) — was already annotated at the declaration before the review.
+
 ## 🔴 MULTI-HOP RELAY — MUST BE FINISHED BEFORE PRODUCTION RELEASE (maintainer, 2026-07-30)
 
 **Decision:** multi-hop is a shipping feature, not an experiment. It must be complete before the
