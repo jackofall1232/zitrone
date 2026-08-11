@@ -1,12 +1,12 @@
 {
  "schema_version": 1,
- "lock_id": "lock-20260811T-pr66-round-1",
+ "lock_id": "lock-20260811T-pr66-codex-round-1",
  "owner_agent": null,
  "owner_session": null,
- "acquired_at": "2026-08-11T12:20:00Z",
- "expires_at": "2026-08-11T13:20:00Z",
+ "acquired_at": "2026-08-11T12:35:00Z",
+ "expires_at": "2026-08-11T13:35:00Z",
  "ttl_seconds": 3600,
- "purpose": "PR #66 round 1: Gemini critical on verifiedBootstrap memo fixed + pinned; released",
+ "purpose": "PR #66 Codex round: suppression depth counter + burn single-flight question recorded; released",
  "protected_paths": [
   "ledger.md",
   "memory.md",

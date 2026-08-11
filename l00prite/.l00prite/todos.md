@@ -213,6 +213,18 @@ above — none were reviewed or fixed pre-merge.
       when Orbot is absent, indicate separately that routing needs the install. Decide alongside
       the Tor-default unit's never-set semantics (no migration write — key absence is the signal).
 
+- [ ] **Should the burn itself be single-flight? (Codex on PR #66 — MAINTAINER CALL, hardened
+      surface.)** Overlapping burns are reachable: `attemptPassphrase` releases its process
+      single-flight when it RETURNS Burn (before `onBurn` runs), and the composition-local
+      `unlocking` guard dies with an Activity recreation, so a second duress entry can start burn B
+      while burn A is mid-wipe. The registry suppression is now a depth counter (PR #66), so the
+      REGISTRY gate is correct under overlap — but the wider question stands: two concurrent
+      `runTerminalBurn` brackets share `beginTerminalWipe`/`endTerminalWipe` (a pre-existing
+      boolean-shaped gate from 0.9.2) and the wipe steps themselves. A refused second burn must
+      still render WB-1's uniform failure (it cannot look different from a wrong passphrase), and a
+      hung first burn must not permanently block the duress path — both are design decisions on the
+      hardened surface, not mechanical fixes.
+
 ### Adjudicated DECLINED — do not revisit without NEW information (full reasoning on the PR threads)
 
 - **Base64 in `RegistrySnapshotStore` is load-bearing, not redundant** (Gemini). Readers re-verify

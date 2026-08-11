@@ -256,16 +256,25 @@ class AppContainer(private val app: Application) {
     // registry keys into the store during or after the wipe: post-burn residue, or a
     // write between the wipe's clear and its emptiness proof that aborts the burn
     // AFTER the vault image is already gone. The gate is the protocol
-    // [RegistrySnapshotStore] documents: [registryWritesSuppressed] is set BEFORE the
+    // [RegistrySnapshotStore] documents: [registryWriteSuppressions] is raised BEFORE the
     // first destructive burn step (and around the boot completion pass, which re-runs
     // the same wipe), and the wipe's action holds [registryWriteGateLock] — the same
     // monitor every snapshot commit runs under — so an admitted commit always
     // completes before the clear begins, and no commit is admitted after.
     private val registryWriteGateLock = Any()
 
-    /** See [registryWriteGateLock]. Volatile: written by the burn thread, read under the lock. */
-    @Volatile
-    private var registryWritesSuppressed = false
+    /**
+     * See [registryWriteGateLock]. A DEPTH COUNTER, not a Boolean, deliberately: wipe
+     * brackets can overlap — a cross-recreation second duress entry can start burn B
+     * while burn A is still running ([attemptPassphrase] releases its single-flight
+     * when it RETURNS Burn, before `onBurn` runs, and the composition-local
+     * `unlocking` guard dies with the recreated Activity) — and with a Boolean the
+     * FIRST bracket's finally lifted suppression while the second still owned the
+     * store. Suppression now lifts only when the LAST holder exits. Whether the burn
+     * itself should be single-flight is a separate hardened-surface design question,
+     * tracked in todos.md — this counter makes the registry gate correct either way.
+     */
+    private val registryWriteSuppressions = java.util.concurrent.atomic.AtomicInteger(0)
 
     // ── Registry resolution (docs/design/REGISTRY_RESOLUTION.md) ───────────────
     // Relay endpoints resolve through a signed registry manifest instead of the
@@ -284,7 +293,7 @@ class AppContainer(private val app: Application) {
         snapshots = RegistrySnapshotStore(
             keyStoreManager.prefs(KeyStoreManager.PREFS_SETTINGS),
             writeGateLock = registryWriteGateLock,
-            writesSuppressed = { registryWritesSuppressed },
+            writesSuppressed = { registryWriteSuppressions.get() > 0 },
         ),
         bootstrap = {
             runCatching { app.assets.open(REGISTRY_BOOTSTRAP_ASSET).use { it.readBytes() } }.getOrNull()
@@ -643,10 +652,11 @@ class AppContainer(private val app: Application) {
     internal fun runTerminalBurn(terminate: () -> Unit) {
         // Suppress registry snapshot writes FIRST, before anything destructive can
         // run: the refresh collector is app-scope and survives the session quiesce
-        // below, and this flag is what keeps its store() out of the wiped store
-        // (see registryWriteGateLock). Lifted in the finally — on a failed burn the
-        // session may still be intact, so refresh caching must resume.
-        registryWritesSuppressed = true
+        // below, and this hold is what keeps its store() out of the wiped store
+        // (see registryWriteGateLock). Released in the finally — on a failed burn the
+        // session may still be intact, so refresh caching must resume — but only the
+        // LAST overlapping holder's release lifts suppression (see the counter's kdoc).
+        registryWriteSuppressions.incrementAndGet()
         unlockController.beginTerminalWipe()
         try {
             runTerminalBurnLocked(terminate)
@@ -665,10 +675,11 @@ class AppContainer(private val app: Application) {
             // precondition — the gate discriminating a change to the terminal sequence, which is the
             // property this refactor existed to establish.
             //
-            // The registry write suppression lifts with the gate it accompanies: on
+            // The registry write suppression releases with the gate it accompanies: on
             // the success path the process is already dead; on the failure path a
-            // possibly-intact install must be allowed to cache manifests again.
-            registryWritesSuppressed = false
+            // possibly-intact install must be allowed to cache manifests again — once
+            // no OTHER wipe bracket still holds the counter.
+            registryWriteSuppressions.decrementAndGet()
             unlockController.endTerminalWipe()
         }
     }
@@ -896,7 +907,7 @@ class AppContainer(private val app: Application) {
                 // INCOMPLETE (a spurious durability hold), or rewrite keys the pass just
                 // erased. The flag lifts in the finally; a refresh refused here simply
                 // caches nothing this process and retries on the next transport change.
-                registryWritesSuppressed = true
+                registryWriteSuppressions.incrementAndGet()
                 try {
                     foldBootMutators(
                         reconcileUnproven = reconcileUnproven,
@@ -905,7 +916,7 @@ class AppContainer(private val app: Application) {
                         completeCleanup = { absent -> completeInterruptedCleanup(burnPlan, absent) },
                     )
                 } finally {
-                    registryWritesSuppressed = false
+                    registryWriteSuppressions.decrementAndGet()
                 }
             },
             publish = { hold ->

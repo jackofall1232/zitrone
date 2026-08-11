@@ -4141,3 +4141,15 @@ outside reader on the first pass. Fix deltas are not lower-risk than original co
 
 Android evidence rides PR CI (this container cannot resolve AGP); both changes traced by hand
 against source in both directions (fails unfixed / passes fixed).
+
+## 2026-08-11 — PR #66 Codex round 1: suppression must survive overlapping wipe brackets
+
+Codex confirmed a real hole in the NEW suppression flag: burns can overlap (single-flight releases
+on `attemptPassphrase` RETURN, `unlocking` guard dies with recreation), and a Boolean let a failed
+burn A's finally lift suppression while burn B still owned the store — post-burn registry residue,
+or a write between B's clear and its emptiness proof. **Fix: depth counter** (`AtomicInteger`),
+raise before the first destructive step, release in the same finally; suppression lifts only when
+the LAST holder exits. The store's `writesSuppressed: () -> Boolean` seam is unchanged, so the
+burn-gate tests hold as written. The wider question — burn single-flight itself, which touches
+WB-1 uniformity and the 0.9.2 terminal-exclusion boolean — is recorded in todos.md as a
+maintainer decision; the counter makes the registry gate correct under either answer.
